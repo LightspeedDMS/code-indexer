@@ -31,7 +31,7 @@ from rich.table import Table
 
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
-from .config import ConfigManager, Config
+from .config import ConfigManager, Config, ConfigCorruptionError
 
 # CRITICAL: TYPE_CHECKING-only import -- Tantivy must NOT load eagerly at
 # CLI-startup import time (see the "Tantivy lazy import" perf rule).
@@ -2323,16 +2323,37 @@ def init(
 
     # Check if config already exists
     if config_manager.config_path.exists():
-        # Load existing config to check for backend changes
-        existing_config = config_manager.load()
+        # Load existing config to check for backend changes. Bug #1894: a
+        # corrupt/truncated config.json (e.g. left 0 bytes by an interrupted
+        # write) must not permanently block repair -- with --force, treat it
+        # as ABSENT so the self-heal path (RefreshScheduler.
+        # _repair_uninitialized_local_repo, which always calls `cidx init
+        # --force`) can converge without operator intervention, exactly like
+        # a first-time init.
+        try:
+            existing_config = config_manager.load()
+        except ConfigCorruptionError as e:
+            if not force:
+                console.print(
+                    f"❌ Existing configuration at {config_manager.config_path} "
+                    f"is invalid or corrupted: {e}"
+                )
+                console.print("Use --force to regenerate it")
+                sys.exit(1)
+            console.print(
+                f"⚠️  Existing configuration at {config_manager.config_path} "
+                "is invalid or corrupted; regenerating",
+                style="yellow",
+            )
+            existing_config = None
         existing_backend = (
             existing_config.vector_store.provider
-            if existing_config.vector_store
+            if existing_config and existing_config.vector_store
             else "filesystem"  # Default if not set
         )
 
         # Check if switching backends with --force
-        if force and existing_backend != vector_store:
+        if force and existing_config is not None and existing_backend != vector_store:
             console.print(
                 "⚠️  Backend switch detected: {} → {}".format(
                     existing_backend, vector_store
@@ -2369,6 +2390,7 @@ def init(
         if not force and create_override_file:
             # Load existing config and create override file
             config = existing_config
+            assert config is not None
             project_root = config.codebase_dir
             if _create_default_override_file(project_root, force=False):
                 console.print(

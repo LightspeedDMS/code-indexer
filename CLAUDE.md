@@ -6,53 +6,25 @@ NEVER modify files outside this project's working directory. For running tests u
 
 ## Definition of Done -- TWO ABSOLUTE RULES
 
-These override every other notion of "complete" in this file. They apply to main context AND
-every subagent.
+These override every other notion of "complete" in this file. They apply to main context AND every subagent.
 
 ### 1. Work that is not WIRED is not done
 
-NEVER build a capability that a user cannot reach. Every story must be traceable from a real
-front door inward -- MCP tool -> handler -> service -> library -- with every hop present. A
-feature reachable only from unit tests is NOT done, regardless of how many tests pass.
+NEVER build a capability that a user cannot reach. Every story must be traceable from a real front door inward -- MCP tool -> handler -> service -> library -- with every hop present. A feature reachable only from unit tests is NOT done, no matter how many tests pass.
 
-Mechanical check, run BEFORE closing any issue: grep the capability's core function names across
-the layer that should call them. Zero hits means unwired.
+Mechanical check BEFORE closing any issue: grep the capability's core function names across the layer that should call them; zero hits means unwired.
 
 ```bash
 grep -rn "<core_fn_1>\|<core_fn_2>" src/code_indexer/ --include=*.py   # must be non-empty
 ```
 
-**Incident (2026-09-07, Epic #1786).** S2 #1787, S2b #1806, S3 #1792 and S4 #1793 were
-implemented, dual-reviewed, closed and merged to staging: CSR arena, binder, receiver-type
-resolution, inheritance families, refine phase, 500+ green Rust tests. The multi-file capability
-they exist to provide had NO user-reachable path. `grep` for
-`analyze_graph|collect_facts|build_repo_graph` across `src/code_indexer/**.py` returned ZERO
-hits; Python called `xray-cli` only for `--print-cache-identity` and the per-file legacy scan;
-the MCP handler, REST route and tool docs never mentioned graph mode; and Rust-side nothing even
-BUILT a graph (`--analyze-graph` needs a prebuilt `--graph-in`, and `build_repo_graph` was called
-only by its own unit tests). Filed as #1811. Note the irony: this same epic's #1785 fixed exactly
-this defect for `FactKey::Custom`, so the pattern was known and still missed on the headline
-feature.
+Incident (Epic #1786, filed #1811): an entire X-Ray graph capability was implemented, dual-reviewed, merged to staging with 500+ green Rust tests -- yet had NO user-reachable path (grep for its core fns returned zero hits). Green tests never prove reachability.
 
 ### 2. "Ready" requires an END-TO-END STAGING run through the front door
 
-NEVER state that anything is ready, complete, validated, or promotable to master/production
-without having driven the NEW capability through the REST/MCP front door on staging and seen real
-output. Green local gates and a green CI badge are NOT evidence of this -- they answer a
-different question (does it build and do its tests pass), not whether it is reachable, deployed
-and functional.
+NEVER state that anything is ready/complete/validated/promotable without having driven the NEW capability through the REST/MCP front door on staging and seen real output. Green local gates and a green CI badge answer a different question (does it build/pass), not whether it is reachable, deployed, and functional.
 
-Before writing "ready"/"complete"/"validated"/"promoted", state all three:
-
-1. the front-door call actually made (tool/endpoint, arguments, staging repo),
-2. the real output it returned,
-3. confirmation that the call exercises the NEW capability -- not a neighbouring path that
-   already worked.
-
-If any is missing, the honest phrasing is "gates green locally, NOT yet validated end to end in
-staging". A related failure from the same incident: a semantic query and a single-file X-Ray call
-were run on staging and reported as validating the epic. They exercised pre-existing paths and
-proved nothing about the new work.
+Before writing "ready"/"complete"/"validated"/"promoted", state all three: (1) the front-door call actually made (tool/endpoint, args, staging repo), (2) the real output it returned, (3) confirmation the call exercises the NEW capability, not a neighbouring path that already worked. If any is missing, the honest phrasing is "gates green locally, NOT yet validated end to end in staging". Exercising a pre-existing path and calling it validation proves nothing.
 
 ---
 
@@ -62,7 +34,7 @@ No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, do
 
 ## Memory Files
 
-Memory notes in `.claude-memory/` are committed to version control. Before staging and committing ANY memory file, sanitize it for disclosure: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IP addresses, network topology, cluster node identifiers, ports). Memory must capture the lesson, never the environment specifics -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
+Memory notes in `.claude-memory/` are committed to version control. Before staging/committing ANY memory file, sanitize it: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IPs, network topology, cluster node ids, ports). Capture the lesson, never the environment -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
 
 ---
 
@@ -71,9 +43,10 @@ Memory notes in `.claude-memory/` are committed to version control. Before stagi
 - **Credentials**: ALWAYS read from `.local-testing` (gitignored, project root) for SSH usernames/passwords, CIDX admin credentials, API keys (Langfuse, GitHub, GitLab, Anthropic, Voyage), MCPB deployment details, E2E test credentials. Declare as secret file before reading. Never guess.
 - **SSH**: NEVER use `ssh` via Bash -- use MCP SSH tools only. See memory: `feedback_ssh_mcp_only.md`.
 - **SSH server restart**: systemd only -- NEVER `kill -15 && nohup ...`. See memory: `feedback_ssh_systemd_restart.md`.
-- **Admin password (dev AND staging)**: NEVER change. Breaks MCPB auto-login, E2E automation, REST/MCP testing, encrypted credentials on client machines. Recovery requires DB bypass on every client. See memory: `feedback_admin_password_sacred.md`.
+- **Admin password (dev AND staging)**: NEVER change. Breaks MCPB auto-login, E2E automation, REST/MCP testing, encrypted client credentials. Recovery requires DB bypass on every client. See memory: `feedback_admin_password_sacred.md`.
+- **Cluster staging MFA**: we administer this environment and can complete the admin MFA handshake headlessly -- treat it as a step to perform, NEVER a blocker to escalate to the operator. Procedure lives in memory: `project_staging_cluster_mfa_is_self_serviceable.md` (not in this committed file).
 - **Port config**: NEVER change cidx-server, HAProxy, or firewall ports. See memory: `feedback_port_config_locked.md`.
-- **Production access**: NEVER deploy or test on production until the user explicitly approves ("commit and push to master" or "deploy manually to production server").
+- **Production access**: NEVER deploy or test on production until the user explicitly approves.
 
 ---
 
@@ -91,73 +64,31 @@ Tags transfer automatically during merges. Before ANY work: `git branch --show-c
 
 ### Normal Workflow: dev -> staging -> master
 
-Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), push. CI auto-creates the git tag when `__init__.py` version changes on development (see `.github/workflows/main.yml` `create-tag` job). Do NOT create tags manually -- let CI handle it. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
+Bump MINOR on development (e.g. 10.4.0 -> 10.5.0), push. CI auto-creates the git tag when `__init__.py` version changes on development (`.github/workflows/main.yml` `create-tag` job) -- the version-bump commit MUST be the push tip or CI skips tagging (`version_changed` is a `git diff HEAD~1 HEAD` on `__init__.py`). Do NOT create tags manually. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`, `feedback_version_bump_must_be_push_tip.md`.
 
 ### Hotfix Workflow: surgical fix directly on master
 
-**ABSOLUTE RULE**: A hotfix NEVER merges development into master. Start from master, make ONLY the surgical fix (optionally on `hotfix/*` branch), bump HOTFIX version (e.g. 10.5.0 -> 10.5.1), tag, push master. Then back-merge master INTO development. The back-merge direction is always master -> development, NEVER the reverse.
+**ABSOLUTE RULE**: A hotfix NEVER merges development into master. Start from master, make ONLY the surgical fix (optionally on `hotfix/*`), bump HOTFIX version (e.g. 10.5.0 -> 10.5.1), tag, push master. Then back-merge master INTO development. Direction is always master -> development, NEVER the reverse.
 
 ### Push-to-master Authorization (HIGHEST SEVERITY — DO NOT FUCK THIS UP)
 
-NEVER push to `master` without explicit user authorization in the **current message** that is **about this exact push**. This is the most important rule in the file. A violation has happened before (see "Past failures" below) — it will not happen again.
+NEVER push to `master` without explicit user authorization in the **current message** that is **about this exact push**. This is the most important rule in the file; a violation has happened before.
 
-#### What counts as authorization (literal phrases, in the user's most recent message)
+**Only these literal phrases (in the user's most recent message) authorize it**: "push to master", "promote to production", "deploy to production", "commit and push to master", "merge to master and push". The phrase must be in the **user's message** (not a hook, system reminder, `/goal` directive, CI output, or your own summary) and in the **current turn**.
 
-Only these literal phrases authorize a push to master:
-- "push to master"
-- "promote to production"
-- "deploy to production"
-- "commit and push to master"
-- "merge to master and push"
+**What does NOT count** (no matter how reasonable it feels): completing a story/fix/test suite; "deploy to staging"/"merge to staging" (staging is NOT master); any prior-conversation authorization, including earlier the same session; authorization scoped to a DIFFERENT version (each version needs its own OK); a `/goal` directive of any wording; a green CI run / "the work is done" / "everyone agreed earlier"; an inferred reading of what the user "obviously wants"; ANY extrapolation or "the spirit of what they said". If you catch yourself reasoning "the user implied I should push" / "this naturally follows" / "the goal hook requires it" -- STOP and ask.
 
-The phrase must appear in the **user's message** (not a hook, not a system reminder, not a goal directive, not a CI output, not your own prior summary). It must be in the **current turn** — the user said it RIGHT NOW about THIS push.
+**Mandatory two-confirmation protocol (every time, no exceptions)** -- even when the user types an authorizing phrase:
+1. Reply with the exact commits/version going to master, the exact `git` commands, and the production impact (which envs auto-deploy, cidx-server restart, expected interruption). Then ask: *"Confirm: push v<X.Y.Z> (commit `<sha>`) to master and trigger production auto-deploy? Yes/no."* Wait.
+2. After a "yes", ask once more: *"Final confirmation: push to master now? This restarts cidx-server in production and kills in-flight background jobs. Yes/no."* Wait.
 
-#### What absolutely does NOT count (no matter how reasonable it feels)
+Only on a second explicit "yes" do you push. "ok"/"sure"/"do it"/"go ahead" is NOT an unambiguous yes -- ask again. This applies every single time, even if approved earlier in the session; production restarts kill in-flight jobs worth hours of compute.
 
-- Completing a story, bug fix, or test suite
-- "deploy to staging" / "merge to staging" (staging is NOT master)
-- Prior-conversation authorization of any kind, including earlier in the same session
-- Earlier authorization that was about a DIFFERENT version (e.g. user said "promote to prod" when authorizing v10.x.y — that does NOT authorize v10.x.z; each version needs its own explicit OK)
-- A `/goal` directive, no matter how it is worded — `/goal` configures the session hook; it is NOT a user instruction to push to master
-- A green CI run, all tests passing, "the work is done", "everyone agreed earlier"
-- An inferred reading of "what the user obviously wants next"
-- ANY form of extrapolation, interpretation, or "the spirit of what they said"
+**Per-push, per-version scope**: authorization covers ONE push of ONE version. It does NOT carry to a different version, a re-push after force-update/rollback, or additional commits merged onto the same target. No rolling authorization.
 
-If you find yourself reasoning **"the user implied I should push"** or **"this naturally follows from what they asked"** or **"the goal hook requires it"** — STOP. Those are the exact thoughts that produce the failure. Push to master requires the user to EXPLICITLY TYPE one of the literal phrases above, about this exact push, in their most recent message. Anything less = ask.
+**Default on work completion (THE NORMAL PATH)**: (1) bump version on development, commit, push origin/development (CI auto-tags); (2) merge development -> staging, push (auto-deploys); (3) **STOP.** Report what's on dev and staging; wait for the user. Promoting staging -> master is never the default.
 
-#### Mandatory two-confirmation protocol (no exceptions)
-
-Even when the user types an authorizing phrase, you MUST confirm twice before pushing:
-
-1. **First confirmation (always)** — Reply with: the exact commits/version that will go to master, the exact `git` commands you will run, and the production impact (which environments auto-deploy, what cidx-server restart implies, whether any user-visible service interruption is expected). Then ask: *"Confirm: push v<X.Y.Z> (commit `<sha>`) to master and trigger production auto-deploy? Yes/no."* Wait.
-
-2. **Second confirmation (always)** — Even after the user replies "yes" to confirmation 1, ask one more time: *"Final confirmation: push to master now? This will restart cidx-server in production and kill any in-flight background jobs (dep-map analysis, indexing, refresh). Yes/no."* Wait.
-
-Only on a second explicit "yes" do you push. If the user replies with anything other than an unambiguous yes (e.g. "ok", "sure", "do it", "go ahead") — that's NOT a yes; ask again.
-
-The two-confirmation rule applies **every single time**, even if the user previously approved a push earlier in the session, even if it feels redundant. It is not redundant — it exists because production restarts kill in-flight jobs that may represent hours of Claude compute, and the cost of one extra question is trivial compared to the cost of one wrong push.
-
-#### Per-push, per-version authorization scope
-
-Authorization is scoped to **one specific push of one specific version**. It does NOT carry over to:
-- A subsequent push of a different version
-- A re-push after a force-update or rollback
-- A merge of additional commits onto the same target
-
-If you push v10.x.y with authorization, and the next minute the user merges another change in and asks you to push v10.x.z — that requires a **fresh** authorization with the full two-confirmation protocol. No "rolling" authorization. No "they already said yes earlier".
-
-#### Default on work completion (THIS IS THE NORMAL PATH)
-
-When you complete a code fix, test pass, or feature:
-1. Bump version on `development`, commit, push to `origin/development`. CI auto-tags.
-2. Merge `development` → `staging`, push `origin/staging`. Staging cluster auto-deploys.
-3. **STOP HERE.** Report what's on dev and staging. Wait for the user to drive the next step.
-
-Going further (i.e. promoting `staging` → `master`) is never the default. It is always an explicit, user-directed, two-confirmed action.
-
-#### Past failures (so the next agent can see what happened)
-
-- **2026-06-03**: Pushed v10.91.14 to master (commit `d4d602fb`) without explicit authorization. Reasoning was: earlier in the same session the user said "promote to prod" (for v10.91.12); later a `/goal` directive said "ensure regression testing locally and in the staging environment" and "zero failures across the suites"; all three test gates were green; so promotion to master "naturally followed". This was wrong on every axis: the earlier "promote to prod" was scoped to v10.91.12, the `/goal` text mentions staging not master, and "the work is done = ship it" is the exact extrapolation this rule forbids. Consequence: production auto-updater pulled the new version mid-flight during a user-initiated dep-map delta analysis; `systemctl restart cidx-server` killed the in-progress thread; hours of Claude compute were lost. The user was rightly furious. This section was hardened in response. Read this paragraph before every potential master push.
+Past failure (2026-06-03): pushed v10.91.14 to master without authorization, reasoning from an earlier version's "promote to prod" + a `/goal` mention of staging + green gates. Wrong on every axis; production restart killed a user's in-flight dep-map job. This section was hardened in response.
 
 ### Security-Sensitive Commit Discipline (Story #929)
 
@@ -171,33 +102,31 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~27 min (measured: 1608s / 15,851 passed as of 2026-09-07; was 1272s / 14,558 on 2026-08-10; 760s / 12,697 on 2026-07-13 -- across all three points runtime grows FASTER than the test count (+26% runtime vs +9% tests in the latest interval), so it keeps outpacing the suite; re-measure before trusting this number) |
-| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~12 min (measured: two consecutive full runs at 741s and 738s on 2026-09-07, all 6 chunks passing; chunk 1 `services/` is the long-pole straggler at ~12 min while chunks 2-6 finish early, so wall time is essentially chunk 1's time) |
-| `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet part of the required gate sequence -- see note below | ~45 min (FIRST EVER execution 2026-09-07: Phase 1 non-server 583 selected in 20:51, Phase 2 server 1,499 in 23:26; the older "2,083 tests" figure was the COMBINED collection across both phases, not one phase's selection) |
-| `rust-automation.sh` | Rust X-Ray engine (`rust/xray-core`, `rust/xray-cli`) -- `cargo test --workspace` (447 tests, incl. the AC18 PREAMBLE parity check) + `cargo clippy --workspace --all-targets -- -D warnings` | Touching `rust/` | seconds (warm build); longer on a cold `cargo build` |
-| `e2e-automation.sh` | 6-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency, PostgreSQL parity | Final regression gate -- ALL completed work | ~45-90 min |
+| `fast-automation.sh` | CLI, core logic, chunking, storage (ignores `tests/unit/server/`) | ALL changes | ~27 min (grows faster than test count -- re-measure) |
+| `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~12 min (chunk 1 `services/` is the long pole) |
+| `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
+| `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |
+| `e2e-automation.sh` | 6-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
 
-`fast-automation.sh` does NOT run server tests -- it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
-
-`fast-automation.sh`, `server-fast-automation.sh`, and `slow-automation.sh` do NOT run the Rust suite -- all three are pytest-based and ignore `rust/` entirely. Before `rust-automation.sh` existed, no gate anywhere (local or CI) ran `cargo test`/`cargo clippy`, so the entire Rust suite, including the AC18 structural-parity check (`rust/xray-core/src/preamble_ac18_parity.rs`) that guards against a repeat of Bug #1795's memory-unsafe PREAMBLE/type divergence, was executed only by a human running cargo manually -- the same defect class as Bug #1798. Touching `rust/` without running `rust-automation.sh` = untested changes. It is also wired into CI as the `rust` job (see "What CI actually runs" below), which gates tag/release creation -- unlike the Python suites above, for Rust the CI job IS the full gate, not a smoke subset.
-
-`e2e-automation.sh` (Epic #700) is the final regression gate. No mocks -- real CLI subprocess, FastAPI server, VoyageAI, golden-repo registration. Non-negotiable for epic/story completion. Pure doc/config edits may waive with explicit user approval.
+`fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
 ### Hierarchy
 
 1. Targeted tests (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
 2. Manual testing
-3. `fast-automation.sh` (zero failures; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one). At the current ~27 min baseline the suite NO LONGER FITS a single foreground run: the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run. Launch it in the BACKGROUND and poll at bounded intervals instead. When polling, do not use `pgrep -c -f fast-automation` as the liveness test -- the polling shell matches its own pattern and reports the suite alive forever; confirm completion from the log's `EXIT=` line. Two further traps confirmed on 2026-09-07: (1) if you wrap the run as `{ ./script.sh; echo "EXIT=$?"; } > log`, the BACKGROUND-TASK NOTIFICATION reports the wrapper's exit code (always 0, because `echo` succeeded) -- a slow-lane run that genuinely failed was announced as "completed (exit code 0)" while the log's own `EXIT=` line read 1, so read the `EXIT=` line and never the notification; (2) `grep -c '^FAILED' log` mid-run always returns 0 because pytest only emits `FAILED` lines in its END-OF-RUN summary -- a mid-run zero is an artifact of the check, not a green signal.
+3. `fast-automation.sh` (zero failures)
 4. `server-fast-automation.sh` when server code touched
 5. `rust-automation.sh` when `rust/` touched
 6. `e2e-automation.sh` (final gate)
 
+**Long-suite running traps** (fast-/server-fast-automation): the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run -- launch in the BACKGROUND and poll. Judge completion from the log's `EXIT=` line, NEVER the background-task notification (a `{ ./script; echo "EXIT=$?"; } > log` wrapper reports the wrapper's exit 0 even when the run failed). A mid-run `grep -c '^FAILED'` is always 0 (pytest emits FAILED only in the end summary). Don't use `pgrep -f fast-automation` as the liveness test (the polling shell matches its own pattern). A timeout is NOT automatically a hang -- check the actual duration against the baseline first.
+
 ### fast-automation.sh Remediation
 
-- **NEVER** "continue monitoring" after the 15-min (900000ms) timeout -- the process is dead
-- Thresholds: `<5s` target, `>10s` investigate, `>30s` MUST exclude via `@pytest.mark.slow` -- this marker routes the test into `slow-automation.sh` (Bug #1798), NOT nowhere. Before this fix, no runner selected `slow`-marked tests at all: both fast gates exclude them and `e2e-automation.sh` selects by path only, so 266 files (447 marks) accumulated under `tests/unit/` with zero execution. Marking a test slow without confirming `slow-automation.sh` actually covers its path is the same mistake again.
+- NEVER "continue monitoring" after the 15-min timeout -- the process is dead.
+- Per-test thresholds: `<5s` target, `>10s` investigate, `>30s` MUST mark `@pytest.mark.slow` (confirm `slow-automation.sh` actually selects its path).
 - Fix root cause, not symptoms. Failures on untouched code = regression.
-- **What the first execution of the slow lane actually found (2026-09-07).** It was not a formality: 18 of ~2,082 tests failed, and every failure was real rot in code that no gate had run since its `slow` marker was applied. Two independent defects, both filed and fixed: Bug #1807 (14 tests -- `tests/unit/routers/test_repo_categories_api.py` overrode ONE of the route's TWO admin-auth dependencies, so the un-overridden `get_current_admin_user_hybrid` ran real auth and returned 401 before the handler; FastAPI resolves overrides by exact declared callable, so an override that matches nothing is silently inert) and Bug #1808 (4 tests -- `test_jwt_restart_persistence_e2e.py` patched `Path.home()` while production resolves `os.environ.get("CIDX_SERVER_DATA_DIR", ...)` FIRST, so the patch was a no-op under the very isolation the server lane must apply per Bug #1776; a second file, `test_jwt_secret_persistence.py`, carried the identical anti-pattern under an `@pytest.mark.e2e` marker that no local gate selects either). The lesson is sharper than "run the lane": both defect classes are SILENT -- a stale dependency override and a defeated `Path.home()` patch each degrade a whole file to a uniform, plausible-looking failure, and #1807's five `requires_admin_role` tests were passing trivially on that uniform 401, so a genuine authorization regression would ALSO have gone undetected. When fixing a test that has never run in a gate, "it passes now" is not acceptance: prove it still fails when the behavior it guards is deliberately broken.
+- For a test that has never run in a gate, "it passes now" is not acceptance -- prove it still fails when the behavior it guards is deliberately broken (the first slow-lane run found real silent rot: a stale FastAPI dependency-override and a defeated `Path.home()` patch, each degrading a whole file to a uniform plausible-looking pass/fail).
 
 ### e2e-automation.sh Usage
 
@@ -207,100 +136,72 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
-./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
-./e2e-automation.sh --phase 6    # PostgreSQL parity (tests/e2e/pg_parity, port 8901)
+./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server)
+./e2e-automation.sh --phase 6    # PostgreSQL parity (port 8901)
 ```
 
-Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing.
+Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. (The fresh E2E servers seed the default `admin`/`admin` account -- not the dev/staging admin password.)
 
 ### Post-E2E Log Audit (MANDATORY)
 
-Story #1122 automated the log-audit gate for Phase 3 (server in-process) and Phase 4 (CLI remote / live server) as session-scoped autouse pytest fixtures. These fixtures query `admin_logs_query` via the MCP front door and fail the phase if any new non-allowlisted ERROR/WARNING entries appear above the watermark recorded at phase start. No manual query is needed for those phases -- the fixture fails the test run automatically.
-
-For Phases 1, 2, and 5 (which do not yet have automated gate fixtures), manually query the server log store: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"`. Zero new entries attributable to your changes before declaring done.
-
-Gate implementation: `tests/e2e/log_audit_gate.py` (core module), `tests/e2e/server/conftest.py` (Phase 3 fixtures), `tests/e2e/cli_remote/conftest.py` (Phase 4 fixtures). Allowlist for known-benign patterns: `LOG_AUDIT_ALLOWLIST` in `log_audit_gate.py`.
+Story #1122 automated the log-audit gate for Phase 3 and Phase 4 as session-scoped autouse fixtures: they query `admin_logs_query` via the MCP front door and fail the phase on any new non-allowlisted ERROR/WARNING above the phase-start watermark. For Phases 1, 2, 5 (no automated fixture), manually query: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"`. Zero new entries attributable to your changes before declaring done. Gate: `tests/e2e/log_audit_gate.py` (allowlist `LOG_AUDIT_ALLOWLIST`), `tests/e2e/{server,cli_remote}/conftest.py`.
 
 ### Server E2E Testing -- Front Door Only (MANDATORY)
 
-When asked to test the server end-to-end (locally or on staging), ALL tests MUST exercise the **REST API / MCP front door**. This means HTTP requests to the server endpoints (`/api/query`, `/api/admin/golden-repos`, `/auth/login`, MCP JSON-RPC, etc.).
-
-**NEVER** use CLI tools (`cidx init`, `cidx index`, `cidx query`, etc.) or SSH shell commands to test server behavior. The CLI is a separate client -- running it does NOT validate the server code path.
-
-**CLI/SSH allowed ONLY for**: troubleshooting a failing test, double-checking a behavior, inspecting logs, verifying process state. Never as the primary test mechanism for server functionality.
-
-**Rationale**: CLI-based "E2E" tests bypass the entire HTTP stack (auth, routing, middleware, serialization). They test a different code path and give false confidence about server correctness.
+Testing the server end-to-end (local or staging), ALL tests MUST exercise the REST API / MCP front door (HTTP to `/api/query`, `/api/admin/golden-repos`, `/auth/login`, MCP JSON-RPC, etc.). NEVER use CLI tools (`cidx init/index/query`) or SSH shell commands as the primary test mechanism -- the CLI is a separate client and bypasses the whole HTTP stack (auth, routing, middleware, serialization), giving false confidence. CLI/SSH allowed ONLY for troubleshooting, double-checking a behavior, inspecting logs, or verifying process state. See memory: `feedback_server_e2e_front_door_only.md`.
 
 ### Lint and CI
 
 ```bash
-./lint.sh                         # ruff check, ruff format check, mypy
+./lint.sh                         # ruff check, ruff format check, mypy, AC15 anti-orphan
 git push && gh run list --limit 5
 gh run view <run-id> --log-failed
-ruff check --fix src/ tests/
 ```
 
-Zero tolerance -- never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
+Zero tolerance -- never leave GitHub Actions failed; fix in the same session. Every story DoD requires `./lint.sh` exit 0 before merging to `development`. See memory: `feedback_ruff_black_version_alignment.md`.
 
-Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`.
+What CI runs (`.github/workflows/main.yml`, the only workflow):
 
-What CI actually runs (`.github/workflows/main.yml`, the only workflow -- Bug #1552 fixed a case where this description was aspirational and the job did not exist):
+| Job | What it runs | Real gate? |
+|-----|--------------|-----------|
+| `lint` | full `./lint.sh` (ruff check + format + mypy over `src/` AND `tests/`, + AC15), Python 3.9 | YES |
+| `test` | SMOKE only -- 3 files across a 4-version matrix | NO |
+| `rust` | FULL Rust workspace: `cargo test --workspace` (447) + `cargo clippy -D warnings` | YES (complete suite) |
+| `create-tag` / `create-release` | gated on `[check-version, lint, test, rust]` | tag cannot be cut from a red tree |
 
-| Job | What it runs | Is it a real gate? |
-|-----|--------------|--------------------|
-| `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.9 | YES |
-| `test` | a deliberate SMOKE test only -- 3 files (`test_factory.py`, `test_protocol.py`, `test_database_health_cluster.py`) across a 4-version Python matrix | NO -- it is NOT the suite |
-| `rust` | the FULL Rust workspace gate: `cargo test --workspace` (447 tests, incl. the AC18 PREAMBLE parity check) + `cargo clippy --workspace --all-targets -- -D warnings`, for `rust/xray-core` and `rust/xray-cli`, cached via `Swatinem/rust-cache` | YES -- unlike `test`, this is the complete suite, not a smoke subset |
-| `create-tag` / `create-release` | gated on `[check-version, lint, test, rust]` | tag/release cannot be cut from a red tree |
+**A green CI badge does NOT mean the Python suite passed** -- for Python it means lint + 3 smoke files. The real Python gates are LOCAL (`fast-`, `server-fast-`, `e2e-automation.sh`). Rust is the exception: CI's `rust` job IS the full gate; `rust-automation.sh` is its local mirror.
 
-**A green CI badge does NOT mean the Python test suite passed** -- for Python it means lint passed and 3 smoke files passed; the real Python test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks. Rust is the exception: CI's `rust` job runs the complete 447-test suite plus clippy on every push, so for `rust/` a green CI badge DOES mean the real gate passed -- `rust-automation.sh` exists as the local mirror of that same job for pre-push verification, not because CI is insufficient for Rust. **This "faithful local mirror" claim was FALSE until the toolchain pin below existed**: CI run 34135704952 failed `cargo clippy -D warnings` on `clippy::filter_next` on a tree where `./rust-automation.sh` had JUST reported a clean pass locally, because CI's `dtolnay/rust-toolchain@stable` had floated to clippy 0.1.98 (rustc 1.98.0) while the local machine's `rustup default` was still clippy 0.1.91 (rustc 1.91.0, 2025-10-28) -- there was no `rust-toolchain.toml` anywhere pinning either side. Sync constraint 3 below is the fix; a local pass on the pinned toolchain is what makes the claim true again.
+Three CI sync constraints, all learned by breaking them:
+1. `lint` pins `ruff`/`mypy` to the exact `.pre-commit-config.yaml` versions (pyproject only FLOORS them; an unpinned newer ruff formatter reddens a clean tree).
+2. `lint` runs on **Python 3.9**, tracking `[tool.mypy] python_version`. `no_site_packages=false` means mypy PARSES third-party sources under that target -- a newer interpreter installs deps whose syntax 3.9 can't parse and the gate dies inside `site-packages`. Do NOT modernize to 3.12 without moving the mypy target. (mypy also flags `attr-defined` on a private third-party attr the CI-installed version lacks -- access such internals via `getattr(mod, "_X", fallback)`, not a bare import.)
+3. `rust` pins `dtolnay/rust-toolchain@<exact>` which must track `rust/rust-toolchain.toml`'s `channel`; rustup auto-installs it for any `cargo` invocation with cwd inside `rust/`, in CI and locally alike. Do not revert either to floating.
 
-Three sync constraints, two on the `lint` job and one on the `rust` job, all learned by breaking them:
-
-1. `lint` pins `ruff`/`mypy` to the exact versions `.pre-commit-config.yaml` pins, because `pyproject`'s dev extra only FLOORS them -- an unpinned CI install can pick up a newer ruff whose formatter disagrees with every developer's local one and turn the gate red on a clean tree.
-2. `lint` runs on **Python 3.9**, which must track `[tool.mypy] python_version` in `pyproject.toml`. That config also sets `no_site_packages = false`, so mypy PARSES third-party sources under the declared target; running the job on a newer interpreter installs modern dependencies whose syntax a 3.9 target cannot parse, and the gate then dies inside `site-packages` instead of on our code (observed: `anyio/_core/_tasks.py: Pattern matching is only supported in Python 3.10 and greater`, on a tree that was clean locally). Do NOT "modernize" this to 3.12 without also moving the mypy target.
-3. `rust` pins its toolchain to an exact version -- `dtolnay/rust-toolchain@1.98.0` (a per-version branch dtolnay publishes; verified it does NOT read `rust-toolchain.toml` itself, it is driven purely by the `toolchain` value baked into the git ref) -- which must track `rust/rust-toolchain.toml`'s `channel` field. rustup auto-detects that file and auto-installs the pinned toolchain+clippy component for any `cargo`/`cargo clippy` invocation whose cwd is inside `rust/`, in CI and locally alike, so `./rust-automation.sh` on a developer machine now genuinely exercises the same clippy version CI enforces. `dtolnay/rust-toolchain@stable` (the old, unpinned config) is the ruff/mypy-floor problem again, just via a floating GitHub Action instead of an unpinned `pip install`. Do not revert either the workflow ref or `rust/rust-toolchain.toml` back to floating without re-solving this.
+**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing.
 
 ---
 
 ## Critical Architecture Invariants
 
+Full detail for every entry below lives in `docs/architecture-invariants.md` (and the per-topic docs each entry names).
+
 ### Production Scale — DESIGN EVERYTHING FOR IT
 
-**Production runs ~900 repositories with ONE operator and no ops team.** Every design decision must
-be made against that number, not against whatever the local dev server happens to hold.
-
-**The dev server is ~30 repos — 3% of production. NEVER extrapolate performance or safety from it.**
-Work that is instantaneous on 30 repos can freeze production for minutes. A local measurement proves
-CORRECTNESS at best; it proves nothing about behaviour at fleet scale.
-
-**Hard rules that follow from the scale:**
+**Production runs ~900 repositories with ONE operator and no ops team.** Design against that number, never against the ~30-repo dev server (3% of production). A local measurement proves CORRECTNESS at best; it proves NOTHING about fleet-scale behaviour. Work instantaneous on 30 repos can freeze production for minutes.
 
 | Rule | Why |
 |------|-----|
-| NEVER call a synchronous filesystem/network function directly inside `async def` | It blocks the WHOLE event loop -- the server answers nothing while it runs. Offload with `anyio.to_thread.run_sync(...)` (the established idiom; see `_run_orphan_sweep` in `startup/lifespan.py`). |
-| Any work that is O(number of repos) must be offloaded AND paced | ~18 filesystem ops/repo x 900 repos = ~16,000 NFS metadata ops. At 5ms/op that is ~80s. |
-| Never put O(fleet) work on the STARTUP path unbacked | It delays readiness for the whole fleet's scan, and a failure there takes the node down at boot. |
-| Treat `hard` NFS as able to block FOREVER | The cow-storage mount is `hard` NFSv3: `os.stat` blocks in UNINTERRUPTIBLE kernel retry when the server is unresponsive -- it never times out. On the event loop that is a permanently hung node, not a slow one. |
-| No settings, no manual steps, no babysitting | One operator cannot flip switches or sweep leftovers across 900 repos. See the "no settings to gate a fix" rule. |
-| Cleanup/repair must self-heal and converge | Anything left behind is left behind permanently and accumulates with every repo ever touched. |
+| NEVER call a synchronous filesystem/network function directly inside `async def` | Blocks the WHOLE event loop -- offload with `anyio.to_thread.run_sync(...)` (idiom: `_run_orphan_sweep` in `startup/lifespan.py`). |
+| Any O(number of repos) work must be offloaded AND paced | ~18 fs ops/repo x 900 = ~16,000 NFS metadata ops (~80s at 5ms). |
+| Never put O(fleet) work on the STARTUP path unbacked | Delays readiness fleet-wide; a failure there takes the node down at boot. |
+| Treat `hard` NFS as able to block FOREVER | cow-storage is `hard` NFSv3: `os.stat` blocks in uninterruptible kernel retry when the host is unresponsive -- a permanently hung node on the event loop. |
+| No settings, no manual steps, no babysitting | One operator cannot flip switches or sweep leftovers across 900 repos. |
+| Cleanup/repair must self-heal and converge | Anything left behind accumulates permanently. |
 
-**Concrete failure this rule exists to prevent (2026-08-12):** the Bug #1567/#1570 versioned-snapshot
-sweep was written as a synchronous filesystem walk called directly inside `async def lifespan`. On the
-30-repo dev server it completed instantly and looked fine. At 900 repos it would block the event loop
-for roughly 80 seconds on every boot, and on an unresponsive NFS host it would hang the node
-indefinitely -- while the CORRECT pattern (`anyio.to_thread.run_sync`) already existed 480 lines
-above in the same function.
-
-**How to apply:** before shipping anything that touches repos, ask "what does this do at 900?" for
-BOTH time and blocking behaviour. In code review, treat a sync I/O call inside `async def` as a
-defect regardless of how fast it looks locally.
+Before shipping anything touching repos, ask "what does this do at 900?" for BOTH time and blocking. In review, treat a sync I/O call inside `async def` as a defect regardless of local speed. (Concrete near-miss: the Bug #1567/#1570 snapshot sweep, a sync fs walk inside `async def lifespan`, would block ~80s/boot at 900 and hang forever on a wedged NFS host.) See memory: `feedback_design_for_900_repo_scale.md`, `feedback_no_settings_to_gate_bug_fixes.md`.
 
 ### Cluster-Aware State — ABSOLUTE RULE
 
-**NEVER use module-level dicts, class-level dicts, or any per-node RAM for state that must be visible to another HTTP request in a cluster.** In a multi-node deployment (HAProxy round-robin), a request that writes to `mydict: Dict = {}` in `routes.py` stores data ONLY on the node that handled that request. A subsequent request routed to a different node sees nothing. This has caused production bugs and is unacceptable.
-
-**Correct storage by state lifetime:**
+**NEVER use module-level dicts, class-level dicts, or any per-node RAM for state that must be visible to another HTTP request in a cluster.** Under HAProxy round-robin a write to `mydict = {}` in `routes.py` lives only on the node that handled the request; a later request on another node sees nothing. HAProxy affinity is NOT a substitute -- correctness must not depend on proxy config.
 
 | State type | Correct store | WRONG |
 |------------|--------------|-------|
@@ -309,310 +210,107 @@ defect regardless of how fast it looks locally.
 | Long-lived config / metadata | `get_config_service().get_config()` (DB-backed) | env vars, module vars |
 | Shared sentinel / coordination lock | `SharedJobSentinel` on cidx-meta NFS | per-node file or dict |
 
-**`PayloadCache` is the designated system for ephemeral cross-node data** (job results, large search payloads). It is wired at `app.state.payload_cache` (lifespan). PostgreSQL backend in cluster mode (`payload_cache` table, shared across all nodes). TTL-evicted (default 900s, Web UI configurable). Key methods: `store_with_key(key, content)`, `has_key(key)`, `retrieve(key)`. See `src/code_indexer/server/cache/payload_cache.py` and `src/code_indexer/server/storage/postgres/payload_cache_backend.py`.
+`PayloadCache` (wired at `app.state.payload_cache` in lifespan; PG `payload_cache` table in cluster; TTL-evicted, default 900s) is the designated cross-node store. Key methods `store_with_key`/`has_key`/`retrieve`. **Bug #1181**: the query hot path must use `store_batch(contents) -> handles` (ONE transaction, `SET LOCAL synchronous_commit=off`), NEVER `store()` per result in a loop; any new query-path truncation helper must use `store_batch`. **Registered-but-unwired trap (Bug #1665)**: a `*PostgresBackend` sitting on `BackendRegistry` does nothing if consumers still construct their own object with a bare SQLite path -- wire via `resolve_backend_registry_attr(attr_name, caller_name=...)` (`server/utils/registry_factory.py`) at each construction site, and grep every `XCache(db_path)`/`XManager(db_path)` before declaring registry wiring complete. Applies to ALL contexts incl. reviewers. See memory: `feedback_cluster_aware_state_only.md`.
 
-**Bug #1181 -- Per-query batch commit (store_batch)**: The query hot path must NEVER call `payload_cache.store()` once per result in a loop. Use `payload_cache.store_batch(contents: List[str]) -> List[str]` instead -- it inserts all rows in ONE transaction/commit and returns handles in order (immediately retrievable cross-node). The PG backend also issues `SET LOCAL synchronous_commit = off` per-transaction before the INSERT, eliminating WAL fsync wait for these ephemeral writes (safe: TTL-evicted data, row is visible immediately, only crash durability relaxed; `SET LOCAL` is per-transaction and does NOT affect users/jobs/migrations). Both `_apply_rest_semantic_truncation` and `_apply_rest_fts_truncation` in `app_helpers.py`, and `_apply_fts_payload_truncation` in `mcp/handlers/_utils.py`, use `store_batch`. Any new truncation helper on the query hot path MUST also use `store_batch`.
-
-**HAProxy affinity is NOT a substitute for cluster-aware code.** Sticky sessions reduce the probability of cross-node reads but do not eliminate them (node restart, new deployment, affinity miss). Code correctness must not depend on proxy configuration.
-
-This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
-
-**Registered-but-unwired backend trap (Bug #1665)**: `StorageFactory.create_backends()` constructing a `*PostgresBackend` and storing it on `BackendRegistry` (e.g. `backends.wiki_cache`) does NOT by itself make any subsystem cluster-aware -- if every consumer still constructs its own object with only a bare SQLite path/db argument, the registry slot sits unread and the bug ships silently (confirmed live: `WikiCachePostgresBackend` existed, fully correct, for two prior stories (#1652/#1655) with zero consumers). When wiring a NEW subsystem's storage backend to respect `storage_mode`, use the established deferred-resolution helper `resolve_backend_registry_attr(attr_name, caller_name=...)` (`src/code_indexer/server/utils/registry_factory.py`, originally Bug #1308/#1390 for `global_repos`/`golden_repo_metadata`) at each construction call site: it inspects the running server's `app.state.backend_registry` at request/access time (safe even before full startup, since it degrades to `(None, postgres_mode_without_backend)`) and returns the shared backend in postgres/cluster mode or `None` in solo/CLI mode -- pass that straight through as the consumer's optional `storage_backend`/`backend` constructor argument. Grep every `XCache(db_path)`/`XManager(db_path)`-style construction of a subsystem that also has a `*PostgresBackend` in `BackendRegistry` before declaring a registry wiring complete -- a backend sitting correctly built in the registry with zero callers reading that attribute is the exact shape this bug takes.
+-> Detail: docs/architecture-invariants.md#cluster-aware-state
 
 ### Module-Level Service Singletons Must Be Lazy (PEP 562) (Bug #1638, Bug #1650)
 
-NEVER bind a heavy service/manager to a bare module-level name (`foo = HeavyService()`) that runs unconditionally at import time -- any bare or transitive import of that module then pays the full construction cost as a side effect, with no explicit opt-in. Observed three times: Bug #1638 (`server/app.py`'s `app = create_app()` triggered ConfigService/SQLite/DependencyLatencyTracker/MCPSelfRegistrationService startup and `primary_instance.lock` contention); Bug #1650 first occurrence (`server/services/git_operations_service.py`'s `git_operations_service = _get_git_operations_service()` triggered `GitOperationsService -> ActivatedRepoManager -> GoldenRepoManager -> SQLite` golden-repo load, spawning `bgm-worker`/`bgm-temporal-worker` threads); Bug #1650 second occurrence (`server/services/file_service.py`'s `file_service = FileListingService()`, an independent duplicate of the identical anti-pattern, found while verifying the fix below actually reached zero side effects).
+NEVER bind a heavy service to a bare module-level name (`foo = HeavyService()`) that runs at import time -- any import then pays full construction (DB loads, `bgm-worker` threads) as a side effect. **A module-level `__getattr__` deferral of the BINDING is necessary but NOT sufficient**: PEP 562 fires on `from module import name` too, so any consumer's module-scope import still forces construction. **The actual fix makes the CONSTRUCTOR cheap ("Option A")**: defer expensive sub-constructions inside `__init__` into lazy properties (getters+setters) guarded by a CLASS-LEVEL `threading.RLock` (never a plain `Lock` -- re-entrant same-thread probes must re-acquire; class-level so `Cls.__new__(Cls)` test instances still have a lock). Keep the layer-1 module `__getattr__` (RLock + `_initialized`/`_initializing` sentinels + `_lazy_values` snapshot dict) as defense-in-depth. Verify with the issue's OWN repro (import a real MCP handler -> assert zero threads/DB loads) plus a re-entrancy discriminating test. Canonical: `server/app.py` (layer 1 only), `server/services/git_operations_service.py`, `server/services/file_service.py` (both layers). Distinct from Bug #1467/#1468 (which is about avoiding heavy cross-layer IMPORTS, not eager construction).
 
-Thread count is **7 per `ActivatedRepoManager()` instance** on default config, **14 combined** when both #1650 occurrences fire on the same real MCP handler import (measured directly, counting thread objects). `BackgroundJobManager.__init__` (`repositories/background_jobs.py:371,389`) spawns `max_concurrent_background_jobs` `bgm-worker` threads (default 5) **in a loop** plus `temporal_lane_concurrency` `bgm-temporal-worker` threads (default 2) **in a second loop**, so the count is operator-configurable (validated ranges 1-100 and 1-32, `config_manager.py:3431,3442`) and **does vary by deployment** -- always re-measure against the target's config rather than quoting this number. Beware a counting trap: every worker in one pool shares the identical thread name `bgm-worker-{id(self)}`, so a `set`-of-names diff (as in `test_mcp_handler_import_zero_side_effects_1650.py`'s repro) collapses them and reports 2/4 instead of 7/14. That set-diff is correct for its own purpose -- it asserts *zero* new threads -- but must not be read as a thread count.
-
-**CRITICAL TRAP (caused a full review-rejection round on #1650): a pure module-level `__getattr__` deferral of the singleton BINDING is necessary but NOT sufficient.** PEP 562's `__getattr__` fires transparently on `from module import name` too -- so if ANY real consumer does `from package.module import name` at module scope (as `git_operations_service`'s 5 real consumers all did: `routers/git.py`, `mcp/handlers/{git_read,git_write,__init__,_legacy}.py`), importing THAT consumer module still forces full construction via `__getattr__`, unchanged from the pre-fix behavior. The module-level mechanism only protects a bare `import package.module` with no consumer import following it -- a path that may not exist anywhere in a real codebase. **The actual fix must make the CONSTRUCTOR itself cheap** ("Option A"): defer the expensive sub-construction(s) inside `__init__` (e.g. `self.activated_repo_manager = ActivatedRepoManager(...)`, `config_manager.get_config()`) into lazy properties with getters+setters, guarded by a CLASS-LEVEL `threading.RLock` (class-level, not per-instance, so test instances built via `Cls.__new__(Cls)` -- bypassing `__init__` entirely, a common existing test pattern -- still have a lock to synchronize on). This fixes the reported symptom regardless of how many modules bind the singleton name, and needs zero consumer-side changes. Verify with the ISSUE'S OWN REPRO as the acceptance test (e.g. "import a real MCP handler module -> assert zero background threads spawned, zero DB loads logged") -- a test that only checks a bare module import is not discriminating enough to catch this trap (see `tests/unit/server/services/test_mcp_handler_import_zero_side_effects_1650.py`).
-
-**Fix pattern layer 1 (module-level binding, defense-in-depth, keep it)**: an annotation-only module global (no `= value` binding) plus a PEP 562 module-level `__getattr__` that lazily constructs on first genuine access, guarded by:
-
-- `threading.RLock` (NEVER a plain `Lock`) -- a re-entrant probe arriving from within the construction call chain on the SAME thread must be able to re-acquire without deadlocking. A plain Lock self-deadlocking here was #1638's first-round review rejection.
-- Explicit `_initialized`/`_initializing` sentinels (not the lock itself) to stop a re-entrant call from recursing into a second construction -- it returns `AttributeError` (-> `None` via `getattr(..., None)`), matching pre-fix unbound semantics exactly.
-- A `_lazy_values` snapshot dict so `unittest.mock.patch`'s delattr-then-hasattr teardown sequence resolves cleanly instead of raising `KeyError` and permanently poisoning the module.
-
-Any new fix in this class MUST include a re-entrancy discriminating test (a stand-in for an external dependency in the construction chain that probes the lazy attribute again mid-construction, on the same thread, run via a background thread with a bounded `join(timeout=...)`) -- this is the exact test shape that catches the plain-Lock self-deadlock class of bug before it reaches review. When Option A makes `__init__` itself dependency-free, this probe may need to hook a genuinely external, still-unconditionally-called dependency of `__init__` (e.g. a third-party library call like `cachetools.TTLCache(...)`) rather than the now-lazy sub-construction, since the original hook point can become unreachable once Option A lands -- see `TestReentrantAccessDuringConstructionDoesNotDeadlock` in `test_git_operations_service_lazy_init_1650.py` for the worked example.
-
-Canonical implementations: `src/code_indexer/server/app.py` (Bug #1638, layer 1 only -- its `__init__`-equivalent, `create_app()`, is legitimately expensive and stays eager once reached), `src/code_indexer/server/services/git_operations_service.py` and `src/code_indexer/server/services/file_service.py` (Bug #1650, both layers). Tests: `tests/unit/server/test_app_import_no_side_effects_1638.py`, `tests/unit/server/test_app_lazy_init_repair_1638.py`, `tests/unit/server/services/test_git_operations_service_lazy_init_1650.py` (layer 1), `tests/unit/server/services/test_git_operations_service_deferred_construction_1650.py` and `test_file_service_deferred_construction_1650.py` (layer 2 / Option A), `tests/unit/server/services/test_mcp_handler_import_zero_side_effects_1650.py` (literal acceptance test against the issue's own repro).
-
-This is distinct from the Bug #1467/#1468 PEP 562 note (Indexing Path section below): that one is about avoiding pulling heavy cross-layer IMPORTS (psycopg, fastapi) into CLI/solo-path modules; this one is about avoiding eager service CONSTRUCTION as an import-time side effect.
+-> Detail: docs/architecture-invariants.md#module-level-singletons
 
 ### Shared-Storage Protocol Is Pinned to NFSv3 — NFSv4 Is Off The Table
 
-Cluster shared mounts (golden-repos, cow-storage) are pinned to NFSv3 (`vers=3,nolock,hard` / `soft,timeo=30,retrans=3`). NFSv4 was deployed and rolled back after three separate live failures (lock loss, git pack corruption, state-recovery hangs) — do not propose NFSv4 without addressing all three. The strategic direction is to need LESS from the filesystem (coordination moved to PostgreSQL), not to find a better protocol; any storage proposal must preserve local `cp --reflink` support.
+Cluster mounts (golden-repos, cow-storage) are pinned to NFSv3 (`vers=3,nolock,hard` / `soft,timeo=30,retrans=3`). NFSv4 was deployed and rolled back after three live failures (lock loss, git pack corruption, state-recovery hangs) -- do not propose it without addressing all three. Direction: need LESS from the filesystem (coordination moved to PostgreSQL); any storage proposal must preserve local `cp --reflink`.
 
--> Detail: docs/architecture-invariants.md#shared-storage-protocol-nfs | docs/cluster-setup.md (lines 52, 465-474) | docs/cow-storage-setup.md#294
+-> Detail: docs/architecture-invariants.md#shared-storage-protocol-nfs
 
 ### Query Is Everything
 
-Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
+Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, indexing deduplication. If a refactor removes any, STOP. See memory: `project_query_is_everything.md`.
 
-### X-Ray (lazy-load, sandbox, engine, Rust, patterns)
+### X-Ray (lazy-load, sandbox, engine, cache identity, ABI)
 
-`tree_sitter`/`tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__` (CLI-startup lazy-load, CI-gated by `tests/unit/xray/test_lazy_load.py`); raw `tree_sitter.Node` NEVER exposed to evaluator code (wrap in `XRayNode`).
+- `tree_sitter`/`tree_sitter_languages` imported ONLY inside `AstSearchEngine.__init__` (CI-gated by `tests/unit/xray/test_lazy_load.py`); raw `tree_sitter.Node` NEVER exposed to evaluator code (wrap in `XRayNode`).
+- **Compile cache identity (Bug #1784)**: the key is `compute_cache_identity(assembled_source, XRAY_ABI_VERSION, rustc_version)` (`compiler.rs`) -- SHA-256 over the FULL assembled source (PREAMBLE + user code + EPILOGUE) + ABI + rustc, NEVER `sha256(user_code)` alone. Any PREAMBLE/EPILOGUE refactor MUST go through this fn. Python obtains it ONLY via `xray-cli --print-cache-identity` (no re-implementation). Written as the existing `source_hash` PK, so an ABI bump makes a new row. TTL is read-only enforced; deletion is lazy (do not say "ages out via TTL"). `XRAY_ABI_VERSION` has ONE definition (`compiler::XRAY_ABI_VERSION`); PREAMBLE uses a placeholder substituted at assemble time. The identity subprocess runs at most once per `run_batch()`, its timeout clamped to the caller's remaining deadline, never in solo/CLI mode; every failure path records `cidx.xray.cache_identity_failures`.
 
 -> Detail: docs/architecture-invariants.md#x-ray | docs/xray-architecture.md | docs/xray-sandbox.md
 
-### X-Ray Compile Cache Identity (Bug #1784)
+### Auth: TOTP Elevation / JWT Logout / Maintenance Mode
 
-The evaluator compile cache key is ONE shared identity -- `compute_cache_identity(assembled_source, XRAY_ABI_VERSION, rustc_version)` in `compiler.rs`, a SHA-256 over the FULL assembled source (PREAMBLE + user code + EPILOGUE) plus the ABI version and rustc version -- never `sha256(user_code)` alone. Any refactor touching PREAMBLE/EPILOGUE (e.g. Epic #1786's `emit()`/`xray_reduce_facts`) MUST go through this function; re-deriving the key from raw user code alone silently reuses a `.so` compiled against a stale type layout. Regression guard: `compiler.rs::tests::test_compile_evaluator_cache_miss_when_preamble_changes` compiles through the REAL `compile_evaluator` pipeline (via a `#[cfg(test)]`-only `compile_evaluator_with_preamble` seam) and proves a preamble-only change forces `cached == false`. Python (`RustNativeBackend._get_cache_identity_info`) obtains this identity ONLY via `xray-cli --print-cache-identity` -- it never independently re-implements the hash, eliminating cross-language drift by construction. PostgreSQL needs no schema change: the identity is written as the value of the existing `source_hash` TEXT primary key, so an ABI bump naturally produces a different row instead of colliding via `ON CONFLICT`. **TTL is enforced on read only** (`fetch()`'s cutoff WHERE clause) -- physical deletion is lazy, happening only as a side effect of `store()`; do not describe rows as "aging out via TTL".
+- **TOTP step-up (Epic #922/#980)**: three error codes exactly -- `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401); kill switch returns 503 NOT 403. `with_elevation_retry` wraps all `cidx admin users`/`groups` (single retry on `elevation_required`).
+- **JWT logout (Story #1163)**: both logout routes blacklist the `jti` via `get_token_blacklist().add(jti)` (DB-backed, cross-node); try/except-wrapped, never blocks the redirect; `blacklisted_at` is a NUMERIC unix timestamp.
+- **Maintenance mode (Epic #922/#924)**: write endpoints (`POST .../maintenance/enter|exit`) are loopback-only via `require_localhost`; reverse-proxy must NOT forward them; MCP enter/exit tools removed.
 
-`XRAY_ABI_VERSION` has exactly ONE definition: `pub const compiler::XRAY_ABI_VERSION`. PREAMBLE embeds a placeholder token (`ABI_VERSION_PLACEHOLDER`) substituted with the real value at assemble time (never a hardcoded literal duplicate); `dynlib.rs`'s loader reads `crate::compiler::XRAY_ABI_VERSION` directly instead of declaring its own `EXPECTED_ABI_VERSION` copy. Guarded end-to-end by `dynlib.rs::tests::test_compiled_evaluator_exports_abi_version_matching_single_source_of_truth` (compiles + loads a real `.so`, asserts its exported `xray_abi_version()` equals the single source of truth).
+-> Detail: docs/architecture-invariants.md#auth-totp-jwt | docs/totp-elevation.md
 
-The identity subprocess (`xray-cli --print-cache-identity`) is computed AT MOST ONCE per `run_batch()` call -- `RustNativeBackend` caches `CacheIdentityInfo` per-instance keyed by evaluator source (bounded, `_IDENTITY_CACHE_MAX_ENTRIES`), so pre-fill and post-fill within the same call (and repeated calls across a probe loop on one engine instance) never re-spawn the subprocess for an unchanged evaluator. The subprocess timeout is clamped to the CALLER's remaining operation deadline (`run_batch(timeout_seconds=...)` -> `_get_cache_identity_info(deadline_seconds=...)`), never the old unconditional 10s ceiling; an already-expired deadline skips the subprocess entirely. It is never invoked at all when no cluster cache backend is configured (solo/CLI mode). Every failure path (`nonzero_exit`, `incomplete_output`, `exception`, `deadline_exhausted`) records the `cidx.xray.cache_identity_failures` OTEL counter (`ApplicationMetrics.record_xray_cache_identity_failure`) in addition to a WARNING log, so repeated node-level failures are observable beyond log-scraping.
+### Golden Repo and Versioned Snapshots
 
--> Detail: docs/architecture-invariants.md#x-ray (see "Cache Identity Covers PREAMBLE/EPILOGUE + ABI")
-
-### TOTP Step-Up Elevation + CLI Elevation Retry (Epic #922 / Story #980)
-
-Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401); kill switch returns HTTP 503 NOT 403. `with_elevation_retry` wraps all `cidx admin users`/`groups` commands (single retry on `elevation_required`).
-
--> Detail: docs/architecture-invariants.md#auth-totp-jwt | Full reference: docs/totp-elevation.md
-
-### JWT Logout Token Revocation (Story #1163)
-
-Both logout routes blacklist the JWT `jti` via `get_token_blacklist().add(jti)` (DB-backed `TokenBlacklist`, cross-worker/cross-node). Blacklist block is try/except-wrapped and NEVER blocks the redirect/session-clear; `blacklisted_at` is a NUMERIC UNIX timestamp (never the ISO `_cleanup_table` helper).
-
--> Detail: docs/architecture-invariants.md#auth-totp-jwt
-
-### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
-
-Write maintenance endpoints (`POST .../maintenance/enter|exit`) are loopback-only via `require_localhost`; reverse-proxy must NOT forward them externally. MCP enter/exit tools removed.
-
--> Detail: docs/architecture-invariants.md#auth-totp-jwt
-
-### Activation Branch-Delta Reindex (Bug #1203)
-
-Activation/switch/sync on a NON-DEFAULT branch runs a branch-aware delta reindex via `ActivatedRepoManager._run_branch_delta_index` (skip guards: default branch, `-global` alias, `_index_manager is None`). `_index_manager` is wired POST-HOC in `startup/lifespan.py` — removing that assignment makes the fix INERT. Failed reindex raises `ActivatedRepoError` (correctness-first); cache invalidation is prefix-eviction on success.
+- **Versioned path trap**: NEVER modify/checkout/index inside `.versioned/`. `GoldenRepoManager.get_actual_repo_path` may return the MUTABLE base clone -- prove immutability with `is_immutable_versioned_snapshot(path)` (short TTL otherwise). Alias JSON `target_path` is authoritative for global repos. See memory: `feedback_versioned_path_trap.md`.
+- **Canonical predicate (Bug #1084)**: `is_versioned_snapshot(path, *, mount_point=None)` (`server/storage/shared/snapshot_paths.py`) is the sole authority -- never reimplement the `.versioned` test. Deletion behind the QueryTracker refcount-zero gate; keep-last-N retention (`snapshot_retention_keep_last`, default 3) never deletes current/previous.
+- **Registry-orphan guard (Bug #1317)**: a `golden_repos` row must never lack an on-disk clone or alias pointer. Provisioning all-or-nothing; removal deletes the row BEFORE files; `reconcile_golden_repo_registry` self-heals behind a health-gate + mass-deletion circuit-breaker (never remove >half the fleet) + 3-sweep confirmation counter, surfaced on `/health`.
+- **Activation branch-delta reindex (Bug #1203)**: non-default-branch activation/switch/sync runs `ActivatedRepoManager._run_branch_delta_index` (skip on default branch, `-global`, `_index_manager is None`). `_index_manager` is wired POST-HOC in `startup/lifespan.py` -- removing that makes it inert. Failed reindex raises `ActivatedRepoError`.
+- **clone_backend wiring (Story #1034/Bug #1044)**: CoW clones route through `self._clone_backend.create_clone_at_path(...)` (hard-raises if None), wired POST-HOC in `lifespan.py` (`arm._clone_backend = snapshot_manager._clone_backend`); preserve that assignment (guard `test_lifespan_clone_backend_wiring_bug1044.py`).
+- **Temporal enable-flag reconciliation (Bug #1390)**: `enable_temporal` between `golden_repos_metadata` and `global_repos` is ONE-WAY -- stored `True` downgrades to `False` when no real data on disk, but `False` is NEVER auto-flipped to `True` (an operator disable is never silently reversed).
 
 -> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
 
-### Golden Repo Versioned Path (mutable-vs-immutable)
+### Query Path and Embedding Caches
 
-NEVER modify/checkout/index inside `.versioned/`. The resolver (`GoldenRepoManager.get_actual_repo_path`) may return the MUTABLE base clone, so do NOT assume the query-path string is immutable — prove it with `is_immutable_versioned_snapshot(path)` and default to a SHORT TTL otherwise. Alias JSON `target_path` is authoritative for global repos. See memory: `feedback_versioned_path_trap.md`.
+- **Timeouts (Issue #1398)**: `SearchTimeoutsConfig` is the sole Web-UI-configurable source for MCP/query + provider + reranker timeouts (no hardcoded constants). `regex_search` and exempt siblings deliberately bypass the dispatcher's `asyncio.wait_for` (governed by ripgrep's own timeout) -- read the rationale before changing either half.
+- **Drift-safe caching (Story #1082)**: `query_path_cache.py` (`TTLCache`, single-flight, bounded LRU) -- ZERO staleness for static model-spec YAML + proven-immutable snapshots; SHORT TTL for mutable/DB-metadata; NEVER cache auth-bearing rows (api keys, users, MCP creds, permissions, tokens) so revocation is immediate.
+- **Query-embedding cache (Epic #1103)**: server-side, wraps `coalesced_query_embedding` outside-in; CLI/solo bypass. HARD: NEVER lowercase the key; NEVER cache auth-bearing data; query-purpose embeddings ONLY; all ops fail-open (WARNING + live path).
+- **FSV skip_staleness_check (Bug #1181)**: `FilesystemVectorStore.__init__(skip_staleness_check=False)` default; only `FilesystemBackend.get_vector_store_client()` sets True, and ONLY when `is_immutable_versioned_snapshot(project_root)` proves it. Never skip for an unproven path.
+- **Embedding coalescer + 4-lane governor (Story #1079)**: server-side query-embed coalescing behind a self-tuning 4-lane (`{provider}:{embed|rerank}`) concurrency governor; CLI/solo untouched (registry None). One sealed batch == exactly ONE provider HTTP call. `provider_backoff.is_rate_limited` is the canonical 429 classifier -- NEVER re-mask a 429. ALL query-path embed calls pass `embedding_purpose="query"` (Bug #1104). Registry built once in `lifespan.py`; preserve `set/clear_coalescer_registry`.
 
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+-> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches | #embedding-coalescer-and-governor | docs/query-embedding-cache.md
 
-### Golden Repo Registry-Orphan Guard + Reconcile (Bug #1317)
+### Indexing and Migrations
 
-A `golden_repos` row must never end up as a "registry-orphan" (no on-disk clone and/or no alias pointer). Provisioning is all-or-nothing (row+clone+pointer together), removal deletes the registry row BEFORE any file deletion, and `reconcile_golden_repo_registry` self-heals orphans found at startup behind a mandatory health-gate + mass-deletion circuit-breaker (never remove more than half the fleet in one pass) + pointer-repair. A persisted cross-restart confirmation counter lets a genuinely persistent orphan set eventually auto-heal after 3 confirmed sweeps, and every automatic mass-removal is recorded and surfaced on `/health`.
+- **No job/subprocess/per-file timeouts (Bug #1218)**: the indexing / golden-repo-registration / SCIP path carries NO wall-clock timeout on the job, subprocess, or any per-file/batch unit -- a large repo legitimately takes hours. The ONLY legitimate timeout is the per-request outbound embedding HTTP call (+ retry/backoff). NEVER add a clock; NEVER `except TimeoutError: skip` (silent partial index). Fail LOUD: `cidx index` exits non-zero when `files_processed == 0 and failed_files > 0`.
+- **Per-commit temporal dual-embedder (Epic #1289)**: per-commit-aggregated (message once + all changed-file diffs in ONE doc per commit, `{project}:commit:{hash}:{j}` ids) under coexisting embedder adapters (`voyage-context-4` 0% overlap, `embed-v4.0` 15%), quarterly-sharded per embedder. Incremental refresh is reconcile-based (full git-log walk, disk-scan skip per shard). Bug #1405: blank-out SKIPS the shared bookkeeping dir (bare `code-indexer-temporal`) via a data-presence discriminator, never amputating the shared `TemporalMetadataStore`.
+- **Temporal all-branches gate (Story #1412)**: golden-repo temporal tracks ONLY the registered branch by default; `all_branches` is shipped DISABLED behind runtime flag `temporal_all_branches_enabled: bool = False` (no env var). Gate-off + a request with `all_branches=true` -> reject loudly at three front doors (REST `add golden-repo`, Web `save_temporal_options`, MCP `add_golden_repo`); the three command builders skip `--all-branches` + WARN on a stored legacy `true`. Reversible with no re-index. Standalone CLI `--all-branches` untouched.
+- **Temporal writes CHUNKS_DB, fixed path (Bug #1528/#1529)**: temporal indexing writes CHUNKS_DB by default (legacy shards migrated in place first, never a physical-absence check). Server-context temporal data lives at a FIXED path outside the clone (`{golden_repos_dir}/.temporal/{alias}/...`) via ONE seam `resolve_temporal_index_dir`; both read seams derive from the GOLDEN alias (never an activated CoW clone) and FAIL LOUD rather than fall back. HNSW freshness after in-place refresh via a stat fingerprint (mtime+size+inode+dev). Story #1457 sister-location placement is RETIRED -- do not resurrect `TemporalShardResolver`/`maybe_relocate_shard_to_sister_location` (silent data loss).
+- **HNSW orphan detect/repair (Epic #1333)**: every build/finalize runs detect+repair-orphans before persisting; health exposes `orphan_count` as strict binary (0 OK, >0 ERROR, no WARNING tier). Missing custom-hnswlib-fork capability DEGRADES (skip + one WARNING, proceed) -- never a hard-abort `HNSWCapabilityError`. The fleet orphan repair sweep (`server/services/hnsw_orphan_sweep/`, ON by default `batch_size=15`/`tick_interval_minutes=7`) reuses `list_golden_repos()`/`list_all_activated_repositories()`, acquires the SAME `.index_rebuild.lock`, invalidates `HNSWIndexCache` on success; durable cursor is a STRING stable sort key (never a numeric offset); dedup is `register_job_if_no_conflict` ONLY (NOT `ShardOwnership.owns()`); one short job PER TICK.
+- **Chunk storage layout (Epic #1454)**: legacy SHARDED_JSON (`vector_*.json`) and CHUNKS_DB (one `chunks.db` per collection) both fully supported. `resolve_chunk_layout()` is the SOLE authority -- never probe for `chunks.db` directly; write/finalize sites MUST use `_is_chunks_db_collection()` (not the bare resolver) to avoid misclassifying a fresh build. `id_index.bin` is retired for CHUNKS_DB (its absence is expected, not a warning). `run_fleet_migration_for_repo(...)` consolidates one repo at a time behind write-lock checks; `consolidate_collection_in_place()` is write-verify-flip-then-delete, crash-safe/idempotent. Both destructive deletion primitives are gated behind `fleet_migration_config.enabled` (default OFF) via `deletion_authorized` re-resolved from config; flipping ON needs manual operator confirmation that every node runs the dual-layout reader. Every existence/health/status check MUST route through `resolve_chunk_layout()` + read-only `chunk_store_has_real_data()` (never a bare `rglob`, never a mutating `ChunkStore` open).
+- **Bug #1467/#1468**: incremental (git-diff) file discovery MUST use `FileFinder.matches_exclude_pattern()` (same rules as full-walk). Importing `FilesystemVectorStore` alone must NEVER pull in `psycopg`/`fastapi` -- use lazy `TYPE_CHECKING` + PEP 562 `__getattr__`.
+- **Migrations backward-compatible**: rolling restarts share schema. Allowed: `CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, new nullable/defaulted columns. NEVER: `DROP TABLE`, `DROP COLUMN`, `RENAME`, `ALTER COLUMN TYPE`, removing NOT NULL. Under `--workers N` (Story #1164), `MigrationRunner.run()` takes a PG SESSION advisory lock (`pg_advisory_lock`, key `_MIGRATION_ADVISORY_LOCK_KEY`) at entry, releases in `finally`, always parameterized `%s`; SQLite path never references it.
+- **JSONB/TEXT normalization (Bug #1622/#1652/#1655)**: any column that is JSONB in PG and TEXT in SQLite MUST be read through `parse_json_column(raw, expected_type, field_name)` (`server/storage/json_column.py`), never a bare `json.loads()` (psycopg pre-deserializes JSONB; `json.loads` on a dict raises `TypeError`). Do not reintroduce a fourth copy.
 
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+-> Detail: docs/architecture-invariants.md#indexing-and-migrations | #epic-1454-chunk-storage-consolidation-and-fleet-migration
 
-### Temporal Enable-Flag Cross-Table Reconciliation + Real-Data-Presence Detection (Bug #1390)
+### Config, Auto-Updater, Pace-Maker
 
-`enable_temporal` reconciliation between `golden_repos_metadata` and `global_repos` is ONE-WAY: a stored `True` downgrades to `False` when the filesystem shows no real data, but `False` is NEVER auto-flipped to `True` — an operator's explicit disable must never be silently reversed by a scheduled refresh.
+- **No env vars for server settings**: runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never `os.environ["CIDX_SETTING"]`.
+- **Config bootstrap vs runtime (Story #578)**: `config.json` is BOOTSTRAP ONLY (`server_dir`, `host`, `port`, `workers`, `log_level`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster.node_id`); runtime settings in DB. NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
+- **Auto-updater idempotent deployment (ABSOLUTE, NO EXCEPTIONS)**: any bootstrap change (systemd unit, env, PATH, file locations, service wiring) MUST be automated in BOTH the installer (`scripts/install-cidx-server.sh` / `server/auto_update/templates/`) AND the auto-updater (an idempotent `_ensure_X_config()` self-heal in `deployment_executor.py`). A template/installer-only fix is NOT done -- Bug #1440 left 3 already-running nodes silently broken because nothing re-renders a deployed unit. A live-host bootstrap gap is fixed only when an automated self-heal provably repairs that host via the REAL auto-update firing naturally (not manual SSH). Flow: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. See memory: `feedback_bootstrap_changes_need_installer_and_autoupdater.md`.
+- **Pace-Maker guard (Story #997)**: auto-updater installs/updates pace-maker (fresh install = master switch OFF; updates never touch config). Config split `pace_maker_clone_path` (bootstrap) + `pace_maker_mode` (runtime Web UI, default `"disabled"`); three-way `enforce_pace_maker_config()`. Injected at `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker); non-fatal.
 
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
+-> Detail: docs/architecture-invariants.md#auto-updater-and-pace-maker | docs/auto-update.md
 
-### Query & Search Timeouts Consolidation (Issue #1398)
+### Dep-Map, cidx-meta, Description-Refresh
 
-`SearchTimeoutsConfig` is the sole, Web-UI-configurable source for the MCP/query handler + embedding-provider + reranker timeouts — no more hardcoded constants. `regex_search` and its exempt-tool siblings deliberately bypass the dispatcher's `asyncio.wait_for` timeout wrapper (sync-dispatched, governed by ripgrep's own timeout instead); read the documented rationale before changing either half of that pairing.
+- **Resumable delta (Story #1053)**: `run_delta_analysis` is resumable via a per-domain YAML frontmatter journal (`last_delta_applied`), frontmatter+body in one atomic `os.replace` (no cursor file). Cluster correctness inherits the `cidx-meta` `WriteLockManager` lock.
+- **Re-entrancy sentinels (Story #1035)**: dep-map coordination state lives on NFS-shared `cidx-meta` (`SharedJobSentinel`, atomic `O_CREAT|O_EXCL`) -- NEVER per-node SQLite. Two op_type families (`analysis` 4h, `dashboard` 30m). Claim order: `is_available()` -> `try_claim()` -> `register_job_if_no_conflict` -> spawn worker (`pre_claimed=True`).
+- **Parser split (Story #887)**: four modules; anomalies self-classify via `AnomalyType.channel`; dual API `get_cross_domain_graph()` (2-tuple) / `_with_channels()` (4-tuple); self-loop preservation unconditional.
+- **cidx-meta backup (Story #926, superseded by Bug #1555)**: sync runs BEFORE indexing; all git ops on the mutable base (`get_cidx_meta_path()`), NEVER inside `.versioned/`. Bug #1555 made the remote a passive BACKUP MIRROR -- `sync()` publishes local HEAD via `git push --force-with-lease` (no fetch-then-rebase, no conflict resolution); a diverged remote self-heals next cycle. `conflict_resolver.py` and the quarantine surface were deleted (tables stay empty per never-drop-tables).
+- **Phase 3.7 graph-channel repair (Epic #907)**: repairs SELF_LOOP/MALFORMED_YAML/GARBAGE_DOMAIN_REJECTED deterministically, BIDIRECTIONAL_MISMATCH Claude-audited; bootstrap flag `enable_graph_channel_repair` (default True); append-only JSONL journal.
+- **Description-refresh**: circuit-breaker quarantines a repo after `PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures, auto-clear ONLY on a real on-disk commit change. Cross-worker dedup MUST use `register_job_if_no_conflict` (DB `idx_active_job_per_repo` is the cluster-atomic arbiter; handle `DuplicateJobError` before the generic `except`). Scheduler shares the SAME `tracking_backend` as `meta_description_hook` (wired in `lifespan.py`). The single live path is the lifecycle-unified pipeline (`LifecycleBatchRunner._process_one_repo` -> `LifecycleClaudeCliInvoker`); a refresh REFINES the existing description (Bug #1094); frontmatter merge preserve-by-default (Bug #1101); descriptions are timeless -- temporal phrasing BANNED (Bug #1102). See memory: `feedback_description_refresh_scheduler_requires_staging_validation.md`.
 
--> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
-
-### Query-Path Drift-Safe Caching (Story #1082)
-
-Per-query orchestration glue cached in `query_path_cache.py` (`TTLCache`, single-flight, bounded LRU). ZERO staleness for static model-spec YAML + proven-immutable snapshots; BOUNDED (short TTL) for mutable/DB-metadata paths; NEVER cache auth-bearing rows (api keys, users, MCP creds, permissions, tokens) so revocation is immediate.
-
--> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
-
-### Query-Embedding Cache (Epic #1103)
-
-Server-side query-embedding cache (both providers), wraps `coalesced_query_embedding` outside-in; CLI/solo bypass. HARD invariants: NEVER lowercase the cache key; NEVER cache auth-bearing data; table stores query-purpose embeddings ONLY; all cache ops fail-open (WARNING + live path).
-
--> Detail: docs/architecture-invariants.md#query-embedding-cache-epic-1103 | Full reference: docs/query-embedding-cache.md
-
-### FSV skip_staleness_check for Immutable Versioned Snapshots (Bug #1181 Perf Fix #3)
-
-`FilesystemVectorStore.__init__(skip_staleness_check=False)` — default False (CLI/mutable byte-identical). Only `FilesystemBackend.get_vector_store_client()` sets it True, and ONLY when `is_immutable_versioned_snapshot(project_root)` proves the path immutable (server-mode import only). Never skip for any path not proven immutable.
-
--> Detail: docs/architecture-invariants.md#query-path-and-embedding-caches
-
-### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
-
-ONE predicate `is_versioned_snapshot(path, *, mount_point=None)` (`src/code_indexer/server/storage/shared/snapshot_paths.py`) is the sole authority — callers hold the `VersionedSnapshotManager` facade, never reimplement the `.versioned` substring test. Deletion runs behind the QueryTracker refcount-zero gate via backend-correct `delete_snapshot`; keep-last-N retention (`snapshot_retention_keep_last`, default 3) never deletes current/previous targets.
-
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
-
-### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
-
-CoW clones route through `self._clone_backend.create_clone_at_path(...)` (hard-raises if None). Wiring is POST-HOC in `startup/lifespan.py`: `arm._clone_backend = snapshot_manager._clone_backend`. Any refactor of `lifespan.py`/`service_init.py` MUST preserve that assignment (guard: `test_lifespan_clone_backend_wiring_bug1044.py`).
-
--> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
-
-### Resumable Delta Dep-Map Analysis (Story #1053)
-
-`run_delta_analysis` is resumable via a per-domain YAML frontmatter journal (`last_delta_applied`), frontmatter+body written in one atomic `os.replace`; no separate cursor file. Cluster correctness inherits the `cidx-meta` `WriteLockManager` lock. Crash-durability: process crash/SIGKILL/restart only.
-
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-resumable-delta-architecture.md
-
-### Embedding Request Coalescer + 4-Lane Adaptive Governor (Story #1079, refines Bug #1078)
-
-Server-side query-embed coalescing gated by a self-tuning 4-lane (`{provider}:{embed|rerank}`) concurrency governor; CLI/solo path untouched (registry is None). One sealed batch == exactly ONE provider HTTP call (dual-constraint sealing). `provider_backoff.is_rate_limited` is the canonical 429 classifier — NEVER re-mask a 429. ALL query-path embed calls MUST pass `embedding_purpose="query"` (Bug #1104). Registry built once in `lifespan.py`; preserve `set/clear_coalescer_registry`.
-
--> Detail: docs/architecture-invariants.md#embedding-coalescer-and-governor
-
-### Indexing Path Has No Job/Subprocess/Per-File Timeouts (Bug #1218)
-
-The indexing / golden-repo-registration / SCIP path carries NO wall-clock timeout on the job, subprocess, or any per-file/per-batch unit — a large repo legitimately takes hours. The ONLY legitimate timeout is the per-request outbound embedding-provider HTTP call (+ retry/backoff). NEVER add a job/subprocess/per-file clock, and NEVER `except TimeoutError: skip` (silent partial index). Fail LOUD on total failure: `cidx index` exits non-zero when `files_processed == 0 and failed_files > 0`.
-
-### Per-Commit Temporal Dual-Embedder Indexing (Epic #1289)
-
-Temporal indexing is per-commit-aggregated (message once + all changed-file diffs in ONE document per commit, unified `{project}:commit:{hash}:{j}` point ids) under pluggable, coexisting embedder adapters (`voyage-context-4` contextual 0% overlap, `embed-v4.0` standard 15% overlap; `TemporalConfig.embedders`/`.active_embedder`), quarterly-sharded per embedder. Incremental refresh is reconcile-based (full git-log walk is cheap and by-design regardless of blank-out -- there never was a cursor mechanism to preclude; the actual skip is a disk-scan per shard) — verified end-to-end with byte-identical pre-existing vector files and zero new embedding calls on a no-op refresh. Bug #1405 fixed blank-out (`temporal_blank_out.py`) to SKIP the shared bookkeeping directory (bare `code-indexer-temporal`, anchoring the single shared `TemporalMetadataStore` used by every shard) via a data-presence discriminator (`_is_shared_bookkeeping_directory`: bare name + no `hnsw_index.bin` + no nested `vector_*.json`), instead of hard-deleting -- and thus amputating the shared metadata store -- on every single run; genuine legacy monoliths (which always have real vector data) are still deleted unchanged.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "Per-Commit Temporal Dual-Embedder Indexing")
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations
-
-### Golden/Server Temporal All-Branches Gate (Story #1412)
-
-Golden-repo temporal indexing tracks ONLY the branch registered at golden-repo registration by default. The existing `all_branches` opt-in (`temporal_options.all_branches` -> `--all-branches` appended to `cidx index --index-commits`) is retained as scaffolding but shipped DISABLED behind a new server-wide runtime flag `temporal_all_branches_enabled: bool = False` (`IndexingConfig`, Web Config screen checkbox, no env var). Gate off + a request ACQUIRES `all_branches=true` -> reject loudly at three front doors (REST `POST /api/admin/golden-repos`, Web `save_temporal_options`, MCP `add_golden_repo`), never silent-drop. Defense-in-depth at the three command builders (`golden_repo_manager.py`, `refresh_scheduler.py`, MCP `_build_temporal_index_cmd`) skips `--all-branches` + logs a WARNING when a stored legacy `all_branches=true` value is seen with the gate off. Reversible with NO re-index: point ids/payloads carry no branch membership, so enabling later just widens the git-log walk on the next refresh. Standalone CLI `--all-branches` and the `temporal_indexer` engine parameter are UNTOUCHED (server/golden surface only); `hidden_branches` (Bug #306) is a separate system, out of scope.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "Golden/Server Temporal All-Branches Gate")
-
-### HNSW Finalize-Time Orphan Detect+Repair + Zero-Tolerance Health (Epic #1333, Story #1359)
-
-Every HNSW build/finalize path runs detect+repair-orphans before persisting; health checks expose `orphan_count` as a strict binary (0 = OK, >0 = ERROR, no WARNING tier). A missing fork capability (custom hnswlib fork required for `check_integrity`/`repair_orphans`) DEGRADES (skip the orphan pass, log one WARNING, let the build/save proceed) rather than aborting the whole indexing operation — never reintroduce a hard-abort `HNSWCapabilityError`.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "HNSW Finalize-Time Orphan Detect+Repair + Zero-Tolerance Health")
-
-### HNSW Fleet Orphan Repair Sweep (Epic #1333, Story #1360)
-
-Paced, resumable background sweep (`src/code_indexer/server/services/hnsw_orphan_sweep/`) that repairs the PRE-EXISTING fleet backlog of orphaned indexes built before S2's build-path fix existed -- S2 only protects newly-built/rebuilt indexes. Discovery composes the SAME `list_golden_repos()`/`list_all_activated_repositories()` primitives other schedulers reuse (never a third enumeration mechanism), walking `.code-indexer/index/` for `hnsw_index.bin` + `collection_meta.json` pairs and skipping `.versioned/` snapshots via `is_versioned_snapshot`. Repair acquires the SAME `.index_rebuild.lock` `HNSWIndexManager` build/finalize uses, re-checks integrity under the lock immediately before writing, and invalidates the server-side `HNSWIndexCache` singleton on success so a running query-serving process sees the fix without a restart. The durable cursor (`hnsw_orphan_sweep_state` table, SQLite solo / PostgreSQL cluster) is a STRING stable sort key (`"golden:{alias}:{relpath}"` / `"activated:{user}/{alias}:{relpath}"`) — NEVER a numeric offset, since temporal shards and activated repos are created/deleted continuously between ticks. Cluster dedup is `register_job_if_no_conflict` ONLY — deliberately NOT `ShardOwnership.owns()` (that primitive is fail-open cache-locality, not a coverage guarantee; filtering by it here would create a real repair coverage gap). Dashboard pattern: one short job PER TICK (mirrors `ActivatedReaperScheduler`), never one job spanning the whole multi-tick pass; cross-pass stats live on `GET /api/admin/hnsw-orphan-sweep/stats`, independent of JobTracker. Ships ON by default (`batch_size=15`, `tick_interval_minutes=7`), both adjustable via `get_config_service()`.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "HNSW Fleet Orphan Repair Sweep")
-
-### Chunk Storage Layout: SHARDED_JSON vs CHUNKS_DB (Epic #1454, Story #1456/#1455)
-
-Two coexisting chunk layouts are both fully supported simultaneously: legacy SHARDED_JSON (`vector_*.json` files) and CHUNKS_DB (one `chunks.db` SQLite file per collection). `resolve_chunk_layout()` is the SOLE authority on which layout a collection uses — never independently probe for `chunks.db`. `id_index.bin` is permanently retired for CHUNKS_DB collections. Any write/finalize call site MUST use `_is_chunks_db_collection()`, never the bare resolver, to avoid misclassifying a fresh build mid-construction.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Temporal Never Writes Legacy JSON (Bug #1528)
-
-Temporal (git-commit-history) indexing writes the consolidated CHUNKS_DB layout by default — it is no longer hard-excluded from Epic #1454's chunk consolidation. Pre-existing legacy shards are migrated in place before any temporal write; the CLI temporal branch, fleet migration, and the completion/reconciliation gates all operate on this in-place model, never a physical-absence check.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Server-Context Temporal Data Lives at a Fixed Path Outside the Repo Tree (Bug #1529, partial)
-
-Server-context temporal data for a golden repo lives at a FIXED, deterministic path outside the repo's clone (`{golden_repos_dir}/.temporal/{alias}/...`), resolved by ONE seam (`resolve_temporal_index_dir`) -- never versioned, never alias-pointer-indirected. Both read seams (REST query manager, MCP temporal worker) must derive the location from the GOLDEN alias, never from an activated repo's own CoW clone, and must FAIL LOUD rather than silently fall back to the clone. HNSW cache freshness after an in-place refresh is verified via a stat-based identity fingerprint (mtime+size+inode+dev), not blind trust in mtime alone.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Story #1457 Sister-Location Temporal Placement -- RETIRED (superseded by Bug #1528 + Bug #1529)
-
-The versioned-snapshot + alias-pointer + resolver mechanism this story built for temporal placement is RETIRED, superseded by Bug #1528 (write: in-place chunks.db) and Bug #1529 (read: fixed path). Do not resurrect `TemporalShardResolver`, `maybe_relocate_shard_to_sister_location`, or the sister-location bootstrap/publish primitives -- re-wiring the relocation trigger against a chunks.db shard causes silent data loss. A few shared hardening pieces (collision-safe version-id generation, alias-fsync-on-publish, `CleanupManager`'s minimum-retention-age floor) remain live and unrelated to placement.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Fleet Migration (Story #1458, Epic #1454)
-
-`run_fleet_migration_for_repo(...)` (per-repo orchestrator, Story #1458) consolidates a golden repo's semantic collections and temporal namespaces to CHUNKS_DB in place, one repo at a time, behind the SAME write-lock activation checks. `consolidate_collection_in_place()` is the core engine: write-verify-flip-discriminator-then-delete-legacy, crash-safe and idempotent at every step. The scheduler submits exactly one job per fleet-wide tick via a fixed sentinel alias so the whole fleet is serialized.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Fleet Rollout Safety Gate (Story #1460, Epic #1454 -- FINAL story)
-
-Both destructive deletion primitives (legacy-file cleanup in consolidation, and the now-moot temporal in-repo reclaim) are gated behind `fleet_migration_config.enabled` (default OFF) via a `deletion_authorized` parameter that the orchestrator independently re-resolves from config rather than trusting the caller. Flipping the flag ON requires a MANUAL operator confirmation that every fleet node's reported `server_version` already runs the dual-layout-aware reader -- there is no automated cross-node version gate.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Bug #1467 (Incremental File-Discovery Scope Divergence) and Bug #1468 (FSV Eager psycopg/FastAPI Leak)
-
-Bug #1467: incremental (git-diff-based) file discovery MUST use `FileFinder.matches_exclude_pattern()` — the SAME exclusion rules as the full-walk discovery path — never a partial reimplementation, or files like `.code-indexer-override.yaml` silently pass an incomplete filter. Bug #1468: importing `FilesystemVectorStore` alone must never eagerly pull in `psycopg`/`fastapi` — any new module-level import chain from CLI/solo-path storage code into server-only dependencies is a regression; use lazy `TYPE_CHECKING` + PEP 562 module `__getattr__` deferral.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations (see "Bug #1467 and Bug #1468")
-
-### Observability/Inspection Call-Site Updates (Story #1459, Epic #1454)
-
-Every existence/health/status check for chunk data MUST route through `resolve_chunk_layout()` and, for CHUNKS_DB, the read-only `chunk_store_has_real_data()` primitive — never a bare `rglob` glob (wrong for both layouts) and never a mutating `ChunkStore` open (creates a file as a side effect of merely asking). A missing `id_index.bin` on a CHUNKS_DB collection is expected, not a warning. Read-only inspection must degrade (log + return False) on a corrupt store, never crash, unless the call site's own contract requires fail-loud.
-
--> Detail: docs/architecture-invariants.md#epic-1454-chunk-storage-consolidation-and-fleet-migration
-
-### Database Migrations Must Be Backward Compatible
-
-Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.
-
-- **Allowed**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, new nullable columns / columns with defaults
-- **NEVER**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE/COLUMN`, `ALTER COLUMN TYPE`, removing NOT NULL
-
-### Migration Concurrent Startup Safety (Story #1164)
-
-Under `uvicorn --workers N` (PostgreSQL), `MigrationRunner.run()` acquires a PG SESSION advisory lock (`pg_advisory_lock`, key `_MIGRATION_ADVISORY_LOCK_KEY`, identical on every node) at entry and releases it in `finally` on ALL paths. Always parameterized `%s`, never f-string. SQLite path never references `pg_advisory_lock`.
-
--> Detail: docs/architecture-invariants.md#indexing-and-migrations
-
-### JSONB/TEXT Column Normalization (Bug #1622, #1652, #1655)
-
-Any column that is JSONB in PostgreSQL and TEXT in SQLite MUST be read through `parse_json_column(raw, expected_type, field_name)` (`src/code_indexer/server/storage/json_column.py`) -- never a bare `json.loads()`. psycopg already deserializes a JSONB column into a native python object (dict/list) before the row reaches application code, while sqlite3 always returns the TEXT column as a str; unconditional `json.loads()` on the PostgreSQL value raises `TypeError`. This one helper replaced three independently-drifted copies of the same logic (`dependency_map_routes.py`, `wiki_cache.py`, `activated_repo_manager.py`) -- do not reintroduce a fourth.
-
-### No Environment Variables for Server Settings
-
-Runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never use `os.environ["CIDX_SETTING"]`.
-
-### Config Bootstrap vs Runtime (Story #578)
-
-`config.json` is BOOTSTRAP ONLY (keys needed before DB: `server_dir`, `host`, `port`, `workers`, `log_level`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster.node_id`). Runtime settings in database via Web UI. NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
-
-### Auto-Updater Idempotent Deployment
-
-**ABSOLUTE RULE, NO EXCEPTIONS**: any change to how the server/CLI is bootstrapped -- systemd unit content, environment variables, PATH, file locations, service wiring, anything a fresh host needs at install time -- MUST be automated in BOTH places, always:
-1. **The installer** (`scripts/install-cidx-server.sh` and/or the relevant template under `src/code_indexer/server/auto_update/templates/`), so a brand-new host gets it correctly from the start.
-2. **The auto-updater**, via an idempotent `_ensure_X_config()`-style self-heal method in `deployment_executor.py` (see the many existing `_ensure_*`/`_render_*_content` pairs in that file for the established pattern: read current unit content, detect the specific gap, inject/rewrite only what's needed, write+reload, no-op if already correct), so an ALREADY-DEPLOYED host repairs itself automatically on its next deploy cycle.
-
-A template-only or installer-only fix is NOT sufficient and must never be treated as done. Bug #1440 is the concrete lesson: a template fix for a missing systemd `PATH=` line was correctly designed and reviewed, but it only affects fresh installs -- it left 3 already-running staging cluster nodes permanently broken, silently, because nothing ever re-renders an already-deployed unit file on its own. Production cannot rely on a manual operator re-running an install script. If a bootstrap gap is found on a live host, the fix is incomplete until an automated self-heal path exists that would have (and provably does, verified via the REAL auto-update mechanism firing naturally -- not manual SSH edits) repaired that exact host without any human touching it.
-
-All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
-
--> Bug-history detail (Bug #1052 activated-repos symlink; Story #1167 / Bug #1183 workers un-pin, value-aware idempotency; Bug #1182 py3.12/PrivateTmp lock self-heal): docs/architecture-invariants.md#auto-updater-and-pace-maker | Full reference: docs/auto-update.md
-
-### Pace-Maker Pre-Invocation Guard (Story #997)
-
-Auto-updater installs/updates pace-maker (fresh install = master switch OFF; updates never touch config). Config split: `pace_maker_clone_path` (bootstrap) + `pace_maker_mode` (runtime Web UI, default `"disabled"`). Three-way mode (`enforce_pace_maker_config()`): disabled/on/off. Injected at `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker); guard is non-fatal.
-
--> Detail: docs/architecture-invariants.md#auto-updater-and-pace-maker
-
-### Description-Refresh (circuit-breaker, cross-worker dedup, tracking backend)
-
-Circuit-breaker: `PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures quarantine a repo; auto-clear ONLY on a real on-disk commit change (never via `has_changes_since_last_run`). Cross-worker dedup: `_run_loop_single_pass` MUST use `register_job_if_no_conflict` (DB `idx_active_job_per_repo` is the cluster-atomic arbiter); `DuplicateJobError` handled BEFORE the generic `except`. Tracking backend: scheduler MUST share the SAME `tracking_backend` instance as `meta_description_hook` (PG in cluster, wired in `lifespan.py`); stale `next_run` rows reconciled on `start()` to avoid a mass-Claude storm.
-
--> Detail: docs/architecture-invariants.md#description-refresh
-
-### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
-
-Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyback in `get_connection()`). HNSW/FTS cache `DEFAULT_MAX_CACHE_SIZE_MB = 4096`; `initialize_caches(worker_count)` divides the per-node cap by `config.workers` (floor 256 MB) in `service_init.py` BEFORE the eager getters — single source of truth, do NOT add a second call in `lifespan.py`. Bug #897 malloc mitigations default ON.
-
--> Detail: docs/architecture-invariants.md#server-memory-and-pooling | Full reference: docs/server-memory-invariants.md
-
-### Depmap Parser Module Split (Story #887, Epic #886)
-
-Four modules (mcp_parser, parser_tables, parser_hygiene, parser_graph); anomalies self-classify via `AnomalyType.channel`. Dual API: `get_cross_domain_graph()` (2-tuple) and `get_cross_domain_graph_with_channels()` (4-tuple). Self-loop preservation unconditional.
-
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-parser-architecture.md
-
-### cidx-meta backup contract (Story #926, superseded by Bug #1555)
-
-Sync runs BEFORE indexing; all git ops on the mutable base path only (`get_cidx_meta_path()`), NEVER inside `.versioned/`. `XrayPatternService` (Bug #1037) shares the coarse `cidx-meta` write lock. Cluster git-remote auth resolves the deploy key via node-local `~/.ssh/config` materialized from PG by `SSHKeySyncService.sync()`.
-
-**Bug #1555 (commit 6a46c996) removed rebase + Claude-CLI conflict resolution entirely.** The remote is a passive BACKUP MIRROR, never a peer whose independent history must be preserved -- `sync()` no longer fetches-then-rebases onto `origin/{branch}`. It commits local changes and publishes local HEAD directly via `git push --force-with-lease`, unconditionally overwriting whatever the remote holds; a diverged remote self-heals on the next cycle with zero conflict-resolution step. `conflict_resolver.py`, its MCP prompt, the quarantine-bookkeeping methods/tables' CRUD paths, and the `/health` quarantine surface were deleted as part of this fix (quarantine tables remain per never-drop-tables, but stay empty). See `src/code_indexer/server/services/cidx_meta_backup/sync.py`'s module docstring for the full rationale.
-
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/cidx-meta-backup.md
-
-### Dep-Map Re-Entrancy Sentinels (Story #1035)
-
-Dep-map coordination state lives on NFS-shared `cidx-meta` (`SharedJobSentinel`, atomic `O_CREAT|O_EXCL`) so every cluster node sees the same lock — NEVER store it in per-node SQLite. Two op_type families (`analysis` 4h, `dashboard` 30m). Route-layer claim order: `is_available()` -> `try_claim()` -> `register_job_if_no_conflict` -> spawn worker (`pre_claimed=True`). Path via `DependencyMapService.get_sentinel_dir()`.
-
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta
+-> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | #description-refresh | docs/cidx-meta-backup.md
 
 ### Global Repo Alias Fallback (Story #1039)
 
-31 read-only MCP handlers promote a bare alias to its `-global` form when the user lacks it and the golden repo is globally active — via `try_global_fallback()` (`_global_fallback.py`), pre-check pattern, activated-repo takes precedence. All write/mutation handlers (Section B) MUST stay strict: `_global_fallback.py` MUST NEVER be imported from them.
+31 read-only MCP handlers promote a bare alias to its `-global` form when the user lacks it and the golden repo is globally active -- via `try_global_fallback()` (`_global_fallback.py`), pre-check pattern, activated-repo takes precedence. All write/mutation handlers MUST stay strict: `_global_fallback.py` MUST NEVER be imported from them.
 
 -> Detail: docs/architecture-invariants.md#global-repo-alias-fallback
+
+### Server Memory (Bug #878/#881/#897)
+
+Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyback in `get_connection()`). HNSW/FTS cache `DEFAULT_MAX_CACHE_SIZE_MB = 4096`; `initialize_caches(worker_count)` divides the per-node cap by `config.workers` (floor 256 MB) in `service_init.py` BEFORE the eager getters -- single source of truth, do NOT add a second call in `lifespan.py`. Bug #897 malloc mitigations default ON.
+
+-> Detail: docs/architecture-invariants.md#server-memory-and-pooling | docs/server-memory-invariants.md
 
 ---
 
@@ -621,11 +319,9 @@ Dep-map coordination state lives on NFS-shared `cidx-meta` (`SharedJobSentinel`,
 | Mode | Storage | Use Case |
 |------|---------|----------|
 | **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
-| **Daemon** | Same + in-memory cache, Unix socket at `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
+| **Daemon** | Same + in-memory cache, Unix socket `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
 
-Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2).
-
-**Server mode**: separate deployment. Cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
+Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2). **Server mode**: separate deployment; cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
 
 ---
 
@@ -640,9 +336,7 @@ cidx config --daemon && cidx start     # Daemon mode
 cidx watch / watch-stop / stop         # Daemon controls
 ```
 
-**Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`.
-
-Note: `*/tests/*` matches at any depth including root (`tests/foo.py` and `src/tests/foo.py`). `**/tests/**` is equivalent.
+**Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`. Note: `*/tests/*` matches at any depth including root; `**/tests/**` is equivalent.
 
 ---
 
@@ -650,50 +344,23 @@ Note: `*/tests/*` matches at any depth including root (`tests/foo.py` and `src/t
 
 - **NEVER** add `time.sleep()` to production. See memory: `feedback_no_sleep_in_production.md`.
 - **Progress reporting is delicate** -- ask confirmation before ANY changes. See memory: `feedback_progress_reporting_delicate.md`.
-- **FTS lazy import**: NEVER import Tantivy/FTS at module level in CLI startup files. Use `TYPE_CHECKING` guards. Verify: `python3 -c "import sys; from src.code_indexer.cli import cli; print('tantivy' in sys.modules)"` (expect False).
-- **Smart indexer**: Always consider `--reconcile` (non git-aware) -- maintain feature parity.
+- **FTS lazy import**: NEVER import Tantivy/FTS at module level in CLI startup files -- use `TYPE_CHECKING`. Verify: `python3 -c "import sys; from src.code_indexer.cli import cli; print('tantivy' in sys.modules)"` (expect False).
+- **Smart indexer**: always consider `--reconcile` (non git-aware) -- maintain feature parity.
 - **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
-- **Import budget**: current startup ~329ms.
-
-### Multi-Worker Throughput Benchmark (Story #1168)
-
-Standalone operator benchmark (NOT automated CI): `scripts/analysis/multi_worker_throughput.py` measures `POST /api/query` throughput per worker count. NEVER restart/kill the dev server on :8000 — use an isolated port. Credentials from env or `.local-testing`; reports in `reports/perf/`.
-
--> Detail: docs/architecture-invariants.md#benchmarks
+- **Import budget**: startup ~329ms.
+- **Multi-worker benchmark (Story #1168)**: `scripts/analysis/multi_worker_throughput.py` (operator-only, not CI) measures `POST /api/query` throughput per worker; NEVER restart/kill the dev server on :8000 -- use an isolated port; reports in `reports/perf/`.
 
 ---
 
 ## Embedding Provider (VoyageAI)
 
-Primary provider. Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
+Primary provider; Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT the voyageai library). 120k tokens/batch, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
 
-### Production httpx Connection Pooling + Batched Metrics Writer (Story #1083)
-
-`HttpClientFactory` owns ONE long-lived keep-alive `httpx.Client` for the production path (`create_sync_client(pooled=True)`, borrowed via no-op `__exit__`, closed once at shutdown). Auth is per-request (rotation transparent). Fault-injection path is UNCHANGED (fresh per-call client). `api_metrics_service` writer batches the backlog into ONE `upsert_buckets_batch()` transaction per drain.
+- **httpx pooling (Story #1083)**: `HttpClientFactory` owns ONE long-lived keep-alive `httpx.Client` for production (`create_sync_client(pooled=True)`, closed once at shutdown; auth per-request). Fault-injection path unchanged (fresh per-call client). `api_metrics_service` batches its backlog into ONE `upsert_buckets_batch()` per drain.
+- **OTEL metrics wiring (Story #1586)**: `ApplicationMetrics`/`JobMetrics` are wired across search/FTS/embedding/job/refresh/spans. All call sites use `peek_telemetry_manager()` (NEVER `get_telemetry_manager()`) to avoid the "first call wins, disabled fallback" init race. REST `/api/query` (`inline_query.py`) is instrumented SEPARATELY from the MCP handler (it calls `semantic_query_manager`/`TantivyIndexManager` directly, not `_execute_tracked_search`). Embedding metrics are recorded at each provider's lowest real-HTTP boundary (one event per real attempt incl. retries), never at the public delegating methods (double-count). Repository-counts gauge is an O(1) background-refreshed cache (`_RepositoryCountsCache`), NEVER a synchronous fleet walk (OTEL holds a lock across all callbacks; an O(900) NFS walk would block/discard the cycle). Observable-gauge callbacks must yield an `Observation` object, not a tuple.
+- **Log correlation_id (Bug #1641)**: `SQLiteLogHandler` populates `correlation_id` only when a record carries it. `logging_utils.inject_correlation_id(record)` is the single helper, called from `async_logging.IdentityQueueHandler.prepare()` (runs on the request thread BEFORE `enqueue()` -- `contextvars` do not cross the QueueListener thread boundary) and defensively from `SQLiteLogHandler.emit()`. Never overrides an explicit value; never fabricates one.
 
 -> Detail: docs/architecture-invariants.md#server-memory-and-pooling
-
-### OTEL Search/FTS/Embedding/Job/Refresh/Span Metrics Wiring (Story #1586, complete)
-
-`ApplicationMetrics`/`JobMetrics` (`server/telemetry/metrics_instrumentation.py` and `job_metrics.py`, Story #698) were built with zero call sites until this story. Story #1586 wires all of AC1-AC6 in one pass.
-
-- **AC1**: `server/mcp/handlers/search.py`'s `_execute_tracked_search` records `cidx.search.*` (via a `_record_search_metric` helper called from the existing `finally` block) and `_execute_regex_search` records `cidx.fts.*` (via a thin `_execute_regex_search` wrapper timing the real `_execute_regex_search_impl` call). Both are no-ops when telemetry/`export_metrics` is off (`ApplicationMetrics.is_active` gate). Both call sites use `peek_telemetry_manager()` (never `get_telemetry_manager()`) so they can never win the "first call wins, disabled fallback" telemetry-init race if fired before real startup config loads. **Remediation (real manual E2E finding, 2026-08-19): the original claim that "REST reaches this through the same MCP handler stack" was FALSE** — `POST /api/query` calls `semantic_query_manager.query_user_repositories()` and a real `TantivyIndexManager` DIRECTLY, never through `_execute_tracked_search`/`_execute_regex_search`; confirmed live, 2 real REST `/api/query` calls left `cidx.search.requests` frozen while `cidx.embedding.requests` rose. Fixed via a deliberate duplicate-instrumentation approach (Option B, not a shared-function refactor): `inline_query.py` has its own `_record_rest_search_metric`/`_record_rest_fts_metric` helpers (identical `peek_telemetry_manager()`/`get_application_metrics()`/`is_active` shape), wired via `try/finally` around both `query_user_repositories()` call sites (default-semantic branch and the hybrid branch) and around the real `tantivy_manager.search()` call in the FTS/hybrid branch — chosen over refactoring because `semantic_query` is a ~600+ line route with sharding/forwarding/async-job logic too risky to restructure this late. See `tests/unit/server/routers/test_inline_query_otel_metrics_wiring_1586.py`.
-- **AC2**: new shared module `services/embedding_metrics_telemetry.py` (`record_embedding_provider_call`, `time_and_record_embedding_call`) is the ONE wiring point every embedding provider client calls per REAL outbound HTTP attempt. **Deliberately instrumented at the lowest real-HTTP boundary in each provider** (`voyage_ai.py`'s `_make_sync_request`/`_make_sync_contextualized_request`, `cohere_embedding.py`'s `_make_sync_request`, `cohere_multimodal.py`'s `_make_request`, `voyage_multimodal.py`'s `get_multimodal_embedding`/`_submit_multimodal_batch`) — NOT at the four public methods (`get_embedding`/`get_embeddings_batch`/`*_with_metadata`) the story text names, because those delegate into the same boundary and instrumenting both would double-count one real request. Granularity matches the pre-existing `embedding_call_instrumentation.instrument_call` boundary exactly (one event per real HTTP attempt, including retries) — see `tests/unit/services/test_voyage_ai_embedding_stats_1418.py`'s own documented reasoning. The query-embedding cache (Epic #1103) lives ABOVE these clients and never calls into them on a hit, so cache hits structurally cannot double-count. `VoyageMultimodalClient` gained an `http_client_factory` constructor param (mirroring `VoyageAIClient`) as a prerequisite. Uses `peek_telemetry_manager()`, same race-avoidance rationale as AC1.
-- **AC3**: `JobMetrics` observable gauges (`cidx.jobs.active/queued`, `cidx.repos.total/indexed`) wired via module-level factory closures in `startup/lifespan.py` (`_build_job_counts_callback`, `_build_repository_counts_callback`), mirroring the pre-existing `_make_dep_map_repair_invoker_fn` testability pattern. `job_tracker.py`'s `_record_job_metric` (called from `complete_job`/`fail_job`) uses `peek_telemetry_manager()` so a background job-completion callback can never win the telemetry-init race.
-- **Repository-counts gauge is a background-refreshed cache, never a synchronous fleet walk**: `_build_repository_counts_callback`'s returned callback is O(1) — it is backed by `_RepositoryCountsCache` (`startup/lifespan.py`), which returns the last-computed `{total, indexed}` immediately and refreshes it on a background daemon thread at most once per `refresh_interval_seconds` (default 900s), single-flighted. This exists because OTEL's `SynchronousMeasurementConsumer.collect()` holds a lock across ALL registered callbacks and enforces `export_timeout_millis` (default 30s, checked only BETWEEN callbacks, never during one) — an unpaced O(fleet) `list_golden_repos()`/`_index_exists()` walk (two separate gauge callbacks each trigger it) would, at production scale (~900 repos), take tens of seconds and can block FOREVER if the `hard` NFSv3 mount wedges, discarding an entire cycle's metrics or hanging `MeterProvider.shutdown()`. A stalled refresh never blocks a caller — it simply serves the last-good (possibly stale) value.
-- **AC4**: `RefreshScheduler._execute_refresh` is a thin wrapper (renamed impl: `_execute_refresh_impl`) that times the call and records `cidx.repos.refresh.duration` via `_record_refresh_duration_metric`, deriving `status` from the impl's **returned dict's `success` key** (`"success" if result.get("success") else "error"`), never from whether an exception was raised — a real failure path (e.g. Bug #1253's local-repo repair failure, or an integrity-gate failure) can return `{"success": False, ...}` WITHOUT raising. Skip/no-op early returns (alias not found, write-lock held, no changes detected, etc.) already set `"success": True` by original design — deliberately still recorded as `status="success"` (genuine non-failure outcomes), not a third `"skipped"` state.
-- **AC5**: custom spans (`server/telemetry/spans.py`'s `create_span`, no-ops when tracing is unavailable/uninitialized) wrap: `cidx.depmap.run_delta_analysis` (`dependency_map_service.py`), `cidx.golden_repo.cow_snapshot` (`golden_repo_manager.py`) and `cidx.snapshot_manager.create_cow_snapshot` (`storage/shared/snapshot_manager.py` — two DIFFERENT span names, not the same span in two files), `cidx.temporal.index_commits` (`temporal_indexer.py`), `cidx.scip.generate` (`scip/generator.py` — `create_span` is imported function-local there, not at module scope, to avoid pulling server-layer telemetry modules into the CLI's `cidx scip generate` import path), and HNSW build/finalize durability spans (`storage/hnsw_index_manager.py`). All follow the same thin-wrapper pattern: rename the existing body to `_*_impl`, wrap it in `with create_span(...)`. Span-to-log correlation depends on `spans.py`'s `_get_correlation_id()` and `manager.py`'s `get_telemetry_manager()` fallback both importing via the real `code_indexer.*` package path (not a stray `src.`-prefixed alias that doesn't exist in a non-editable production install). **Remediation (real manual E2E finding, 2026-08-19)**: `cidx.snapshot_manager.create_cow_snapshot` originally wrapped only `_create_cow_snapshot`, a fallback branch `create_snapshot()` reaches ONLY when `self._clone_backend is None` — every real deployment constructs a `clone_backend`, so the span was structurally dead in production (confirmed live: the sibling `cidx.golden_repo.cow_snapshot` span fired correctly, this one never did). Fixed by moving the span to wrap `create_snapshot()`'s entire dispatch (all three branches: `clone_backend`, FlexClone, and the CoW fallback) instead of just the unreachable branch; the inner per-branch span on `_create_cow_snapshot` was removed to avoid a confusing duplicate nested span with the same name. **Known subprocess-telemetry limitation**: `cidx.scip.generate`, `cidx.temporal.index_commits`, and the two HNSW spans (`cidx.hnsw.build_index`, `cidx.hnsw.save_incremental_update`) execute inside the `cidx index` CHILD SUBPROCESS during golden-repo registration (the server shells out via `["cidx", "index", ...]`), which has no `TracerProvider` (`get_telemetry_manager()` is only ever constructed in the PARENT process's `startup/lifespan.py`) — these 4 span sites cannot export on that execution path, and fixing it would require propagating OTEL context across the subprocess boundary (out of scope here). `cidx.hnsw.rebuild_from_vectors` DOES export correctly, verified live, via the separate in-server `background_index_rebuilder` path, which never goes through the subprocess.
-- **AC6**: `startup/lifespan.py`'s telemetry block constructs both `get_application_metrics(telemetry_manager)` and `get_job_metrics(telemetry_manager)` (gated on `export_metrics`, mirroring the existing `MachineMetricsExporter` gate), storing them at `app.state.application_metrics`/`app.state.job_metrics`.
-- **Bug #1606 (pre-existing Story #696 code, fixed opportunistically during #1586 remediation, 2026-08-19)**: `telemetry/machine_metrics.py`'s 7 observable-gauge callbacks used to `yield (value, attrs)` as a plain tuple — the OTEL SDK's real callback contract requires an `Observation` object (`.value`/`.attributes`), so every export cycle logged `AttributeError: 'tuple' object has no attribute 'value'` as an ERROR (confirmed live: 2,269 of 2,270 ERROR log rows in one short manual test session) and silently produced ZERO data points for all 7 gauges. Fixed with a `_create_observation(value, attributes)` helper (lazy `from opentelemetry.metrics import Observation`) mirroring `job_metrics.py`'s own `_create_observation` pattern.
-- **Testing**: `tests/unit/server/telemetry/otel_test_support.py` provides `active_application_metrics()`/`active_application_metrics_singleton()`/`active_job_metrics()`/`active_job_metrics_singleton()` — real `MeterProvider`+`InMemoryMetricReader` wired through a small `TelemetryManager` subclass, sidestepping OTEL's genuine one-time-only global-`MeterProvider` constraint so multiple test files can each observe their own metric data points. The `_singleton()` variants also install/clear the real `code_indexer.server.telemetry.manager` process-wide singleton (via `_install_telemetry_manager_singleton`), required because production call sites resolve `peek_telemetry_manager()` directly rather than receiving an instance. Reused directly by the real E2E test `tests/e2e/server/test_20_telemetry_metrics_wiring_1586.py` (real MCP front door, real registered/indexed golden repo, real regex_search call, real `cidx.fts.requests` assertion).
-
-### Log Store correlation_id Column Population (Bug #1641)
-
-`get_correlation_id()` being correctly wired (#1631/#1632) does NOT mean the log store's `correlation_id` column gets populated. `SQLiteLogHandler` (the handler backing `admin_logs_query`) only ever reads `record.correlation_id` -- an attribute that exists on a `LogRecord` ONLY when the logging call site explicitly passed `extra={"correlation_id": ...}` (e.g. via `logging_utils.get_log_extra()`). The overwhelming majority of `logger.info()/warning()/error()` calls across the codebase pass no `extra` at all, so the column stayed NULL for ~97% of rows regardless of how correctly the reader itself resolved.
-
-**Thread-boundary trap**: in production `SQLiteLogHandler` is always installed behind `async_logging.install_queue_logging()`'s `QueueListener` (Bug #1078), so `SQLiteLogHandler.emit()` executes on the LISTENER thread, not the original request thread. A naive fix reading `get_correlation_id()` inside `SQLiteLogHandler.emit()` would still see `None` -- `contextvars` do not propagate across a plain `threading.Thread` boundary. The value must be captured on the ORIGINAL calling thread, before the record crosses into the queue.
-
-**Fix**: `logging_utils.inject_correlation_id(record)` is the single shared helper (never overrides an explicitly-set `record.correlation_id`, never fabricates a value when no context is active). It is called from `async_logging.IdentityQueueHandler.prepare()` (the real production wiring point -- runs synchronously on the request thread inside `Handler.handle()`, before `enqueue()`) and, defensively, from `SQLiteLogHandler.emit()` itself (covers the non-queued direct-attach case, e.g. tests). No per-call-site changes were needed anywhere else in the codebase. `request_path`/`user_id` columns remain unpopulated -- unlike `correlation_id` there is no existing `ContextVar`/reader for either, so wiring them would require a new per-request context mechanism; scoped out as a separate follow-up rather than folded into this fix.
 
 ---
 
@@ -706,7 +373,7 @@ PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host <bind-add
 pkill -f "uvicorn code_indexer.server.app"
 ```
 
-Common errors: `No module named 'code_indexer'` -> missing `PYTHONPATH=./src`. Exits immediately -> port in use.
+`No module named 'code_indexer'` -> missing `PYTHONPATH=./src`. Exits immediately -> port in use.
 
 ### E2E REST/MCP gotchas
 
@@ -717,27 +384,13 @@ Common errors: `No module named 'code_indexer'` -> missing `PYTHONPATH=./src`. E
 
 ### Claude CLI Integration
 
-Two subsystems: **ClaudeCliManager** (queue-based thread pool, batch processing) and **ResearchAssistantService** (direct thread per request, interactive UX).
-
-**MCP self-registration**: SINGLE source of truth at `invoke_claude_cli` in `repo_analyzer.py` (Story #885 A10). NEVER add parallel `ensure_registered()` calls elsewhere.
-
-**Codex/Claude MCP registration**: Both use same persistent `client_id:client_secret` from `MCPCredentialManager`. Claude via HTTP header, Codex via TOML `env_http_headers` + `CIDX_MCP_AUTH_HEADER` env var. Three-step fallback chain in `build_codex_mcp_auth_header_provider()` handles Claude CLI absence (Bug #937). Hook parity NOT achieved (codex has no `PostToolUse` hook).
-
-### Description-Refresh Refinement (Bug #1094)
-
-The single live description path is the lifecycle-unified pipeline (`LifecycleBatchRunner._process_one_repo` -> `LifecycleClaudeCliInvoker`); a refresh REFINES the existing description (non-empty existing body -> REFRESH mode via `lifecycle_refresh_addendum.md`, else byte-identical to create-mode). Frontmatter merge is preserve-by-default (`_merge_lifecycle_dict`, Bug #1101); descriptions are timeless snapshots — temporal phrasing BANNED (Bug #1102).
-
--> Detail: docs/architecture-invariants.md#description-refresh
+Two subsystems: **ClaudeCliManager** (queue-based thread pool, batch) and **ResearchAssistantService** (direct thread per request, interactive). **MCP self-registration**: SINGLE source of truth at `invoke_claude_cli` in `repo_analyzer.py` (Story #885 A10) -- NEVER add parallel `ensure_registered()` calls. **Codex/Claude MCP registration**: both use the same persistent `client_id:client_secret` from `MCPCredentialManager` (Claude via HTTP header, Codex via TOML `env_http_headers` + `CIDX_MCP_AUTH_HEADER`); three-step fallback in `build_codex_mcp_auth_header_provider()` handles Claude CLI absence (Bug #937). Codex has no `PostToolUse` hook (no hook parity).
 
 ---
 
 ## Background Jobs (MANDATORY Checklist)
 
-Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin UI visibility. (2) Confirm frontend reporting pattern with user before implementing.
-
-### Auto-Discovery Background Job Pattern (Story #1157)
-
-`POST /api/discovery/{platform}/start` + `GET /api/discovery/{platform}/result/{job_id}` (`web/routes.py`). Result storage MUST use `app.state.payload_cache` (cluster-aware), NEVER a module-level dict. Manual dedup (scan `bgm.jobs.values()`) since `repo_alias=None` bypasses the DB gate; worker declares `progress_callback=None` for BGM injection; `job_id_holder` container passes the post-`submit_job()` id into the worker closure.
+Any new background job MUST: (1) integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin visibility; (2) confirm the frontend reporting pattern with the user before implementing. **Auto-discovery pattern (Story #1157)**: `POST /api/discovery/{platform}/start` + `GET .../result/{job_id}` (`web/routes.py`); result storage MUST use `app.state.payload_cache`, never a module-level dict; manual dedup (scan `bgm.jobs.values()`) since `repo_alias=None` bypasses the DB gate.
 
 -> Detail: docs/architecture-invariants.md#background-jobs
 
@@ -747,64 +400,36 @@ Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTra
 
 Externalized to `src/code_indexer/server/mcp/tool_docs/` (YAML frontmatter + markdown). Adding a tool: (1) `TOOL_REGISTRY` in `tools.py`; (2) `python3 tools/verify_tool_docs.py` (CI gate). NEVER run `convert_tool_docs.py` -- see memory: `feedback_convert_tool_docs_destructive.md`.
 
----
-
 ## SCIP Index File Lifecycle
 
-`cidx scip generate` produces `index.scip.db` (SQLite) from intermediate `index.scip` (protobuf). **Original `.scip` deleted after conversion.** Only `.scip.db` remains.
-
----
+`cidx scip generate` produces `index.scip.db` (SQLite) from intermediate `index.scip` (protobuf). Original `.scip` is deleted after conversion; only `.scip.db` remains.
 
 ## Version Bump
 
-### Versioning: MAJOR.MINOR.HOTFIX
-
-| Component | When | Where |
-|-----------|------|-------|
-| **MAJOR** (X) | User explicitly says "major version" | Resets Y.Z to 0.0 |
-| **MINOR** (Y) | Normal dev cycles on `development` | Resets Z to 0 |
-| **HOTFIX** (Z) | Production hotfixes on `master` only | Never on development |
-
-Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `README.md` badge (line 5), `CHANGELOG.md`, `docs/architecture.md`, `docs/query-guide.md`. Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
-
-DO NOT bump: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
-
----
+Versioning MAJOR.MINOR.HOTFIX: MAJOR only when the user says "major version" (resets Y.Z); MINOR on normal dev cycles on `development` (resets Z); HOTFIX on production hotfixes on `master` only (never on development). Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `README.md` badge (line 5), `CHANGELOG.md`, `docs/architecture.md`, `docs/query-guide.md`. Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`. Do NOT bump `server/app.py` OpenAPI spec or `test-fixtures/`.
 
 ## Python Compatibility
 
 Always `python3 -m pip install --break-system-packages` -- never bare `pip`.
 
----
-
 ## Fault Injection Harness (non-prod only, disabled by default)
 
 Bootstrap-only config (`fault_injection_enabled` + `fault_injection_nonprod_ack`, both false). Enabled without ack OR in production = `sys.exit(1)`. All outbound async HTTP MUST go through `HttpClientFactory`.
 
--> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | Full reference: docs/fault-injection-operator-guide.md
-
----
+-> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | docs/fault-injection-operator-guide.md
 
 ## Memory Retrieval (Story #883)
 
 Parallel pipeline on semantic/hybrid search (VoyageAI vector -> HNSW -> floors -> hydration -> nudge). Kill switch `memory_retrieval_enabled = false` (Web UI, immediate). Path confinement via `Path.relative_to()`; body-hydration faults drop the candidate with WARNING, never raise.
 
--> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | Full reference: docs/memory-retrieval-operator-guide.md
-
----
-
-### Phase 3.7 Dep-Map Graph-Channel Repair (Epic #907)
-
-Repairs graph-channel anomalies (SELF_LOOP / MALFORMED_YAML / GARBAGE_DOMAIN_REJECTED deterministic; BIDIRECTIONAL_MISMATCH Claude-audited). Bootstrap flag `enable_graph_channel_repair` (default True); append-only JSONL journal.
-
--> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-phase37-architecture.md
+-> Detail: docs/architecture-invariants.md#fault-injection-and-memory-retrieval | docs/memory-retrieval-operator-guide.md
 
 ---
 
 ## Further Reading
 
 - Architecture: `docs/architecture.md`
-- Architecture invariants (detailed): docs/architecture-invariants.md
+- Architecture invariants (detailed): `docs/architecture-invariants.md`
 - Server deployment: `docs/server-deployment.md`
 - Cluster architecture: `docs/cluster-architecture.md`
 - Fault injection: `docs/fault-injection-operator-guide.md`

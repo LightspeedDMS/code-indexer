@@ -200,6 +200,14 @@ class TestLocalRepoRepairCircuitBreaker:
             == _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD
         )
 
+        # The scheduler must stop submitting the recurring global refresh job
+        # once the persisted repair breaker is active.  Skipping only inside
+        # the worker still creates a failed job every five minutes.
+        scheduler.background_job_manager = Mock()
+        scheduler.background_job_manager.submit_job.return_value = "unexpected"
+        assert scheduler._submit_refresh_job(ALIAS) is None
+        scheduler.background_job_manager.submit_job.assert_not_called()
+
     def test_successful_repair_resets_quarantine_state(
         self, scheduler, golden_repos_dir, golden_repo_metadata_backend
     ):
@@ -307,6 +315,29 @@ class TestLocalRepoRepairQuarantineResetOnHealthyCycle:
             ALIAS
         )
         assert state_after is None
+
+    def test_scheduled_submission_after_external_repair_resets_breaker(
+        self, scheduler, golden_repos_dir, golden_repo_metadata_backend
+    ):
+        """A valid config clears quarantine and permits the next job."""
+        master_path = golden_repos_dir / REPO_NAME
+        config_path = master_path / ".code-indexer" / "config.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        for _ in range(3):
+            golden_repo_metadata_backend.record_local_repo_repair_failure(
+                ALIAS, "temporary repair failure"
+            )
+
+        scheduler.background_job_manager = Mock()
+        scheduler.background_job_manager.submit_job.return_value = "refresh-job"
+
+        assert scheduler._submit_refresh_job(ALIAS) == "refresh-job"
+        scheduler.background_job_manager.submit_job.assert_called_once()
+        assert (
+            golden_repo_metadata_backend.get_local_repo_repair_failure_state(ALIAS)
+            is None
+        )
 
 
 class TestLocalRepoRepairQuarantineReadFailureFailsClosed:

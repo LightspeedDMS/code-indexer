@@ -11458,6 +11458,8 @@ def embedding_stats_dashboard_page(
         "embedding_stats_dashboard.html",
         {
             "records": records,
+            "current_page": "embedding-stats",
+            "show_nav": True,
             "filters": {
                 "provider": provider or "",
                 "purpose": purpose or "",

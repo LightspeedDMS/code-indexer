@@ -24,6 +24,7 @@ import platform
 
 import requests
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.config import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -4792,9 +4793,9 @@ class DeploymentExecutor:
                         config_dict = json.load(f)
                 config_dict["pace_maker_clone_path"] = str(clone_path)
                 _cidx_data_dir.mkdir(parents=True, exist_ok=True)
-                with open(config_path, "w") as f:
-                    json.dump(config_dict, f, indent=2)
-                    f.write("\n")
+                write_json_atomic(
+                    config_path, config_dict, indent=2, trailing_newline=True
+                )
             except Exception as e:
                 logger.warning(
                     format_error_log(
@@ -5615,9 +5616,7 @@ class DeploymentExecutor:
             cow_daemon_dict["daemon_storage_path"] = resolved_value
             config_dict["cow_daemon"] = cow_daemon_dict
             _cidx_data_dir.mkdir(parents=True, exist_ok=True)
-            with open(config_path, "w") as f:
-                json.dump(config_dict, f, indent=2)
-                f.write("\n")
+            write_json_atomic(config_path, config_dict, indent=2, trailing_newline=True)
 
             logger.info(
                 "Bug #1320: set cow_daemon.daemon_storage_path=%s in config.json",
