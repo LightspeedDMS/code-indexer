@@ -1,71 +1,54 @@
 ---
 name: project_release_1873_1876_overnight_state
-description: "Resume state for the 2026-09-16 overnight release of #1873/#1875 (X-Ray Java binder), #1876 (search glob scoping) and #1886 (browse_directory non-recursive) — read first after a context reset"
+description: Resume state for the 2026-09-16/17 overnight release (X-Ray binder #1873/#1875, glob scoping #1876, browse #1886, config race #1889, path-confinement security #1891) shipped to staging as 12.63.0 - read first after a reset
 metadata:
-  node_type: memory
   type: project
-  originSessionId: a8e442d6-0c34-4c2b-8b4c-30d7e4ed0283
-  modified: 2026-09-17T03:54:34.396Z
 ---
 
-Goal set by the user 2026-09-16 night: fix all open P1/P2 (plus any new P1/P2 found), validate on staging
-(both solo and cluster), leave everything ready for production. The user decides the master push in the morning;
-NEVER push master.
+Overnight goal: fix all open P1/P2 (+ any new P1/P2 found), validate on staging, leave ready for
+production; user decides the master push in the morning. NEVER push master without the literal
+per-version two-confirmation authorization.
 
-State as of 2026-09-16 ~23:00 (all UNCOMMITTED in the working tree on `development`, HEAD a5941e17):
-- #1873/#1875 Rust binder fix: passed Claude + Codex review (no P1/P2), 727 Rust tests + clippy green.
-  P3 leftovers filed #1882-#1885, #1887.
-- #1876 glob scoping: round-4 dual review REJECTED; round-5 tdd-engineer fixing F1-F9 (trailing-slash
-  bare-dir regression, `src/main/` anchoring, multiline trailing context, grep-fallback base dir, per-batch
-  timeout, bare-string patterns, whitespace normalization, `*/` docs+CHANGELOG, zero-match warning mode).
-  P3 leftovers on #1881.
-- #1886 browse_directory recursive:false (P2, found by the staging baseline): tdd-engineer fixing in
-  files.py only.
+## SHIPPED to staging as 12.63.0 (2026-09-17 ~08:20 CDT), tag v12.63.0 on development commit 84bb0d18
+CI green (lint incl. mypy, rust, smoke); auto-updater deployed 12.63.0 to ALL 4 staging servers
+(solo + cluster nodes 20/22/23), all running. master/production UNTOUCHED.
 
-Update 2026-09-17 ~01:10:
-- #1876 round 5: APPROVED by Claude and Codex. A code-surgeon is applying pre-commit P3 polish (grep fallback
-  launches glob_files.py with sys.executable; analyze_graph/regex/xray glob doc gaps). Other P3s are on #1881.
-- #1886 round 3 running. Decision: REST /api/repositories/{id}/files for non-composite repos honours `path`
-  (subtree) but NOT `recursive` (deployed CLIs always send recursive=false; honouring it hides dirs). Proper
-  REST non-recursive listing with directory entries is filed as #1888 (P3). MCP browse_directory/list_files do
-  honour recursive:false.
-- Flaky tests reported in `tests/unit/server/services -k "file_service or list_files"` (also fail on HEAD):
-  test_token_enforcement_truncates_large_content, test_skip_truncation_default_is_false — investigate if they
-  surface in server-fast.
+Commits on development (origin/development == staging content):
+- e587ca51 #1873/#1875 X-Ray Java binder (constructors/method-refs/super/visibility)
+- 529e0b75 #1876 regex/xray include-exclude glob selector (dual-approved, F1-F12)
+- b1ae7b9b #1889 ConfigService.get_config lazy-init thread race
+- e9a43960 #1886 browse_directory/list_files recursive:false direct-children + REST path subtree
+- aeedbe41 #1891 SECURITY path confinement (REST content, MCP get_file_content/directory_tree, CRUD, .git symlink)
+- 7f08510c #1876 CI-mypy fix: pathspec _DIR_MARK via getattr (12.62.0 lint failed on this; runtime-inert)
+- 84bb0d18 bump 12.63.0  (12.62.0 was pushed but its lint failed -> no tag; re-cut as 12.63.0)
 
-Update 2026-09-17 ~04:30 (local commits on development, NOT pushed yet):
-- e587ca51 #1873/#1875 (Rust binder), 529e0b75 #1876 (glob selector, dual-approved incl. F10-F12),
-  b1ae7b9b #1889 (ConfigService lazy-init race; root cause of the flaky truncation tests),
-  e9a43960 #1886 (browse_directory/list_files recursive:false; REST path subtree; dual-approved round 4).
-- #1891 SECURITY (P1): REST content=true path traversal + CRUD symlink escape (round 1). Round-2 engineer
-  fixing MCP get_file_content prefix-match escape, MCP directory_tree traversal, delete_file-through-symlink
-  regression, NUL/loop -> 500. Must be an ISOLATED commit, then dual security review.
-- CHANGELOG.md [Unreleased] has entries for #1876, #1886, #1873/#1875, #1889 (uncommitted; #1891 entry to add).
-- Filed follow-ups: #1887 (P3 self-loop), #1888 (P3 REST non-recursive with dirs), #1890 (P3 cluster config
-  lost update), P3 notes on #1877/#1879/#1881.
-- Pre-commit mypy hook is stricter than lint.sh about Any returns (anyio/json) — run
-  `pre-commit run mypy --files ...` before committing.
+## Staging verification (front door, solo/SQLite): ALL PASS, no P1/P2
+- #1873/#1875: analyze_graph jsoup dead 72->42; exactly the 30 baseline false-dead constructors now
+  alive; 0 new dead verdicts; S3-S7 exact & set-consistent (S3|S7==S2). Re-confirmed on 12.63.0.
+- #1876: include *.md -> only .md; file-path & **/ includes now honoured; exclude/context/xray/
+  bare-string-reject all correct. Re-confirmed on 12.63.0.
+- #1886: recursive:false -> direct children only; leading-slash normalised; recursive unchanged.
+- #1891: traversal/sibling/encoded/.git-symlink all "Access denied", no content, no 500; legit reads work.
+- Log audit: 0 post-deploy ERROR; all WARNINGs are probes or pre-existing.
+- Cluster (postgres) front door VERIFIED via the admin MFA handshake (self-service; procedure in
+  project_staging_cluster_mfa_is_self_serviceable). CLUSTER 12.63.0; #1876 include *.md -> only .md;
+  #1891 traversal -> Access denied no leak; #1886 recursive:false -> 8 entries no nesting. ALL PASS.
+  (MFA is ALWAYS self-serviceable - never call it a blocker or a gap.)
 
-Update 2026-09-17 ~08:10: PUSHED to development+staging as 12.62.0 (commits e587ca51,529e0b75,b1ae7b9b,
-e9a43960,aeedbe41,c9ab33b2,868286f5). Staging deployed+verified: all 3 cluster nodes + solo on 12.62.0;
-front-door proved #1876 (include *.md -> only .md), #1886 (recursive:false -> direct children), #1891
-(traversal + sibling escape denied, legit read works), #1873/#1875 (X-Ray dead 72->42, all 30 false-dead
-constructors reclassified alive, PASS). BUT CI lint FAILED on 12.62.0: mypy `pathspec.patterns.gitwildmatch
-has no attribute _DIR_MARK` at path_pattern_matcher.py:38 (CI's newer pathspec lacks it; local 0.12.1 has it).
-create-tag SKIPPED (no v12.62.0 tag). Fix in flight: getattr-with-fallback (runtime-identical). Because
-create-tag needs __init__.py to differ HEAD~1->HEAD, the TIP commit must re-bump: lint fix + bump 12.62.0->
-12.63.0 as tip, push dev, merge staging. Then CI tags v12.63.0 and staging redeploys 12.63.0 (getattr change
-is runtime-inert so functional verification above still holds; just re-confirm version after redeploy).
-Filed #1892 (P2 slow-fixture gate flake). master/production UNTOUCHED - user decides in the morning.
+## Gates run (local, on this code): fast-automation PASS (16333), server-fast PASS, rust PASS,
+## e2e phases 1-6 PASS. (server-fast chunk4 flaked ONCE on a slow fixture -> #1892, passed on rerun.)
 
-Remaining sequence: dual review (#1876, #1886) -> commit -> lint/rust/fast/server-fast/e2e gates -> bump
-MINOR -> push development -> merge staging -> re-run the pre-fix X-Ray baseline scenarios S1-S10 on solo
-staging and compare (expected: S2 72->42, S3 30->9, S4 3->2, S5 4->1, S6 21->5, S7 42->33, controls unchanged;
-new dead verdicts after dropping impossible private edges need manual source checks) -> also run on cluster
-staging -> front-door repros of #1876 and #1886 -> morning report.
+## Follow-ups filed (all P3/P4, none block): #1881 (1876 P3s), #1887 (self-loop), #1888 (REST non-recursive
+## dirs), #1890 (cluster config lost-update), #1892 (P2 slow-fixture gate flake, test-only), #1893 (Type::method
+## ref binds to enclosing class - new in 1873/1875, safe direction). #1877/#1879 have P3 notes.
 
-The pre-fix baseline report and exact call arguments live in the session scratchpad as
-`xray_pressure_baseline_staging_solo.md` + `xr/` (not versioned).
+## LEFT FOR THE USER (morning): decide whether to promote staging->master (production). If yes, it needs the
+## literal authorization phrase + the two-confirmation protocol, per version. #1891 is a production security
+## fix (path traversal readable by any authed user) - weigh first.
 
-Related: [[feedback_review_findings_fix_p1_p2_tolerate_p3_p4]], [[project_staging_cluster_mfa_is_self_serviceable]],
-[[project_verify_both_staging_environments]].
+## Housekeeping: ~95GB stale Rust build dirs + reviewer scratch under ~/.tmp await manual rm (Senior Coding
+## Nanny blocks rm -rf from the agent). Disk 85% / ~31GB free.
+
+Related: [[feedback_review_findings_fix_p1_p2_tolerate_p3_p4]], [[feedback_version_bump_must_be_push_tip]],
+[[project_staging_cluster_mfa_is_self_serviceable]], [[project_verify_both_staging_environments]],
+[[feedback_never_claim_ready_without_staging_e2e]].
