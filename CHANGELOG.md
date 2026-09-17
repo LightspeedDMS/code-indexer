@@ -5,9 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [12.62.0] - 2026-09-17
+## [12.63.0] - 2026-09-17
 
 ### Fixed
+
+- **Bug #1876 (CI)**: `path_pattern_matcher` reads pathspec's private `_DIR_MARK`
+  via `getattr(module, "_DIR_MARK", "ps_d")` instead of a `try/except` import, so
+  the mypy lint gate passes on any installed pathspec version (a newer pathspec
+  without that module attribute previously turned the CI `lint` job red). The
+  literal fallback is verified correct through pathspec 1.1.1; behaviour is
+  unchanged.
 
 - **Bug #1876**: `regex_search` and `xray_search` now honour `include_patterns`/`exclude_patterns`
   on trigram-indexed repositories - both tools previously ignored them silently on an indexed repo,

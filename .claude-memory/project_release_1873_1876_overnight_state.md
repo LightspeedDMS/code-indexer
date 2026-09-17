@@ -46,6 +46,18 @@ Update 2026-09-17 ~04:30 (local commits on development, NOT pushed yet):
 - Pre-commit mypy hook is stricter than lint.sh about Any returns (anyio/json) — run
   `pre-commit run mypy --files ...` before committing.
 
+Update 2026-09-17 ~08:10: PUSHED to development+staging as 12.62.0 (commits e587ca51,529e0b75,b1ae7b9b,
+e9a43960,aeedbe41,c9ab33b2,868286f5). Staging deployed+verified: all 3 cluster nodes + solo on 12.62.0;
+front-door proved #1876 (include *.md -> only .md), #1886 (recursive:false -> direct children), #1891
+(traversal + sibling escape denied, legit read works), #1873/#1875 (X-Ray dead 72->42, all 30 false-dead
+constructors reclassified alive, PASS). BUT CI lint FAILED on 12.62.0: mypy `pathspec.patterns.gitwildmatch
+has no attribute _DIR_MARK` at path_pattern_matcher.py:38 (CI's newer pathspec lacks it; local 0.12.1 has it).
+create-tag SKIPPED (no v12.62.0 tag). Fix in flight: getattr-with-fallback (runtime-identical). Because
+create-tag needs __init__.py to differ HEAD~1->HEAD, the TIP commit must re-bump: lint fix + bump 12.62.0->
+12.63.0 as tip, push dev, merge staging. Then CI tags v12.63.0 and staging redeploys 12.63.0 (getattr change
+is runtime-inert so functional verification above still holds; just re-confirm version after redeploy).
+Filed #1892 (P2 slow-fixture gate flake). master/production UNTOUCHED - user decides in the morning.
+
 Remaining sequence: dual review (#1876, #1886) -> commit -> lint/rust/fast/server-fast/e2e gates -> bump
 MINOR -> push development -> merge staging -> re-run the pre-fix X-Ray baseline scenarios S1-S10 on solo
 staging and compare (expected: S2 72->42, S3 30->9, S4 3->2, S5 4->1, S6 21->5, S7 42->33, controls unchanged;
