@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.64.0] - 2026-09-17
+
+### Fixed
+
+- **Bug #1894**: Clustered-staging golden-repo refresh failures caused by a 0-byte
+  `config.json` that retried every ~5 minutes (260 failed jobs over 3 days; a recurrence
+  of #1769). Config writes are now atomic (`write_json_atomic`: mkstemp in the same
+  directory, `flush` + `os.fsync`, `os.replace`, preserving the target file's mode per
+  Bug #879), with ~12 hand-rolled write sites consolidated onto the helper. The refresh
+  scheduler self-heals a corrupt config under `--force` (guarding a non-dict parse) and
+  suppresses job submission after 3 consecutive failures via a DB-backed, cluster-safe
+  circuit-breaker that self-resets once the config parses again. Review hardening: the
+  async provider-index config writes are offloaded off the event loop with
+  `anyio.to_thread.run_sync` (900-scale: no synchronous I/O inside `async def`); a narrow
+  `ConfigCorruptionError` keeps the `--force` self-heal from destroying a recoverable
+  config on a transient permission/IO or validation error; and `UnicodeDecodeError` is
+  caught in both config-validation paths so a non-UTF-8 config cannot crash the scheduler
+  quarantine gate.
+- **Bug #1895**: The embedding-stats admin dashboard page rendered without the top
+  navigation bar, so the stats view took over the whole screen and only the browser back
+  button returned. Restored by setting `show_nav` and `current_page` in the page template
+  context so the shared admin navigation renders with the embedding-stats item active.
+
 ## [12.63.0] - 2026-09-17
 
 ### Fixed
