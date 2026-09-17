@@ -30,14 +30,14 @@ from typing import List, Optional
 # path segment, full stop, and a directory match never implies "and
 # everything under it" unless the pattern itself says so (see
 # CompiledPatternSet._matches_as_include's docstring for the fix this
-# constant enables). Imported from pathspec itself (not hardcoded) so a
-# future pathspec release renaming its internal group cannot silently
-# make this check a no-op; falls back to the verified literal value if
-# the private attribute ever disappears.
-try:
-    from pathspec.patterns.gitwildmatch import _DIR_MARK as _PATHSPEC_DIR_MARK
-except ImportError:  # pragma: no cover - defensive, verified present today
-    _PATHSPEC_DIR_MARK = "ps_d"
+# constant enables). Read from pathspec itself via getattr (not hardcoded,
+# and not a static `from ... import _DIR_MARK`) so a future pathspec
+# release renaming its internal group cannot silently make this check a
+# no-op, falling back to the verified literal value if the private
+# attribute ever disappears -- and so mypy (which parses pathspec's own
+# source under CI's `no_site_packages=false`) never reports attr-defined
+# against a pathspec version that lacks the attribute.
+import pathspec.patterns.gitwildmatch as _gitwildmatch_module
 
 # Every pattern this module ever compiles goes through
 # ``pathspec.PathSpec.from_lines("gitwildmatch", ...)``, so every entry in a
@@ -46,6 +46,8 @@ except ImportError:  # pragma: no cover - defensive, verified present today
 # ``Pattern`` (which has no ``.regex``), so an ``isinstance`` narrowing is
 # needed for both mypy and defensive correctness.
 from pathspec.patterns.gitwildmatch import GitWildMatchPattern
+
+_PATHSPEC_DIR_MARK: str = getattr(_gitwildmatch_module, "_DIR_MARK", "ps_d")
 
 
 class InvalidPatternError(ValueError):
