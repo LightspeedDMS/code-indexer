@@ -28,7 +28,6 @@ forward compatibility but does not yet change behavior.
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import math
 import os
@@ -132,19 +131,29 @@ def _collect_graph_candidate_files(
     """
     if max_files < 1:
         raise ValueError(f"max_files must be >= 1, got {max_files}")
+    # Bug #1876: routes through the SAME PathPatternMatcher-backed compiled
+    # selector (items 3/5/6) regex_search.py's indexed path and
+    # xray_search's directory-walk (AST) path both use, keeping all three
+    # X-Ray/search tools in agreement on one canonical glob normalization
+    # policy (brace groups, bare-directory tokens, leading `./`/`*/`).
+    # This is NOT "one glob implementation" end to end: xray_search's
+    # content mode (ripgrep-backed) still hands its normalized globs to
+    # ripgrep's own `-g` matcher, a separate glob engine fed by the same
+    # normalization -- only directory-walk/AST callers like this one use
+    # this Python selector directly. Built ONCE, outside the loop, so the
+    # compiled PathSpec amortizes across every file visited during this
+    # walk instead of recompiling the same include/exclude patterns per
+    # file.
+    from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+    selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
     results: List[str] = []
     collection_truncated = False
     for dirpath, dirnames, filenames in os.walk(repo_path):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
         for filename in sorted(filenames):
             rel = Path(dirpath, filename).relative_to(repo_path).as_posix()
-            if include_patterns and not any(
-                fnmatch.fnmatch(rel, pat) for pat in include_patterns
-            ):
-                continue
-            if exclude_patterns and any(
-                fnmatch.fnmatch(rel, pat) for pat in exclude_patterns
-            ):
+            if not selector.select(rel):
                 continue
             if len(results) >= max_files:
                 collection_truncated = True
@@ -159,21 +168,34 @@ def _collect_graph_candidate_files(
 def _validate_glob_patterns(
     value: Any, field_name: str
 ) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
-    """Validates `value` is `None` or a list of strings before it is ever
-    handed to `fnmatch.fnmatch`. A bare string (e.g. `"*.py"` instead of
-    `["*.py"]`) would otherwise silently iterate per CHARACTER, producing
-    nonsensical single-character glob patterns instead of the caller's
-    real intent -- rejected here as a structured error instead.
+    """Validates and compiles `value` before it reaches the graph pipeline.
+
+    A bare string (e.g. `"*.py"` instead of `["*.py"]`) would otherwise
+    silently iterate per CHARACTER, producing nonsensical single-character
+    glob patterns. A syntactically invalid glob would otherwise fail later
+    during candidate collection, where an invalid exclude can fail open.
 
     Returns `(patterns, None)` on success (`patterns` is `[]` for `None`),
-    or `(None, error_dict)` on a type violation.
+    or `(None, error_dict)` on a type or pattern violation.
     """
+    from code_indexer.services.path_pattern_matcher import (
+        InvalidPatternError,
+        PathPatternMatcher,
+    )
+
     if value is None:
         return [], None
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         return None, {
             "error": f"{field_name}_invalid",
             "message": f"{field_name} must be a list of strings",
+        }
+    try:
+        PathPatternMatcher().compile_patterns(value)
+    except InvalidPatternError as exc:
+        return None, {
+            "error": f"{field_name}_invalid",
+            "message": str(exc),
         }
     return value, None
 
@@ -465,7 +487,8 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         evaluator_code_required          -- evaluator_code missing/empty.
         repository_alias_required        -- repository_alias missing/empty.
         include_patterns_invalid /
-        exclude_patterns_invalid         -- not a list of strings.
+        exclude_patterns_invalid         -- not a list of strings, or a
+                                             malformed glob.
         timeout_seconds_invalid          -- not a finite number.
         mutually_exclusive_params        -- evaluator_code and pattern_name
                                              were supplied together.

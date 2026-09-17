@@ -9,7 +9,6 @@ dynamic libraries, and executes with native speed and rayon parallelism.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 import math
 import re
@@ -28,6 +27,12 @@ from code_indexer.global_repos.regex_search import (
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
+
+# Zero-match warnings are advisory. A missing pattern must not turn that
+# advisory check into an unbounded post-walk scan on a large repository.
+# This is a process-local operation budget, not an operator setting: at most
+# this many compiled-pattern/path comparisons are spent after Phase 1.
+_ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
 
 
 class XRayPhase1TimeoutError(Exception):
@@ -344,6 +349,21 @@ class XRaySearchEngine:
             raise ValueError(f"worker_threads must be > 0, got {worker_threads}")
         if max_files is not None and max_files <= 0:
             raise ValueError(f"max_files must be > 0 when provided, got {max_files}")
+
+        # Bug #1876 N5: validate include/exclude patterns ONCE here, at the
+        # top of the service-layer entry point every MCP handler (xray_search,
+        # xray_explore), REST route, and CLI command reaches -- so a
+        # malformed or negated pattern (e.g. "!*.md", which ripgrep/pathspec
+        # would otherwise treat as its own negation syntax) fails loud
+        # before ANY dispatch work, rather than depending on each
+        # candidate-collection path (content-mode's delegation to
+        # RegexSearchService.search, filename-mode's own selector in
+        # _run_phase1_filename) to independently remember to validate.
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        _pattern_matcher = PathPatternMatcher()
+        _pattern_matcher.compile_patterns(include_patterns)
+        _pattern_matcher.compile_patterns(exclude_patterns)
 
         start = time.monotonic()
         include_patterns = include_patterns or []
@@ -752,30 +772,80 @@ class XRaySearchEngine:
             include_patterns: The caller-supplied glob patterns.  Empty list
                 means "include all" — no warnings are emitted.
             all_rel_paths: Relative paths (from repo root) of every file that
-                existed in the repo before regex / include filtering.  These are
+                existed in the repo before regex / include filtering. These are
                 used to determine whether each pattern is capable of matching
-                anything in this repository at all.
+                anything in this repository at all, subject to the bounded
+                advisory scan budget below.
 
         Returns:
-            List of warning dicts (may be empty).  Each dict has keys:
-            ``type``, ``pattern``, ``hint``.
+            List of warning dicts (may be empty). A conclusive warning has
+            ``type``, ``pattern``, ``hint``. If the fixed comparison budget is
+            exhausted, a ``zero_match_probe_incomplete`` advisory identifies
+            the patterns that could not be checked without falsely claiming a
+            zero match.
 
         Notes:
-            ``*`` matches a single path segment (no ``/`` traversal).
+            ``*`` matches a single path segment (no ``/`` traversal) when the
+            pattern itself contains a ``/``; a bare ``*`` with no ``/``
+            matches at any depth (gitignore-style semantics -- the SAME
+            matcher ripgrep's own ``-g`` flags and the real filtering above
+            use, via ``PathPatternMatcher``).
             ``**`` matches multiple path segments recursively.
             A pattern that matches zero files receives a hint explaining the
             difference and suggesting ``**`` as a fix.
         """
         if not include_patterns:
             return []
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        path_matcher = PathPatternMatcher()
         warnings: List[Dict[str, Any]] = []
         hint = (
-            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
-            "path segment; use `**/time.py` (with **) for recursive matching "
-            "across directories."
+            "Pattern matched 0 files. Use `**/time.py` (with **) for "
+            "recursive matching across directories."
         )
-        for pat in include_patterns:
-            if not any(fnmatch.fnmatch(rel, pat) for rel in all_rel_paths):
+        remaining_attempts = _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET
+        for pattern_index, pat in enumerate(include_patterns):
+            # Bug #1876 item 5: compiled ONCE per pattern here, not once per
+            # (pattern, file) pair -- `compile_patterns` builds a fresh
+            # PathSpec on every call, so re-checking it against every file
+            # in `all_rel_paths` without hoisting the build out of this
+            # inner loop would rebuild the same PathSpec per file.
+            #
+            # Bug #1876 round-5 finding F9: this is an INCLUDE-pattern
+            # probe (include_patterns, checked against real candidate
+            # files) -- it must use the SAME `is_include=True` semantics
+            # (Bug #1876 N1, real ripgrep -g INCLUDE behavior: a
+            # directory match never implies its contents also match) the
+            # actual filtering selector uses. The default
+            # `is_include=False` (gitignore/pathspec directory-
+            # containment) silently disagreed with the real filter,
+            # e.g. "src/*" matching "src/a/b.ts" here (via the
+            # directory-containment optional group) even though the real
+            # selector picks nothing for that exact pattern/path pair.
+            compiled = path_matcher.compile_patterns([pat], is_include=True)
+            matched = False
+            if compiled is not None:
+                for rel in all_rel_paths:
+                    if remaining_attempts <= 0:
+                        warnings.append(
+                            {
+                                "type": "zero_match_probe_incomplete",
+                                "patterns": include_patterns[pattern_index:],
+                                "hint": (
+                                    "The zero-match-pattern check reached its "
+                                    "bounded comparison budget before checking "
+                                    "all files; some warnings may be missing. "
+                                    "The search results are unaffected."
+                                ),
+                            }
+                        )
+                        return warnings
+                    remaining_attempts -= 1
+                    if compiled.matches(rel):
+                        matched = True
+                        break
+            if not matched:
                 warnings.append(
                     {
                         "type": "zero_match_include_pattern",
@@ -793,11 +863,14 @@ class XRaySearchEngine:
     ) -> List[Dict[str, Any]]:
         """Probe each include_pattern to detect those that match zero files.
 
-        Uses ``RegexSearchService`` with a trivial ``.*`` regex so that the
-        glob semantics are identical to the main Phase 1 content search
-        (ripgrep-backed), avoiding false warnings from Python fnmatch
-        divergence (e.g. ``*/x`` has different semantics in ripgrep vs
-        Python fnmatch).
+        Unlike the AST-mode ``_check_zero_match_patterns`` sibling, this
+        content-mode probe has no pre-collected ``all_rel_paths`` list to
+        check patterns against directly with ``PathPatternMatcher`` --
+        candidates here stream from ripgrep rather than a full filesystem
+        walk. Uses ``RegexSearchService`` with a trivial ``.*`` regex so the
+        probe reuses that SAME real search call path (the same shared
+        selector the main Phase 1 content search itself uses), guaranteeing
+        identical glob semantics without a separate filesystem walk.
 
         Args:
             repo_path: Root directory of the repository.
@@ -831,9 +904,8 @@ class XRaySearchEngine:
             return []
 
         hint = (
-            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
-            "path segment; use `**` for recursive matching across directories "
-            "(e.g. `**/time.py` instead of `*/time.py`)."
+            "Pattern matched 0 files. Use `**/time.py` (with **) for "
+            "recursive matching across directories."
         )
         warnings: List[Dict[str, Any]] = []
         probe_service = RegexSearchService(repo_path)
@@ -990,6 +1062,14 @@ class XRaySearchEngine:
                 a timed-out search still returns partial results instead of
                 discarding the work done.
         """
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        # Bug #1876 items 5/6: built ONCE for the whole walk, not once per
+        # file -- the same shared selector every other glob-filtering call
+        # site in this codebase now uses.
+        selector = PathPatternMatcher().create_selector(
+            include_patterns, exclude_patterns
+        )
         pattern = re.compile(driver_regex)
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
@@ -1019,14 +1099,7 @@ class XRaySearchEngine:
                 continue
             all_rel_paths.append(rel)
 
-            if include_patterns and not any(
-                fnmatch.fnmatch(rel, ip) for ip in include_patterns
-            ):
-                continue
-
-            if exclude_patterns and any(
-                fnmatch.fnmatch(rel, ep) for ep in exclude_patterns
-            ):
+            if not selector.select(rel):
                 continue
 
             if pattern.search(rel):

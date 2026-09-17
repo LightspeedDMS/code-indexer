@@ -669,6 +669,53 @@ async def _await_xray_future(
     return None
 
 
+def _validate_xray_search_patterns(
+    include_patterns: Any, exclude_patterns: Any
+) -> Optional[Dict[str, Any]]:
+    """Validates and compiles xray_search's include_patterns/exclude_patterns
+    ONCE at the front door (Bug #1876 item 4), mirroring
+    `handlers.search._validate_regex_args`. Callers MUST pass the RAW
+    `params.get(...)` value for each field, never an `or []`-normalized
+    one -- normalizing first would silently turn a falsy-but-invalid input
+    (`""`, `0`, `False`) into "no filter" before this function ever sees
+    it. `None` (field omitted) is the only falsy value treated as valid.
+    A bare string (e.g. `"*.py"` instead of `["*.py"]`) would otherwise
+    silently iterate per CHARACTER through `PathPatternMatcher.
+    compile_patterns`; a non-string item (e.g. `[None]`) or a malformed
+    pattern (unbalanced brace, gitignore negation/comment syntax) would
+    otherwise pass straight into the background job, where an exclude
+    failing OPEN silently widens the search with no signal to the caller.
+
+    Returns `None` on success, or a structured `{"error": ..., "message":
+    ...}` dict on the first invalid field.
+    """
+    from code_indexer.services.path_pattern_matcher import (
+        InvalidPatternError,
+        PathPatternMatcher,
+    )
+
+    matcher = PathPatternMatcher()
+    for field_name, patterns in (
+        ("include_patterns", include_patterns),
+        ("exclude_patterns", exclude_patterns),
+    ):
+        if patterns is None:
+            continue
+        if not isinstance(patterns, list):
+            return {
+                "error": f"{field_name}_invalid",
+                "message": f"{field_name} must be a list of strings",
+            }
+        try:
+            matcher.compile_patterns(patterns)
+        except InvalidPatternError as e:
+            return {
+                "error": f"{field_name}_invalid",
+                "message": str(e),
+            }
+    return None
+
+
 async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """MCP handler for the xray_search tool.
 
@@ -687,6 +734,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         repository_not_found    — alias cannot be resolved.
         xray_extras_not_installed — tree-sitter extras not available.
         xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation.
+        include_patterns_invalid / exclude_patterns_invalid — not a list of
+            strings, or a malformed glob (unbalanced brace, gitignore
+            negation/comment syntax).
     """
     _admission = check_query_admission()
     if not _admission.allowed:
@@ -721,6 +771,20 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         candidate = repo_alias_parsed[0]
         if isinstance(candidate, str) and candidate:
             repo_alias_parsed = candidate
+
+    # Bug #1876 item 4: validate and compile include/exclude patterns ONCE
+    # here, on the RAW params.get(...) values, before any repo-scoped
+    # resolution or job submission -- a non-string item or malformed glob
+    # must never silently pass through and fail OPEN (an exclude that
+    # fails to apply silently widens the search). Deliberately validates
+    # the raw value, not an `or []`-normalized one: normalizing first would
+    # mask a falsy-but-invalid input (e.g. `""`, `0`) before this call ever
+    # sees it.
+    pattern_validation_error = _validate_xray_search_patterns(
+        params.get("include_patterns"), params.get("exclude_patterns")
+    )
+    if pattern_validation_error is not None:
+        return _mcp_response(pattern_validation_error)
 
     # H5 (consolidated review, Issue #1811/Bug #1812): this handler's own
     # tool_docs document the default-evaluator fallback as intentional
@@ -1446,6 +1510,22 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         candidate = repo_alias_parsed[0]
         if isinstance(candidate, str) and candidate:
             repo_alias_parsed = candidate
+
+    # Bug #1876 N5: xray_explore is functionally identical to xray_search
+    # (same include/exclude-filtered candidate collection) but never called
+    # _validate_xray_search_patterns at all -- a non-string item or
+    # malformed glob passed straight into the background job with no
+    # structured error, and a BARE STRING (e.g. "*.md" instead of
+    # ["*.md"]) was silently exploded into one pattern per CHARACTER by
+    # the `list(include_patterns)` call further below. Validate on the
+    # RAW params.get(...) values (never an `or []`-normalized one, which
+    # would mask a falsy-but-invalid input) before any repo-scoped
+    # resolution or job submission, mirroring handle_xray_search exactly.
+    pattern_validation_error = _validate_xray_search_patterns(
+        params.get("include_patterns"), params.get("exclude_patterns")
+    )
+    if pattern_validation_error is not None:
+        return _mcp_response(pattern_validation_error)
 
     # H5 (consolidated review, Issue #1811/Bug #1812): this handler's own
     # tool_docs document the default-evaluator fallback as intentional
