@@ -27,6 +27,7 @@ from ..models.api_models import (
     FileListQueryParams,
 )
 from ..services.config_service import get_config_service
+from code_indexer.utils.path_confinement import resolve_confined_path
 
 if TYPE_CHECKING:
     # Bug #1650: type-only import for the lazily-constructed
@@ -804,11 +805,13 @@ class FileListingService:
             - pagination_hint: Helpful message for navigating large files
         """
         repo_path = self._get_repository_path(repository_alias, username)
-        full_file_path = Path(repo_path) / file_path
-        full_file_path = full_file_path.resolve()
-        repo_root = Path(repo_path).resolve()
-        if not str(full_file_path).startswith(str(repo_root)):
-            raise PermissionError("Access denied")
+        # Bug #1891 round 2 (S1): the previous
+        # str(full_file_path).startswith(str(repo_root)) check incorrectly
+        # admitted a SIBLING directory whose name starts with repo_root's
+        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
+        # resolve_confined_path() confines via Path.relative_to() instead,
+        # which is immune to that class of bug.
+        full_file_path = resolve_confined_path(Path(repo_path), file_path)
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():
@@ -986,11 +989,13 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist
         """
-        full_file_path = Path(repo_path) / file_path
-        full_file_path = full_file_path.resolve()
-        repo_root = Path(repo_path).resolve()
-        if not str(full_file_path).startswith(str(repo_root)):
-            raise PermissionError("Access denied")
+        # Bug #1891 round 2 (S1): the previous
+        # str(full_file_path).startswith(str(repo_root)) check incorrectly
+        # admitted a SIBLING directory whose name starts with repo_root's
+        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
+        # resolve_confined_path() confines via Path.relative_to() instead,
+        # which is immune to that class of bug.
+        full_file_path = resolve_confined_path(Path(repo_path), file_path)
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():

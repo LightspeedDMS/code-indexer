@@ -1015,6 +1015,26 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "metadata": {},
             }
         )
+    except PermissionError as denied:
+        # Bug #1891 D3: a caller-triggerable path-confinement escape
+        # attempt (resolve_confined_path()) is an EXPECTED security
+        # rejection, not a server error -- same shape as the
+        # FileNotFoundError branch above, but logged at INFO with no
+        # traceback so it cannot trip the E2E Phase 3/4 log-audit gate
+        # (tests/e2e/log_audit_gate.py), which fails a phase on any new
+        # ERROR/WARNING log entry. No caller-supplied path is logged.
+        logger.info(
+            "get_file_content: access denied (path confinement)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": str(denied),
+                "file_content": [],
+                "metadata": {},
+            }
+        )
     except Exception as e:
         logger.exception(
             f"Unexpected error in get_file_content: {e}",

@@ -54,6 +54,7 @@ from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
 from ..services.file_listing_paths import build_non_composite_path_pattern
+from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -816,7 +817,19 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
-            file_path = Path(repo.path) / path
+
+            # Bug #1891: confine the resolved target to repo.path BEFORE any
+            # exists()/is_file()/open() touches the filesystem. A caller-
+            # supplied `path` containing parent-directory segments, an
+            # absolute path, or a symlink pointing outside the repository
+            # must never reach the filesystem calls below. The 404 here is
+            # byte-identical to the ordinary not-found response so an
+            # escape attempt cannot be distinguished from a legitimately
+            # missing file.
+            try:
+                file_path = resolve_confined_path(Path(repo.path), path)
+            except PermissionError:
+                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
 
             if not file_path.exists():
                 raise HTTPException(status_code=404, detail=f"File '{path}' not found")
