@@ -28,7 +28,10 @@ pub(crate) fn build_file_scope(index: &LocalIndex) -> FileScope {
         .iter()
         .find(|d| d.kind == DeclarationKind::Package)
         .map(|d| d.name.clone());
-    FileScope { package, imports: index.imports.clone() }
+    FileScope {
+        package,
+        imports: index.imports.clone(),
+    }
 }
 
 #[cfg(test)]

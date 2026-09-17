@@ -45,7 +45,9 @@ const MAX_RECEIVER_CHAIN_DEPTH: usize = 32;
 /// child, matching the pre-existing heuristic this replaces) but no
 /// object is reported, so callers never misattribute an unrelated node as
 /// the receiver.
-pub(super) fn invocation_object_and_name(node: &OwnedNode) -> (Option<&OwnedNode>, Option<&OwnedNode>) {
+pub(super) fn invocation_object_and_name(
+    node: &OwnedNode,
+) -> (Option<&OwnedNode>, Option<&OwnedNode>) {
     let candidates: Vec<&OwnedNode> = node
         .named_children()
         .into_iter()
@@ -84,10 +86,13 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
         }
         match node.kind.as_str() {
             "identifier" => break ReceiverExpr::Identifier(node.text().to_string()),
-            "this" | "super" => break ReceiverExpr::SelfOrSuper,
+            "this" => break ReceiverExpr::SelfOrSuper,
+            "super" => break ReceiverExpr::Super,
             "method_invocation" => {
                 let (object, name) = invocation_object_and_name(node);
-                let Some(name_node) = name else { return ReceiverExpr::Other };
+                let Some(name_node) = name else {
+                    return ReceiverExpr::Other;
+                };
                 method_names.push(name_node.text().to_string());
                 match object {
                     Some(inner) => node = inner,
@@ -100,7 +105,10 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
     method_names
         .into_iter()
         .rev()
-        .fold(base, |acc, method_name| ReceiverExpr::Chained { method_name, receiver: Box::new(acc) })
+        .fold(base, |acc, method_name| ReceiverExpr::Chained {
+            method_name,
+            receiver: Box::new(acc),
+        })
 }
 
 /// AC2 (Story #1806, S2b): a `method_declaration`'s declared return type
@@ -112,8 +120,11 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
 /// method's own NAME, appearing strictly after the return type), so this
 /// never risks reading past the type into the name.
 pub(super) fn method_return_type_name(node: &OwnedNode) -> Option<String> {
-    let type_node = node.named_children().into_iter().find(|c| c.kind != "modifiers" && c.kind != "type_parameters")?;
-    Some(super::java::base_name_of_type_node(type_node))
+    let type_node = node
+        .named_children()
+        .into_iter()
+        .find(|c| c.kind != "modifiers" && c.kind != "type_parameters")?;
+    Some(super::java_type_names::base_name_of_type_node(type_node))
 }
 
 /// AC1 (Story #1806, S2b): one `formal_parameter`/`spread_parameter`
@@ -127,9 +138,14 @@ pub(super) fn method_return_type_name(node: &OwnedNode) -> Option<String> {
 pub(super) fn parameter_name_and_type(param_node: &OwnedNode) -> Option<(String, String)> {
     let declared_type = super::java::formal_parameter_type_name(param_node)?;
     let name_node = if param_node.kind == "spread_parameter" {
-        param_node.child_by_kind("variable_declarator")?.child_by_kind("identifier")?
+        param_node
+            .child_by_kind("variable_declarator")?
+            .child_by_kind("identifier")?
     } else {
-        param_node.named_children().into_iter().find(|c| c.kind == "identifier")?
+        param_node
+            .named_children()
+            .into_iter()
+            .find(|c| c.kind == "identifier")?
     };
     Some((name_node.text().to_string(), declared_type))
 }
@@ -148,7 +164,7 @@ fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<Typed
         .named_children()
         .into_iter()
         .find(|c| c.kind != "modifiers" && c.kind != "variable_declarator")
-        .map(super::java::base_name_of_type_node)
+        .map(super::java_type_names::base_name_of_type_node)
     else {
         return Vec::new();
     };
@@ -167,17 +183,32 @@ fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<Typed
 /// AC1: every FIELD `TypedNameRecord` declared by one `field_declaration`
 /// node, scoped to `enclosing_type`. `Vec::new()` when `enclosing_type`
 /// is unknown -- never a guessed scope.
-pub(super) fn field_typed_names(node: &OwnedNode, enclosing_type: Option<&str>) -> Vec<TypedNameRecord> {
-    let Some(enclosing_type) = enclosing_type else { return Vec::new() };
-    typed_names_from_declarators(node, NameScope::Field { enclosing_type: enclosing_type.to_string() })
+pub(super) fn field_typed_names(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+) -> Vec<TypedNameRecord> {
+    let Some(enclosing_type) = enclosing_type else {
+        return Vec::new();
+    };
+    typed_names_from_declarators(
+        node,
+        NameScope::Field {
+            enclosing_type: enclosing_type.to_string(),
+        },
+    )
 }
 
 /// AC1: every LOCAL VARIABLE `TypedNameRecord` declared by one
 /// `local_variable_declaration` node, scoped to `enclosing_method`.
 /// `Vec::new()` when `enclosing_method` is unknown (e.g. a declaration
 /// outside any method body) -- never a guessed scope.
-pub(super) fn local_variable_typed_names(node: &OwnedNode, enclosing_method: Option<SymbolId>) -> Vec<TypedNameRecord> {
-    let Some(enclosing_method) = enclosing_method else { return Vec::new() };
+pub(super) fn local_variable_typed_names(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Vec<TypedNameRecord> {
+    let Some(enclosing_method) = enclosing_method else {
+        return Vec::new();
+    };
     typed_names_from_declarators(node, NameScope::Local { enclosing_method })
 }
 
@@ -191,7 +222,11 @@ mod tests {
         let path = dir.path().join("Sample.java");
         std::fs::write(&path, source).unwrap();
         let root = crate::scanner::parse_file(Path::new(&path)).unwrap();
-        root.descendants_of_kind("method_invocation").into_iter().next().unwrap().clone()
+        root.descendants_of_kind("method_invocation")
+            .into_iter()
+            .next()
+            .unwrap()
+            .clone()
     }
 
     /// AC1: `obj.doSomething()`'s object is a simple identifier receiver.
@@ -235,7 +270,11 @@ mod tests {
         let path = dir.path().join("Sample.java");
         std::fs::write(&path, source).unwrap();
         let root = crate::scanner::parse_file(Path::new(&path)).unwrap();
-        root.descendants_of_kind(kind).into_iter().next().unwrap().clone()
+        root.descendants_of_kind(kind)
+            .into_iter()
+            .next()
+            .unwrap()
+            .clone()
     }
 
     /// AC2: `Foo getSomething()`'s declared return type is `"Foo"`; a
@@ -243,11 +282,20 @@ mod tests {
     /// never absent for a real declared `void_type` node).
     #[test]
     fn method_return_type_name_reads_the_declared_return_type() {
-        let typed = parse_first_of_kind("class First {\n    Foo getSomething() { return null; }\n}\n", "method_declaration");
+        let typed = parse_first_of_kind(
+            "class First {\n    Foo getSomething() { return null; }\n}\n",
+            "method_declaration",
+        );
         assert_eq!(method_return_type_name(&typed), Some("Foo".to_string()));
 
-        let void_method = parse_first_of_kind("class First {\n    void run() {}\n}\n", "method_declaration");
-        assert_eq!(method_return_type_name(&void_method), Some("void".to_string()));
+        let void_method = parse_first_of_kind(
+            "class First {\n    void run() {}\n}\n",
+            "method_declaration",
+        );
+        assert_eq!(
+            method_return_type_name(&void_method),
+            Some("void".to_string())
+        );
     }
 
     /// AC1: both `formal_parameter` (`String s`) and `spread_parameter`
@@ -255,15 +303,20 @@ mod tests {
     /// modifier/annotation on a `formal_parameter` never shifts either.
     #[test]
     fn parameter_name_and_type_reads_both_formal_and_spread_parameters() {
-        let formal_parameters =
-            parse_first_of_kind("class First {\n    void save(final String s, Bar... rest) {}\n}\n", "formal_parameters");
+        let formal_parameters = parse_first_of_kind(
+            "class First {\n    void save(final String s, Bar... rest) {}\n}\n",
+            "formal_parameters",
+        );
         let params: Vec<&OwnedNode> = formal_parameters.named_children();
         assert_eq!(
             parameter_name_and_type(params[0]),
             Some(("s".to_string(), "String".to_string())),
             "a formal_parameter with a modifier must still yield its real name and type"
         );
-        assert_eq!(parameter_name_and_type(params[1]), Some(("rest".to_string(), "Bar".to_string())));
+        assert_eq!(
+            parameter_name_and_type(params[1]),
+            Some(("rest".to_string(), "Bar".to_string()))
+        );
     }
 
     /// AC1: `int a, b;` yields TWO `TypedNameRecord`s (one per
@@ -271,15 +324,19 @@ mod tests {
     /// and the same `Field` scope.
     #[test]
     fn field_typed_names_reads_multiple_comma_separated_declarators() {
-        let field = parse_first_of_kind("class First {\n    private int a, b;\n}\n", "field_declaration");
+        let field = parse_first_of_kind(
+            "class First {\n    private int a, b;\n}\n",
+            "field_declaration",
+        );
         let records = field_typed_names(&field, Some("First"));
         assert_eq!(records.len(), 2);
         assert!(records.iter().all(|r| r.declared_type == "int"));
         assert!(records.iter().any(|r| r.name == "a"));
         assert!(records.iter().any(|r| r.name == "b"));
-        assert!(records
-            .iter()
-            .all(|r| r.scope == NameScope::Field { enclosing_type: "First".to_string() }));
+        assert!(records.iter().all(|r| r.scope
+            == NameScope::Field {
+                enclosing_type: "First".to_string()
+            }));
     }
 
     /// AC1: `Foo local = new Foo();`'s declared type is read off the
