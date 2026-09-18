@@ -105,7 +105,7 @@ class TestTriggerPostConsolidationSnapshotInvalidatesBothCaches1775:
         _seed_source_with_real_chunk_store(source_path)
 
         first_target = trigger_post_consolidation_snapshot(
-            scheduler, "evolution", str(source_path)
+            scheduler, "example-repo", str(source_path)
         )
         old_coll = str(Path(first_target) / INDEX_SUBPATH)
         old_db = str(Path(old_coll) / CHUNKS_DB_FILENAME)
@@ -123,11 +123,12 @@ class TestTriggerPostConsolidationSnapshotInvalidatesBothCaches1775:
             # test_snapshot_trigger_1458.py's republish test.
             (source_path / "marker.txt").write_text("consolidated")
             second_target = trigger_post_consolidation_snapshot(
-                scheduler, "evolution", str(source_path)
+                scheduler, "example-repo", str(source_path)
             )
             assert second_target != first_target
             assert (
-                scheduler.alias_manager.read_alias("evolution-global") == second_target
+                scheduler.alias_manager.read_alias("example-repo-global")
+                == second_target
             )
 
             hnsw_loader_calls: list = []

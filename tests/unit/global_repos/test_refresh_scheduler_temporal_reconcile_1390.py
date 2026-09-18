@@ -428,18 +428,18 @@ class TestReconciliationUpdatesBothTables:
         """
         registry = _make_real_registry(tmp_path)
         registry.register_global_repo(
-            repo_name="evolution",
-            alias_name="evolution-global",
-            repo_url="https://example.com/evolution.git",
-            index_path=str(tmp_path / "golden-repos" / "evolution"),
+            repo_name="example-repo",
+            alias_name="example-repo-global",
+            repo_url="https://example.com/example-repo.git",
+            index_path=str(tmp_path / "golden-repos" / "example-repo"),
             enable_temporal=True,
         )
         golden_meta = _make_real_golden_meta(tmp_path)
         golden_meta.add_repo(
-            alias="evolution",
-            repo_url="https://example.com/evolution.git",
+            alias="example-repo",
+            repo_url="https://example.com/example-repo.git",
             default_branch="main",
-            clone_path=str(tmp_path / "golden-repos" / "evolution"),
+            clone_path=str(tmp_path / "golden-repos" / "example-repo"),
             created_at="2024-01-01T00:00:00Z",
             enable_temporal=True,
         )
@@ -447,12 +447,14 @@ class TestReconciliationUpdatesBothTables:
         scheduler = _make_scheduler_with_real_backends(tmp_path, registry, golden_meta)
 
         scheduler._reconcile_registry_with_filesystem(
-            "evolution-global", {"temporal": False, "scip": False}
+            "example-repo-global", {"temporal": False, "scip": False}
         )
 
-        assert golden_meta.get_repo("evolution")["enable_temporal"] is False
-        assert golden_meta.get_repo("evolution-global") is None
-        assert registry.get_global_repo("evolution-global")["enable_temporal"] is False
+        assert golden_meta.get_repo("example-repo")["enable_temporal"] is False
+        assert golden_meta.get_repo("example-repo-global") is None
+        assert (
+            registry.get_global_repo("example-repo-global")["enable_temporal"] is False
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ from code_indexer.services.temporal.temporal_server_paths import (
     server_temporal_index_root,
 )
 
-REPO_ALIAS = "evolution"
+REPO_ALIAS = "example-repo"
 
 
 # ---------------------------------------------------------------------------

@@ -106,7 +106,7 @@ class TestFleetMigrationUnrecoverableHealthCheckReports:
         table nobody queries."""
         service = _make_service_with_temp_db(
             create_table=True,
-            rows=[("evolution", 1, "unrecoverable_corruption")],
+            rows=[("example-repo", 1, "unrecoverable_corruption")],
         )
 
         has_warning, has_error, reasons = (
@@ -116,13 +116,13 @@ class TestFleetMigrationUnrecoverableHealthCheckReports:
         assert has_warning is True
         assert has_error is False
         assert len(reasons) == 1
-        assert "evolution" in reasons[0]
+        assert "example-repo" in reasons[0]
 
     def test_multiple_unrecoverable_rows_all_named(self):
         service = _make_service_with_temp_db(
             create_table=True,
             rows=[
-                ("evolution", 1, "unrecoverable_corruption"),
+                ("example-repo", 1, "unrecoverable_corruption"),
                 ("other-repo", 1, "unrecoverable_corruption"),
                 ("click", 3, "generic"),
             ],
@@ -135,7 +135,7 @@ class TestFleetMigrationUnrecoverableHealthCheckReports:
         assert has_warning is True
         assert has_error is False
         combined = " ".join(reasons)
-        assert "evolution" in combined
+        assert "example-repo" in combined
         assert "other-repo" in combined
         assert "click" not in combined
 
@@ -149,7 +149,7 @@ class TestFleetMigrationUnrecoverableWiredIntoOverallStatus:
         code (Messi Rule #12: anti-orphan-code)."""
         service = _make_service_with_temp_db(
             create_table=True,
-            rows=[("evolution", 1, "unrecoverable_corruption")],
+            rows=[("example-repo", 1, "unrecoverable_corruption")],
         )
         system_info = SystemHealthInfo(
             memory_usage_percent=20.0,
@@ -165,4 +165,4 @@ class TestFleetMigrationUnrecoverableWiredIntoOverallStatus:
         status, failure_reasons = service._calculate_overall_status({}, system_info, [])
 
         assert status == HealthStatus.DEGRADED
-        assert any("evolution" in reason for reason in failure_reasons)
+        assert any("example-repo" in reason for reason in failure_reasons)

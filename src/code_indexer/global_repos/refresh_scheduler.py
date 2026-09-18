@@ -1368,7 +1368,7 @@ class RefreshScheduler:
         background-job thread, which should not be tied up indefinitely.
 
         Args:
-            alias: Repo alias without -global suffix (e.g., "evolution").
+            alias: Repo alias without -global suffix (e.g., "example-repo").
 
         Raises:
             job_tracker.DuplicateJobError: If a global_repo_refresh job is

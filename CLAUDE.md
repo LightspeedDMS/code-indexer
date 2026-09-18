@@ -28,6 +28,40 @@ Before writing "ready"/"complete"/"validated"/"promoted", state all three: (1) t
 
 ---
 
+## Disclosure Discipline -- THIS IS A PUBLIC OPEN-SOURCE REPOSITORY
+
+**Everything here is world-readable: code, tests, docs, commit messages, issue bodies, issue comments, PR descriptions, and CHANGELOG.** GitHub also retains edit history, so editing a leaked value later does NOT remove it. The only reliable control is never writing it in the first place.
+
+### Mandatory check in EVERY code review
+
+Every code review -- `code-reviewer`, `codex-code-reviewer`, every external-CLI reviewer variant, and every human pass -- MUST scan the diff for disclosure and REJECT on any hit. This check ranks alongside correctness; a functionally perfect change that leaks is a REJECT.
+
+Scan for, and reject:
+
+| Class | Examples |
+|-------|----------|
+| **Secrets / credentials** | passwords, API keys, tokens, JWTs, private keys, connection strings with real credentials, `.env` / `.local-testing` / `.e2e-automation` content |
+| **PII** | names, emails, usernames, phone numbers, addresses, account ids, anything identifying a person |
+| **Third-party / customer identity** | customer or partner names, their package namespaces, their class/method/table names, their repository aliases, snippets of their source |
+| **System internals** | real hostnames, public/private IPs, network topology, cluster node ids, ports, mount paths, internal service names |
+| **Internal project vocabulary** | repository aliases for internal systems, internal codenames used as sample data |
+
+Applies to source, tests, **test fixtures and sample data**, docstrings, comments, doc files, commit messages, and anything written to an issue or PR.
+
+### Rules when authoring
+
+- Sample data is neutral by default: `com.example.app`, `example-repo-global`, `ExampleService`, RFC-1918 / RFC-5737 addresses, `example.com`.
+- Never paste real production output (query results, log lines, stack traces, repo listings) into an issue, PR, commit message, or doc without sanitising identifiers first.
+- Bug reports and epics cite BEHAVIOUR and code locations in THIS repository -- never a third party's file paths, type names, or source.
+- Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
+- Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
+
+### If something already leaked
+
+Scrub it, then say so plainly to the user -- do not quietly edit and move on. Editing reduces casual visibility but does not erase GitHub edit history, so the user needs to know in order to judge whether further action (rotation, takedown, disclosure) is warranted.
+
+---
+
 ## Documentation Standards
 
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.

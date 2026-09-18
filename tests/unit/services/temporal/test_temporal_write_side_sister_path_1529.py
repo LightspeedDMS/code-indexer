@@ -31,7 +31,7 @@ from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 EMBEDDER_SLUG = "voyage_code_3"
 QUARTER = "2024Q1"
 SHARD_NAME = f"code-indexer-temporal-{EMBEDDER_SLUG}-{QUARTER}"
-REPO_ALIAS = "evolution"
+REPO_ALIAS = "example-repo"
 VECTOR_SIZE = 8
 SEAM_FUNCTION = "resolve_temporal_index_dir"
 

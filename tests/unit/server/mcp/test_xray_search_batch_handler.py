@@ -574,7 +574,9 @@ class TestXraySearchBatchRepoResolution:
         mock_grm.is_globally_active.return_value = True
 
         def _resolve(alias):
-            return "/repos/evolution-global" if alias == "evolution-global" else None
+            return (
+                "/repos/example-repo-global" if alias == "example-repo-global" else None
+            )
 
         with (
             patch(
@@ -594,7 +596,7 @@ class TestXraySearchBatchRepoResolution:
                 return_value=Path("/cidx-meta"),
             ),
         ):
-            params = _valid_params(repository_alias="evolution")
+            params = _valid_params(repository_alias="example-repo")
             resp = _parse_response(handle_xray_search_batch(params, user))
         assert "job_id" in resp
 

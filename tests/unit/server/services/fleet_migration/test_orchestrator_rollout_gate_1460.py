@@ -140,7 +140,7 @@ class TestExplicitDeletionAuthorizedOverrideBypassesConfig:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -184,13 +184,13 @@ class TestExplicitDeletionAuthorizedOverrideBypassesConfig:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
             temporal_namespaces=[
                 TemporalNamespaceSpec(
-                    pointer_namespace="evolution-temporal-voyage_code_3-2024Q1",
+                    pointer_namespace="example-repo-temporal-voyage_code_3-2024Q1",
                     legacy_shard_dir=legacy_shard_dir,
                     embedder_slug="voyage_code_3",
                 )
@@ -214,12 +214,12 @@ class TestExplicitDeletionAuthorizedOverrideBypassesConfig:
         assert (legacy_shard_dir / "chunks.db").is_file()
         assert list(legacy_shard_dir.rglob("vector_*.json"))
         assert not sister_alias_manager.alias_exists(
-            "evolution-temporal-voyage_code_3-2024Q1"
+            "example-repo-temporal-voyage_code_3-2024Q1"
         )
 
         candidate = FleetMigrationCandidate(
-            sort_key="evolution",
-            golden_alias="evolution",
+            sort_key="example-repo",
+            golden_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -253,7 +253,7 @@ class TestDeletionAuthorizedResolvesFromConfigWhenNotGiven:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -286,7 +286,7 @@ class TestDeletionAuthorizedResolvesFromConfigWhenNotGiven:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],

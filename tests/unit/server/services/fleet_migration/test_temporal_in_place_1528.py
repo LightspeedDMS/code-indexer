@@ -39,8 +39,8 @@ from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_
 
 EMBEDDER_SLUG = "voyage_code_3"
 SHARD_NAME = f"code-indexer-temporal-{EMBEDDER_SLUG}-2024Q1"
-POINTER_NAMESPACE = f"evolution-temporal-{EMBEDDER_SLUG}-2024Q1"
-REPO_ALIAS = "evolution"
+POINTER_NAMESPACE = f"example-repo-temporal-{EMBEDDER_SLUG}-2024Q1"
+REPO_ALIAS = "example-repo"
 
 VECTOR_SIZE = 16
 RNG_SEED = 1528

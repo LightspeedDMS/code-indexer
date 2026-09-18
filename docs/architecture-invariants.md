@@ -960,7 +960,7 @@ In cluster mode (`storage_mode=postgres`) the memory-heavy index ops in `POD_PUL
 
 ### Global Repo Alias Fallback (Story #1039)
 
-31 read-only MCP handlers transparently promote bare repo aliases (e.g. `evolution`) to their globally-activated form (`evolution-global`) when:
+31 read-only MCP handlers transparently promote bare repo aliases (e.g. `example-repo`) to their globally-activated form (`example-repo-global`) when:
 1. The alias does not already end with `-global`.
 2. The user does NOT have the alias in their own activated-repo list.
 3. The golden repo is globally active (`GoldenRepoManager.is_globally_active(alias)`).

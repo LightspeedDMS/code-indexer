@@ -43,7 +43,13 @@ class TestConfigFixerProjectId:
 
         # Add git remote (real repo name)
         subprocess.run(
-            ["git", "remote", "add", "origin", "https://github.com/user/evolution.git"],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/example-repo.git",
+            ],
             cwd=project_dir,
             check=True,
         )
@@ -55,8 +61,8 @@ class TestConfigFixerProjectId:
 
         CRITICAL: This test reproduces Bug #85 scenario:
         - Directory name: v_1769727231 (versioned CoW clone)
-        - Git remote: evolution
-        - Expected project_id: "evolution" (from git remote, NOT directory name)
+        - Git remote: example-repo
+        - Expected project_id: "example-repo" (from git remote, NOT directory name)
 
         Old behavior (WRONG):
         - Used codebase_dir.name -> "v_1769727231"
@@ -64,7 +70,7 @@ class TestConfigFixerProjectId:
         - Triggered unnecessary full reindex
 
         New behavior (CORRECT):
-        - Uses FileIdentifier.get_project_id() -> "evolution"
+        - Uses FileIdentifier.get_project_id() -> "example-repo"
         - Matches smart_indexer's project_id
         - No unnecessary full reindex
         """
@@ -77,7 +83,7 @@ class TestConfigFixerProjectId:
         detected_project_name = validator.detect_correct_project_name()
 
         # CRITICAL: Must return git repo name, NOT directory name
-        assert detected_project_name == "evolution"
+        assert detected_project_name == "example-repo"
         assert detected_project_name != "v_1769727231"
         assert detected_project_name != "v-1769727231"
 

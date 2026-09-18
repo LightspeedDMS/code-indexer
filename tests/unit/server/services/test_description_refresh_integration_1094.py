@@ -167,7 +167,7 @@ def _build_scheduler(
 def test_null_marker_refresh_forwards_existing_body_end_to_end(
     tmp_path: Path,
 ) -> None:
-    alias = "evolution"
+    alias = "example-repo"
 
     # Real golden repo clone with provider metadata (current_commit set).
     clone = tmp_path / alias

@@ -128,7 +128,7 @@ class TestRunFleetMigrationForRepoHappyPath:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -142,7 +142,7 @@ class TestRunFleetMigrationForRepoHappyPath:
         assert result.snapshot_path is not None
         assert resolve_chunk_layout(collection_dir) == ChunkLayout.CHUNKS_DB
         assert (
-            scheduler.alias_manager.read_alias("evolution-global")
+            scheduler.alias_manager.read_alias("example-repo-global")
             == result.snapshot_path
         )
         assert repo_has_published_post_consolidation_snapshot(index_path) is True
@@ -157,7 +157,7 @@ class TestRunFleetMigrationForRepoHappyPath:
         run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -166,7 +166,7 @@ class TestRunFleetMigrationForRepoHappyPath:
             deletion_authorized=True,
         )
 
-        assert scheduler.is_write_locked("evolution") is False
+        assert scheduler.is_write_locked("example-repo") is False
 
 
 def _write_legacy_temporal_shard(index_path: Path) -> Path:
@@ -200,13 +200,13 @@ class TestRunFleetMigrationForRepoAC1Ordering:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
             temporal_namespaces=[
                 TemporalNamespaceSpec(
-                    pointer_namespace="evolution-temporal-voyage_code_3-2024Q1",
+                    pointer_namespace="example-repo-temporal-voyage_code_3-2024Q1",
                     legacy_shard_dir=legacy_shard_dir,
                     embedder_slug="voyage_code_3",
                 )
@@ -224,7 +224,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
         assert list(legacy_shard_dir.rglob("vector_*.json")) == []
         assert resolve_chunk_layout(legacy_shard_dir) == ChunkLayout.CHUNKS_DB
         assert not sister_alias_manager.alias_exists(
-            "evolution-temporal-voyage_code_3-2024Q1"
+            "example-repo-temporal-voyage_code_3-2024Q1"
         )
         assert result.snapshot_path is not None
 
@@ -245,7 +245,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -256,7 +256,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
 
         assert result.status == "incomplete"
         assert result.snapshot_path is None
-        assert scheduler.alias_manager.read_alias("evolution-global") is None
+        assert scheduler.alias_manager.read_alias("example-repo-global") is None
 
     def test_marker_absent_when_status_is_incomplete(self, tmp_path: Path) -> None:
         """New CRITICAL finding: the durable snapshot-published marker
@@ -272,7 +272,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -308,13 +308,13 @@ class TestRunFleetMigrationForRepoAC1aRowlessEmptyArtifact:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
             temporal_namespaces=[
                 TemporalNamespaceSpec(
-                    pointer_namespace="evolution-temporal-voyage_code_3-2024Q1",
+                    pointer_namespace="example-repo-temporal-voyage_code_3-2024Q1",
                     legacy_shard_dir=rowless_dir,
                     embedder_slug="voyage_code_3",
                 )
@@ -331,7 +331,7 @@ class TestRunFleetMigrationForRepoAC1aRowlessEmptyArtifact:
         assert list(rowless_dir.rglob("vector_*.json")) == []
         # Never published to the sister location -- nothing to migrate.
         assert not sister_alias_manager.alias_exists(
-            "evolution-temporal-voyage_code_3-2024Q1"
+            "example-repo-temporal-voyage_code_3-2024Q1"
         )
         assert result.snapshot_path is not None
 
@@ -349,7 +349,7 @@ class TestRunFleetMigrationForRepoRefusesImmutablePath:
         scheduler = _make_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
         immutable_snapshot_path = (
-            golden_repos_dir / ".versioned" / "evolution" / "v_1700000000"
+            golden_repos_dir / ".versioned" / "example-repo" / "v_1700000000"
         )
         index_path = immutable_snapshot_path / ".code-indexer" / "index"
         index_path.mkdir(parents=True)
@@ -360,7 +360,7 @@ class TestRunFleetMigrationForRepoRefusesImmutablePath:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=immutable_snapshot_path,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -370,7 +370,7 @@ class TestRunFleetMigrationForRepoRefusesImmutablePath:
         )
 
         assert result.status == "refused_immutable_path"
-        assert scheduler.is_write_locked("evolution") is False
+        assert scheduler.is_write_locked("example-repo") is False
 
 
 class TestConsolidateSemanticCollectionsRefusesSymlinkIntoImmutableSnapshot:
@@ -508,7 +508,7 @@ class TestSnapshotGateReVerifiesBeforeFiring:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -541,12 +541,12 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
         _write_vector_json(collection_dir, "bbbb2222", [0.3, 0.4])
 
         job_tracker.register_job(
-            "refresh-evolution-global",
+            "refresh-example-repo-global",
             operation_type="global_repo_refresh",
             username="system",
-            repo_alias="evolution-global",
+            repo_alias="example-repo-global",
         )
-        job_tracker.update_status("refresh-evolution-global", status="running")
+        job_tracker.update_status("refresh-example-repo-global", status="running")
 
         sister_root = tmp_path / "sister"
         sister_alias_manager = AliasManager(str(sister_root / "aliases"))
@@ -554,7 +554,7 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],
@@ -574,12 +574,12 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
         index_path = base_clone / ".code-indexer" / "index"
 
         job_tracker.register_job(
-            "refresh-evolution-global",
+            "refresh-example-repo-global",
             operation_type="global_repo_refresh",
             username="system",
-            repo_alias="evolution-global",
+            repo_alias="example-repo-global",
         )
-        job_tracker.update_status("refresh-evolution-global", status="running")
+        job_tracker.update_status("refresh-example-repo-global", status="running")
 
         sister_root = tmp_path / "sister"
         sister_alias_manager = AliasManager(str(sister_root / "aliases"))
@@ -587,7 +587,7 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
         run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -598,7 +598,7 @@ class TestRunFleetMigrationForRepoAC9RefreshInFlight:
 
         # Not left holding the lock forever -- released so a retry (or
         # refresh, or activation) can proceed.
-        assert scheduler.is_write_locked("evolution") is False
+        assert scheduler.is_write_locked("example-repo") is False
 
 
 class TestRunFleetMigrationForRepoAC2AC8WriteLock:
@@ -612,7 +612,7 @@ class TestRunFleetMigrationForRepoAC2AC8WriteLock:
         # Simulate an in-flight migration by directly holding the lock
         # under the SAME owner name migration itself uses.
         acquired = scheduler.write_lock_manager.acquire(
-            "evolution", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=3600
+            "example-repo", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=3600
         )
         assert acquired is True
 
@@ -622,7 +622,7 @@ class TestRunFleetMigrationForRepoAC2AC8WriteLock:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[],
@@ -646,11 +646,11 @@ class TestRunFleetMigrationForRepoAC2AC8WriteLock:
 
         scheduler = _make_scheduler(tmp_path)
         acquired = scheduler.write_lock_manager.acquire(
-            "evolution", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=24 * 60 * 60
+            "example-repo", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=24 * 60 * 60
         )
         assert acquired is True
 
-        lock_file = scheduler.golden_repos_dir / ".locks" / "evolution.lock"
+        lock_file = scheduler.golden_repos_dir / ".locks" / "example-repo.lock"
         content = _json.loads(lock_file.read_text())
         # Backdate acquired_at by 2 hours -- well beyond the base 3600s
         # default TTL, but still far inside the migration-specific TTL.
@@ -660,7 +660,7 @@ class TestRunFleetMigrationForRepoAC2AC8WriteLock:
         lock_file.write_text(_json.dumps(content))
 
         still_refused = scheduler.write_lock_manager.acquire(
-            "evolution", owner_name="some-other-writer"
+            "example-repo", owner_name="some-other-writer"
         )
         assert still_refused is False
 
@@ -676,7 +676,7 @@ class TestRunFleetMigrationForRepoAC7ActivationFailFast:
         # relies on for refresh-vs-activation conflicts (Bug #1393).
         scheduler = _make_scheduler(tmp_path)
         acquired = scheduler.write_lock_manager.acquire(
-            "evolution", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=3600
+            "example-repo", owner_name=MIGRATION_OWNER_NAME, ttl_seconds=3600
         )
         assert acquired is True
 
@@ -684,7 +684,7 @@ class TestRunFleetMigrationForRepoAC7ActivationFailFast:
 
         start = time.monotonic()
         activation_acquired = scheduler.write_lock_manager.acquire(
-            "evolution", owner_name="activation"
+            "example-repo", owner_name="activation"
         )
         elapsed = time.monotonic() - start
 

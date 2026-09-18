@@ -727,7 +727,7 @@ class TestFleetMigrationFailureQuarantine:
     (genuinely corrupt legacy data `scan_vectors_for_id_map` correctly
     refuses to auto-resolve) must NOT be retried forever, permanently
     starving every alphabetically-later repo in the fleet -- this is the
-    exact live-observed incident ("click" failing every tick, "evolution"
+    exact live-observed incident ("click" failing every tick, "example-repo"
     never reached).
 
     Real corrupt on-disk data (two vector_*.json files sharing the same
@@ -782,10 +782,10 @@ class TestFleetMigrationFailureQuarantine:
         corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
             golden_repos_dir, "click"
         )
-        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "example-repo")
         backend = self._make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"click": corrupt_base, "evolution": pending_base},
+            {"click": corrupt_base, "example-repo": pending_base},
             sqlite_backend=backend,
         )
         scheduler = _make_scheduler(
@@ -801,11 +801,11 @@ class TestFleetMigrationFailureQuarantine:
             assert result["status"] == "dedup_gate_rejected"
 
         # "click" is now quarantined -- the NEXT call must skip it and
-        # migrate "evolution" instead of raising the identical error again.
+        # migrate "example-repo" instead of raising the identical error again.
         result = scheduler._run_next_candidate()
 
         assert result["status"] == "completed"
-        assert result["golden_alias"] == "evolution"
+        assert result["golden_alias"] == "example-repo"
         evolution_collection = (
             pending_base / ".code-indexer" / "index" / "semantic_collection"
         )
@@ -920,10 +920,10 @@ class TestFleetMigrationFailureQuarantine:
         corrupt_base = _build_corrupt_repo_with_duplicate_point_id(
             golden_repos_dir, "click"
         )
-        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "example-repo")
         backend = self._make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"click": corrupt_base, "evolution": pending_base},
+            {"click": corrupt_base, "example-repo": pending_base},
             sqlite_backend=backend,
         )
         scheduler = _make_scheduler(
@@ -1026,10 +1026,10 @@ class TestQuarantineCountsNonRaisingStatuses:
         refresh_scheduler = _make_refresh_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
         stuck_base = _build_unconsolidated_repo(golden_repos_dir, "click")
-        pending_base = _build_unconsolidated_repo(golden_repos_dir, "evolution")
+        pending_base = _build_unconsolidated_repo(golden_repos_dir, "example-repo")
         backend = self._make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"click": stuck_base, "evolution": pending_base},
+            {"click": stuck_base, "example-repo": pending_base},
             sqlite_backend=backend,
         )
         scheduler = _make_scheduler(
@@ -1072,12 +1072,12 @@ class TestQuarantineCountsNonRaisingStatuses:
         )
 
         # "click" is now quarantined -- restore the REAL orchestrator so
-        # the next candidate ("evolution") can genuinely migrate.
+        # the next candidate ("example-repo") can genuinely migrate.
         monkeypatch.undo()
         result = scheduler._run_next_candidate()
 
         assert result["status"] == "completed"
-        assert result["golden_alias"] == "evolution"
+        assert result["golden_alias"] == "example-repo"
 
     @pytest.mark.parametrize("transient_status", ["lock_held", "refresh_in_flight"])
     def test_transient_statuses_never_increment_the_failure_counter(

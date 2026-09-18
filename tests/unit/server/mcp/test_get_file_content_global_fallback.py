@@ -84,7 +84,7 @@ class TestBareAliasNotActivatedFallsBackToGlobal:
         from code_indexer.server.mcp.handlers.files import get_file_content
 
         user = _make_user()
-        params = {"repository_alias": "evolution", "file_path": "src/main.py"}
+        params = {"repository_alias": "example-repo", "file_path": "src/main.py"}
 
         captured: Dict[str, Any] = {}
 
@@ -114,7 +114,7 @@ class TestBareAliasNotActivatedFallsBackToGlobal:
         data = _json_result(result)
         assert data.get("success") is True, data
         # Must have routed through the -global path.
-        assert captured.get("alias") == "evolution-global", captured
+        assert captured.get("alias") == "example-repo-global", captured
         assert captured.get("by_path_repo") == "/fake/global/path", captured
         # The own-activation path must NOT have been used.
         file_svc.get_file_content.assert_not_called()
@@ -282,7 +282,7 @@ class TestExplicitGlobalUnchanged:
         from code_indexer.server.mcp.handlers.files import get_file_content
 
         user = _make_user()
-        params = {"repository_alias": "evolution-global", "file_path": "src/main.py"}
+        params = {"repository_alias": "example-repo-global", "file_path": "src/main.py"}
 
         captured: Dict[str, Any] = {}
 
@@ -306,7 +306,7 @@ class TestExplicitGlobalUnchanged:
 
         data = _json_result(result)
         assert data.get("success") is True, data
-        assert captured.get("alias") == "evolution-global", captured
+        assert captured.get("alias") == "example-repo-global", captured
         file_svc.get_file_content.assert_not_called()
 
 

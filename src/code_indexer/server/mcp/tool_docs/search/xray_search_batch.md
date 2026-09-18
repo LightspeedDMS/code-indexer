@@ -13,7 +13,7 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier(s): single string, list of strings, or JSON-encoded string array. Duplicates are de-duplicated before the matrix is built. Global-alias fallback: bare alias "evolution" promotes to "evolution-global" when the repo is globally active. Maximum 50 aliases.'
+      description: 'Repository identifier(s): single string, list of strings, or JSON-encoded string array. Duplicates are de-duplicated before the matrix is built. Global-alias fallback: bare alias "example-repo" promotes to "example-repo-global" when the repo is globally active. Maximum 50 aliases.'
     scans:
       type: array
       description: 'Array of scan bundles (REQUIRED, non-empty, max 50). Each bundle drives one Phase-1 + Phase-2 pass per resolved repository. See bundle schema below.'
@@ -129,7 +129,7 @@ Limits:
 
 Aliases are resolved before submitting the job:
 - Direct resolution attempted first.
-- Global-alias fallback: bare alias "evolution" -> "evolution-global" when globally active and user does not have it directly activated.
+- Global-alias fallback: bare alias "example-repo" -> "example-repo-global" when globally active and user does not have it directly activated.
 - Unresolvable aliases become `error_level="repo"` entries in errors[].
 - If ALL aliases fail: synchronous error `no_repositories_resolved`.
 - If SOME aliases fail: job is submitted over the resolved subset; partial=true.

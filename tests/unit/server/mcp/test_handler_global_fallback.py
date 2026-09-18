@@ -8,14 +8,14 @@ Strategy
 --------
 Each test:
 1. Patches ``_utils.app_module.activated_repo_manager`` so that
-   ``user_has_activated_repo("testuser", "evolution")`` returns ``False``.
+   ``user_has_activated_repo("testuser", "example-repo")`` returns ``False``.
 2. Patches ``_utils.app_module.golden_repo_manager`` so that
-   ``is_globally_active("evolution")`` returns ``True``.
+   ``is_globally_active("example-repo")`` returns ``True``.
 3. Patches the downstream routing/service call so the handler does not actually
    try to open files on disk.
-4. Calls the handler with ``repository_alias="evolution"`` (bare alias).
+4. Calls the handler with ``repository_alias="example-repo"`` (bare alias).
 5. Asserts the handler did NOT return a "not found" error -- i.e. the fallback
-   was applied and routing continued with ``"evolution-global"``.
+   was applied and routing continued with ``"example-repo-global"``.
 
 Section B regression tests confirm that write/mutation handlers do NOT apply the
 fallback (they must continue to return an appropriate error for bare aliases).
@@ -87,7 +87,7 @@ class TestSearchCodeFallback:
         from code_indexer.server.mcp.handlers.search import search_code
 
         user = _make_user()
-        params = {"repository_alias": "evolution", "query_text": "some query"}
+        params = {"repository_alias": "example-repo", "query_text": "some query"}
 
         captured = {}
 
@@ -107,9 +107,9 @@ class TestSearchCodeFallback:
         ):
             search_code(params, user)
 
-        # Fallback should have routed to _search_global_repo with evolution-global
-        assert captured.get("alias") == "evolution-global", (
-            f"Expected routing to 'evolution-global', got {captured.get('alias')!r}"
+        # Fallback should have routed to _search_global_repo with example-repo-global
+        assert captured.get("alias") == "example-repo-global", (
+            f"Expected routing to 'example-repo-global', got {captured.get('alias')!r}"
         )
 
 
@@ -122,7 +122,7 @@ class TestHandleRegexSearchFallback:
         from code_indexer.server.mcp.handlers.search import handle_regex_search
 
         user = _make_user()
-        args = {"repository_alias": "evolution", "pattern": "foo"}
+        args = {"repository_alias": "example-repo", "pattern": "foo"}
 
         captured_alias = {}
 
@@ -162,8 +162,8 @@ class TestHandleRegexSearchFallback:
         ):
             asyncio.get_event_loop().run_until_complete(handle_regex_search(args, user))
 
-        assert captured_alias.get("alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured_alias.get('alias')!r}"
+        assert captured_alias.get("alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured_alias.get('alias')!r}"
         )
 
 
@@ -180,7 +180,7 @@ class TestScipDefinitionFallback:
         from code_indexer.server.mcp.handlers.scip import scip_definition
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
 
@@ -212,8 +212,8 @@ class TestScipDefinitionFallback:
 
         data = _json_result(result)
         assert data.get("success") is True
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -225,7 +225,7 @@ class TestScipReferencesFallback:
         from code_indexer.server.mcp.handlers.scip import scip_references
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
         mock_service = MagicMock()
@@ -252,8 +252,8 @@ class TestScipReferencesFallback:
 
         data = _json_result(result)
         assert data.get("success") is True
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -265,7 +265,7 @@ class TestScipDependenciesFallback:
         from code_indexer.server.mcp.handlers.scip import scip_dependencies
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
         mock_service = MagicMock()
@@ -292,8 +292,8 @@ class TestScipDependenciesFallback:
 
         data = _json_result(result)
         assert data.get("success") is True
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -305,7 +305,7 @@ class TestScipDependentsFallback:
         from code_indexer.server.mcp.handlers.scip import scip_dependents
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
         mock_service = MagicMock()
@@ -332,8 +332,8 @@ class TestScipDependentsFallback:
 
         data = _json_result(result)
         assert data.get("success") is True
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -345,7 +345,7 @@ class TestScipImpactFallback:
         from code_indexer.server.mcp.handlers.scip import scip_impact
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
 
@@ -366,8 +366,8 @@ class TestScipImpactFallback:
         ):
             scip_impact(params, user)
 
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -382,7 +382,7 @@ class TestScipCallchainFallback:
         params = {
             "from_symbol": "A.method",
             "to_symbol": "B.method",
-            "repository_alias": "evolution",
+            "repository_alias": "example-repo",
         }
 
         captured = {}
@@ -404,8 +404,8 @@ class TestScipCallchainFallback:
         ):
             scip_callchain(params, user)
 
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -417,7 +417,7 @@ class TestScipContextFallback:
         from code_indexer.server.mcp.handlers.scip import scip_context
 
         user = _make_user()
-        params = {"symbol": "MyClass", "repository_alias": "evolution"}
+        params = {"symbol": "MyClass", "repository_alias": "example-repo"}
 
         captured = {}
 
@@ -438,8 +438,8 @@ class TestScipContextFallback:
         ):
             scip_context(params, user)
 
-        assert captured.get("repository_alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('repository_alias')!r}"
+        assert captured.get("repository_alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('repository_alias')!r}"
         )
 
 
@@ -458,12 +458,12 @@ class TestGitLogFallback:
         from code_indexer.server.mcp.handlers.git_read import git_log
 
         # Create a fake git repo
-        repo_dir = tmp_path / "evolution-global"
+        repo_dir = tmp_path / "example-repo-global"
         repo_dir.mkdir()
         (repo_dir / ".git").mkdir()
 
         user = _make_user()
-        args = {"repository_alias": "evolution"}
+        args = {"repository_alias": "example-repo"}
 
         captured_alias = {}
 
@@ -485,8 +485,8 @@ class TestGitLogFallback:
             mock_ops.git_log.return_value = {"commits": [], "total_count": 0}
             git_log(args, user)
 
-        assert captured_alias.get("alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured_alias.get('alias')!r}"
+        assert captured_alias.get("alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured_alias.get('alias')!r}"
         )
 
 
@@ -497,12 +497,12 @@ class TestGitBlameFallback:
         """handle_git_blame bare alias + globally active -> resolved using -global form."""
         from code_indexer.server.mcp.handlers.git_read import handle_git_blame
 
-        repo_dir = tmp_path / "evolution-global"
+        repo_dir = tmp_path / "example-repo-global"
         repo_dir.mkdir()
         (repo_dir / ".git").mkdir()
 
         user = _make_user()
-        args = {"repository_alias": "evolution", "path": "src/main.py"}
+        args = {"repository_alias": "example-repo", "path": "src/main.py"}
 
         captured_alias = {}
 
@@ -524,8 +524,8 @@ class TestGitBlameFallback:
             mock_ops.git_blame.return_value = {"lines": []}
             handle_git_blame(args, user)
 
-        assert captured_alias.get("alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured_alias.get('alias')!r}"
+        assert captured_alias.get("alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured_alias.get('alias')!r}"
         )
 
 
@@ -536,12 +536,12 @@ class TestGitStatusFallback:
         """git_status bare alias + globally active -> resolved using -global form."""
         from code_indexer.server.mcp.handlers.git_read import git_status
 
-        repo_dir = tmp_path / "evolution-global"
+        repo_dir = tmp_path / "example-repo-global"
         repo_dir.mkdir()
         (repo_dir / ".git").mkdir()
 
         user = _make_user()
-        args = {"repository_alias": "evolution"}
+        args = {"repository_alias": "example-repo"}
 
         captured_alias = {}
 
@@ -567,8 +567,8 @@ class TestGitStatusFallback:
             }
             git_status(args, user)
 
-        assert captured_alias.get("alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured_alias.get('alias')!r}"
+        assert captured_alias.get("alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured_alias.get('alias')!r}"
         )
 
 
@@ -585,7 +585,7 @@ class TestGetBranchesFallback:
         from code_indexer.server.mcp.handlers.repos import get_branches
 
         user = _make_user()
-        params = {"repository_alias": "evolution"}
+        params = {"repository_alias": "example-repo"}
 
         captured = {}
 
@@ -608,8 +608,8 @@ class TestGetBranchesFallback:
             mock_bs.return_value.__enter__.return_value.list_branches.return_value = []
             get_branches(params, user)
 
-        assert captured.get("alias") == "evolution-global", (
-            f"Expected 'evolution-global', got {captured.get('alias')!r}"
+        assert captured.get("alias") == "example-repo-global", (
+            f"Expected 'example-repo-global', got {captured.get('alias')!r}"
         )
 
 
@@ -627,7 +627,7 @@ class TestSectionBHandlersStayStrict:
 
         user = _make_user()
         params = {
-            "repository_alias": "evolution",
+            "repository_alias": "example-repo",
             "path": "test.txt",
             "content": "hello",
         }
@@ -650,7 +650,7 @@ class TestSectionBHandlersStayStrict:
 
         user = _make_user()
         params = {
-            "repository_alias": "evolution",
+            "repository_alias": "example-repo",
             "path": "test.txt",
             "old_content": "old",
             "new_content": "new",

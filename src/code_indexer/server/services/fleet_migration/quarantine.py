@@ -602,7 +602,7 @@ def get_failure_state(
 #: (seconds) between EXPENSIVE full-signature rechecks of an already-
 #: quarantined repo. Codex measured the walk at ~0.5s / ~45,338 stat()
 #: calls on a synthetic 21,518-file collection deliberately matching the
-#: real "evolution" golden repo's actual scale -- running this on EVERY
+#: real "example-repo" golden repo's actual scale -- running this on EVERY
 #: tick for EVERY already-quarantined candidate the scheduler's loop
 #: encounters is a genuine I/O storm on NFS (this project's actual
 #: staging/cluster storage). 5 minutes comfortably reduces this to a

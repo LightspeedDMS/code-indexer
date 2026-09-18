@@ -122,16 +122,16 @@ def golden_repo_manager_mock(real_refresh_scheduler):
     """Mock golden repo manager wired to a REAL RefreshScheduler."""
     mock = MagicMock()
     golden_repo = GoldenRepo(
-        alias="evolution",
-        repo_url="https://github.com/example/evolution.git",
+        alias="example-repo",
+        repo_url="https://github.com/example/example-repo.git",
         default_branch="main",
-        clone_path="/path/to/golden/evolution",
+        clone_path="/path/to/golden/example-repo",
         created_at=datetime.now(timezone.utc).isoformat(),
     )
-    golden_repos_dict = {"evolution": golden_repo}
+    golden_repos_dict = {"example-repo": golden_repo}
     mock.golden_repos = golden_repos_dict
     mock.get_golden_repo.side_effect = lambda alias: golden_repos_dict.get(alias)
-    mock.get_actual_repo_path.return_value = "/path/to/golden/evolution"
+    mock.get_actual_repo_path.return_value = "/path/to/golden/example-repo"
     mock.resource_config = ServerResourceConfig()
     mock._refresh_scheduler = real_refresh_scheduler
     return mock
@@ -182,24 +182,24 @@ class TestActivationAcquiresWriteLockAroundClone:
 
         def _fake_clone(source_path, dest_path_arg, **kwargs):
             lock_state_during_clone["held"] = real_refresh_scheduler.is_write_locked(
-                "evolution"
+                "example-repo"
             )
             os.makedirs(dest_path_arg, exist_ok=True)
             return dest_path_arg
 
         mock_clone_backend.create_clone_at_path.side_effect = _fake_clone
 
-        assert real_refresh_scheduler.is_write_locked("evolution") is False
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False
 
         success = activated_repo_manager._clone_with_copy_on_write(
-            "/src/path", str(dest_path), golden_repo_alias="evolution"
+            "/src/path", str(dest_path), golden_repo_alias="example-repo"
         )
 
         assert success is True
         assert lock_state_during_clone["held"] is True, (
             "write lock must be held DURING the clone call"
         )
-        assert real_refresh_scheduler.is_write_locked("evolution") is False, (
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False, (
             "write lock must be released after a successful clone"
         )
 
@@ -219,10 +219,10 @@ class TestActivationAcquiresWriteLockAroundClone:
 
         with pytest.raises(ActivatedRepoError):
             activated_repo_manager._clone_with_copy_on_write(
-                "/src/path", str(dest_path), golden_repo_alias="evolution"
+                "/src/path", str(dest_path), golden_repo_alias="example-repo"
             )
 
-        assert real_refresh_scheduler.is_write_locked("evolution") is False, (
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False, (
             "write lock must be released even when the clone fails"
         )
 
@@ -239,7 +239,7 @@ class TestActivationRefusesWhenLockAlreadyHeld:
         already holds the lock, activation must fail fast WITHOUT cloning
         and must NOT release a lock it never acquired."""
         acquired = real_refresh_scheduler.acquire_write_lock(
-            "evolution", owner_name="external_writer"
+            "example-repo", owner_name="external_writer"
         )
         assert acquired is True
 
@@ -247,12 +247,14 @@ class TestActivationRefusesWhenLockAlreadyHeld:
 
         with pytest.raises(ActivatedRepoError):
             activated_repo_manager._clone_with_copy_on_write(
-                "/src/path", str(dest_path), golden_repo_alias="evolution"
+                "/src/path", str(dest_path), golden_repo_alias="example-repo"
             )
 
         mock_clone_backend.create_clone_at_path.assert_not_called()
 
-        lock_info = real_refresh_scheduler.write_lock_manager.get_lock_info("evolution")
+        lock_info = real_refresh_scheduler.write_lock_manager.get_lock_info(
+            "example-repo"
+        )
         assert lock_info is not None, "external_writer's lock must remain held"
         assert lock_info["owner"] == "external_writer"
 
@@ -271,24 +273,24 @@ class TestActivationFailsFastOnInFlightRefresh:
         write lock alone cannot see this because a running refresh never
         holds it itself."""
         job_tracker_real.register_job(
-            "refresh-evolution-global",
+            "refresh-example-repo-global",
             operation_type="global_repo_refresh",
             username="system",
-            repo_alias="evolution-global",
+            repo_alias="example-repo-global",
         )
-        job_tracker_real.update_status("refresh-evolution-global", status="running")
+        job_tracker_real.update_status("refresh-example-repo-global", status="running")
 
         dest_path = tmp_path / "dest"
 
         with pytest.raises(
-            ActivatedRepoError, match="(?is)evolution.*refresh|refresh.*evolution"
+            ActivatedRepoError, match="(?is)example-repo.*refresh|refresh.*example-repo"
         ):
             activated_repo_manager._clone_with_copy_on_write(
-                "/src/path", str(dest_path), golden_repo_alias="evolution"
+                "/src/path", str(dest_path), golden_repo_alias="example-repo"
             )
 
         mock_clone_backend.create_clone_at_path.assert_not_called()
-        assert real_refresh_scheduler.is_write_locked("evolution") is False, (
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False, (
             "no lock should be left behind -- the JobTracker check runs "
             "BEFORE lock acquisition"
         )
@@ -356,7 +358,7 @@ class TestBackwardCompatibility:
         dest_path.mkdir()
 
         success = manager._clone_with_copy_on_write(
-            "/src/path", str(dest_path), golden_repo_alias="evolution"
+            "/src/path", str(dest_path), golden_repo_alias="example-repo"
         )
 
         assert success is True
@@ -379,7 +381,7 @@ class TestSingleRepoPathParticipatesInLockCoordination:
 
         def _fake_clone(source_path, dest_path_arg, **kwargs):
             lock_state_during_clone["held"] = real_refresh_scheduler.is_write_locked(
-                "evolution"
+                "example-repo"
             )
             os.makedirs(dest_path_arg, exist_ok=True)
             return dest_path_arg
@@ -396,7 +398,7 @@ class TestSingleRepoPathParticipatesInLockCoordination:
             )
             activated_repo_manager._do_activate_repository(
                 username="testuser",
-                golden_repo_alias="evolution",
+                golden_repo_alias="example-repo",
                 branch_name="main",  # matches golden_repo default_branch
                 user_alias="my-activated-repo",
             )
@@ -405,7 +407,7 @@ class TestSingleRepoPathParticipatesInLockCoordination:
             "the single-repo activation path must pass golden_repo_alias "
             "through so the write lock actually engages during the clone"
         )
-        assert real_refresh_scheduler.is_write_locked("evolution") is False, (
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False, (
             "lock must be released after activation completes"
         )
 
@@ -442,14 +444,14 @@ class TestCompositeLoopParticipatesInLockCoordination:
 
         result = activated_repo_manager._do_activate_composite_repository(
             username="testuser",
-            golden_repo_aliases=["evolution", "phoenix"],
+            golden_repo_aliases=["example-repo", "phoenix"],
             user_alias="my-composite",
         )
 
         assert result["success"] is True
-        assert lock_state_by_alias == {"evolution": True, "phoenix": True}, (
+        assert lock_state_by_alias == {"example-repo": True, "phoenix": True}, (
             "the write lock must engage for EVERY component alias during "
             "its own clone call"
         )
-        assert real_refresh_scheduler.is_write_locked("evolution") is False
+        assert real_refresh_scheduler.is_write_locked("example-repo") is False
         assert real_refresh_scheduler.is_write_locked("phoenix") is False
