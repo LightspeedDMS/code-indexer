@@ -41,10 +41,14 @@ class TestIncludePatternZeroMatchWarningSurface:
     def test_warning_on_zero_match_single_segment_pattern(
         self, search_engine, tmp_path
     ):
-        """A single-segment pattern that misses a deeply-nested file emits a warning.
+        """A pattern with no real match anywhere in the repo emits a warning.
 
-        File is at src/foo/time.py — reachable via **/time.py but NOT */time.py
-        (which only matches one directory level deep from repo root).
+        Bug #1876 item 3: a leading `*/` is now normalized to `**/` (any-depth,
+        matching CLAUDE.md's documented `*/tests/*` convention), so a pattern
+        like `*/time.py` DOES reach a file at src/foo/time.py -- it is no
+        longer "one directory level deep only". This test now uses a filename
+        that does not exist anywhere in the repo, so the pattern remains a
+        genuine zero-match regardless of depth.
         """
         subdir = tmp_path / "src" / "foo"
         subdir.mkdir(parents=True)
@@ -55,19 +59,25 @@ class TestIncludePatternZeroMatchWarningSurface:
             driver_regex=r"prepareStatement",
             evaluator_code="return True",
             search_target="content",
-            include_patterns=["*/time.py"],
+            include_patterns=["*/nonexistent_file.py"],
         )
 
         assert "warnings" in result
         assert len(result["warnings"]) == 1
         warning = result["warnings"][0]
         assert warning["type"] == "zero_match_include_pattern"
-        assert warning["pattern"] == "*/time.py"
+        assert warning["pattern"] == "*/nonexistent_file.py"
 
     def test_multiple_warnings_for_multiple_zero_match_patterns(
         self, search_engine, tmp_path
     ):
-        """Each zero-match include_pattern produces its own warning entry."""
+        """Each zero-match include_pattern produces its own warning entry.
+
+        Bug #1876 item 3: patterns use filenames that do not exist anywhere
+        in the repo, since a leading `*/` now matches at any depth (see
+        test_warning_on_zero_match_single_segment_pattern) and would
+        otherwise reach x.py/y.py below.
+        """
         subdir = tmp_path / "deep" / "nested"
         subdir.mkdir(parents=True)
         (subdir / "x.py").write_text("def a(): prepareStatement()")
@@ -78,20 +88,25 @@ class TestIncludePatternZeroMatchWarningSurface:
             driver_regex=r"prepareStatement",
             evaluator_code="return True",
             search_target="content",
-            include_patterns=["*/x.py", "*/y.py"],
+            include_patterns=["*/x_missing.py", "*/y_missing.py"],
         )
 
         assert "warnings" in result
         assert len(result["warnings"]) == 2
         warned_patterns = {w["pattern"] for w in result["warnings"]}
-        assert warned_patterns == {"*/x.py", "*/y.py"}
+        assert warned_patterns == {"*/x_missing.py", "*/y_missing.py"}
 
 
 class TestIncludePatternZeroMatchWarningContent:
     """Warning content and suppression behaviour for zero-match include patterns."""
 
     def test_mixed_healthy_and_zero_match_pattern(self, search_engine, tmp_path):
-        """Healthy pattern finds files; zero-match pattern produces exactly one warning."""
+        """Healthy pattern finds files; zero-match pattern produces exactly one warning.
+
+        Bug #1876 item 3: the zero-match pattern uses a filename that does not
+        exist anywhere in the repo, since a leading `*/` now matches at any
+        depth and `*/hidden.py` would otherwise reach deep/nested/hidden.py.
+        """
         subdir = tmp_path / "deep" / "nested"
         subdir.mkdir(parents=True)
         (tmp_path / "top.py").write_text("def main(): prepareStatement()")
@@ -102,7 +117,7 @@ class TestIncludePatternZeroMatchWarningContent:
             driver_regex=r"prepareStatement",
             evaluator_code="return True",
             search_target="content",
-            include_patterns=["**/*.py", "*/hidden.py"],
+            include_patterns=["**/*.py", "*/hidden_missing.py"],
         )
 
         # Healthy pattern finds files
@@ -110,10 +125,14 @@ class TestIncludePatternZeroMatchWarningContent:
         # Exactly one warning for the zero-match pattern
         assert "warnings" in result
         assert len(result["warnings"]) == 1
-        assert result["warnings"][0]["pattern"] == "*/hidden.py"
+        assert result["warnings"][0]["pattern"] == "*/hidden_missing.py"
 
     def test_warning_hint_mentions_glob_difference(self, search_engine, tmp_path):
-        """Warning hint explains the * vs ** difference for user guidance."""
+        """Warning hint explains the * vs ** difference for user guidance.
+
+        Bug #1876 item 3: uses a nonexistent filename since a leading `*/` now
+        matches at any depth and would otherwise reach a/b/time.py below.
+        """
         subdir = tmp_path / "a" / "b"
         subdir.mkdir(parents=True)
         (subdir / "time.py").write_text("def tick(): prepareStatement()")
@@ -123,7 +142,7 @@ class TestIncludePatternZeroMatchWarningContent:
             driver_regex=r"prepareStatement",
             evaluator_code="return True",
             search_target="content",
-            include_patterns=["*/time.py"],
+            include_patterns=["*/nonexistent_time.py"],
         )
 
         assert "warnings" in result

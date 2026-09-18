@@ -20,11 +20,18 @@ use crate::graph::csr::{CodeGraph, CodeGraphBuilder};
 /// one entry per reference `resolve_all_references` produced, itself
 /// bounded by the finite invocation/type-reference/construction counts
 /// extracted per file).
-pub(super) fn capped_candidate_total(pending: &[PendingReference], exceeded: bool, max_per_reference: usize) -> usize {
+pub(super) fn capped_candidate_total(
+    pending: &[PendingReference],
+    exceeded: bool,
+    max_per_reference: usize,
+) -> usize {
     if !exceeded {
         return pending.iter().map(|r| r.candidates.len()).sum();
     }
-    pending.iter().map(|r| r.candidates.len().min(max_per_reference)).sum()
+    pending
+        .iter()
+        .map(|r| r.candidates.len().min(max_per_reference))
+        .sum()
 }
 
 /// Interns EVERY declared symbol across `files` -- not just symbols that
@@ -35,7 +42,11 @@ pub(super) fn capped_candidate_total(pending: &[PendingReference], exceeded: boo
 /// symbol nobody ever calls (the exact case `is_definitely_dead_code`
 /// exists to report on) would otherwise never be interned at all, making
 /// it unqueryable rather than correctly "unreferenced".
-pub(super) fn intern_declarations_and_attach_signatures(files: &[FileForBind], builder: &mut CodeGraphBuilder, exceeded: bool) {
+pub(super) fn intern_declarations_and_attach_signatures(
+    files: &[FileForBind],
+    builder: &mut CodeGraphBuilder,
+    exceeded: bool,
+) {
     for file in files {
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
@@ -124,10 +135,17 @@ pub fn bind_with_budget_and_completeness(
 mod tests {
     use super::*;
     use crate::graph::budget::AnalysisCompleteness;
-    use crate::graph::extract::local_index::{Declaration, DeclarationKind, InvocationSite, LocalIndex};
+    use crate::graph::extract::local_index::{
+        Declaration, DeclarationKind, InvocationSite, LocalIndex,
+    };
     use crate::graph::identity::{make_symbol_id, SymbolId};
 
-    fn method_decl(name: &str, file_id: u32, local: u32, param_count: Option<usize>) -> Declaration {
+    fn method_decl(
+        name: &str,
+        file_id: u32,
+        local: u32,
+        param_count: Option<usize>,
+    ) -> Declaration {
         Declaration {
             kind: DeclarationKind::Method,
             name: name.to_string(),
@@ -152,7 +170,11 @@ mod tests {
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
-        FileForBind { file_id, language: language.to_string(), index }
+        FileForBind {
+            file_id,
+            language: language.to_string(),
+            index,
+        }
     }
 
     /// Three same-named `run` declarations, none sharing a file (or
@@ -172,7 +194,9 @@ mod tests {
         caller.invocations.push(invocation("run", None));
         caller.invocations.push(invocation("uniqueOne", Some(0)));
         let mut file_unique = LocalIndex::new();
-        file_unique.declarations.push(method_decl("uniqueOne", 5, 0, None));
+        file_unique
+            .declarations
+            .push(method_decl("uniqueOne", 5, 0, None));
 
         let files = vec![
             file(1, "java", file_a),
@@ -181,7 +205,10 @@ mod tests {
             file(4, "java", caller),
             file(5, "java", file_unique),
         ];
-        let run_symbols: Vec<SymbolId> = [1u32, 2u32, 3u32].iter().map(|&f| make_symbol_id(f, 0)).collect();
+        let run_symbols: Vec<SymbolId> = [1u32, 2u32, 3u32]
+            .iter()
+            .map(|&f| make_symbol_id(f, 0))
+            .collect();
         (files, IndexBudget::new(3, 1), run_symbols)
     }
 
@@ -199,7 +226,10 @@ mod tests {
         let (files, budget, run_symbols) = ambiguous_run_fixture();
         let graph = bind_with_budget(files, &budget);
 
-        assert_eq!(graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+        assert_eq!(
+            graph.completeness(),
+            AnalysisCompleteness::IndexBudgetExceeded
+        );
 
         let run_reference = graph
             .references()
@@ -212,13 +242,19 @@ mod tests {
                         .any(|c| run_symbols.contains(&graph.resolve_symbol(c.symbol())))
             })
             .expect("expected to find the 'run' reference by one of its surviving candidates");
-        assert_eq!(graph.candidates_for(run_reference).len(), 1, "cap must narrow the 3-way ambiguous set to 1");
+        assert_eq!(
+            graph.candidates_for(run_reference).len(),
+            1,
+            "cap must narrow the 3-way ambiguous set to 1"
+        );
 
         // All three "run" declarations are NameOnly confidence (no
         // distinguishing evidence whatsoever) -- every one of them,
         // including the two capped away, must still report referenced.
         for &symbol in &run_symbols {
-            let dense = graph.dense_id_for(symbol).expect("declared symbol must be interned");
+            let dense = graph
+                .dense_id_for(symbol)
+                .expect("declared symbol must be interned");
             assert!(
                 graph.is_symbol_referenced(dense),
                 "symbol {symbol:#x} lost its referenced bit after cap truncation"
@@ -249,8 +285,13 @@ mod tests {
         let files = vec![file(1, "java", index)];
         let graph = bind_with_budget(files, &IndexBudget::unlimited());
 
-        let dense = graph.dense_id_for(symbol).expect("declared symbol must be interned");
-        assert!(!graph.is_symbol_referenced(dense), "fixture sanity: hidden() must have zero callers");
+        let dense = graph
+            .dense_id_for(symbol)
+            .expect("declared symbol must be interned");
+        assert!(
+            !graph.is_symbol_referenced(dense),
+            "fixture sanity: hidden() must have zero callers"
+        );
         assert_eq!(
             graph.is_definitely_dead_code(dense),
             Some(true),
@@ -270,7 +311,8 @@ mod tests {
     /// Unlike that signature test, kind must NOT be dropped under budget
     /// pressure -- it must behave like visibility, not like signatures.
     #[test]
-    fn declaration_kind_is_retained_end_to_end_through_the_real_extraction_to_csr_pipeline_regardless_of_budget_pressure() {
+    fn declaration_kind_is_retained_end_to_end_through_the_real_extraction_to_csr_pipeline_regardless_of_budget_pressure(
+    ) {
         use crate::graph::extract::local_index::{Declaration, DeclarationKind};
 
         fn field_decl(name: &str, file_id: u32, local: u32) -> Declaration {
@@ -291,27 +333,49 @@ mod tests {
         index.declarations.push(field_decl("count", 1, 0));
         index.declarations.push(method_decl("hidden", 1, 1, None));
 
-        let unlimited_graph = bind_with_budget(vec![file(1, "java", index)], &IndexBudget::unlimited());
-        assert_eq!(unlimited_graph.completeness(), AnalysisCompleteness::Complete);
-        let field_dense = unlimited_graph.dense_id_for(field_symbol).expect("field must be interned");
-        let method_dense = unlimited_graph.dense_id_for(method_symbol).expect("method must be interned");
+        let unlimited_graph =
+            bind_with_budget(vec![file(1, "java", index)], &IndexBudget::unlimited());
+        assert_eq!(
+            unlimited_graph.completeness(),
+            AnalysisCompleteness::Complete
+        );
+        let field_dense = unlimited_graph
+            .dense_id_for(field_symbol)
+            .expect("field must be interned");
+        let method_dense = unlimited_graph
+            .dense_id_for(method_symbol)
+            .expect("method must be interned");
         assert_eq!(
             unlimited_graph.kind_for(field_dense),
             Some(DeclarationKind::Field),
             "a Field declaration's kind must survive end-to-end from LocalIndex.declarations \
              through the builder into a real CodeGraph"
         );
-        assert_eq!(unlimited_graph.kind_for(method_dense), Some(DeclarationKind::Method));
+        assert_eq!(
+            unlimited_graph.kind_for(method_dense),
+            Some(DeclarationKind::Method)
+        );
 
         let mut index_for_exceeded = LocalIndex::new();
-        index_for_exceeded.declarations.push(field_decl("count", 1, 0));
+        index_for_exceeded
+            .declarations
+            .push(field_decl("count", 1, 0));
         let (dup_a, dup_b) = dup_pair();
         let exceeded_graph = bind_with_budget(
-            vec![file(1, "java", index_for_exceeded), file(2, "java", dup_a), file(3, "java", dup_b)],
+            vec![
+                file(1, "java", index_for_exceeded),
+                file(2, "java", dup_a),
+                file(3, "java", dup_b),
+            ],
             &IndexBudget::new(0, 5),
         );
-        assert_eq!(exceeded_graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
-        let field_dense_exceeded = exceeded_graph.dense_id_for(field_symbol).expect("field must be interned");
+        assert_eq!(
+            exceeded_graph.completeness(),
+            AnalysisCompleteness::IndexBudgetExceeded
+        );
+        let field_dense_exceeded = exceeded_graph
+            .dense_id_for(field_symbol)
+            .expect("field must be interned");
         assert_eq!(
             exceeded_graph.kind_for(field_dense_exceeded),
             Some(DeclarationKind::Field),
@@ -323,7 +387,9 @@ mod tests {
     fn solo_declared_symbol_with_signature() -> LocalIndex {
         let mut index = LocalIndex::new();
         index.declarations.push(method_decl("solo", 1, 0, None));
-        index.signatures.insert(make_symbol_id(1, 0), "solo()".to_string());
+        index
+            .signatures
+            .insert(make_symbol_id(1, 0), "solo()".to_string());
         index
     }
 
@@ -343,11 +409,16 @@ mod tests {
     /// over budget while "solo" itself is never even referenced.
     #[test]
     fn signatures_are_present_when_budget_is_not_exceeded_and_dropped_when_it_is() {
-        let unlimited_graph =
-            bind_with_budget(vec![file(1, "java", solo_declared_symbol_with_signature())], &IndexBudget::unlimited());
+        let unlimited_graph = bind_with_budget(
+            vec![file(1, "java", solo_declared_symbol_with_signature())],
+            &IndexBudget::unlimited(),
+        );
         let dense = unlimited_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
         assert_eq!(unlimited_graph.signature_for(dense), Some("solo()"));
-        assert_eq!(unlimited_graph.completeness(), AnalysisCompleteness::Complete);
+        assert_eq!(
+            unlimited_graph.completeness(),
+            AnalysisCompleteness::Complete
+        );
 
         let (dup_a, dup_b) = dup_pair();
         let exceeded_graph = bind_with_budget(
@@ -358,7 +429,10 @@ mod tests {
             ],
             &IndexBudget::new(0, 5),
         );
-        assert_eq!(exceeded_graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+        assert_eq!(
+            exceeded_graph.completeness(),
+            AnalysisCompleteness::IndexBudgetExceeded
+        );
         let dense = exceeded_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
         assert_eq!(
             exceeded_graph.signature_for(dense),
@@ -379,11 +453,16 @@ mod tests {
     fn strongest_dead_code_tier_is_suppressed_regardless_of_completeness() {
         fn never_called_file() -> LocalIndex {
             let mut index = LocalIndex::new();
-            index.declarations.push(method_decl("neverCalled", 1, 0, None));
+            index
+                .declarations
+                .push(method_decl("neverCalled", 1, 0, None));
             index
         }
 
-        let complete_graph = bind_with_budget(vec![file(1, "java", never_called_file())], &IndexBudget::unlimited());
+        let complete_graph = bind_with_budget(
+            vec![file(1, "java", never_called_file())],
+            &IndexBudget::unlimited(),
+        );
         let dense = complete_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
         assert_eq!(
             complete_graph.is_definitely_dead_code(dense),
@@ -394,7 +473,11 @@ mod tests {
 
         let (dup_a, dup_b) = dup_pair();
         let exceeded_graph = bind_with_budget(
-            vec![file(1, "java", never_called_file()), file(2, "java", dup_a), file(3, "java", dup_b)],
+            vec![
+                file(1, "java", never_called_file()),
+                file(2, "java", dup_a),
+                file(3, "java", dup_b),
+            ],
             &IndexBudget::new(0, 5),
         );
         let dense = exceeded_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
@@ -411,13 +494,21 @@ mod tests {
     #[test]
     fn completeness_reports_the_real_build_state() {
         let (dup_a, dup_b) = dup_pair();
-        let complete =
-            bind_with_budget(vec![file(2, "java", dup_a), file(3, "java", dup_b)], &IndexBudget::unlimited());
+        let complete = bind_with_budget(
+            vec![file(2, "java", dup_a), file(3, "java", dup_b)],
+            &IndexBudget::unlimited(),
+        );
         assert_eq!(complete.completeness(), AnalysisCompleteness::Complete);
 
         let (dup_a, dup_b) = dup_pair();
-        let exceeded = bind_with_budget(vec![file(2, "java", dup_a), file(3, "java", dup_b)], &IndexBudget::new(0, 5));
-        assert_eq!(exceeded.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+        let exceeded = bind_with_budget(
+            vec![file(2, "java", dup_a), file(3, "java", dup_b)],
+            &IndexBudget::new(0, 5),
+        );
+        assert_eq!(
+            exceeded.completeness(),
+            AnalysisCompleteness::IndexBudgetExceeded
+        );
     }
 
     /// Dual-review defect D3: `bind_with_budget_and_completeness` is the
@@ -439,7 +530,8 @@ mod tests {
             vec![file(1, "java", solo), file(2, "java", caller)]
         };
 
-        let complete_graph = bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), true);
+        let complete_graph =
+            bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), true);
         let complete_ref = complete_graph
             .references()
             .iter()
@@ -448,7 +540,8 @@ mod tests {
         let complete_candidate = &complete_graph.candidates_for(complete_ref)[0];
         assert_eq!(complete_candidate.confidence(), Confidence::Exact);
 
-        let partial_graph = bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), false);
+        let partial_graph =
+            bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), false);
         let partial_ref = partial_graph
             .references()
             .iter()

@@ -23,6 +23,7 @@ from code_indexer.server.services.query_admission_gate import (
 )
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.config import write_json_atomic
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
@@ -1542,8 +1543,7 @@ def _append_provider_to_config(repo_path: str, provider_name: str) -> bool:
         if provider_name not in existing:
             existing.append(provider_name)
         config_data["embedding_providers"] = existing
-        with open(config_path, "w") as f:
-            json.dump(config_data, f)
+        write_json_atomic(config_path, config_data)
         return True
     except Exception as exc:
         logger.warning("_append_provider_to_config failed for %s: %s", config_path, exc)
@@ -1572,8 +1572,7 @@ def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
         if provider_name in existing:
             existing.remove(provider_name)
             config_data["embedding_providers"] = existing
-            with open(config_path, "w") as f:
-                json.dump(config_data, f)
+            write_json_atomic(config_path, config_data)
     except Exception as exc:
         logger.warning(
             "_remove_provider_from_config failed for %s: %s", config_path, exc

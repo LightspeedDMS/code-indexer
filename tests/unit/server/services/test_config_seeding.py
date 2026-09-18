@@ -135,7 +135,7 @@ class TestConfigSeedingErrorHandling:
         config_file.write_text(original_content)
 
         with patch(
-            "code_indexer.server.services.config_seeding.os.replace",
+            "code_indexer.config.os.replace",
             side_effect=OSError("rename failed"),
         ):
             seed_provider_config(str(tmp_path))
@@ -153,7 +153,7 @@ class TestConfigSeedingErrorHandling:
         (ci_dir / "config.json").write_text(json.dumps({"voyage_ai": {"timeout": 10}}))
 
         with patch(
-            "code_indexer.server.services.config_seeding.os.replace",
+            "code_indexer.config.os.replace",
             side_effect=OSError("rename failed"),
         ):
             seed_provider_config(str(tmp_path))

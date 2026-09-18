@@ -8,6 +8,7 @@ except ImportError:
 import json
 import logging
 from pathlib import Path
+from code_indexer.config import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,7 @@ def update_scip_db_version(config_path: Path, version: int) -> None:
 
     # Write back to file
     try:
-        with open(config_path, "w") as f:
-            json.dump(config_data, f, indent=2)
+        write_json_atomic(config_path, config_data, indent=2)
     except OSError as e:
         logger.error(f"Failed to write SCIP DB version to {config_path}: {e}")
         raise

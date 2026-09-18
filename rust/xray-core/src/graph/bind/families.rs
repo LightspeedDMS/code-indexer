@@ -29,6 +29,17 @@ pub(crate) struct TypeIndex {
     /// Bare names of every type declared as an INTERFACE anywhere in the
     /// repo.
     interface_names: HashSet<String>,
+    /// Bare type name -> one unambiguous top-level private-access domain.
+    /// Omitted when duplicate bare names disagree, so callers retain edges.
+    top_levels: HashMap<String, String>,
+    /// N1 (#1873/#1875 second-review rework): bare names of every type
+    /// whose recorded superclass/`implements` evidence is known to be
+    /// INCOMPLETE (aggregated from every file's own
+    /// `LocalIndex::incomplete_supertypes`). `apply_super_class_narrowing`
+    /// (narrowing.rs) consults this BEFORE trusting `supertypes_of` -- an
+    /// incomplete set may be missing the real supertype entirely, so
+    /// narrowing on it must be skipped, not just when the set is empty.
+    incomplete_supertype_names: HashSet<String>,
 }
 
 impl TypeIndex {
@@ -39,21 +50,74 @@ impl TypeIndex {
         let mut direct_children: HashMap<String, Vec<String>> = HashMap::new();
         let mut direct_parents: HashMap<String, Vec<String>> = HashMap::new();
         let mut interface_names: HashSet<String> = HashSet::new();
+        let mut incomplete_supertype_names: HashSet<String> = HashSet::new();
         for file in files {
             for name in &file.index.interface_names {
                 interface_names.insert(name.clone());
             }
             for edge in &file.index.inheritance {
-                direct_children.entry(edge.supertype_name.clone()).or_default().push(edge.subtype_name.clone());
-                direct_parents.entry(edge.subtype_name.clone()).or_default().push(edge.supertype_name.clone());
+                direct_children
+                    .entry(edge.supertype_name.clone())
+                    .or_default()
+                    .push(edge.subtype_name.clone());
+                direct_parents
+                    .entry(edge.subtype_name.clone())
+                    .or_default()
+                    .push(edge.supertype_name.clone());
+            }
+            for name in &file.index.incomplete_supertypes {
+                incomplete_supertype_names.insert(name.clone());
             }
         }
-        TypeIndex { direct_children, direct_parents, interface_names }
+        let mut top_levels = HashMap::new();
+        let mut ambiguous_top_levels = HashSet::new();
+        for file in files {
+            for nesting in &file.index.type_nesting {
+                if ambiguous_top_levels.contains(&nesting.type_name) {
+                    continue;
+                }
+                match top_levels.get(&nesting.type_name) {
+                    Some(existing) if existing != &nesting.top_level_type => {
+                        top_levels.remove(&nesting.type_name);
+                        ambiguous_top_levels.insert(nesting.type_name.clone());
+                    }
+                    Some(_) => {}
+                    None => {
+                        top_levels
+                            .insert(nesting.type_name.clone(), nesting.top_level_type.clone());
+                    }
+                }
+            }
+        }
+        TypeIndex {
+            direct_children,
+            direct_parents,
+            interface_names,
+            top_levels,
+            incomplete_supertype_names,
+        }
     }
 
     /// True when `type_name` is a known interface anywhere in the repo.
     pub(crate) fn is_interface(&self, type_name: &str) -> bool {
         self.interface_names.contains(type_name)
+    }
+
+    /// The Java top-level declaration sharing this type's private-access
+    /// domain, if the extractor can establish it without ambiguity.
+    pub(crate) fn top_level_of(&self, type_name: &str) -> Option<&str> {
+        self.top_levels.get(type_name).map(String::as_str)
+    }
+
+    /// N1 (#1873/#1875 second-review rework): true when `type_name`'s
+    /// recorded superclass/`implements` evidence is known to be INCOMPLETE
+    /// -- a `superclass`/type-list entry existed syntactically somewhere in
+    /// the repo for this type but could not be resolved to a name. The sole
+    /// consumer, `apply_super_class_narrowing`, must treat this as "do not
+    /// trust `supertypes_of` for this type", regardless of whether that set
+    /// happens to be non-empty from some OTHER, correctly-resolved edge.
+    pub(crate) fn has_incomplete_supertype_evidence(&self, type_name: &str) -> bool {
+        self.incomplete_supertype_names.contains(type_name)
     }
 
     /// AC1 "engine query": every type that directly or transitively
@@ -69,10 +133,13 @@ impl TypeIndex {
     /// anti-unbounded-loop).
     pub(crate) fn implementors_of(&self, type_name: &str) -> HashSet<String> {
         let mut visited: HashSet<String> = HashSet::from([type_name.to_string()]);
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::from([type_name.to_string()]);
+        let mut queue: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([type_name.to_string()]);
         let mut result = HashSet::new();
         while let Some(current) = queue.pop_front() {
-            let Some(children) = self.direct_children.get(&current) else { continue };
+            let Some(children) = self.direct_children.get(&current) else {
+                continue;
+            };
             for child in children {
                 if visited.insert(child.clone()) {
                     result.insert(child.clone());
@@ -101,10 +168,13 @@ impl TypeIndex {
     /// cannot loop or grow without bound relative to that finite count.
     pub(crate) fn supertypes_of(&self, type_name: &str) -> HashSet<String> {
         let mut visited: HashSet<String> = HashSet::from([type_name.to_string()]);
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::from([type_name.to_string()]);
+        let mut queue: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([type_name.to_string()]);
         let mut result = HashSet::new();
         while let Some(current) = queue.pop_front() {
-            let Some(parents) = self.direct_parents.get(&current) else { continue };
+            let Some(parents) = self.direct_parents.get(&current) else {
+                continue;
+            };
             for parent in parents {
                 if visited.insert(parent.clone()) {
                     result.insert(parent.clone());
@@ -156,7 +226,11 @@ impl TypeIndex {
         let mut result = Vec::new();
         let mut truncated = false;
         for decl in pool {
-            if !decl.enclosing_type.as_deref().is_some_and(|t| implementors.contains(t)) {
+            if !decl
+                .enclosing_type
+                .as_deref()
+                .is_some_and(|t| implementors.contains(t))
+            {
                 continue;
             }
             if result.len() >= MAX_FAMILY_SIZE {
@@ -180,10 +254,12 @@ pub(crate) const MAX_FAMILY_SIZE: usize = 64;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::extract::local_index::{DeclarationKind, InheritanceKind, InheritanceRecord, LocalIndex};
-    use crate::graph::identity::make_symbol_id;
     use super::super::name_index::DeclInfo;
+    use super::*;
+    use crate::graph::extract::local_index::{
+        DeclarationKind, InheritanceKind, InheritanceRecord, LocalIndex, Visibility,
+    };
+    use crate::graph::identity::make_symbol_id;
 
     fn method_decl_info(file_id: u32, local: u32, enclosing_type: &str) -> DeclInfo {
         DeclInfo {
@@ -196,11 +272,17 @@ mod tests {
             param_types: Vec::new(),
             is_varargs: false,
             return_type: None,
+            visibility: Visibility::Unknown,
         }
     }
 
     fn edge(subtype: &str, supertype: &str, kind: InheritanceKind) -> InheritanceRecord {
-        InheritanceRecord { kind, subtype_name: subtype.to_string(), supertype_name: supertype.to_string(), line: 1 }
+        InheritanceRecord {
+            kind,
+            subtype_name: subtype.to_string(),
+            supertype_name: supertype.to_string(),
+            line: 1,
+        }
     }
 
     /// AC1: `overrides_of` filters an EXISTING same-named-method pool down
@@ -233,7 +315,10 @@ mod tests {
         let (overrides, truncated) = index.overrides_of("Repo", &pool);
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].enclosing_type.as_deref(), Some("Impl"));
-        assert!(!truncated, "a family well under the cap must never report truncation");
+        assert!(
+            !truncated,
+            "a family well under the cap must never report truncation"
+        );
     }
 
     /// Shared fixture for the `MAX_FAMILY_SIZE` boundary tests below:
@@ -243,8 +328,10 @@ mod tests {
     fn single_interface_family_fixture(count: usize) -> (TypeIndex, Vec<DeclInfo>) {
         const SHARED_FILE_ID: u32 = 1;
         let implementor_names: Vec<String> = (0..count).map(|i| format!("Impl{i}")).collect();
-        let edges: Vec<InheritanceRecord> =
-            implementor_names.iter().map(|name| edge(name, "Repo", InheritanceKind::Implements)).collect();
+        let edges: Vec<InheritanceRecord> = implementor_names
+            .iter()
+            .map(|name| edge(name, "Repo", InheritanceKind::Implements))
+            .collect();
         let files = vec![file_with(SHARED_FILE_ID, edges, vec!["Repo".to_string()])];
         let index = TypeIndex::build(&files);
         let pool: Vec<DeclInfo> = implementor_names
@@ -271,8 +358,15 @@ mod tests {
     fn overrides_of_caps_family_size_and_reports_truncation() {
         let (index, pool) = single_interface_family_fixture(MAX_FAMILY_SIZE + 5);
         let (overrides, truncated) = index.overrides_of("Repo", &pool);
-        assert_eq!(overrides.len(), MAX_FAMILY_SIZE, "result must be capped at exactly MAX_FAMILY_SIZE");
-        assert!(truncated, "exceeding the cap must be reported, never silently swallowed");
+        assert_eq!(
+            overrides.len(),
+            MAX_FAMILY_SIZE,
+            "result must be capped at exactly MAX_FAMILY_SIZE"
+        );
+        assert!(
+            truncated,
+            "exceeding the cap must be reported, never silently swallowed"
+        );
     }
 
     /// Companion to the cap test: exactly `MAX_FAMILY_SIZE` matches (not
@@ -283,14 +377,25 @@ mod tests {
         let (index, pool) = single_interface_family_fixture(MAX_FAMILY_SIZE);
         let (overrides, truncated) = index.overrides_of("Repo", &pool);
         assert_eq!(overrides.len(), MAX_FAMILY_SIZE);
-        assert!(!truncated, "exactly-at-cap must not be reported as truncated");
+        assert!(
+            !truncated,
+            "exactly-at-cap must not be reported as truncated"
+        );
     }
 
-    fn file_with(file_id: u32, inheritance: Vec<InheritanceRecord>, interface_names: Vec<String>) -> FileForBind {
+    fn file_with(
+        file_id: u32,
+        inheritance: Vec<InheritanceRecord>,
+        interface_names: Vec<String>,
+    ) -> FileForBind {
         let mut index = LocalIndex::new();
         index.inheritance = inheritance;
         index.interface_names = interface_names;
-        FileForBind { file_id, language: "java".to_string(), index }
+        FileForBind {
+            file_id,
+            language: "java".to_string(),
+            index,
+        }
     }
 
     /// AC1: a class that `implements` an interface is a direct
@@ -300,7 +405,10 @@ mod tests {
     fn implementors_of_finds_direct_and_transitive_implementors() {
         let files = vec![file_with(
             1,
-            vec![edge("C", "I", InheritanceKind::Implements), edge("D", "C", InheritanceKind::Extends)],
+            vec![
+                edge("C", "I", InheritanceKind::Implements),
+                edge("D", "C", InheritanceKind::Extends),
+            ],
             vec!["I".to_string()],
         )];
         let index = TypeIndex::build(&files);
@@ -336,7 +444,10 @@ mod tests {
         )];
         let index = TypeIndex::build(&files);
         let implementors = index.implementors_of("I");
-        assert_eq!(implementors, ["J", "K", "C"].into_iter().map(String::from).collect());
+        assert_eq!(
+            implementors,
+            ["J", "K", "C"].into_iter().map(String::from).collect()
+        );
     }
 
     /// AC1 + Rule 14: a malformed/adversarial CYCLIC inheritance edge set
@@ -348,7 +459,10 @@ mod tests {
     fn implementors_of_terminates_on_a_cyclic_edge_set() {
         let files = vec![file_with(
             1,
-            vec![edge("B", "A", InheritanceKind::Extends), edge("A", "B", InheritanceKind::Extends)],
+            vec![
+                edge("B", "A", InheritanceKind::Extends),
+                edge("A", "B", InheritanceKind::Extends),
+            ],
             Vec::new(),
         )];
         let index = TypeIndex::build(&files);
@@ -365,7 +479,10 @@ mod tests {
     fn supertypes_of_finds_direct_and_transitive_supertypes() {
         let files = vec![file_with(
             1,
-            vec![edge("C", "I", InheritanceKind::Implements), edge("D", "C", InheritanceKind::Extends)],
+            vec![
+                edge("C", "I", InheritanceKind::Implements),
+                edge("D", "C", InheritanceKind::Extends),
+            ],
             vec!["I".to_string()],
         )];
         let index = TypeIndex::build(&files);
@@ -392,7 +509,10 @@ mod tests {
     fn supertypes_of_terminates_on_a_cyclic_edge_set() {
         let files = vec![file_with(
             1,
-            vec![edge("B", "A", InheritanceKind::Extends), edge("A", "B", InheritanceKind::Extends)],
+            vec![
+                edge("B", "A", InheritanceKind::Extends),
+                edge("A", "B", InheritanceKind::Extends),
+            ],
             Vec::new(),
         )];
         let index = TypeIndex::build(&files);

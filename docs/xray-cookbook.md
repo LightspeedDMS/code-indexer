@@ -7,7 +7,7 @@ in `xray-core` (`dynlib.rs`) proves both that each template compiles and runs
 correctly against a real fixture AND that this doc copy has not drifted from
 its file. The current MCP and REST evaluator contract is Rust-based and is
 documented by the live tool documentation for
-[xray_search](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
+`get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/xray_search.md')`.
 The examples below are request shapes and contract guidance; the templates in
 "Template library: single-file mode" and "Template library: graph mode" below
 are ready-to-adapt starting points for each execution mode.
@@ -632,16 +632,17 @@ it when the result shape is understood. Include and exclude patterns,
 language-specific paths, and `context_lines` can further focus the search.
 
 The full MCP schema, evaluator rules, output fields, timeout behavior, and
-security restrictions are maintained in the [xray_search tool
-documentation](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
+security restrictions are maintained in the xray_search tool documentation:
+`get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/xray_search.md')`.
 
 ## REST field names
 
 The REST endpoint `POST /api/xray/search` exposes the same single-file
 capability but retains its REST field names. Send `driver_regex` instead of
 the MCP `pattern`, and `max_files` instead of the MCP `max_results`. Do not
-copy REST field names into an MCP request. Refer to the [REST section of the
-live xray_search contract](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md)
+copy REST field names into an MCP request. Refer to the REST section of the
+live xray_search contract,
+`get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/xray_search.md')`,
 when building an HTTP request.
 
 ## Graph mode
@@ -684,8 +685,8 @@ their required function contracts must not be mixed.
 ## Related documentation
 
 - For the engine architecture, its two execution modes, and the graph node/edge model: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-architecture.md')` (X-Ray Architecture).
-- [X-Ray Sandbox](xray-sandbox.md) describes the retained internal Python
-  module and its non-contract status.
-- [xray_search MCP contract](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md)
+- `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-sandbox.md')`
+  describes the retained internal Python module and its non-contract status.
+- `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/xray_search.md')`
   defines the single-file request and evaluator schema.
 - For graph extraction, reduction, and completeness semantics: `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md')` (analyze_graph MCP contract).

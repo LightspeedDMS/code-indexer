@@ -6,12 +6,10 @@ before each cidx index launch. Server values always win.
 
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.config import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -85,25 +83,10 @@ def seed_provider_config(repo_path: str) -> None:
         temporal_val = _resolve_dot_path(server_values, dot_path)
         _set_dot_path(disk_config, dot_path, temporal_val)
 
-    _atomic_write(config_file, disk_config)
-
-
-def _atomic_write(config_file: Path, data: Dict[str, Any]) -> None:
-    """Write data to config_file atomically via a temp file + rename."""
-    parent_dir = config_file.parent
-    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(parent_dir), suffix=".tmp")
     try:
-        with os.fdopen(tmp_fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            nfs_safe_fsync(f.fileno())
-        os.replace(tmp_name, str(config_file))
-    except Exception as exc:
+        write_json_atomic(config_file, disk_config, indent=2)
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Config seeding: atomic write failed: %s", exc)
-        try:
-            os.unlink(tmp_name)
-        except Exception as cleanup_exc:
-            logger.debug("Config seeding: cleanup of temp file failed: %s", cleanup_exc)
 
 
 def _get_server_provider_values() -> Dict[str, Any]:

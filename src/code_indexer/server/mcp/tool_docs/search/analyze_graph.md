@@ -103,7 +103,62 @@ Find symbols with no reference anywhere in the repository (dead code):
 
 ## Indexing scope vs finding scope
 
-**Indexing covers the WHOLE repository; findings are restricted only by what your evaluator chooses to report.** `include_patterns`/`exclude_patterns` narrow which files are read into the graph (all of them, by default) -- they do NOT narrow which files can appear as the *target* of a resolved reference. A reference from an included file to a symbol declared in an excluded file resolves as "external to the graph", which is a real, meaningful signal your evaluator can act on; it is never silently dropped.
+**`include_patterns`/`exclude_patterns` DO narrow which files are read into the graph.** By default (both empty) indexing covers the whole repository; passing `include_patterns: ["*.java"]` restricts indexing to just the matching files (this is the recommended usage on a mixed-language repo -- see "Language support" above: an empty `include_patterns` on such a repo pulls in every non-Java file too, inflating `files_with_unsupported_language` and making `fact_graph_complete: true` unreachable).
+
+What patterns do NOT narrow is which files can appear as the *target* of a resolved reference. A reference from an included file to a symbol declared in an EXCLUDED file still resolves as "external to the graph", which is a real, meaningful signal your evaluator can act on; it is never silently dropped. So narrowing `include_patterns` shrinks what gets indexed and searched, but a symbol outside that scope can still be correctly identified as an external dependency rather than vanishing from the analysis.
+
+## Glob Pattern Semantics
+
+`include_patterns`/`exclude_patterns` use the exact same selector as `regex_search` and
+`xray_search` (`PathPatternMatcher`, gitignore-style globs) -- a pattern produces the same file set
+here as it would for either of those tools:
+
+- `*` does not cross `/` when the pattern has a trailing suffix -- `src/*.java` matches only
+  `src/Foo.java`, never `src/sub/Foo.java`. Same for both `include_patterns` and
+  `exclude_patterns`.
+- A BARE trailing `*` with no suffix (e.g. `src/*`) behaves DIFFERENTLY depending on which list
+  it is used in (verified directly against the shared selector, both directions):
+  - As `include_patterns`, `src/*` matches only files directly under `src/` by name --
+    `src/Foo.java`, never `src/sub/Foo.java` or `src/sub/sub2/Foo.java` (ripgrep `-g` reference
+    semantics: a directory match never implies "and everything under it" for an include).
+  - As `exclude_patterns`, `src/*` instead excludes the WHOLE subtree -- `src/Foo.java`,
+    `src/sub/Foo.java`, and `src/sub/sub2/Foo.java` are all dropped (gitignore containment
+    semantics: excluding a directory excludes everything inside it).
+  Use `src/**` to deliberately INCLUDE the whole subtree (matches at every depth under `src/`,
+  including direct children).
+- A pattern with no `/` at all (e.g. `*.java`) matches the basename at any depth: `Foo.java`,
+  `src/Foo.java`, and `src/sub/Foo.java` all match. Same for both `include_patterns` and
+  `exclude_patterns`.
+- A trailing-slash directory marker (e.g. `src/tests/`) selects that directory's CONTENTS in
+  BOTH `include_patterns` and `exclude_patterns` -- including when the marker itself also
+  carries a wildcard (e.g. `src/*/` selects files under any direct subdirectory of `src/`,
+  never a file directly in `src/` itself; `*/tests/` selects any `tests/` directory's contents
+  at any depth). See `regex_search`'s tool docs for the full trailing-slash / leading `*/`
+  reference -- the underlying matcher is shared, so those rules apply here unchanged.
+- Brace groups are supported (e.g. `*.{java,kt}`), capped at 64 expanded variants per pattern.
+
+See `regex_search`'s tool docs for the full semantics reference (leading `*/` any-depth rewriting,
+trailing-`/` directory markers -- root-anchored only when MULTI-segment, e.g. `src/main/`; a
+SINGLE-segment marker like `docs/` or `tests*/` matches at any depth -- bare-token ambiguity
+handling) -- the underlying matcher is shared, so those rules apply here unchanged.
+
+## Running a stored graph pattern
+
+`pattern_name` resolves a previously stored evaluator from the X-Ray pattern library instead of inlining `evaluator_code` (mutually exclusive with it). Resolution tries the REPOSITORY-SPECIFIC scope first (`cidx-meta/xray-patterns/{repository_alias}/{pattern_name}.yaml`), then falls back to the cross-repo `__any__` scope (`cidx-meta/xray-patterns/__any__/{pattern_name}.yaml`) -- a repo-specific pattern always takes precedence over a same-named `__any__` pattern.
+
+A stored pattern declares its own `execution_mode` (`"legacy"` for `xray_search`-style single-file evaluators, or `"graph"` for the two-function `collect_facts`/`analyze_graph` contract this tool requires). `analyze_graph` checks the declared mode BEFORE preparing the evaluator code; a pattern authored for `xray_search` cannot be run here.
+
+`pattern_params` supplies optional typed overrides for the pattern's declared parameters, using the exact same substitution semantics `xray_search` uses for its own stored patterns: each resolved value is injected as a Rust `const` declaration prepended to the evaluator source before compilation. Ignored unless `pattern_name` is also supplied.
+
+Error codes specific to pattern resolution:
+
+- `mutually_exclusive_params` -- both `pattern_name` and `evaluator_code` were supplied; provide exactly one.
+- `pattern_mode_mismatch` -- the stored pattern's declared `execution_mode` is not `"graph"` (this includes a legacy pattern predating `execution_mode`, which is treated as non-graph).
+- `pattern_not_found` -- `pattern_name` does not exist in either the repository-specific scope or `__any__`.
+- `invalid_pattern_params` -- `pattern_params` was supplied as a TRUTHY, non-empty JSON value that is not an object (e.g. a non-empty array like `["a"]` or a non-empty string like `"foo"`); rejected before any per-parameter validation runs, so this never surfaces alongside `unknown_parameter`/`parameter_type_mismatch`. An EMPTY array (`[]`), empty string (`""`), or any other falsy value is indistinguishable from omitting `pattern_params` entirely -- it is treated as absent (defaults to no overrides) and never reaches this check. Response: `{"error": "invalid_pattern_params", "message": "invalid_pattern_params: pattern_params must be a dict, got <type>"}`.
+- `path_traversal_rejected` -- `repository_alias` (used as the pattern-resolution scope) or `pattern_name` contains `/`, `\`, or `..`. Checked before the filesystem lookup, so it takes priority over `pattern_not_found` for the same request. Response: `{"error": "path_traversal_rejected", "message": "path_traversal_rejected: <field> '<value>' contains path traversal sequences"}`, where `<field>` is `repo_alias` or `pattern_name`.
+
+(`unknown_parameter` and `parameter_type_mismatch` can also surface from `pattern_params` validation, mirroring `xray_search`'s own stored-pattern parameter errors.)
 
 ## Two-function evaluator contract (ADR-001)
 
@@ -170,7 +225,7 @@ pub struct ReduceFinding {
 | `g.dense_id_for(symbol)` | `(u64) -> Option<u32>` | Reverse lookup from a real global `SymbolId` to its dense id. |
 | `g.resolve_string(string_id)` | `(u32) -> Option<&str>` | Interned string lookup. |
 | `g.is_symbol_referenced(dense_id)` | `(u32) -> bool` | True if ANY inbound edge exists, regardless of graph completeness. |
-| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = the symbol has an inbound reference edge. `Some(true)` = unreferenced, its declaration kind is `Method` or `Type`, and its visibility is provably `Private`. `None` = every other case: `Public`, `Protected`, or `Unknown` visibility, and every `Field`, `Constant`, `Package`, or unknown-kind symbol. **This predicate does NOT consult `fact_graph_complete`** -- it returns `Some(true)` on an incomplete graph exactly as it would on a complete one. Field and constant reads therefore cannot produce `Some(true)`: those declaration kinds are outside the predicate's allowlist, regardless of whether their reads are represented by graph edges. A `Some(true)` for an allowed private `Method` or `Type` can still be falsified by reflection, JNI, dependency injection, or other runtime behavior invisible to the graph. |
+| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = the symbol has an inbound reference edge. `Some(true)` = unreferenced, its declaration kind is `Method` or `Type`, and its visibility is provably `Private`. `None` = every other case: `Public`, `Protected`, or `Unknown` visibility, and every `Field`, `Constant`, `Package`, or unknown-kind symbol. Java extraction creates inbound edges for direct calls, method references, `new` expressions, explicit `this(...)`/`super(...)` constructor invocations, `Type::new`, and annotation usages (an edge to the annotation type's declaration); it preserves plausible overload and varargs targets. `super` calls bind only to a KNOWN, recorded superclass edge; the conservative "no evidence" fallback applies only when a class has NEITHER an `extends` NOR an `implements` clause (e.g. implicit `java.lang.Object`, never tracked) -- a class with no `extends` but a real `implements` clause still narrows against its recorded interfaces. With neither clause, `super.m()` falls into the same "no supertype evidence" case as a genuine extraction gap, so it can still self-loop when the enclosing type's own method is the sole matching candidate. Java-private candidates from a different known top-level type are excluded. **This predicate does NOT consult `fact_graph_complete`** -- it returns `Some(true)` on an incomplete graph exactly as it would on a complete one. Field and constant reads therefore cannot produce `Some(true)`: those declaration kinds are outside the predicate's allowlist, regardless of whether their reads are represented by graph edges. A `Some(true)` for an allowed private `Method` or `Type` can still be falsified by reflection, JNI, dependency injection, or other runtime behavior invisible to the graph. |
 | `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature line, for reporting. |
 
 ### FactsHandle reference

@@ -14,7 +14,9 @@
 
 use super::families::TypeIndex;
 use super::name_index::RepoNameIndex;
-use crate::graph::extract::local_index::{DeclarationKind, NameScope, ReceiverExpr, TypedNameRecord};
+use crate::graph::extract::local_index::{
+    DeclarationKind, NameScope, ReceiverExpr, TypedNameRecord,
+};
 use crate::graph::identity::SymbolId;
 use std::collections::HashMap;
 
@@ -38,10 +40,16 @@ impl FileTypedNames {
         for record in typed_names {
             match &record.scope {
                 NameScope::Local { enclosing_method } => {
-                    locals.insert((*enclosing_method, record.name.clone()), record.declared_type.clone());
+                    locals.insert(
+                        (*enclosing_method, record.name.clone()),
+                        record.declared_type.clone(),
+                    );
                 }
                 NameScope::Field { enclosing_type } => {
-                    fields.insert((enclosing_type.clone(), record.name.clone()), record.declared_type.clone());
+                    fields.insert(
+                        (enclosing_type.clone(), record.name.clone()),
+                        record.declared_type.clone(),
+                    );
                 }
             }
         }
@@ -54,14 +62,21 @@ impl FileTypedNames {
     /// same-named field), falling back to a FIELD binding on
     /// `enclosing_type`. `None` when neither substrate has evidence --
     /// never a guessed type.
-    pub(crate) fn lookup(&self, enclosing_method: Option<SymbolId>, enclosing_type: Option<&str>, name: &str) -> Option<String> {
+    pub(crate) fn lookup(
+        &self,
+        enclosing_method: Option<SymbolId>,
+        enclosing_type: Option<&str>,
+        name: &str,
+    ) -> Option<String> {
         if let Some(enclosing_method) = enclosing_method {
             if let Some(declared_type) = self.locals.get(&(enclosing_method, name.to_string())) {
                 return Some(declared_type.clone());
             }
         }
         let enclosing_type = enclosing_type?;
-        self.fields.get(&(enclosing_type.to_string(), name.to_string())).cloned()
+        self.fields
+            .get(&(enclosing_type.to_string(), name.to_string()))
+            .cloned()
     }
 }
 
@@ -81,10 +96,16 @@ fn return_type_of_method_on_type(
     allowed.insert(type_name.to_string());
     let mut found: Option<&str> = None;
     for decl in name_index.lookup(method_name, DeclarationKind::Method) {
-        if !decl.enclosing_type.as_deref().is_some_and(|t| allowed.contains(t)) {
+        if !decl
+            .enclosing_type
+            .as_deref()
+            .is_some_and(|t| allowed.contains(t))
+        {
             continue;
         }
-        let Some(return_type) = decl.return_type.as_deref() else { continue };
+        let Some(return_type) = decl.return_type.as_deref() else {
+            continue;
+        };
         match found {
             None => found = Some(return_type),
             Some(existing) if existing == return_type => {}
@@ -118,18 +139,36 @@ pub(crate) fn resolve_receiver_type(
 ) -> Option<String> {
     let mut current = receiver;
     let mut method_chain: Vec<&str> = Vec::new();
-    while let ReceiverExpr::Chained { method_name, receiver: inner } = current {
+    while let ReceiverExpr::Chained {
+        method_name,
+        receiver: inner,
+    } = current
+    {
         method_chain.push(method_name.as_str());
         current = inner;
     }
     let mut resolved_type = match current {
         ReceiverExpr::None | ReceiverExpr::SelfOrSuper => enclosing_type.map(|t| t.to_string())?,
-        ReceiverExpr::Identifier(name) => typed_names.lookup(enclosing_method, enclosing_type, name)?,
+        // D3: unlike `SelfOrSuper`, a chained call rooted in `super.foo()`
+        // (e.g. `super.foo().bar()`) has no single well-defined base type
+        // here -- `TypeIndex` exposes only the full transitive supertype
+        // SET (`supertypes_of`), not one "the superclass" name, and
+        // guessing one from that set would risk exactly the false
+        // self/wrong-ancestor binding D3 exists to eliminate. Rule 2
+        // (anti-fallback): return `None` (no return-type-chain evidence)
+        // rather than fabricate a base type.
+        ReceiverExpr::Super => return None,
+        ReceiverExpr::Identifier(name) => {
+            typed_names.lookup(enclosing_method, enclosing_type, name)?
+        }
         ReceiverExpr::Other => return None,
-        ReceiverExpr::Chained { .. } => unreachable!("the while loop above strips every Chained layer"),
+        ReceiverExpr::Chained { .. } => {
+            unreachable!("the while loop above strips every Chained layer")
+        }
     };
     for method_name in method_chain.into_iter().rev() {
-        resolved_type = return_type_of_method_on_type(method_name, &resolved_type, name_index, type_index)?;
+        resolved_type =
+            return_type_of_method_on_type(method_name, &resolved_type, name_index, type_index)?;
     }
     Some(resolved_type)
 }
@@ -138,7 +177,9 @@ pub(crate) fn resolve_receiver_type(
 mod tests {
     use super::*;
     use crate::graph::bind::FileForBind;
-    use crate::graph::extract::local_index::{Declaration, DeclarationKind as DK, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord};
+    use crate::graph::extract::local_index::{
+        Declaration, DeclarationKind as DK, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord,
+    };
     use crate::graph::identity::make_symbol_id;
 
     /// AC1: a local/parameter binding must be preferred over a
@@ -151,16 +192,23 @@ mod tests {
             TypedNameRecord {
                 name: "x".to_string(),
                 declared_type: "Local".to_string(),
-                scope: NameScope::Local { enclosing_method: method_symbol },
+                scope: NameScope::Local {
+                    enclosing_method: method_symbol,
+                },
             },
             TypedNameRecord {
                 name: "x".to_string(),
                 declared_type: "Field".to_string(),
-                scope: NameScope::Field { enclosing_type: "Owner".to_string() },
+                scope: NameScope::Field {
+                    enclosing_type: "Owner".to_string(),
+                },
             },
         ];
         let typed_names = FileTypedNames::build(&records);
-        assert_eq!(typed_names.lookup(Some(method_symbol), Some("Owner"), "x"), Some("Local".to_string()));
+        assert_eq!(
+            typed_names.lookup(Some(method_symbol), Some("Owner"), "x"),
+            Some("Local".to_string())
+        );
         // Without a matching local (different method), falls back to the field.
         assert_eq!(
             typed_names.lookup(Some(make_symbol_id(1, 99)), Some("Owner"), "x"),
@@ -189,7 +237,9 @@ mod tests {
         let typed_names = FileTypedNames::build(&[TypedNameRecord {
             name: "obj".to_string(),
             declared_type: "Foo".to_string(),
-            scope: NameScope::Local { enclosing_method: method_symbol },
+            scope: NameScope::Local {
+                enclosing_method: method_symbol,
+            },
         }]);
         let name_index = RepoNameIndex::build(&[]);
         let type_index = TypeIndex::build(&[]);
@@ -215,7 +265,9 @@ mod tests {
     fn resolve_receiver_type_follows_a_chained_call_through_a_declared_return_type() {
         const AUTH_FILE_ID: u32 = 5;
         let mut auth_file = LocalIndex::new();
-        auth_file.declarations.push(method_decl("realm", AUTH_FILE_ID, 0));
+        auth_file
+            .declarations
+            .push(method_decl("realm", AUTH_FILE_ID, 0));
         auth_file.method_owners.push(MethodOwnerRecord {
             method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
             enclosing_type: "Auth".to_string(),
@@ -224,7 +276,11 @@ mod tests {
             method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
             return_type: "Realm".to_string(),
         });
-        let files = vec![FileForBind { file_id: AUTH_FILE_ID, language: "java".to_string(), index: auth_file }];
+        let files = vec![FileForBind {
+            file_id: AUTH_FILE_ID,
+            language: "java".to_string(),
+            index: auth_file,
+        }];
         let name_index = RepoNameIndex::build(&files);
         let type_index = TypeIndex::build(&files);
 
@@ -232,7 +288,9 @@ mod tests {
         let typed_names = FileTypedNames::build(&[TypedNameRecord {
             name: "auth".to_string(),
             declared_type: "Auth".to_string(),
-            scope: NameScope::Local { enclosing_method: method_symbol },
+            scope: NameScope::Local {
+                enclosing_method: method_symbol,
+            },
         }]);
 
         let receiver = ReceiverExpr::Chained {

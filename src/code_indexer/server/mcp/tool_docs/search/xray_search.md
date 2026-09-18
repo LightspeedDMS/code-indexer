@@ -30,13 +30,26 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include (e.g. ["*.java", "*.kt"]). "*" matches a single path segment; use "**" for recursive segment matching. Empty list means include all.'
+      description: >-
+        Glob patterns for files to include (e.g. ["*.java", "*.kt"]). "*"
+        matches a single path segment; use "**" for recursive segment
+        matching. Brace groups supported (e.g. "*.{ts,tsx}"), including
+        nested/multiple groups, capped at 64 expanded variants per
+        pattern. A bare name with no "/" (e.g. "docs") matches that name
+        at any depth AND everything under it; a single-segment trailing
+        "/" (e.g. "docs/") matches identically. A MULTI-segment trailing
+        "/" (e.g. "src/main/") is root-anchored instead: it matches only
+        starting from the repository root, never at any depth. Empty
+        list means include all. See "Glob Pattern Semantics" below.
       default: []
     exclude_patterns:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none.'
+      description: >-
+        Glob patterns for files to exclude (e.g. ["*/test/*"]). Same
+        brace-group and bare-directory semantics as include_patterns.
+        Empty list means exclude none.
       default: []
     path:
       type: string
@@ -165,8 +178,8 @@ Key points:
 | pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
 | evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See "Evaluator API" below. When omitted, the server substitutes a default that produces one finding per Phase 1 hit. |
 | search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
-| include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
-| exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. |
+| include_patterns | list[str] | no | [] | Glob patterns for files to include. Empty means include all. See "Glob Pattern Semantics" below. |
+| exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. Same semantics as include_patterns. |
 | path | str | no | null | Subdirectory restriction within the repo (relative). |
 | case_sensitive | bool | no | true | Phase 1 content driver case sensitivity. |
 | context_lines | int | no | 0 | Lines of context before/after each Phase 1 hit. Range 0..10. |
@@ -179,6 +192,55 @@ Key points:
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
 > **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the renamed fields shown above. When calling the REST API directly, use the original field names.
+
+## Glob Pattern Semantics
+
+`include_patterns`/`exclude_patterns` are gitignore-style globs, normalized identically for both
+`search_target` modes and for indexed and unindexed repositories alike:
+
+- A leading `./` is stripped (`./src/*.ts` behaves like `src/*.ts`).
+- A "bare token" with no `/`, no glob metacharacter, and no `.` (e.g. `docs`, `Makefile`) is
+  ambiguous -- it could be a directory name or an extension-less filename -- so it matches BOTH the
+  name itself at any depth AND everything recursively under it (`**/docs`, `**/docs/**`).
+- A pattern with no `/` at all is never anchored to a directory level, even when it carries a glob
+  metacharacter or a `.` (unlike the bare-token case above, which requires the ABSENCE of both) --
+  `*.java` matches the basename at any depth: `Foo.java`, `src/Foo.java`, and `src/sub/Foo.java` all
+  match.
+- A pattern ending in `/` with exactly one path segment (e.g. `docs/`) behaves IDENTICALLY to the
+  bare token above -- the trailing slash adds no meaning for a single segment.
+- The same any-depth rule applies when that single segment ALSO carries a wildcard (e.g.
+  `tests*/`, `build-*/`, `*.d/`) -- it is never root-anchored: `tests*/` matches `tests/foo.py`
+  (root), `a/tests/foo.py` (nested), and `lib/src/tests_unit/foo.py` (deeply nested, different
+  `tests*` variant) alike, not only files directly under a root-level `tests`-prefixed directory.
+- A pattern ending in `/` with MORE than one path segment (e.g. `src/main/`) is different: it is an
+  explicit, ROOT-ANCHORED directory marker -- unlike every case above, it does NOT match at any
+  depth. `src/main/` matches `src/main` and everything under it starting from the repository root
+  only; `modA/src/main/App.java` (nested under a submodule) is NOT matched. The same rule makes
+  `src/*/` match only files inside a NAMED subdirectory of `src/` (`src/sub/x.java`,
+  `src/sub/sub2/x.java`), never a file directly in `src/` itself (`src/x.java` does NOT match).
+- `*` matches a single path segment; a leading `*/` is rewritten to `**/` (matches at any depth)
+  regardless of how many further `/` the rest of the pattern contains, and regardless of whether the
+  pattern ends in a wildcard or a bare trailing `/` -- `*/tests/*` and `*/tests/` both match
+  `tests/foo.py` (zero segments before `tests`), `src/tests/foo.py` (one segment), and
+  `a/b/tests/foo.py` (two-or-more segments) alike. `**` matches multiple path segments recursively.
+- Brace groups are supported, including nested and multiple groups in one pattern (e.g.
+  `*.{ts,tsx}`), capped at 64 expanded variants per pattern -- exceeding the cap is an invalid
+  pattern (see below), not a silent truncation.
+
+## Invalid Pattern Errors
+
+A malformed `include_patterns`/`exclude_patterns` entry is rejected up front, before evaluator
+validation or any background job is submitted -- it is never silently skipped or allowed to widen
+the search. The response is returned immediately (synchronously, no `job_id`):
+
+```json
+{"error": "include_patterns_invalid", "message": "<reason>"}
+```
+
+(or `exclude_patterns_invalid` for that field). Triggers: the field is present but not a list
+(including falsy-but-not-a-list values like `""` or `0`); a non-string list item (e.g. `[null]`);
+an unbalanced brace group (e.g. `*.{ts,md`); gitignore negation/comment syntax used as a standalone
+pattern (`!*.md`, `#x`); or a brace group expanding to more than 64 variants.
 
 ## Evaluator API
 
@@ -719,7 +781,24 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 - `partial: true` (only on partial completion)
 - `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
 - `max_files_reached: true` (only when the `max_results` cap fired before timeout)
-- `warnings[]` (only when present): zero-match include_pattern hints
+- `warnings[]` (only when present): advisory diagnostics from the Phase 1 zero-match-pattern probe.
+  Never causes job failure and never changes `matches[]`. Possible `type` values:
+  - `zero_match_include_pattern`: this `include_pattern` matched zero files. Carries `pattern` and a
+    `hint` suggesting `**/name` for recursive matching. A likely sign the pattern is narrower than
+    intended.
+  - `zero_match_probe_incomplete` (`search_target="filename"` only): the probe's bounded comparison
+    budget (10,000 pattern-to-file comparisons, shared across ALL `include_patterns` in this
+    request) was exhausted before every file could be checked against every pattern. Carries the
+    `patterns` that could not be fully checked. Meaning for the caller: some genuine zero-match
+    patterns among those listed may have gone unreported -- absence of a
+    `zero_match_include_pattern` warning for one of them is NOT proof it matched something. The
+    main search's `matches[]` are unaffected; this only limits the diagnostic's completeness.
+  - `zero_match_probe_timeout` (`search_target="content"` only): the ripgrep-backed probe ran out of
+    its shared time budget before checking every `include_pattern`. Same caller implication as
+    `zero_match_probe_incomplete` -- some zero-match warnings may be missing; results are unaffected.
+  - `content_search_read_capped` (`search_target="content"` only): a probe's own broadest-possible
+    scan hit the internal byte-size read ceiling, so that pattern's zero-match determination may be
+    unreliable.
 
 ### evaluation_errors[] payload examples
 

@@ -1916,6 +1916,32 @@ def _validate_regex_args(args: Dict[str, Any]) -> tuple:
             {"success": False, "error": "exclude_patterns must be a list of strings"}
         )
 
+    # Bug #1876 item 4: validate and compile every pattern ONCE here, at
+    # the front door -- a non-string item (e.g. exclude_patterns=[None])
+    # or a malformed pattern (unbalanced brace, gitignore negation/comment
+    # syntax) must never silently pass through. Previously an invalid
+    # exclude pattern failed OPEN (silently widened the search) with zero
+    # signal to the caller.
+    from code_indexer.services.path_pattern_matcher import (
+        InvalidPatternError,
+        PathPatternMatcher,
+    )
+
+    matcher = PathPatternMatcher()
+    for field_name, patterns in (
+        ("include_patterns", include_patterns),
+        ("exclude_patterns", exclude_patterns),
+    ):
+        try:
+            matcher.compile_patterns(patterns)
+        except InvalidPatternError as e:
+            return None, _mcp_response(
+                {
+                    "success": False,
+                    "error": f"invalid {field_name}: {e}",
+                }
+            )
+
     repository_alias = _parse_json_string_array(args.get("repository_alias"))
     args["repository_alias"] = repository_alias
 

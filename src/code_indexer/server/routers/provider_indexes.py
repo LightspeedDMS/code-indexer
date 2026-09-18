@@ -80,7 +80,7 @@ async def add_provider_index(
     current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Add provider index for a repository (background job)."""
-    return _submit_index_job(
+    return await _submit_index_job(
         body.provider,
         body.alias,
         clear=False,
@@ -100,7 +100,7 @@ async def recreate_provider_index(
     current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Recreate provider index from scratch (background job)."""
-    return _submit_index_job(
+    return await _submit_index_job(
         body.provider,
         body.alias,
         clear=True,
@@ -116,6 +116,8 @@ async def remove_provider_index(
     current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Remove a provider's collection from a repository."""
+    import anyio.to_thread
+
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.mcp.handlers import (
@@ -146,13 +148,80 @@ async def remove_provider_index(
             detail=f"Cannot resolve base clone for '{body.alias}'. "
             "Remove requires a writable base clone path.",
         )
-    _remove_provider_from_config(base_clone, body.provider)
+    # P2 fix: _remove_provider_from_config performs a synchronous
+    # fsync+chmod+os.replace write (write_json_atomic). Offload it to a
+    # worker thread so a slow/hard NFS mount never blocks the whole
+    # event loop (900-repo production scale).
+    await anyio.to_thread.run_sync(
+        _remove_provider_from_config, base_clone, body.provider
+    )
     result = service.remove_provider_index(base_clone, body.provider)
     return {
         "success": result["removed"],
         "collection_name": result["collection_name"],
         "message": result["message"],
     }
+
+
+def _prepare_bulk_add_jobs(
+    global_repos: List[Dict[str, Any]],
+    filter_str: Optional[str],
+    provider: str,
+    service: Any,
+) -> "tuple[List[Dict[str, str]], List[str]]":
+    """Synchronous per-repo batch work for bulk_add(): resolve repo paths,
+    check existing provider status, and write the provider into each
+    repo's base-clone config.json (_append_provider_to_config -- fsync +
+    chmod + os.replace via write_json_atomic).
+
+    Extracted so the WHOLE batch (up to ~900 repos) can be offloaded via a
+    single `anyio.to_thread.run_sync` call from bulk_add(), instead of one
+    blocking write per repo directly on the event loop.
+
+    Returns (to_submit, skipped) where to_submit holds {"alias", "repo_path"}
+    dicts for repos whose config write succeeded and a background job still
+    needs to be submitted.
+    """
+    from code_indexer.server.mcp.handlers import (
+        _resolve_golden_repo_path,
+        _resolve_golden_repo_base_clone,
+        _append_provider_to_config,
+    )
+
+    to_submit: List[Dict[str, str]] = []
+    skipped: List[str] = []
+
+    for repo in global_repos:
+        alias = repo.get("alias_name", "")
+
+        if filter_str:
+            category = repo.get("category", "")
+            if filter_str.startswith("category:"):
+                filter_cat = filter_str.split(":", 1)[1]
+                if filter_cat.lower() not in category.lower():
+                    continue
+
+        repo_path = _resolve_golden_repo_path(alias)
+        if not repo_path:
+            continue
+
+        repo_status = service.get_provider_index_status(repo_path, alias)
+        if repo_status.get(provider, {}).get("exists"):
+            skipped.append(alias)
+            continue
+
+        # Bug #625 W3: Write provider to base clone config before submitting job
+        base_clone = _resolve_golden_repo_base_clone(alias)
+        if not base_clone:
+            skipped.append(alias)
+            continue
+        if not _append_provider_to_config(base_clone, provider):
+            skipped.append(alias)
+            continue
+
+        to_submit.append({"alias": alias, "repo_path": repo_path})
+
+    return to_submit, skipped
 
 
 @router.post(
@@ -166,12 +235,11 @@ async def bulk_add(
     current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Bulk add provider index to all repositories that lack it."""
+    import anyio.to_thread
+
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.mcp.handlers import (
-        _resolve_golden_repo_path,
-        _resolve_golden_repo_base_clone,
-        _append_provider_to_config,
         _list_global_repos,
         _provider_index_job,
     )
@@ -186,37 +254,19 @@ async def bulk_add(
     global_repos = _list_global_repos()
     app = request.app
 
+    # P2 fix: offload the ENTIRE synchronous batch (path resolution +
+    # status check + config write for every repo) in ONE worker-thread
+    # call, not one anyio.to_thread.run_sync per repo -- the latter just
+    # serializes N thread hops back onto the event loop and still blocks
+    # it between hops at 900-repo scale.
+    to_submit, skipped = await anyio.to_thread.run_sync(
+        _prepare_bulk_add_jobs, global_repos, body.filter, body.provider, service
+    )
+
     job_ids: List[Dict[str, str]] = []
-    skipped: List[str] = []
-
-    for repo in global_repos:
-        alias = repo.get("alias_name", "")
-
-        if body.filter:
-            category = repo.get("category", "")
-            if body.filter.startswith("category:"):
-                filter_cat = body.filter.split(":", 1)[1]
-                if filter_cat.lower() not in category.lower():
-                    continue
-
-        repo_path = _resolve_golden_repo_path(alias)
-        if not repo_path:
-            continue
-
-        status = service.get_provider_index_status(repo_path, alias)
-        if status.get(body.provider, {}).get("exists"):
-            skipped.append(alias)
-            continue
-
-        # Bug #625 W3: Write provider to base clone config before submitting job
-        base_clone = _resolve_golden_repo_base_clone(alias)
-        if not base_clone:
-            skipped.append(alias)
-            continue
-        if not _append_provider_to_config(base_clone, body.provider):
-            skipped.append(alias)
-            continue
-
+    for item in to_submit:
+        alias = item["alias"]
+        repo_path = item["repo_path"]
         job_id = app.state.background_job_manager.submit_job(
             operation_type="provider_index_add",
             func=_provider_index_job,
@@ -272,10 +322,12 @@ async def get_provider_health_rest(
     return {"provider_health": result}
 
 
-def _submit_index_job(
+async def _submit_index_job(
     provider: str, alias: str, clear: bool, request: Request, current_user: User
 ) -> Dict[str, Any]:
     """Submit a provider index job."""
+    import anyio.to_thread
+
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.mcp.handlers import (
@@ -308,7 +360,15 @@ def _submit_index_job(
                 detail=f"Cannot resolve base clone for '{alias}'. "
                 "Add requires a writable base clone path.",
             )
-        if not _append_provider_to_config(base_clone, provider):
+        # P2 fix: _append_provider_to_config performs a synchronous
+        # fsync+chmod+os.replace write (write_json_atomic). Offload it to
+        # a worker thread so a slow/hard NFS mount never blocks the whole
+        # event loop (900-repo production scale) -- same defect class
+        # already fixed in remove_provider_index()/bulk_add().
+        wrote_ok = await anyio.to_thread.run_sync(
+            _append_provider_to_config, base_clone, provider
+        )
+        if not wrote_ok:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to write provider '{provider}' to config at {base_clone}",

@@ -22,16 +22,19 @@
 //! straight through to `CodeGraphBuilder::add_reference` as a zero-length
 //! candidate window -- never a guessed target.
 
-pub mod depth;
 mod admission;
 mod budget_bind;
+pub mod depth;
 mod families;
 mod name_index;
+mod narrowing;
 mod receiver;
 mod resolve;
 mod scope;
 
-pub use admission::{bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, PreBindStats, PreparedBind};
+pub use admission::{
+    bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, PreBindStats, PreparedBind,
+};
 
 use crate::graph::budget::IndexBudget;
 use crate::graph::csr::CodeGraph;
@@ -40,7 +43,8 @@ use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
 use depth::{
     BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_3_INHERITANCE_FAMILY,
-    LEVEL_4_OVERLOAD_DISCRIMINATION, LEVEL_5_UNIQUE_NAME, LEVEL_6_RECEIVER_TYPE, LEVEL_7_SAME_CLASS_OR_SUPER,
+    LEVEL_4_OVERLOAD_DISCRIMINATION, LEVEL_5_UNIQUE_NAME, LEVEL_6_RECEIVER_TYPE,
+    LEVEL_7_SAME_CLASS_OR_SUPER,
 };
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
@@ -92,6 +96,8 @@ fn resolve_site(
     type_index: &families::TypeIndex,
     receiver_type: Option<&str>,
     same_class_context: Option<&str>,
+    super_class_context: Option<&str>,
+    caller_top_level: Option<&str>,
     index_is_complete: bool,
 ) -> PendingReference {
     let candidates = resolve_reference(
@@ -105,6 +111,8 @@ fn resolve_site(
         type_index,
         receiver_type,
         same_class_context,
+        super_class_context,
+        caller_top_level,
         index_is_complete,
     );
     PendingReference {
@@ -156,7 +164,9 @@ fn mark_depth_for_reasons(depth: &mut BinderDepth, reasons_bits: u16) {
 /// loop: iterates exactly `candidates.len()` times (finite, fixed by an
 /// already-produced candidate list).
 fn any_family_truncated(candidates: &[(DeclInfo, u16)]) -> bool {
-    candidates.iter().any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
+    candidates
+        .iter()
+        .any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
 }
 
 /// Resolves every invocation/type-reference/construction site across
@@ -202,28 +212,49 @@ fn resolve_all_references(
             // compute the identical allowed-types set in that case).
             let receiver_type = match &site.receiver {
                 crate::graph::extract::local_index::ReceiverExpr::Identifier(_)
-                | crate::graph::extract::local_index::ReceiverExpr::Chained { .. } => receiver::resolve_receiver_type(
-                    &site.receiver,
-                    site.enclosing_type.as_deref(),
-                    site.enclosing_method,
-                    &typed_names,
-                    name_index,
-                    type_index,
-                ),
+                | crate::graph::extract::local_index::ReceiverExpr::Chained { .. } => {
+                    receiver::resolve_receiver_type(
+                        &site.receiver,
+                        site.enclosing_type.as_deref(),
+                        site.enclosing_method,
+                        &typed_names,
+                        name_index,
+                        type_index,
+                    )
+                }
                 crate::graph::extract::local_index::ReceiverExpr::None
                 | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper
+                | crate::graph::extract::local_index::ReceiverExpr::Super
                 | crate::graph::extract::local_index::ReceiverExpr::Other => None,
             };
             // AC3 (Story #1806, S2b): "unqualified calls resolve against
             // the enclosing class and its supertypes first" -- applies
-            // ONLY to a bare/`this`/`super` receiver, never a qualified
-            // call on some OTHER object (that is AC1's receiver-type
-            // path instead, a separate evidence bit).
+            // ONLY to a bare/`this` receiver, never a qualified call on
+            // some OTHER object (that is AC1's receiver-type path
+            // instead, a separate evidence bit) and never a genuine
+            // `super` call (D3 -- that is `super_class_context` below,
+            // which must exclude the enclosing type itself).
             let same_class_context = match &site.receiver {
                 crate::graph::extract::local_index::ReceiverExpr::None
-                | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper => site.enclosing_type.as_deref(),
+                | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper => {
+                    site.enclosing_type.as_deref()
+                }
                 _ => None,
             };
+            // D3: a genuine `super.foo()`/`super::foo` call's enclosing
+            // type, threaded to `apply_super_class_narrowing` -- resolved
+            // ONLY against the enclosing type's supertypes, never the
+            // enclosing type itself.
+            let super_class_context = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Super => {
+                    site.enclosing_type.as_deref()
+                }
+                _ => None,
+            };
+            let caller_top_level = site
+                .enclosing_type
+                .as_deref()
+                .and_then(|type_name| type_index.top_level_of(type_name));
             let r = resolve_site(
                 &site.callee_name,
                 REF_KIND_INVOCATION,
@@ -236,6 +267,8 @@ fn resolve_all_references(
                 type_index,
                 receiver_type.as_deref(),
                 same_class_context,
+                super_class_context,
+                caller_top_level,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
@@ -255,6 +288,8 @@ fn resolve_all_references(
                 type_index,
                 None,
                 None,
+                None,
+                None,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
@@ -272,6 +307,8 @@ fn resolve_all_references(
                 &[],
                 name_index,
                 type_index,
+                None,
+                None,
                 None,
                 None,
                 index_is_complete,
@@ -302,7 +339,12 @@ mod tests {
     use crate::graph::confidence::Confidence;
     use crate::graph::extract::local_index::{Declaration, DeclarationKind, InvocationSite};
 
-    fn method_decl(name: &str, file_id: u32, local: u32, param_count: Option<usize>) -> Declaration {
+    fn method_decl(
+        name: &str,
+        file_id: u32,
+        local: u32,
+        param_count: Option<usize>,
+    ) -> Declaration {
         Declaration {
             kind: DeclarationKind::Method,
             name: name.to_string(),
@@ -327,7 +369,11 @@ mod tests {
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
-        FileForBind { file_id, language: language.to_string(), index }
+        FileForBind {
+            file_id,
+            language: language.to_string(),
+            index,
+        }
     }
 
     /// Whole-pipeline regression guard: every candidate `bind()` ever
@@ -336,14 +382,20 @@ mod tests {
     #[test]
     fn every_candidate_bind_produces_has_confidence_matching_derive_of_its_reasons() {
         let mut file_a = LocalIndex::new();
-        file_a.declarations.push(method_decl("uniqueOne", 1, 0, None));
-        file_a.declarations.push(method_decl("shared", 1, 1, Some(1)));
+        file_a
+            .declarations
+            .push(method_decl("uniqueOne", 1, 0, None));
+        file_a
+            .declarations
+            .push(method_decl("shared", 1, 1, Some(1)));
         file_a.invocations.push(invocation("uniqueOne", Some(0)));
         file_a.invocations.push(invocation("shared", Some(1)));
         file_a.invocations.push(invocation("neverDeclared", None));
 
         let mut file_b = LocalIndex::new();
-        file_b.declarations.push(method_decl("shared", 2, 0, Some(2)));
+        file_b
+            .declarations
+            .push(method_decl("shared", 2, 0, Some(2)));
 
         let graph = bind(vec![file(1, "java", file_a), file(2, "java", file_b)]);
 
@@ -351,7 +403,10 @@ mod tests {
         for reference in graph.references() {
             for candidate in graph.candidates_for(reference) {
                 checked_any = true;
-                assert_eq!(candidate.confidence(), Confidence::derive(candidate.reasons()));
+                assert_eq!(
+                    candidate.confidence(),
+                    Confidence::derive(candidate.reasons())
+                );
             }
         }
         assert!(checked_any, "test fixture produced no candidates to check");
@@ -362,16 +417,29 @@ mod tests {
     #[test]
     fn binder_depth_reports_real_levels_for_java_and_claims_none_for_an_empty_language() {
         let mut file_a = LocalIndex::new();
-        file_a.declarations.push(method_decl("uniqueOne", 1, 0, None));
+        file_a
+            .declarations
+            .push(method_decl("uniqueOne", 1, 0, None));
         file_a.invocations.push(invocation("uniqueOne", Some(0)));
 
-        let graph = bind(vec![file(1, "java", file_a), file(2, "text", LocalIndex::new())]);
+        let graph = bind(vec![
+            file(1, "java", file_a),
+            file(2, "text", LocalIndex::new()),
+        ]);
 
-        let java_depth = graph.binder_depths().iter().find(|d| d.language == "java").unwrap();
+        let java_depth = graph
+            .binder_depths()
+            .iter()
+            .find(|d| d.language == "java")
+            .unwrap();
         assert!(java_depth.reached(LEVEL_0_BARE_NAME));
         assert!(java_depth.reached(LEVEL_5_UNIQUE_NAME));
 
-        let text_depth = graph.binder_depths().iter().find(|d| d.language == "text").unwrap();
+        let text_depth = graph
+            .binder_depths()
+            .iter()
+            .find(|d| d.language == "text")
+            .unwrap();
         assert_eq!(
             text_depth.levels_reached, 0,
             "a language with no declarations/references must claim no depth"
@@ -401,7 +469,9 @@ mod tests {
     /// fixture, assembled as real `FileForBind`s for the full `bind()`
     /// pipeline.
     fn family_expansion_fixture_files() -> Vec<FileForBind> {
-        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+        use crate::graph::extract::local_index::{
+            InheritanceKind, InheritanceRecord, MethodOwnerRecord,
+        };
         use crate::graph::identity::make_symbol_id;
         const INTERFACE_FILE_ID: u32 = 10;
         const IMPL_FILE_ID: u32 = 11;
@@ -409,8 +479,15 @@ mod tests {
         const SAVE_METHOD_LOCAL: u32 = 1;
 
         let mut interface_file = LocalIndex::new();
-        interface_file.declarations.push(package_decl(INTERFACE_FILE_ID, "pkg.a"));
-        interface_file.declarations.push(method_decl("save", INTERFACE_FILE_ID, SAVE_METHOD_LOCAL, Some(0)));
+        interface_file
+            .declarations
+            .push(package_decl(INTERFACE_FILE_ID, "pkg.a"));
+        interface_file.declarations.push(method_decl(
+            "save",
+            INTERFACE_FILE_ID,
+            SAVE_METHOD_LOCAL,
+            Some(0),
+        ));
         interface_file.interface_names.push("Repo".to_string());
         interface_file.method_owners.push(MethodOwnerRecord {
             method_symbol: make_symbol_id(INTERFACE_FILE_ID, SAVE_METHOD_LOCAL),
@@ -418,8 +495,15 @@ mod tests {
         });
 
         let mut impl_file = LocalIndex::new();
-        impl_file.declarations.push(package_decl(IMPL_FILE_ID, "pkg.b"));
-        impl_file.declarations.push(method_decl("save", IMPL_FILE_ID, SAVE_METHOD_LOCAL, Some(0)));
+        impl_file
+            .declarations
+            .push(package_decl(IMPL_FILE_ID, "pkg.b"));
+        impl_file.declarations.push(method_decl(
+            "save",
+            IMPL_FILE_ID,
+            SAVE_METHOD_LOCAL,
+            Some(0),
+        ));
         impl_file.method_owners.push(MethodOwnerRecord {
             method_symbol: make_symbol_id(IMPL_FILE_ID, SAVE_METHOD_LOCAL),
             enclosing_type: "Impl".to_string(),
@@ -432,7 +516,9 @@ mod tests {
         });
 
         let mut caller = LocalIndex::new();
-        caller.declarations.push(package_decl(CALLER_FILE_ID, "pkg.a"));
+        caller
+            .declarations
+            .push(package_decl(CALLER_FILE_ID, "pkg.a"));
         caller.invocations.push(invocation("save", Some(0)));
 
         vec![
@@ -464,9 +550,13 @@ mod tests {
         }
 
         let mut string_overload = LocalIndex::new();
-        string_overload.declarations.push(overload_decl(STRING_OVERLOAD_FILE_ID, "String"));
+        string_overload
+            .declarations
+            .push(overload_decl(STRING_OVERLOAD_FILE_ID, "String"));
         let mut int_overload = LocalIndex::new();
-        int_overload.declarations.push(overload_decl(INT_OVERLOAD_FILE_ID, "int"));
+        int_overload
+            .declarations
+            .push(overload_decl(INT_OVERLOAD_FILE_ID, "int"));
         let mut caller = LocalIndex::new();
         caller.invocations.push(InvocationSite {
             callee_name: "process".to_string(),
@@ -490,7 +580,8 @@ mod tests {
     /// discrimination) once real evidence for each is produced, exercised
     /// end-to-end through the real `bind()` pipeline.
     #[test]
-    fn binder_depth_reaches_levels_3_and_4_for_java_via_family_expansion_and_overload_discrimination() {
+    fn binder_depth_reaches_levels_3_and_4_for_java_via_family_expansion_and_overload_discrimination(
+    ) {
         use super::depth::{LEVEL_3_INHERITANCE_FAMILY, LEVEL_4_OVERLOAD_DISCRIMINATION};
 
         let mut files = family_expansion_fixture_files();
@@ -502,7 +593,10 @@ mod tests {
             .iter()
             .find(|d| d.language == "java")
             .expect("java depth must be present: both fixtures declare java files");
-        assert!(java_depth.reached(LEVEL_3_INHERITANCE_FAMILY), "family expansion evidence must reach level 3");
+        assert!(
+            java_depth.reached(LEVEL_3_INHERITANCE_FAMILY),
+            "family expansion evidence must reach level 3"
+        );
         assert!(
             java_depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION),
             "overload-shape evidence must reach level 4"
@@ -524,7 +618,9 @@ mod tests {
         const CALLER_FILE_ID: u32 = 32;
 
         let mut base_file = LocalIndex::new();
-        base_file.declarations.push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
+        base_file
+            .declarations
+            .push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
         base_file.method_owners.push(MethodOwnerRecord {
             method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
             enclosing_type: "Base".to_string(),
@@ -537,7 +633,9 @@ mod tests {
         });
 
         let mut other_file = LocalIndex::new();
-        other_file.declarations.push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
+        other_file
+            .declarations
+            .push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
         other_file.method_owners.push(MethodOwnerRecord {
             method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
             enclosing_type: "Other".to_string(),
@@ -560,7 +658,11 @@ mod tests {
             file(CALLER_FILE_ID, "java", caller),
         ]);
 
-        let java_depth = graph.binder_depths().iter().find(|d| d.language == "java").unwrap();
+        let java_depth = graph
+            .binder_depths()
+            .iter()
+            .find(|d| d.language == "java")
+            .unwrap();
         assert!(
             java_depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER),
             "same-class-or-super evidence must reach level 7"
@@ -575,7 +677,9 @@ mod tests {
     /// confidence instead of the correct `SameClassOrSuper`.
     #[test]
     fn bare_call_marks_only_same_class_or_super_never_receiver_type_match() {
-        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr};
+        use crate::graph::extract::local_index::{
+            InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr,
+        };
         use crate::graph::reasons;
 
         const BASE_FILE_ID: u32 = 60;
@@ -583,7 +687,9 @@ mod tests {
         const CALLER_FILE_ID: u32 = 62;
 
         let mut base_file = LocalIndex::new();
-        base_file.declarations.push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
+        base_file
+            .declarations
+            .push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
         base_file.method_owners.push(MethodOwnerRecord {
             method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
             enclosing_type: "Base".to_string(),
@@ -596,7 +702,9 @@ mod tests {
         });
 
         let mut other_file = LocalIndex::new();
-        other_file.declarations.push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
+        other_file
+            .declarations
+            .push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
         other_file.method_owners.push(MethodOwnerRecord {
             method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
             enclosing_type: "Other".to_string(),
@@ -627,7 +735,11 @@ mod tests {
         let candidates = graph.candidates_for(reference);
         assert_eq!(candidates.len(), 1, "Other.helper must be excluded");
         let reasons_bits = candidates[0].reasons();
-        assert_ne!(reasons_bits & reasons::SAME_CLASS_OR_SUPER, 0, "bare call must carry SAME_CLASS_OR_SUPER");
+        assert_ne!(
+            reasons_bits & reasons::SAME_CLASS_OR_SUPER,
+            0,
+            "bare call must carry SAME_CLASS_OR_SUPER"
+        );
         assert_eq!(
             reasons_bits & reasons::RECEIVER_TYPE_MATCH,
             0,
@@ -644,7 +756,9 @@ mod tests {
         use crate::graph::extract::local_index::MethodOwnerRecord;
 
         let mut index = LocalIndex::new();
-        index.declarations.push(method_decl("doSomething", file_id, 0, Some(0)));
+        index
+            .declarations
+            .push(method_decl("doSomething", file_id, 0, Some(0)));
         index.method_owners.push(MethodOwnerRecord {
             method_symbol: crate::graph::identity::make_symbol_id(file_id, 0),
             enclosing_type: enclosing_type.to_string(),
@@ -670,13 +784,21 @@ mod tests {
         let foo_file = owned_do_something_file(FOO_FILE_ID, "Foo");
         let other_file = owned_do_something_file(OTHER_FILE_ID, "Other");
 
-        let caller_method_symbol = crate::graph::identity::make_symbol_id(CALLER_FILE_ID, CALLER_METHOD_LOCAL);
+        let caller_method_symbol =
+            crate::graph::identity::make_symbol_id(CALLER_FILE_ID, CALLER_METHOD_LOCAL);
         let mut caller = LocalIndex::new();
-        caller.declarations.push(method_decl("run", CALLER_FILE_ID, CALLER_METHOD_LOCAL, Some(0)));
+        caller.declarations.push(method_decl(
+            "run",
+            CALLER_FILE_ID,
+            CALLER_METHOD_LOCAL,
+            Some(0),
+        ));
         caller.typed_names.push(TypedNameRecord {
             name: "obj".to_string(),
             declared_type: "Foo".to_string(),
-            scope: NameScope::Local { enclosing_method: caller_method_symbol },
+            scope: NameScope::Local {
+                enclosing_method: caller_method_symbol,
+            },
         });
         caller.invocations.push(InvocationSite {
             callee_name: "doSomething".to_string(),
@@ -694,7 +816,14 @@ mod tests {
             file(CALLER_FILE_ID, "java", caller),
         ]);
 
-        let java_depth = graph.binder_depths().iter().find(|d| d.language == "java").unwrap();
-        assert!(java_depth.reached(LEVEL_6_RECEIVER_TYPE), "receiver-type evidence must reach level 6");
+        let java_depth = graph
+            .binder_depths()
+            .iter()
+            .find(|d| d.language == "java")
+            .unwrap();
+        assert!(
+            java_depth.reached(LEVEL_6_RECEIVER_TYPE),
+            "receiver-type evidence must reach level 6"
+        );
     }
 }

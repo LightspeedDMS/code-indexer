@@ -19,38 +19,56 @@ Exit codes:
     0: Success (even if no matches found)
     1: Error (invalid config, path doesn't exist, etc.)
 
-This script implements the EXACT glob logic from regex_search.py lines 311-379
-to ensure pattern matching correctness is preserved during the subprocess transition.
+All matching routes through the shared PathPatternMatcher so grep fallback
+selection has the same normalization, brace expansion, and gitwildmatch
+semantics as indexed regex and X-Ray searches.
 """
 
-import sys
 import json
-import fnmatch
+import sys
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
+
+# This script executes as a standalone child process, so add the project's
+# source tree before importing the shared application-layer matcher.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+
+from code_indexer.services.path_pattern_matcher import PathPatternMatcher  # noqa: E402
 
 
 def glob_files(
     search_path: Path,
     include_patterns: List[str],
     exclude_patterns: Optional[List[str]],
+    match_prefix: str = "",
 ) -> List[str]:
-    """Find files matching glob patterns (exact implementation from regex_search.py).
-
-    Supports the following pattern types to match ripgrep's -g flag behavior:
-    - "**/file.java" - Recursive search from search_path
-    - "code/**/file.java" - Recursive search from search_path/code
-    - "code/src/file.java" - Explicit path (non-recursive)
-    - "*.java" - Simple pattern (recursive from search_path)
+    """Find files selected by the shared, compiled path-pattern matcher.
 
     Args:
-        search_path: Base directory to search from. All patterns resolved relative to this path.
-        include_patterns: List of glob patterns following ripgrep -g flag syntax.
+        search_path: Base directory to WALK from. Returned paths are
+            relative to this directory (unchanged by ``match_prefix``).
+        include_patterns: List of glob patterns following the canonical
+            policy -- REPO-relative, matching every other engine
+            (indexed matcher, Python multiline walk, real ripgrep ``-g``).
         exclude_patterns: Optional list of patterns to exclude from results.
+        match_prefix: Bug #1876 round-5 finding F4. The repository-
+            relative path prefix of ``search_path`` itself (e.g. "src"
+            when ``search_path`` is ``<repo>/src``), or "" when
+            ``search_path`` already IS the repository root. Every
+            pattern is matched against ``match_prefix + "/" +
+            relative_path`` (or just ``relative_path`` when the prefix
+            is empty) instead of ``relative_path`` alone -- a caller
+            that narrows ``search_path`` below the repo root (the
+            MCP/REST ``path`` parameter) must still see include/exclude
+            patterns interpreted relative to the repo root, exactly like
+            ripgrep's own ``-g`` flag and the indexed matcher, not
+            relative to the narrowed walk root.
 
     Returns:
-        List of relative file paths as strings for all files matching include patterns
-        and not matching exclude patterns. Empty list if no matches found.
+        List of relative file paths (relative to ``search_path``, NOT
+        prefixed) as strings for all files matching include patterns and
+        not matching exclude patterns. Empty list if no matches found.
 
     Raises:
         ValueError: If search_path doesn't exist or isn't a directory.
@@ -60,85 +78,32 @@ def glob_files(
     if not search_path.is_dir():
         raise ValueError(f"Search path is not a directory: {search_path}")
 
-    matched_files: Set[Path] = set()
+    selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
+    matched_files: List[str] = []
+    for file_path in search_path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        relative_path = file_path.relative_to(search_path).as_posix()
+        match_path = (
+            f"{match_prefix}/{relative_path}" if match_prefix else relative_path
+        )
+        if selector.select(match_path):
+            matched_files.append(relative_path)
 
-    # Process include patterns - EXACT logic from regex_search.py lines 315-358
-    for pattern in include_patterns:
-        # Handle different pattern types to match ripgrep -g behavior
-        if pattern.startswith("**/"):
-            # Pattern like **/filename.ext or **/dir/*.ext
-            # Use rglob for recursive matching from search_path
-            sub_pattern = pattern[3:]  # Remove **/ prefix
-            for file_path in search_path.rglob(sub_pattern):
-                if file_path.is_file():
-                    matched_files.add(file_path)
-
-        elif "**" in pattern:
-            # Pattern like dir/**/filename.ext (** in middle)
-            # Split on /** and use rglob for the recursive part
-            parts = pattern.split("/**/")
-            if len(parts) == 2:
-                prefix, suffix = parts
-                # Find all directories matching prefix
-                prefix_path = search_path / prefix if prefix else search_path
-                if prefix_path.exists() and prefix_path.is_dir():
-                    # Use rglob from prefix_path for suffix pattern
-                    for file_path in prefix_path.rglob(suffix):
-                        if file_path.is_file():
-                            matched_files.add(file_path)
-            else:
-                # Multiple ** in pattern - fall back to walking entire tree
-                for file_path in search_path.rglob("*"):
-                    if file_path.is_file():
-                        rel_path = str(file_path.relative_to(search_path))
-                        if fnmatch.fnmatch(rel_path, pattern):
-                            matched_files.add(file_path)
-
-        elif "/" in pattern:
-            # Explicit path pattern like code/src/Main.java
-            # Use glob for non-recursive matching
-            for file_path in search_path.glob(pattern):
-                if file_path.is_file():
-                    matched_files.add(file_path)
-
-        else:
-            # Simple filename pattern like *.java
-            # Use rglob to find at any depth
-            for file_path in search_path.rglob(pattern):
-                if file_path.is_file():
-                    matched_files.add(file_path)
-
-    # Apply exclude patterns - EXACT logic from regex_search.py lines 360-373
-    if exclude_patterns:
-        filtered_files: Set[Path] = set()
-        for file_path in matched_files:
-            rel_path = str(file_path.relative_to(search_path))
-            excluded = False
-            for exclude_pattern in exclude_patterns:
-                # Match exclude pattern anywhere in path
-                if fnmatch.fnmatch(rel_path, f"*{exclude_pattern}*"):
-                    excluded = True
-                    break
-            if not excluded:
-                filtered_files.add(file_path)
-        matched_files = filtered_files
-
-    # Convert to relative paths as strings - EXACT logic from regex_search.py lines 375-379
-    return [
-        str(file_path.relative_to(search_path)) for file_path in sorted(matched_files)
-    ]
+    return sorted(matched_files)
 
 
 def parse_and_validate_config(
     config_file: str,
-) -> Tuple[Path, List[str], Optional[List[str]]]:
+) -> Tuple[Path, List[str], Optional[List[str]], str]:
     """Parse and validate config file.
 
     Args:
         config_file: Path to JSON config file
 
     Returns:
-        Tuple of (search_path, include_patterns, exclude_patterns)
+        Tuple of (search_path, include_patterns, exclude_patterns,
+        match_prefix)
 
     Raises:
         FileNotFoundError: If config file doesn't exist
@@ -158,13 +123,16 @@ def parse_and_validate_config(
     search_path = Path(config["search_path"])
     include_patterns = config["include_patterns"]
     exclude_patterns = config.get("exclude_patterns")
+    match_prefix = config.get("match_prefix", "")
 
     if not isinstance(include_patterns, list):
         raise ValueError("include_patterns must be a list")
     if exclude_patterns is not None and not isinstance(exclude_patterns, list):
         raise ValueError("exclude_patterns must be a list or null")
+    if not isinstance(match_prefix, str):
+        raise ValueError("match_prefix must be a string")
 
-    return search_path, include_patterns, exclude_patterns
+    return search_path, include_patterns, exclude_patterns, match_prefix
 
 
 def main() -> int:
@@ -186,12 +154,17 @@ def main() -> int:
         config_file = sys.argv[1]
 
         # Parse and validate config
-        search_path, include_patterns, exclude_patterns = parse_and_validate_config(
-            config_file
-        )
+        (
+            search_path,
+            include_patterns,
+            exclude_patterns,
+            match_prefix,
+        ) = parse_and_validate_config(config_file)
 
         # Perform glob matching
-        files = glob_files(search_path, include_patterns, exclude_patterns)
+        files = glob_files(
+            search_path, include_patterns, exclude_patterns, match_prefix
+        )
 
         # Output results as JSON array
         print(json.dumps(files))

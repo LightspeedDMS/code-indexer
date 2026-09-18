@@ -4,6 +4,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from code_indexer.config import write_json_atomic
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 
@@ -132,8 +133,7 @@ def add(provider: str, repo: str):
     original_provider = config_data.get("embedding_provider")
 
     config_data["embedding_provider"] = provider
-    with open(config_path, "w") as _f:
-        _json.dump(config_data, _f)
+    write_json_atomic(config_path, config_data)
 
     console.print(f"Building {provider} index for {repo_path.name}...")
 
@@ -157,8 +157,7 @@ def add(provider: str, repo: str):
             config_data["embedding_provider"] = original_provider
         else:
             config_data.pop("embedding_provider", None)
-        with open(config_path, "w") as _f:
-            _json.dump(config_data, _f)
+        write_json_atomic(config_path, config_data)
 
     if result.returncode == 0:
         console.print(f"[green]Successfully built {provider} index[/green]")
@@ -208,8 +207,7 @@ def recreate(provider: str, repo: str):
     original_provider = config_data.get("embedding_provider")
 
     config_data["embedding_provider"] = provider
-    with open(config_path, "w") as _f:
-        _json.dump(config_data, _f)
+    write_json_atomic(config_path, config_data)
 
     console.print(
         f"Rebuilding {provider} index for {repo_path.name} (clear + rebuild)..."
@@ -235,8 +233,7 @@ def recreate(provider: str, repo: str):
             config_data["embedding_provider"] = original_provider
         else:
             config_data.pop("embedding_provider", None)
-        with open(config_path, "w") as _f:
-            _json.dump(config_data, _f)
+        write_json_atomic(config_path, config_data)
 
     if result.returncode == 0:
         console.print(f"[green]Successfully rebuilt {provider} index[/green]")
