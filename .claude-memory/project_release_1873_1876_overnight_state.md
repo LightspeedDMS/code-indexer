@@ -1,54 +1,75 @@
 ---
 name: project_release_1873_1876_overnight_state
-description: Resume state for the 2026-09-16/17 overnight release (X-Ray binder #1873/#1875, glob scoping #1876, browse #1886, config race #1889, path-confinement security #1891) shipped to staging as 12.63.0 - read first after a reset
+description: "Resume state for the 2026-09-16/17 overnight release. Latest staging version is 12.65.0 (X-Ray binder #1873/#1875, glob #1876, browse #1886, config race #1889, path-confinement #1891, config-atomicity/self-heal/circuit-breaker #1894, embedding-stats nav #1895, atomic-write ownership P1 #1896). Read first after a reset."
 metadata:
+  node_type: memory
   type: project
+  originSessionId: a8e442d6-0c34-4c2b-8b4c-30d7e4ed0283
+  modified: 2026-09-17T22:38:42.774Z
 ---
 
 Overnight goal: fix all open P1/P2 (+ any new P1/P2 found), validate on staging, leave ready for
 production; user decides the master push in the morning. NEVER push master without the literal
 per-version two-confirmation authorization.
 
-## SHIPPED to staging as 12.63.0 (2026-09-17 ~08:20 CDT), tag v12.63.0 on development commit 84bb0d18
-CI green (lint incl. mypy, rust, smoke); auto-updater deployed 12.63.0 to ALL 4 staging servers
-(solo + cluster nodes 20/22/23), all running. master/production UNTOUCHED.
+## CURRENT STATE (2026-09-17): staging + development on 12.65.0, tag v12.65.0. master/production UNTOUCHED (on 12.61.0).
+CI green (lint+mypy, rust, smoke) for every push; tags v12.63.0, v12.64.0, v12.65.0 all cut.
+Auto-updater deployed 12.65.0 to all cluster staging nodes; all serving, bootstrap config
+owned by the server user (recovered - see #1896 below).
 
-Commits on development (origin/development == staging content):
-- e587ca51 #1873/#1875 X-Ray Java binder (constructors/method-refs/super/visibility)
-- 529e0b75 #1876 regex/xray include-exclude glob selector (dual-approved, F1-F12)
-- b1ae7b9b #1889 ConfigService.get_config lazy-init thread race
-- e9a43960 #1886 browse_directory/list_files recursive:false direct-children + REST path subtree
-- aeedbe41 #1891 SECURITY path confinement (REST content, MCP get_file_content/directory_tree, CRUD, .git symlink)
-- 7f08510c #1876 CI-mypy fix: pathspec _DIR_MARK via getattr (12.62.0 lint failed on this; runtime-inert)
-- 84bb0d18 bump 12.63.0  (12.62.0 was pushed but its lint failed -> no tag; re-cut as 12.63.0)
+## Release history this session
+- 12.63.0: #1873/#1875 X-Ray Java binder, #1876 glob include/exclude selector, #1889 ConfigService
+  lazy-init race, #1886 browse recursive:false, #1891 SECURITY path confinement. Dual-approved,
+  staging-verified (solo + cluster front door via self-service admin MFA). Shipped earlier.
+- 12.64.0: #1894 (atomic config writes + refresh self-heal + circuit-breaker) and #1895
+  (embedding-stats nav bar). Dual-reviewed (Claude clean; Codex found 3 P2 -> all fixed:
+  async-offload of provider-index config writes, narrow ConfigCorruptionError so --force self-heal
+  can't destroy recoverable config, UnicodeDecodeError in both validation paths). Gates green.
+  **12.64.0 crash-looped a cluster staging node on deploy -> see #1896.** DO NOT promote 12.64.0.
+- 12.65.0: #1896 P1 fix (commit 5a951fc4). THIS is the production candidate.
 
-## Staging verification (front door, solo/SQLite): ALL PASS, no P1/P2
-- #1873/#1875: analyze_graph jsoup dead 72->42; exactly the 30 baseline false-dead constructors now
-  alive; 0 new dead verdicts; S3-S7 exact & set-consistent (S3|S7==S2). Re-confirmed on 12.63.0.
-- #1876: include *.md -> only .md; file-path & **/ includes now honoured; exclude/context/xray/
-  bare-string-reject all correct. Re-confirmed on 12.63.0.
-- #1886: recursive:false -> direct children only; leading-slash normalised; recursive unchanged.
-- #1891: traversal/sibling/encoded/.git-symlink all "Access denied", no content, no 500; legit reads work.
-- Log audit: 0 post-deploy ERROR; all WARNINGs are probes or pre-existing.
-- Cluster (postgres) front door VERIFIED via the admin MFA handshake (self-service; procedure in
-  project_staging_cluster_mfa_is_self_serviceable). CLUSTER 12.63.0; #1876 include *.md -> only .md;
-  #1891 traversal -> Access denied no leak; #1886 recursive:false -> 8 entries no nesting. ALL PASS.
-  (MFA is ALWAYS self-serviceable - never call it a blocker or a gap.)
+## #1896 (P1, closed) - the one to understand before any master decision
+#1894's write_json_atomic preserved file MODE but not OWNERSHIP. The root auto-updater rewrites the
+server's bootstrap config.json (deployment_executor writes it via write_json_atomic); mkstemp +
+os.replace made a root-owned inode; with the 0600 secret-config mode preserved, the non-root server
+user could not read it -> crash loop (PermissionError at startup). Fix: capture the target's
+uid/gid and os.chown the temp back to the original owner before os.replace (guarded to pre-existing
+files; except PermissionError degrades for non-root). PROVEN on deployed 12.65.0: a root-run
+write_json_atomic over a server-user-owned file preserves ownership.
+- **Transitional flip**: the flip recurs ONCE on the very deploy that installs the fix, because the
+  auto-update process already imported the OLD (unfixed) write_json_atomic before its own git pull
+  (Python module caching). Only nodes whose value-aware-idempotent deploy actually rewrites the
+  config flip. All cluster nodes were recovered by chown-ing the config back to the server user +
+  restart; stable, no pending redeploy to re-trigger it.
+- **Production-safe**: master is 12.61.0 (pre-#1894); its deployment_executor writes the config
+  in-place with open(path,"w") (preserves inode+owner), NOT write_json_atomic. So a 12.61.0->12.65.0
+  upgrade transitions with the old in-place writer (no flip), then installs the fixed atomic writer.
+  The flip is reachable ONLY when upgrading FROM 12.64.0, which master never ran. 12.65.0 is safe to
+  promote. Optional P3 (noted on #1896, not done): a defense-in-depth os.chown at deployment_executor's
+  config-write site.
 
-## Gates run (local, on this code): fast-automation PASS (16333), server-fast PASS, rust PASS,
-## e2e phases 1-6 PASS. (server-fast chunk4 flaked ONCE on a slow fixture -> #1892, passed on rerun.)
+## Verification status
+- #1894 real symptom (langfuse repo refresh storm): the 0-byte-config repo is healed (valid config,
+  actively reindexing, ~5GB chunks.db) - fixed. Circuit-breaker/self-heal covered by unit tests
+  (SQLite + PostgreSQL) and dual review.
+- #1896: proven on live deployed code (root write preserves ownership); all nodes healthy on 12.65.0.
+- #1895: FRONT-DOOR VERIFIED on cluster staging. Drove the full web auth (GET /login -> POST /login
+  -> web MFA challenge page -> POST /admin/mfa/challenge/verify with derived TOTP -> session cookie)
+  and fetched /admin/embedding-stats: the real page (title "Embedding & Reranker Call Tracking")
+  renders `<nav class="admin-nav">` AND `<a href="/admin/embedding-stats" aria-current="page">`. Also
+  covered by the passing real-auth integration test. NOTE: the web session is a stateless SIGNED
+  cookie marked Secure, so over plain http://localhost it is not resent by a client cookie jar -
+  attach it manually in the Cookie header (server validates the signature regardless), or use https.
+  The page handler is NOT MFA-blocked; MFA is enforced at the /login step for admins.
+- Gates on 12.65.0 code: server-fast 20,810 passed/0 failed; fast-automation 16,376 passed/0 failed
+  (the only non-passes on either lane were verified 15s-timeout LOAD FLAKES - each passed in isolation;
+  re-roll server-fast with PYTEST_TIMEOUT=60 to avoid them). lint exit 0. rust untouched.
 
-## Follow-ups filed (all P3/P4, none block): #1881 (1876 P3s), #1887 (self-loop), #1888 (REST non-recursive
-## dirs), #1890 (cluster config lost-update), #1892 (P2 slow-fixture gate flake, test-only), #1893 (Type::method
-## ref binds to enclosing class - new in 1873/1875, safe direction). #1877/#1879 have P3 notes.
-
-## LEFT FOR THE USER (morning): decide whether to promote staging->master (production). If yes, it needs the
-## literal authorization phrase + the two-confirmation protocol, per version. #1891 is a production security
-## fix (path traversal readable by any authed user) - weigh first.
-
-## Housekeeping: ~95GB stale Rust build dirs + reviewer scratch under ~/.tmp await manual rm (Senior Coding
-## Nanny blocks rm -rf from the agent). Disk 85% / ~31GB free.
+## LEFT FOR THE USER (morning): decide whether to promote staging (12.65.0) -> master. Needs the literal
+## authorization phrase + two-confirmation, per version. #1891 (path traversal, any authed user) and #1894
+## (refresh reliability) are the production-relevant wins; #1896 makes the deploy itself safe.
 
 Related: [[feedback_review_findings_fix_p1_p2_tolerate_p3_p4]], [[feedback_version_bump_must_be_push_tip]],
 [[project_staging_cluster_mfa_is_self_serviceable]], [[project_verify_both_staging_environments]],
-[[feedback_never_claim_ready_without_staging_e2e]].
+[[feedback_never_claim_ready_without_staging_e2e]], [[feedback_dual_review_claude_and_codex]],
+[[project_test_gates_flake_under_load]].
