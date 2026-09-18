@@ -153,6 +153,10 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 5. `rust-automation.sh` when `rust/` touched
 6. `e2e-automation.sh` (final gate)
 
+**A/B comparison traps** (proving a fix or a regression against HEAD): a shared `CARGO_TARGET_DIR` across two checkouts of the SAME crate version at different paths SILENTLY REUSES the other tree's integration-test binary -- an A/B run then reports the wrong tree's numbers verbatim, with no error. Give every tree its OWN target dir. This produced a false review result on Bug #1898; the reviewer's first probe of the fixed tree reproduced HEAD's output exactly.
+
+**Scratchpad lifetime**: an A/B proof tree is deleted when its finding is RESOLVED, not when the session ends. Each one is a whole-repo checkout plus build artifacts (~0.5-3 GB); a single completed dual-review session left ~15 of them totalling 94 GB, filling the root filesystem to 91% weeks later. `rust/target` lives on a different mount and is NOT the risk -- `/tmp` is. Check `df -h /` before starting a multi-tree comparison.
+
 **Long-suite running traps** (fast-/server-fast-automation): the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run -- launch in the BACKGROUND and poll. Judge completion from the log's `EXIT=` line, NEVER the background-task notification (a `{ ./script; echo "EXIT=$?"; } > log` wrapper reports the wrapper's exit 0 even when the run failed). A mid-run `grep -c '^FAILED'` is always 0 (pytest emits FAILED only in the end summary). Don't use `pgrep -f fast-automation` as the liveness test (the polling shell matches its own pattern). A timeout is NOT automatically a hang -- check the actual duration against the baseline first.
 
 ### fast-automation.sh Remediation
