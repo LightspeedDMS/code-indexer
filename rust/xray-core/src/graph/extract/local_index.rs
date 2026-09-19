@@ -376,6 +376,24 @@ pub struct LocalIndex {
     /// appear here even when some OTHER supertype edge for it WAS recorded
     /// (the two are independent facts).
     pub incomplete_supertypes: Vec<String>,
+    /// P1-A (#1898 code review round 2, epic #1906): bare names of every
+    /// GENERIC TYPE PARAMETER declared anywhere in this file -- the `T` in
+    /// `class Box<T> {}`, `<T extends Svc> void run(T t) {}`, or a
+    /// constructor's own `<T>`. `TypeIndex::is_known_type_parameter_name`
+    /// (bind/families.rs) is the sole consumer: `receiver::
+    /// resolve_receiver_type` must reject a declared-type STRING that
+    /// names a type parameter rather than a real class/interface -- a
+    /// receiver typed `T` (from a formal parameter `T t`) is not a
+    /// concrete type this binder can narrow against, and treating it as
+    /// one fabricates a hard receiver-type filter on a name that never
+    /// denotes an actual declaration anywhere in the repo. Population is
+    /// REPO-WIDE by aggregation in `TypeIndex::build` (a type parameter is
+    /// syntactically local to its own class/method, but the blocking use
+    /// here is deliberately conservative: any name EVER used as a type
+    /// parameter anywhere is never trusted as a receiver type, which can
+    /// only ever make narrowing MORE conservative, never fabricate a
+    /// wrong hard filter).
+    pub type_parameter_names: Vec<String>,
 }
 
 impl LocalIndex {
@@ -449,6 +467,14 @@ mod tests {
     fn local_index_carries_interface_names_defaulting_empty() {
         let index = LocalIndex::new();
         assert!(index.interface_names.is_empty());
+    }
+
+    /// P1-A (#1898 code review round 2, epic #1906): `type_parameter_names`
+    /// defaults empty exactly like every other extraction-output field.
+    #[test]
+    fn local_index_carries_type_parameter_names_defaulting_empty() {
+        let index = LocalIndex::new();
+        assert!(index.type_parameter_names.is_empty());
     }
 
     #[test]

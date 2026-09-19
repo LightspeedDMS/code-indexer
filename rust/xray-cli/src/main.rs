@@ -775,6 +775,14 @@ struct BuildGraphResult {
     /// the six pre-existing counters, never re-derived.
     files_with_unsupported_language: usize,
     truncated_by_max_files: bool,
+    /// #1898 round 4 (epic #1906, mandate item 3): surfaces `RepoIndexResult::
+    /// narrowed_to_zero_count` verbatim -- how many references had a real
+    /// same-named declaration somewhere in the repo but were narrowed all
+    /// the way down to zero final candidates by the binder. The
+    /// observability gap that let three rounds of narrowing regressions
+    /// survive a green test suite; sibling story #1897 folds this into
+    /// `analyze_graph`'s own completeness reporting.
+    narrowed_to_zero_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -889,6 +897,7 @@ fn run_build_graph(
             files_with_collector_panics: index_result.files_with_collector_panics,
             files_with_unsupported_language: index_result.files_with_unsupported_language,
             truncated_by_max_files: index_result.truncated_by_max_files,
+            narrowed_to_zero_count: index_result.narrowed_to_zero_count,
         }),
     }
 }

@@ -73,6 +73,7 @@ fn out_of_repo_reference_resolves_to_an_empty_candidate_set() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -107,6 +108,7 @@ fn ambiguous_same_name_declarations_yield_a_multi_candidate_set_not_a_picked_win
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -139,6 +141,7 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -156,6 +159,7 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -216,6 +220,7 @@ fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -271,6 +276,7 @@ fn named_type_preference_narrows_between_two_unrelated_named_types() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -342,6 +348,7 @@ fn literal_shape_excludes_a_candidate_with_a_definitely_incompatible_declared_ty
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -390,6 +397,7 @@ fn import_context_narrows_further_than_arity_alone() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -419,6 +427,7 @@ fn import_context_narrows_further_than_arity_alone() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -426,4 +435,198 @@ fn import_context_narrows_further_than_arity_alone() {
     );
     assert_eq!(narrowed.len(), 1);
     assert_eq!(narrowed[0].0.file_id, 11);
+}
+
+/// Bug #1898 (P1 of epic #1906) -- the canonical failure shape: a 0-arg
+/// call whose real target is EXTERNAL to the repo (e.g. a JDK
+/// `close()`), resolved against a repo that only declares 1-param
+/// `close` methods. When NO candidate in the same-named pool matches the
+/// call site's arity, the pre-fix `apply_arity_narrowing` silently kept
+/// the ENTIRE bare-name pool rather than narrowing to empty -- fabricating
+/// an edge to a wrong-arity in-repo candidate. `pool.len() == 2` here
+/// (two unrelated 1-param `close` declarations) so the AC4 Level 5
+/// unique-name shortcut -- which bypasses arity checking entirely --
+/// never applies; this exercises `apply_arity_narrowing` itself.
+#[test]
+fn arity_mismatch_with_no_matching_candidate_yields_zero_not_the_wrong_arity_pool() {
+    let mut file_a = LocalIndex::new();
+    file_a.declarations.push(method_decl("close", 10, 0, Some(1)));
+    let mut file_b = LocalIndex::new();
+    file_b.declarations.push(method_decl("close", 11, 0, Some(1)));
+    let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "close",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(0),
+        &[],
+        &name_index,
+        &super::super::families::TypeIndex::build(&[]),
+        None,
+        false,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert!(
+        candidates.is_empty(),
+        "a 0-arg call must not fall back onto the repo's wrong-arity `close(1 params)` \
+         declarations -- got {} candidate(s)",
+        candidates.len()
+    );
+}
+
+/// Symmetric case: a 1-arg call site against a repo whose only same-named
+/// declarations take 0 params (e.g. a `map.get(key)` call whose real
+/// target is an external collection type, resolved against an unrelated
+/// in-repo `get()` overload that takes no arguments).
+#[test]
+fn arity_mismatch_one_arg_call_against_zero_param_declarations_yields_zero() {
+    let mut file_a = LocalIndex::new();
+    file_a.declarations.push(method_decl("get", 10, 0, Some(0)));
+    let mut file_b = LocalIndex::new();
+    file_b.declarations.push(method_decl("get", 11, 0, Some(0)));
+    let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "get",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(1),
+        &[],
+        &name_index,
+        &super::super::families::TypeIndex::build(&[]),
+        None,
+        false,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert!(
+        candidates.is_empty(),
+        "a 1-arg call must not fall back onto the repo's wrong-arity `get(0 params)` \
+         declarations -- got {} candidate(s)",
+        candidates.len()
+    );
+}
+
+/// Guard against over-correction (#1898 AC): unknown arity
+/// (`arg_count: None`) must still admit the full candidate pool --
+/// `apply_arity_narrowing`'s `None` early return is untouched by the
+/// #1898 fix, only the KNOWN-arity/zero-match branch changed.
+#[test]
+fn unknown_arity_still_admits_the_full_candidate_pool() {
+    let mut file_a = LocalIndex::new();
+    file_a
+        .declarations
+        .push(method_decl("process", 10, 0, Some(1)));
+    let mut file_b = LocalIndex::new();
+    file_b
+        .declarations
+        .push(method_decl("process", 11, 0, Some(3)));
+    let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "process",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        None,
+        &[],
+        &name_index,
+        &super::super::families::TypeIndex::build(&[]),
+        None,
+        false,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "unknown arity must never narrow -- both candidates stay admitted"
+    );
+}
+
+/// P2-1 (#1898 code review, Anti-Silent-Failure): a candidate whose OWN
+/// `param_count` is `None` (missing arity evidence -- e.g. a non-Java
+/// extractor gap; latent for Java today, but Kotlin is P4 of the same
+/// epic #1906, and an extractor that omits param counts must never
+/// silently zero every arity-known call) must be RETAINED by
+/// `apply_arity_narrowing`, never treated as a definite mismatch --
+/// mirroring the "missing/ambiguous evidence retains the candidate"
+/// doctrine already documented on `apply_private_visibility_filter`
+/// three functions later in narrowing.rs. `file_a`'s `param_count:
+/// Some(5)` is a GENUINE mismatch against `arg_count: Some(2)` and must
+/// still be deleted (the #1898 P1 fix stays intact) -- proving this test
+/// discriminates "unknown evidence retains" from "narrowing stopped
+/// deleting anything at all". `pool.len() == 2` keeps the AC4 Level 5
+/// unique-name shortcut out of the way.
+#[test]
+fn arity_narrowing_retains_a_candidate_with_unknown_param_count_evidence() {
+    let mut file_a = LocalIndex::new();
+    file_a
+        .declarations
+        .push(method_decl("process", 10, 0, Some(5)));
+    let mut file_b = LocalIndex::new();
+    file_b.declarations.push(method_decl("process", 11, 0, None));
+    let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "process",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(2),
+        &[],
+        &name_index,
+        &super::super::families::TypeIndex::build(&[]),
+        None,
+        false,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "a candidate with unknown param_count evidence must be retained even though a \
+         DIFFERENT, genuinely wrong-arity candidate is correctly deleted -- got {} \
+         candidate(s)",
+        candidates.len()
+    );
+    assert_eq!(
+        candidates[0].0.file_id, 11,
+        "the surviving candidate must be the unknown-arity one (file 11), never the \
+         genuinely mismatched file 10"
+    );
+    assert_eq!(
+        candidates[0].1 & reasons::ARITY_MATCH,
+        0,
+        "a candidate with NO arity evidence must never be tagged ARITY_MATCH -- retained \
+         does not mean confirmed"
+    );
 }

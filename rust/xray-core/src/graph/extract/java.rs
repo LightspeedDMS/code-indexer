@@ -71,6 +71,33 @@ impl WalkContext {
 /// context a type declaration's own children (including a nested type's
 /// methods) must see -- its own bare name, the inherited-or-newly-rooted
 /// top-level type, and a reset `enclosing_method`.
+/// P1-A (#1898 code review round 2, epic #1906): records the bare name of
+/// every `type_parameter` under `node`'s own DIRECT `type_parameters`
+/// child (`class Box<T> {}`, `<T extends Svc> void run(T t) {}`), never
+/// descending into a NESTED type/method's own `type_parameters` (those are
+/// visited separately when the walk reaches that nested node). Verified
+/// real grammar shape: a `type_parameter`'s first named child is ALWAYS
+/// its own `type_identifier` (an optional trailing `type_bound` names the
+/// CONSTRAINT type, e.g. `Svc` in `T extends Svc`, never the parameter's
+/// own name) -- `child_by_kind("type_identifier")` unambiguously picks the
+/// parameter name itself. Shared by `dispatch_type_declaration` (class/
+/// interface/record/enum/annotation-type declarations) and
+/// `extract_method_declaration` (methods and constructors) rather than
+/// duplicated at each call site (Rule 4, anti-duplication).
+fn push_type_parameter_names(node: &OwnedNode, index: &mut LocalIndex) {
+    let Some(type_parameters) = node.child_by_kind("type_parameters") else {
+        return;
+    };
+    for param in type_parameters.named_children() {
+        if param.kind != "type_parameter" {
+            continue;
+        }
+        if let Some(name_node) = param.child_by_kind("type_identifier") {
+            index.type_parameter_names.push(name_node.text().to_string());
+        }
+    }
+}
+
 fn dispatch_type_declaration(
     node: &OwnedNode,
     file_id: u32,
@@ -79,6 +106,7 @@ fn dispatch_type_declaration(
     index: &mut LocalIndex,
 ) -> WalkContext {
     extract_type_declaration(node, file_id, next_local, index);
+    push_type_parameter_names(node, index);
     let enclosing_type = node
         .child_by_kind("identifier")
         .map(|n| std::rc::Rc::from(n.text()));
@@ -154,6 +182,92 @@ fn dispatch_node(
             index
                 .typed_names
                 .extend(super::java_receiver::local_variable_typed_names(
+                    node,
+                    ctx.enclosing_method,
+                ));
+            ctx
+        }
+        // P1-B (#1898 code review round 2, epic #1906): these four forms
+        // previously had NO typed-name extraction at all, letting
+        // `receiver::resolve_receiver_type`'s static-type-name fallback
+        // misresolve a same-named identifier into an unrelated in-repo
+        // type -- see each function's own doc comment.
+        "enhanced_for_statement" => {
+            if let Some(record) =
+                super::java_receiver::enhanced_for_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        "resource" => {
+            if let Some(record) =
+                super::java_receiver::resource_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        "catch_formal_parameter" => {
+            if let Some(record) =
+                super::java_receiver::catch_parameter_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // Bug #1898 round 4 (epic #1906): a type-pattern binding
+        // (`o instanceof Svc handle`) previously had NO typed-name
+        // extraction at all -- see `instanceof_pattern_typed_name`'s own
+        // doc comment.
+        "instanceof_expression" => {
+            if let Some(record) =
+                super::java_receiver::instanceof_pattern_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // Bug #1898 round 4 (epic #1906): a static initializer's, an
+        // instance initializer's, or a record compact constructor's body
+        // is a bare `block` node reached while `ctx.enclosing_method` is
+        // STILL `None` (none of those three container nodes sets it --
+        // `dispatch_type_declaration` reset it to `None` for the whole
+        // type's children, and only `method_declaration`/`constructor_
+        // declaration` ever set it back). `local_variable_typed_names`
+        // (and every other per-method typed-name extractor) silently
+        // returned `Vec::new()` for a local declared inside such a block,
+        // making `resolve_receiver_type` fall through to its open-world
+        // fallback substrates and misresolve a same-named identifier into
+        // an unrelated in-repo type -- the exact P1-B shape, just for
+        // THREE binding forms extraction never covered. Allocating a
+        // fresh SYNTHETIC symbol here (no `Declaration` pushed for it,
+        // mirroring `extract_method_declaration`'s own "malformed/
+        // nameless declaration still gets a symbol for its children's
+        // context" fallback) and using it as `enclosing_method` for this
+        // block's children fixes all three uniformly: this single rule
+        // fires exactly once per top-level initializer/compact-ctor body
+        // (a NESTED block within it inherits the now-`Some` enclosing_
+        // method unchanged, so it never re-triggers -- same one-scope-
+        // per-method-body granularity every other block in this extractor
+        // already has). An ORDINARY block inside a real method/constructor
+        // body never reaches this arm at all: `ctx.enclosing_method` is
+        // already `Some` by the time such a block is visited, since
+        // `dispatch_method_declaration` sets it before any of the
+        // method's children (including its own top-level `block`) are
+        // pushed onto the walk stack.
+        "block" if ctx.enclosing_method.is_none() => {
+            let symbol = next_symbol(file_id, next_local);
+            WalkContext {
+                enclosing_type: ctx.enclosing_type.clone(),
+                top_level_type: ctx.top_level_type.clone(),
+                enclosing_method: Some(symbol),
+            }
+        }
+        "lambda_expression" => {
+            index
+                .typed_names
+                .extend(super::java_receiver::lambda_param_typed_names(
                     node,
                     ctx.enclosing_method,
                 ));
@@ -744,6 +858,7 @@ fn extract_method_declaration(
     index: &mut LocalIndex,
 ) -> SymbolId {
     let symbol = next_symbol(file_id, next_local);
+    push_type_parameter_names(node, index);
     let Some(name_node) = node.child_by_kind("identifier") else {
         return symbol;
     };

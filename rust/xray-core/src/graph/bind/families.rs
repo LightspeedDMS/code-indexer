@@ -40,6 +40,66 @@ pub(crate) struct TypeIndex {
     /// incomplete set may be missing the real supertype entirely, so
     /// narrowing on it must be skipped, not just when the set is empty.
     incomplete_supertype_names: HashSet<String>,
+    /// P1-4 (#1898 code review, AC3): bare names of EVERY type declared
+    /// anywhere in the repo (every `type_nesting` record's `type_name`,
+    /// collected independently of the `top_levels` ambiguity bookkeeping
+    /// below -- an ambiguous-top-level type is still a KNOWN type name).
+    /// The sole consumer is `receiver::resolve_receiver_type`'s static-
+    /// type fallback: an `Identifier` receiver that is not a local
+    /// variable/field/parameter but IS a known in-repo type name resolves
+    /// to that type itself (e.g. `TimeUtil.parse(x)`'s receiver
+    /// `"TimeUtil"`).
+    known_type_names: HashSet<String>,
+    /// P1-B (#1898 code review round 2, epic #1906): bare names of EVERY
+    /// field declared anywhere in the repo -- aggregated from every
+    /// file's OWN `typed_names` records whose `scope` is `NameScope::
+    /// Field`, repo-wide (unlike `receiver::FileTypedNames`, which is
+    /// deliberately per-file). Sole consumer:
+    /// `receiver::resolve_receiver_type`'s static-type-name fallback must
+    /// NOT fire for an identifier that is ALSO a known field name
+    /// anywhere in the repo -- `FileTypedNames::lookup` only ever sees a
+    /// field declared on the EXACT `enclosing_type` passed to it (never
+    /// an outer lexically-enclosing type, never a superclass in another
+    /// file), so a lookup MISS for a genuine field access (an inner class
+    /// reading its outer class's field; an inherited field from a
+    /// superclass in a different file) is a real evidence GAP, not proof
+    /// the identifier denotes a type. Without this set, such a miss could
+    /// misresolve the field access as a receiver TYPE whenever an
+    /// unrelated type in the repo happens to share the field's bare name.
+    known_field_names: HashSet<String>,
+    /// P1-B (#1898 code review round 2, epic #1906): bare field name ->
+    /// its UNANIMOUS declared type across every Field-scope `typed_names`
+    /// record sharing that name, REPO-WIDE (a field name declared on one
+    /// type in file A and another type in file B both count -- this is
+    /// intentionally cross-file, unlike `receiver::FileTypedNames`).
+    /// `None` when two or more such records disagree on the declared
+    /// type (an unrelated field elsewhere in the repo happens to share
+    /// the bare name but not the type) -- ambiguous, never guessed, same
+    /// "disagree -> None" doctrine `receiver::return_type_of_method_on_
+    /// type` already uses for overloaded return types. Sole consumer:
+    /// `receiver::resolve_receiver_type`'s field-access fallback, which
+    /// this makes an EXACT resolution (not merely "block the wrong
+    /// guess") for the two P1-B forms where the field's real type is
+    /// genuinely recorded somewhere in the repo but not visible to the
+    /// per-file lookup: an inner class reading its outer class's field,
+    /// and a field inherited from a superclass declared in a different
+    /// file.
+    field_types: HashMap<String, Option<String>>,
+    /// P1-A (#1898 code review round 2, epic #1906): bare names of EVERY
+    /// generic type parameter declared anywhere in the repo -- aggregated
+    /// from every file's own `LocalIndex::type_parameter_names`. Sole
+    /// consumer: `receiver::resolve_receiver_type` must reject a
+    /// declared-type STRING (from a local/field/parameter's own typed-name
+    /// evidence) that names a type parameter (`T` in `<T extends Svc> void
+    /// run(T t)`) rather than a real class/interface -- a receiver typed
+    /// `T` is not a concrete declaration this binder can narrow against.
+    /// Post-#1898-scope-split, `apply_receiver_type_narrowing` is
+    /// TAG-ONLY and can never fabricate an empty candidate set regardless;
+    /// this check still matters for `Confidence`/reason-bit accuracy
+    /// (`T` must never spuriously earn `RECEIVER_TYPE_MATCH`) and for the
+    /// AC4 Level 5 unique-name shortcut's admission gate, which still
+    /// consults Positive receiver-type evidence.
+    type_parameter_names: HashSet<String>,
 }
 
 impl TypeIndex {
@@ -71,8 +131,10 @@ impl TypeIndex {
         }
         let mut top_levels = HashMap::new();
         let mut ambiguous_top_levels = HashSet::new();
+        let mut known_type_names: HashSet<String> = HashSet::new();
         for file in files {
             for nesting in &file.index.type_nesting {
+                known_type_names.insert(nesting.type_name.clone());
                 if ambiguous_top_levels.contains(&nesting.type_name) {
                     continue;
                 }
@@ -89,18 +151,100 @@ impl TypeIndex {
                 }
             }
         }
+        // P1-B (#1898 code review round 2): repo-wide, regardless of which
+        // file declares the field or which type's scope it belongs to --
+        // the sole consumer only ever asks "is this bare name a field
+        // ANYWHERE", never "on which type". `field_types` is built in the
+        // SAME pass: `None` means "conflicting declared types seen for
+        // this name" (an unrelated field elsewhere shares the bare name
+        // but not the type), `Some(t)` means every record seen so far
+        // agreed on `t` -- ambiguity is sticky (once `None`, stays `None`
+        // even if a later record happens to match an earlier one, since
+        // by then a genuine conflict is already proven).
+        let mut known_field_names: HashSet<String> = HashSet::new();
+        let mut field_types: HashMap<String, Option<String>> = HashMap::new();
+        for file in files {
+            for typed_name in &file.index.typed_names {
+                if !matches!(
+                    &typed_name.scope,
+                    crate::graph::extract::local_index::NameScope::Field { .. }
+                ) {
+                    continue;
+                }
+                known_field_names.insert(typed_name.name.clone());
+                match field_types.get(&typed_name.name) {
+                    None => {
+                        field_types
+                            .insert(typed_name.name.clone(), Some(typed_name.declared_type.clone()));
+                    }
+                    Some(Some(existing)) if existing != &typed_name.declared_type => {
+                        field_types.insert(typed_name.name.clone(), None);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        // P1-A (#1898 code review round 2): repo-wide, same conservative
+        // rationale as `known_field_names` above -- a name EVER used as a
+        // type parameter anywhere only ever makes this MORE conservative.
+        let mut type_parameter_names: HashSet<String> = HashSet::new();
+        for file in files {
+            for name in &file.index.type_parameter_names {
+                type_parameter_names.insert(name.clone());
+            }
+        }
         TypeIndex {
             direct_children,
             direct_parents,
             interface_names,
             top_levels,
             incomplete_supertype_names,
+            known_field_names,
+            field_types,
+            known_type_names,
+            type_parameter_names,
         }
     }
 
     /// True when `type_name` is a known interface anywhere in the repo.
     pub(crate) fn is_interface(&self, type_name: &str) -> bool {
         self.interface_names.contains(type_name)
+    }
+
+    /// P1-4 (#1898 code review, AC3): true when `name` is the bare name of
+    /// a type declared ANYWHERE in the repo -- see the `known_type_names`
+    /// field doc for the sole consumer (static-type receiver resolution).
+    pub(crate) fn is_known_type_name(&self, name: &str) -> bool {
+        self.known_type_names.contains(name)
+    }
+
+    /// P1-B (#1898 code review round 2, epic #1906): true when `name` is
+    /// the bare name of a FIELD declared ANYWHERE in the repo -- see the
+    /// `known_field_names` field doc for the sole consumer (blocking
+    /// `receiver::resolve_receiver_type`'s static-type-name fallback for
+    /// an identifier that could just as easily be an out-of-scope field
+    /// access this binder's per-file `FileTypedNames` missed).
+    pub(crate) fn is_known_field_name(&self, name: &str) -> bool {
+        self.known_field_names.contains(name)
+    }
+
+    /// P1-B (#1898 code review round 2, epic #1906): `name`'s declared
+    /// type, ONLY when every Field-scope `typed_names` record repo-wide
+    /// sharing that bare name agrees on it -- `None` for a name that is
+    /// not a known field at all, OR one with conflicting declared types
+    /// recorded (never a guessed type). See the `field_types` field doc
+    /// for the sole consumer.
+    pub(crate) fn unambiguous_field_type(&self, name: &str) -> Option<&str> {
+        self.field_types.get(name)?.as_deref()
+    }
+
+    /// P1-A (#1898 code review round 2, epic #1906): true when `name` is
+    /// the bare name of a GENERIC TYPE PARAMETER declared anywhere in the
+    /// repo -- see the `type_parameter_names` field doc for the sole
+    /// consumer (`receiver::resolve_receiver_type` rejecting a declared
+    /// type that names a type variable, never a concrete class).
+    pub(crate) fn is_known_type_parameter_name(&self, name: &str) -> bool {
+        self.type_parameter_names.contains(name)
     }
 
     /// The Java top-level declaration sharing this type's private-access
@@ -257,7 +401,8 @@ mod tests {
     use super::super::name_index::DeclInfo;
     use super::*;
     use crate::graph::extract::local_index::{
-        DeclarationKind, InheritanceKind, InheritanceRecord, LocalIndex, Visibility,
+        DeclarationKind, InheritanceKind, InheritanceRecord, LocalIndex, TypeNestingRecord,
+        Visibility,
     };
     use crate::graph::identity::make_symbol_id;
 
@@ -526,5 +671,157 @@ mod tests {
         let index = TypeIndex::build(&files);
         assert!(index.is_interface("Shape"));
         assert!(!index.is_interface("NotAnInterface"));
+    }
+
+    /// P1-4 (#1898 code review): the substrate AC3's static-type receiver
+    /// resolution needs -- "is this bare identifier the name of a type
+    /// declared ANYWHERE in the repo", built from the SAME `type_nesting`
+    /// records `top_level_of` already reads, so no third parallel index of
+    /// declared type names is introduced. Two SEPARATE files, each
+    /// declaring a DIFFERENT type, prove this is a genuinely repo-wide
+    /// (not single-file) query.
+    #[test]
+    fn is_known_type_name_reports_every_declared_type_and_false_for_unknown_names() {
+        let mut index_a = LocalIndex::new();
+        index_a.type_nesting.push(TypeNestingRecord {
+            type_name: "TimeUtil".to_string(),
+            top_level_type: "TimeUtil".to_string(),
+        });
+        let mut index_b = LocalIndex::new();
+        index_b.type_nesting.push(TypeNestingRecord {
+            type_name: "ParserA".to_string(),
+            top_level_type: "ParserA".to_string(),
+        });
+        let files = vec![
+            FileForBind {
+                file_id: 1,
+                language: "java".to_string(),
+                index: index_a,
+            },
+            FileForBind {
+                file_id: 2,
+                language: "java".to_string(),
+                index: index_b,
+            },
+        ];
+        let type_index = TypeIndex::build(&files);
+        assert!(type_index.is_known_type_name("TimeUtil"));
+        assert!(type_index.is_known_type_name("ParserA"));
+        assert!(!type_index.is_known_type_name("NeverDeclared"));
+    }
+
+    /// P1-B (#1898 code review round 2, epic #1906): `is_known_field_name`
+    /// must see a field declared in ANY file, repo-wide -- the exact
+    /// substrate an inner-class field access or an inherited field (both
+    /// P1-B's own regression fixtures) needs, since the field's OWN
+    /// `field_declaration` may live in a different file from the call
+    /// site that reads it.
+    #[test]
+    fn is_known_field_name_reports_every_declared_field_and_false_for_unknown_names() {
+        use crate::graph::extract::local_index::{NameScope, TypedNameRecord};
+
+        let mut index_a = LocalIndex::new();
+        index_a.typed_names.push(TypedNameRecord {
+            name: "outerField".to_string(),
+            declared_type: "int".to_string(),
+            scope: NameScope::Field {
+                enclosing_type: "Outer".to_string(),
+            },
+        });
+        let mut index_b = LocalIndex::new();
+        index_b.typed_names.push(TypedNameRecord {
+            name: "count".to_string(),
+            declared_type: "int".to_string(),
+            scope: NameScope::Local {
+                enclosing_method: make_symbol_id(2, 0),
+            },
+        });
+        let files = vec![
+            FileForBind {
+                file_id: 1,
+                language: "java".to_string(),
+                index: index_a,
+            },
+            FileForBind {
+                file_id: 2,
+                language: "java".to_string(),
+                index: index_b,
+            },
+        ];
+        let type_index = TypeIndex::build(&files);
+        assert!(type_index.is_known_field_name("outerField"));
+        assert!(
+            !type_index.is_known_field_name("count"),
+            "a LOCAL-scoped typed name must never be reported as a known field"
+        );
+        assert!(!type_index.is_known_field_name("neverDeclared"));
+    }
+
+    /// P1-A (#1898 code review round 2, epic #1906): `is_known_type_
+    /// parameter_name` must see a type parameter declared in ANY file,
+    /// repo-wide -- mirrors `is_known_field_name`'s own repo-wide test
+    /// exactly.
+    #[test]
+    fn is_known_type_parameter_name_reports_every_declared_type_parameter_and_false_for_unknown_names(
+    ) {
+        let mut index_a = LocalIndex::new();
+        index_a.type_parameter_names.push("T".to_string());
+        let index_b = LocalIndex::new();
+        let files = vec![
+            FileForBind {
+                file_id: 1,
+                language: "java".to_string(),
+                index: index_a,
+            },
+            FileForBind {
+                file_id: 2,
+                language: "java".to_string(),
+                index: index_b,
+            },
+        ];
+        let type_index = TypeIndex::build(&files);
+        assert!(type_index.is_known_type_parameter_name("T"));
+        assert!(!type_index.is_known_type_parameter_name("NeverDeclared"));
+    }
+
+    /// P1-B (#1898 code review round 2, epic #1906): `unambiguous_field_
+    /// type` must resolve a field declared in a DIFFERENT file from the
+    /// caller (the "inherited field" P1-B shape) when every record for
+    /// that bare name agrees, and return `None` when two unrelated
+    /// records disagree on the type (never guessed) or the name is
+    /// simply unknown.
+    #[test]
+    fn unambiguous_field_type_resolves_a_field_declared_in_a_different_file_and_returns_none_on_conflict(
+    ) {
+        use crate::graph::extract::local_index::{NameScope, TypedNameRecord};
+
+        let field_file = |id: u32, owner: &str, name: &str, ty: &str| {
+            let mut index = LocalIndex::new();
+            index.typed_names.push(TypedNameRecord {
+                name: name.to_string(),
+                declared_type: ty.to_string(),
+                scope: NameScope::Field {
+                    enclosing_type: owner.to_string(),
+                },
+            });
+            FileForBind { file_id: id, language: "java".to_string(), index }
+        };
+        let files = vec![
+            field_file(1, "Base", "inheritedField", "Svc"),
+            field_file(2, "A", "conflicting", "int"),
+            field_file(3, "B", "conflicting", "String"),
+        ];
+        let type_index = TypeIndex::build(&files);
+        assert_eq!(
+            type_index.unambiguous_field_type("inheritedField"),
+            Some("Svc")
+        );
+        assert_eq!(
+            type_index.unambiguous_field_type("conflicting"),
+            None,
+            "two unrelated fields sharing a bare name but disagreeing on type must never \
+             resolve to either guessed type"
+        );
+        assert_eq!(type_index.unambiguous_field_type("neverDeclared"), None);
     }
 }

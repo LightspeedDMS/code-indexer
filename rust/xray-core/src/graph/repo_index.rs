@@ -43,7 +43,7 @@
 //! budget_and_completeness` is fed exactly this narrower set -- see the
 //! computation at the end of `build_repo_graph`.
 
-use super::bind::{bind_with_budget_and_completeness, enclosing_symbol, FileForBind};
+use super::bind::{finish_bind, prepare_bind, enclosing_symbol, FileForBind};
 use super::budget::{AnalysisCompleteness, IndexBudget};
 use super::csr::CodeGraph;
 use super::fused::{process_file_fused, CollectFactsStatus, ExtractionStatus, FusedFileResult};
@@ -107,6 +107,14 @@ pub struct RepoIndexResult {
     /// (`bind::enclosing_symbol`) so a real `analyze_graph` evaluator can
     /// look facts up via `FactsHandle::for_symbol` -- never discarded.
     pub facts: FactIndex,
+    /// #1898 round 4 (epic #1906, mandate item 3): how many references
+    /// across this whole repository had a non-empty bare-name pool (a
+    /// real same-named declaration exists somewhere in the repo) but were
+    /// narrowed all the way down to ZERO final candidates by the binder --
+    /// see `bind::resolve_all_references`'s own doc comment for the full
+    /// rationale. Sibling story #1897 wires this into `analyze_graph`'s
+    /// completeness reporting; this field is only where the number lives.
+    pub narrowed_to_zero_count: usize,
 }
 
 /// Reuses the exact same containment technique
@@ -255,7 +263,13 @@ pub fn build_repo_graph(
         && acc.files_with_read_errors == 0
         && acc.files_with_unsupported_language == 0;
 
-    let mut graph = bind_with_budget_and_completeness(acc.files_for_bind, &options.budget, index_is_complete);
+    // #1898 round 4 (epic #1906, mandate item 3): calls the exact same
+    // two steps `bind_with_budget_and_completeness` performs internally,
+    // rather than that black-box entry point, so `PreBindStats.narrowed_
+    // to_zero_count` is reachable here for `RepoIndexResult` below.
+    let (prepared, stats) = prepare_bind(acc.files_for_bind, index_is_complete);
+    let narrowed_to_zero_count = stats.narrowed_to_zero_count;
+    let mut graph = finish_bind(prepared, &options.budget);
     let budget_exceeded = graph.completeness() != AnalysisCompleteness::Complete;
 
     // Dual-review defect D1: propagate EVERY repo-level incompleteness
@@ -281,6 +295,7 @@ pub fn build_repo_graph(
         files_with_unsupported_language: acc.files_with_unsupported_language,
         truncated_by_max_files,
         facts: acc.facts,
+        narrowed_to_zero_count,
     })
 }
 
@@ -540,6 +555,61 @@ mod tests {
         assert!(
             resolved_file_ids.contains(&fid("B.java")),
             "the call site's candidate must resolve into B.java, an INDEXED but UNMATCHED file"
+        );
+    }
+
+    /// #1898 round 4 (epic #1906, mandate item 3): `narrowed_to_zero_count`
+    /// must count a reference whose bare-name pool was genuinely non-empty
+    /// (a real in-repo declaration shares the name) but whose candidates
+    /// were correctly narrowed all the way to zero -- but must NOT count
+    /// an ordinary out-of-repo bare-name reference (`neverDeclaredAnywhere()`,
+    /// a name this fixture repo declares nowhere at all), which is a
+    /// DIFFERENT, pre-existing "zero" outcome this counter is deliberately
+    /// scoped to exclude.
+    ///
+    /// #1898 SCOPE SPLIT (epic #1906, round-4 review, `.analysis/
+    /// 1898-review-rounds/round4-findings.md`): the ORIGINAL fixture here
+    /// used a receiver-type-only narrow-to-zero (`connection.commit()`, an
+    /// external `Connection` receiver, vs. an unrelated in-repo
+    /// `Bookkeeper.commit()` of the identical arity -- mirroring `bug_1898_
+    /// round4_narrowing_regressions.rs`'s own since-renamed `external_
+    /// receiver_with_matching_arity_...` test). `apply_receiver_type_
+    /// narrowing` is now TAG-ONLY and never empties a candidate set, so
+    /// that shape no longer narrows to zero at all. The fixture below uses
+    /// an ARITY mismatch instead (`connection.close()`, 0 args, vs. an
+    /// unrelated in-repo `Something.close(int code)`, 1 param) --
+    /// `apply_arity_narrowing` was never implicated in any of the four
+    /// review rounds and still hard-empties on a known mismatch, so this
+    /// counter still has a real narrow-to-zero case to count.
+    #[test]
+    fn narrowed_to_zero_count_counts_a_genuine_narrowing_not_an_ordinary_out_of_repo_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Something.java",
+            "package m;\npublic class Something {\n    void close(int code) {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package m;\nclass Caller {\n    void run(Connection connection) {\n        connection.close();\n        neverDeclaredAnywhere();\n    }\n}\n",
+        );
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["Something.java".to_string(), "Caller.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.narrowed_to_zero_count, 1,
+            "exactly ONE reference (connection.close(), 0 args, vs. Something.close(int), 1 \
+             param) was genuinely narrowed to zero by arity -- neverDeclaredAnywhere() is an \
+             ordinary out-of-repo reference and must not be counted, got {}",
+            result.narrowed_to_zero_count
         );
     }
 

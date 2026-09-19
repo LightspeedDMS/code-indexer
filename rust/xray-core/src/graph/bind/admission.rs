@@ -34,6 +34,13 @@ pub struct PreBindStats {
     pub declaration_count: usize,
     pub call_site_count: usize,
     pub candidate_edge_count: usize,
+    /// #1898 round 4 (epic #1906, mandate item 3): how many references
+    /// had a non-empty bare-name pool (a real same-named declaration
+    /// exists somewhere in the repo) but were narrowed all the way down
+    /// to ZERO final candidates -- see `super::resolve_all_references`'s
+    /// own doc comment for the full rationale and how this is
+    /// distinguished from an ordinary out-of-repo reference.
+    pub narrowed_to_zero_count: usize,
 }
 
 /// Everything `finish_bind` needs to complete the build. Deliberately
@@ -67,7 +74,7 @@ pub fn prepare_bind(
             .entry(file.language.clone())
             .or_insert_with(|| BinderDepth::new(file.language.clone()));
     }
-    let (pending, total_candidates, family_truncated) =
+    let (pending, total_candidates, family_truncated, narrowed_to_zero_count) =
         resolve_all_references(&files, &name_index, &type_index, index_is_complete);
     let declaration_count = files.iter().map(|f| f.index.declarations.len()).sum();
     let call_site_count = pending.len();
@@ -76,6 +83,7 @@ pub fn prepare_bind(
         declaration_count,
         call_site_count,
         candidate_edge_count: total_candidates,
+        narrowed_to_zero_count,
     };
     let prepared = PreparedBind {
         files,

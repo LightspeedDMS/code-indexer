@@ -14,7 +14,7 @@ use super::narrowing::{
     apply_arity_narrowing, apply_import_context_narrowing, apply_inheritance_family_expansion,
     apply_overload_shape_narrowing, apply_private_visibility_filter,
     apply_receiver_type_narrowing, apply_same_class_or_super_narrowing,
-    apply_super_class_narrowing,
+    apply_super_class_narrowing, param_count_matches_arity,
 };
 use super::scope::FileScope;
 use super::REF_KIND_INVOCATION;
@@ -23,8 +23,12 @@ use crate::graph::identity::{make_symbol_id, SymbolId};
 use crate::graph::reasons;
 
 /// Which `DeclarationKind` a reference resolves against: methods for
-/// calls, types for type references and constructions.
-fn target_kind_for_ref(ref_kind: u8) -> DeclarationKind {
+/// calls, types for type references and constructions. `pub(super)`
+/// (#1898 round 4, epic #1906): `bind/mod.rs`'s `resolve_all_references`
+/// reuses this exact mapping (Rule 4, anti-duplication) to re-derive a
+/// reference's pre-narrowing bare-name pool for the "narrowed to zero"
+/// observability counter.
+pub(super) fn target_kind_for_ref(ref_kind: u8) -> DeclarationKind {
     match ref_kind {
         REF_KIND_INVOCATION => DeclarationKind::Method,
         _ => DeclarationKind::Type,
@@ -91,12 +95,12 @@ fn context_reasons(name: &str, decl: &DeclInfo, ref_file_id: u32, ref_scope: &Fi
 }
 
 /// D3/AC4 Level 5: the unique-name shortcut. `Some(result)` when it
-/// applies at all (a genuine `super` call, an ambiguous pool, or an
-/// incomplete index all make it inapplicable, returning `None` so the
-/// caller falls through to the full narrowing pipeline instead); within
-/// `Some`, an empty `Vec` means the sole candidate was excluded by D2
-/// (private, known cross-top-level owner), otherwise the singleton is
-/// returned tagged `UNIQUE_NAME_IN_REPO`.
+/// applies at all (a genuine `super` call, an ambiguous pool, an
+/// incomplete index, or an EVIDENCE MISMATCH all make it inapplicable,
+/// returning `None` so the caller falls through to the full narrowing
+/// pipeline instead); within `Some`, an empty `Vec` means the sole
+/// candidate was excluded by D2 (private, known cross-top-level owner),
+/// otherwise the singleton is returned tagged `UNIQUE_NAME_IN_REPO`.
 ///
 /// D3: a genuine `super` call must never take this shortcut, even when
 /// the name happens to be globally unique -- the sole candidate could
@@ -104,12 +108,55 @@ fn context_reasons(name: &str, decl: &DeclInfo, ref_file_id: u32, ref_scope: &Fi
 /// the D3 fix exists to prevent), which `apply_super_class_narrowing`
 /// (narrowing.rs) is what actually verifies against the ancestor chain.
 ///
+/// Bug #1898 (P1-3 of the code review, epic #1906): this shortcut runs
+/// BEFORE arity/receiver-type narrowing and, pre-fix, consulted neither --
+/// a call whose real target is EXTERNAL to the repo (e.g. `connection.
+/// close()`, 0 args) but whose bare name happens to be globally unique in
+/// the repo (`Something.close(int code)`, 1 param, on some unrelated
+/// class) was admitted unconditionally as `UNIQUE_NAME_IN_REPO` /
+/// `Confidence::Exact`, the exact AC2 repro #1898 names. Now gated: when
+/// `arg_count` is known and the sole candidate's OWN declared arity is
+/// known and does not accept it (`param_count_matches_arity`), or when
+/// `receiver_type` is known (and its supertype evidence is COMPLETE) and
+/// the sole candidate's `enclosing_type` is not in
+/// `{receiver_type} U supertypes_of(receiver_type)`, the shortcut is
+/// inapplicable and falls through -- the full pipeline's own hard arity/
+/// receiver-type narrowing then correctly empties the set. Missing
+/// evidence (`param_count: None`, an unresolved `receiver_type`, or
+/// receiver-type evidence recorded incomplete) never invalidates the
+/// shortcut on its own -- mirrors this same file's/narrowing.rs's
+/// "missing evidence retains, never excludes" doctrine (P2-1).
+///
+/// Round 4 (#1898 epic #1906): `receiver_type` here is ONLY ever the
+/// POSITIVE-tier value -- `resolve_reference` (below) passes `None`
+/// instead whenever the caller's evidence is Advisory, so this shortcut
+/// never invalidates itself on a coincidentally-wrong GUESS the way the
+/// full pipeline's hard filter used to (see `super::receiver::
+/// ReceiverEvidence` and `apply_receiver_type_narrowing`'s own doc
+/// comments for the full rationale).
+///
+/// #1898 scope split (epic #1906, round-4 review): `apply_receiver_type_
+/// narrowing` itself is now TAG-ONLY and never deletes a candidate --
+/// this shortcut's own receiver-type gate is UNCHANGED and deliberately
+/// kept, because it governs a different decision. Declining the shortcut
+/// here is an ADMISSION choice (whether to bypass the rest of the
+/// pipeline for a singleton pool), not a DELETION of an already-built
+/// candidate set -- falling through simply hands the singleton to the
+/// (now tag-only) full pipeline below, which keeps it regardless. A
+/// positive, definitional mismatch (the sole candidate's enclosing type
+/// provably outside `{receiver_type} U supertypes_of(receiver_type)`)
+/// remains a sound reason to skip a SHORTCUT that would otherwise claim
+/// `UNIQUE_NAME_IN_REPO`/`Confidence::Exact` for it.
+///
 /// F6 (#1873/#1875 rework, LOW): reuses `apply_private_visibility_filter`
 /// (D2) instead of a hand-rolled copy of its exact "private + known
 /// cross-top-level owner" exclusion rule -- a fresh 0-bits singleton is
 /// filtered in place, and only its survival is checked.
+#[allow(clippy::too_many_arguments)]
 fn try_unique_name_shortcut(
     pool: &[&DeclInfo],
+    arg_count: Option<usize>,
+    receiver_type: Option<&str>,
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
     type_index: &super::families::TypeIndex,
@@ -119,6 +166,24 @@ fn try_unique_name_shortcut(
         return None;
     }
     let only = pool[0];
+    if let Some(arg_count) = arg_count {
+        if only.param_count.is_some() && !param_count_matches_arity(only, arg_count) {
+            return None;
+        }
+    }
+    if let Some(receiver_type) = receiver_type {
+        if !type_index.has_incomplete_supertype_evidence(receiver_type) {
+            let mut allowed = type_index.supertypes_of(receiver_type);
+            allowed.insert(receiver_type.to_string());
+            if !only
+                .enclosing_type
+                .as_deref()
+                .is_some_and(|t| allowed.contains(t))
+            {
+                return None;
+            }
+        }
+    }
     let mut singleton = vec![(only.clone(), 0u16)];
     apply_private_visibility_filter(&mut singleton, caller_top_level, type_index);
     if singleton.is_empty() {
@@ -166,6 +231,7 @@ pub(crate) fn resolve_reference(
     name_index: &RepoNameIndex,
     type_index: &super::families::TypeIndex,
     receiver_type: Option<&str>,
+    receiver_type_is_positive: bool,
     same_class_context: Option<&str>,
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
@@ -175,8 +241,19 @@ pub(crate) fn resolve_reference(
     if pool.is_empty() {
         return Vec::new();
     }
+    // Round 4 (#1898 epic #1906): the shortcut only ever sees POSITIVE
+    // receiver-type evidence -- an Advisory guess must never invalidate
+    // it (see this function's own doc comment above `try_unique_name_
+    // shortcut` for why).
+    let shortcut_receiver_type = if receiver_type_is_positive {
+        receiver_type
+    } else {
+        None
+    };
     if let Some(result) = try_unique_name_shortcut(
         &pool,
+        arg_count,
+        shortcut_receiver_type,
         super_class_context,
         caller_top_level,
         type_index,

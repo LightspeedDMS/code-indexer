@@ -101,6 +101,7 @@ fn same_class_or_super_narrows_an_unqualified_call_to_the_callers_own_type_hiera
         &name_index,
         &type_index,
         None,
+        false,
         Some("Sub"),
         None,
         None,
@@ -119,15 +120,25 @@ fn same_class_or_super_narrows_an_unqualified_call_to_the_callers_own_type_hiera
     );
 }
 
-/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): a
-/// qualified call's receiver was resolved (by the caller, via
-/// `super::receiver::resolve_receiver_type`) to declared type `"Foo"`,
-/// which `extends Base` -- narrows to `Base.doSomething` (declared on
-/// a SUPERTYPE of the receiver's declared type, not just an
-/// exact-type match), excluding an unrelated `Other.doSomething` that
-/// shares only the name.
+/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing), RE-SCOPED by
+/// the #1898 scope split (epic #1906, round-4 review): a qualified call's
+/// receiver was resolved (by the caller, via `super::receiver::
+/// resolve_receiver_type`) to declared type `"Foo"`, which `extends
+/// Base` -- `apply_receiver_type_narrowing` TAGS `Base.doSomething`
+/// (declared on a SUPERTYPE of the receiver's declared type, not just an
+/// exact-type match) with `RECEIVER_TYPE_MATCH`, but no longer EXCLUDES
+/// the unrelated `Other.doSomething` that shares only the name -- that
+/// exclusion is exactly the "hard-narrow to a non-empty subset" path
+/// round4-findings.md found unsound (Positive evidence is not
+/// closed-world), so it moved whole-cloth to the receiver-type
+/// hard-narrowing follow-up issue named in `docs/xray-architecture.md`'s
+/// candidate-admission section. This test now asserts what the code
+/// actually guarantees: `Base.doSomething` is present and tagged, and
+/// `Other.doSomething` is accepted noise, not silently excluded from the
+/// suite's coverage.
 #[test]
-fn receiver_type_match_narrows_a_qualified_call_to_the_receivers_declared_type() {
+fn receiver_type_match_tags_the_receivers_declared_type_but_no_longer_excludes_the_unrelated_sibling(
+) {
     use crate::graph::confidence::Confidence;
     use crate::graph::extract::local_index::InheritanceKind;
 
@@ -157,6 +168,7 @@ fn receiver_type_match_narrows_a_qualified_call_to_the_receivers_declared_type()
         &name_index,
         &type_index,
         Some("Foo"),
+        true,
         None,
         None,
         None,
@@ -164,17 +176,141 @@ fn receiver_type_match_narrows_a_qualified_call_to_the_receivers_declared_type()
     );
     assert_eq!(
         candidates.len(),
-        1,
-        "Other.doSomething must be excluded -- it has no relation to Foo's hierarchy"
+        2,
+        "accepted regression (#1898 scope split): receiver-type narrowing is tag-only now, \
+         so Other.doSomething is no longer excluded -- both candidates survive"
     );
+    let base_candidate = candidates
+        .iter()
+        .find(|(d, _)| d.file_id == 30)
+        .expect("Base.doSomething must still be present, reachable via Foo's supertype chain");
+    assert_ne!(base_candidate.1 & reasons::RECEIVER_TYPE_MATCH, 0);
     assert_eq!(
-        candidates[0].0.file_id, 30,
-        "Base.doSomething must be reachable via Foo's supertype chain"
-    );
-    assert_ne!(candidates[0].1 & reasons::RECEIVER_TYPE_MATCH, 0);
-    assert_eq!(
-        Confidence::derive(candidates[0].1),
+        Confidence::derive(base_candidate.1),
         Confidence::ReceiverType
+    );
+    assert!(
+        candidates.iter().any(|(d, _)| d.file_id == 31),
+        "Other.doSomething must still be present (accepted regression, not silently dropped \
+         from the suite's coverage) pending the receiver-type hard-narrowing follow-up"
+    );
+}
+
+/// Shared fixture helper for the never-shrinks invariant tests below: two
+/// files, each declaring one 0-arg `"helper"` method owned by its own
+/// `enclosing_type` -- the minimal pool needed to observe whether
+/// `apply_receiver_type_narrowing` shrinks or tags a candidate set.
+fn two_helper_candidates(
+    file_a_id: u32,
+    enclosing_type_a: &str,
+    file_b_id: u32,
+    enclosing_type_b: &str,
+) -> Vec<FileForBind> {
+    use crate::graph::extract::local_index::MethodOwnerRecord;
+
+    let mut file_a = LocalIndex::new();
+    file_a
+        .declarations
+        .push(method_decl("helper", file_a_id, 0, Some(0)));
+    file_a.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(file_a_id, 0),
+        enclosing_type: enclosing_type_a.to_string(),
+    });
+    let mut file_b = LocalIndex::new();
+    file_b
+        .declarations
+        .push(method_decl("helper", file_b_id, 0, Some(0)));
+    file_b.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(file_b_id, 0),
+        enclosing_type: enclosing_type_b.to_string(),
+    });
+    vec![
+        file(file_a_id, "java", file_a),
+        file(file_b_id, "java", file_b),
+    ]
+}
+
+/// Resolves `"helper"` (0-arg invocation) against `files`, with
+/// `receiver_type` as POSITIVE evidence -- shared by both never-shrinks
+/// invariant tests below.
+fn resolve_helper_against(files: &[FileForBind], receiver_type: &str) -> Vec<(DeclInfo, u16)> {
+    let name_index = RepoNameIndex::build(files);
+    let type_index = super::super::families::TypeIndex::build(files);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+    resolve_reference(
+        "helper",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(0),
+        &[],
+        &name_index,
+        &type_index,
+        Some(receiver_type),
+        true,
+        None,
+        None,
+        None,
+        true,
+    )
+}
+
+/// #1898 scope split (epic #1906, round-4 review) -- the STRUCTURAL
+/// invariant the split rests on, proven directly rather than only via the
+/// historical AC1/AC3 fixtures above: a resolved receiver type matching
+/// NOTHING in the candidate pool must leave the pool's LENGTH unchanged
+/// and must tag NOTHING.
+#[test]
+fn apply_receiver_type_narrowing_never_shrinks_the_pool_on_a_zero_match() {
+    let files = two_helper_candidates(70, "Unrelated1", 71, "Unrelated2");
+    let candidates = resolve_helper_against(&files, "TargetType");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "a zero match against the resolved receiver type must never shrink the pool"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH == 0),
+        "a zero match must tag nothing"
+    );
+}
+
+/// Sibling of the zero-match invariant test above: a resolved receiver
+/// type matching SOME (not all) of the pool must still leave the pool's
+/// LENGTH unchanged, with `RECEIVER_TYPE_MATCH` set on EXACTLY the
+/// matching subset -- never used to also narrow the set, unlike every
+/// pre-#1898-scope-split round of this filter.
+#[test]
+fn apply_receiver_type_narrowing_never_shrinks_the_pool_and_tags_only_the_matching_subset() {
+    let files = two_helper_candidates(80, "MatchType", 81, "Unrelated");
+    let candidates = resolve_helper_against(&files, "MatchType");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "a partial match against the resolved receiver type must never shrink the pool"
+    );
+    let match_candidate = candidates
+        .iter()
+        .find(|(d, _)| d.file_id == 80)
+        .expect("MatchType.helper must still be present");
+    assert_ne!(
+        match_candidate.1 & reasons::RECEIVER_TYPE_MATCH,
+        0,
+        "the matching candidate must be tagged"
+    );
+    let unrelated_candidate = candidates
+        .iter()
+        .find(|(d, _)| d.file_id == 81)
+        .expect("Unrelated.helper must still be present");
+    assert_eq!(
+        unrelated_candidate.1 & reasons::RECEIVER_TYPE_MATCH,
+        0,
+        "the non-matching candidate must never be tagged"
     );
 }
 
@@ -250,6 +386,7 @@ fn resolve_save_against(files: &[FileForBind]) -> Vec<(DeclInfo, u16)> {
         &name_index,
         &type_index,
         None,
+        false,
         None,
         None,
         None,
@@ -414,6 +551,7 @@ fn unique_name_in_repo_resolves_to_a_single_exact_confidence_candidate() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -457,6 +595,7 @@ fn a_name_unique_only_in_a_partial_index_does_not_get_exact_confidence() {
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
+        false,
         None,
         None,
         None,
@@ -515,4 +654,275 @@ fn enclosing_symbol_falls_back_to_a_sentinel_when_nothing_precedes_the_line() {
     index.declarations.push(later);
 
     assert_eq!(enclosing_symbol(&index, 3, 10), make_symbol_id(3, u32::MAX));
+}
+
+/// Bug #1898 (P1 of epic #1906), RE-SCOPED by the #1898 scope split
+/// (epic #1906, round-4 review): a statically qualified call
+/// (`TimeUtil.parse(x)`) whose receiver resolves to a KNOWN in-repo type
+/// that declares (and inherits) no method by this name USED to resolve to
+/// ZERO candidates under the old hard-empty contract. That contract is
+/// exactly the "Positive/Advisory evidence hard-narrows an empty match"
+/// path the round-4 review found unsound (findings 1-2: `Positive` is not
+/// closed-world either) -- `apply_receiver_type_narrowing` is now
+/// TAG-ONLY, so a zero match tags nothing and removes nothing; the pool
+/// (every unrelated same-named method elsewhere in the repo) survives
+/// untouched. Exclusive binding to the qualified type moves to the
+/// receiver-type hard-narrowing follow-up issue named in `docs/
+/// xray-architecture.md`'s candidate-admission section.
+#[test]
+fn receiver_type_with_no_matching_member_keeps_the_full_pool_pending_the_hard_narrowing_followup() {
+
+    use crate::graph::extract::local_index::MethodOwnerRecord;
+
+    let mut file_a = LocalIndex::new();
+    file_a.declarations.push(method_decl("parse", 40, 0, Some(1)));
+    file_a.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(40, 0),
+        enclosing_type: "UnrelatedA".to_string(),
+    });
+    let mut file_b = LocalIndex::new();
+    file_b.declarations.push(method_decl("parse", 41, 0, Some(1)));
+    file_b.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(41, 0),
+        enclosing_type: "UnrelatedB".to_string(),
+    });
+    let files = vec![file(40, "java", file_a), file(41, "java", file_b)];
+    let name_index = RepoNameIndex::build(&files);
+    let type_index = super::super::families::TypeIndex::build(&files);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "parse",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(1),
+        &[],
+        &name_index,
+        &type_index,
+        Some("TimeUtil"),
+        true,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "accepted regression (#1898 scope split): receiver-type narrowing is tag-only now, \
+         so TimeUtil.parse(x) keeps binding to UnrelatedA.parse/UnrelatedB.parse until the \
+         hard-narrowing follow-up lands -- got {} candidate(s)",
+        candidates.len()
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH == 0),
+        "neither UnrelatedA.parse nor UnrelatedB.parse matches TimeUtil (or its supertypes), \
+         so neither may be tagged RECEIVER_TYPE_MATCH even though tag-only narrowing keeps \
+         them both in the set"
+    );
+}
+
+/// PRESERVE (#1882/#1883): when the receiver's OWN supertype evidence is
+/// recorded INCOMPLETE, `apply_receiver_type_narrowing` must NOT trust
+/// `supertypes_of` enough to narrow to empty -- an empty `matching` here
+/// could just as easily mean "the real supertype exists but this binder
+/// failed to record the edge" as "the target is genuinely external".
+/// Narrowing must be skipped (full pool retained) exactly like
+/// `apply_super_class_narrowing` already does for this same evidence gap
+/// -- this guards against the #1898 fix introducing a NEW #1882/#1883-
+/// shaped regression in a filter #1882/#1883 never originally audited.
+#[test]
+fn receiver_type_narrowing_skips_when_receivers_own_supertype_evidence_is_incomplete() {
+    use crate::graph::extract::local_index::MethodOwnerRecord;
+
+    let mut file_a = LocalIndex::new();
+    file_a
+        .declarations
+        .push(method_decl("helper", 50, 0, Some(0)));
+    file_a.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(50, 0),
+        enclosing_type: "Other".to_string(),
+    });
+    file_a.incomplete_supertypes.push("Sub".to_string());
+    let mut file_b = LocalIndex::new();
+    file_b
+        .declarations
+        .push(method_decl("helper", 51, 0, Some(0)));
+    file_b.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(51, 0),
+        enclosing_type: "AlsoUnrelated".to_string(),
+    });
+    let files = vec![file(50, "java", file_a), file(51, "java", file_b)];
+    let name_index = RepoNameIndex::build(&files);
+    let type_index = super::super::families::TypeIndex::build(&files);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "helper",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(0),
+        &[],
+        &name_index,
+        &type_index,
+        Some("Sub"),
+        true,
+        None,
+        None,
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "incomplete supertype evidence must fall back to keeping the pool, \
+         never narrow to empty on unproven absence"
+    );
+}
+
+/// PRESERVE (#1882/#1883): the same guard for
+/// `apply_same_class_or_super_narrowing` (AC3, unqualified/`this` calls).
+///
+/// P3-a (#1898 code review round 2, epic #1906): the ORIGINAL version of
+/// this test gave `Sub` NO real inheritance edges at all -- `allowed` was
+/// therefore EMPTY regardless of the incomplete-evidence guard, so
+/// `apply_same_class_or_super_narrowing`'s OWN separate "`matching.is_
+/// empty() -> keep the pool`" soft-skip (unrelated to the guard this test
+/// names) already produced `candidates.len() == 2` on its own -- the test
+/// passed identically with the guard deleted, i.e. it was VACUOUS.
+/// Discriminating now: `Sub` gets a REAL recorded edge (`Sub implements
+/// Marker`) alongside its incomplete marker (representing e.g. an
+/// unresolvable `extends` alongside a resolved `implements`), and one
+/// candidate is owned by `Marker` -- so `supertypes_of("Sub")` is
+/// NON-EMPTY and produces a PARTIAL match (1 of 2 candidates). Without
+/// the guard, that partial match narrows to 1; WITH it (the guard this
+/// test exists to prove), narrowing is skipped entirely and both
+/// candidates survive -- the only case the guard can actually change,
+/// per the review's own diagnosis.
+#[test]
+fn same_class_or_super_narrowing_skips_when_callers_own_supertype_evidence_is_incomplete() {
+    use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+
+    let mut file_a = LocalIndex::new();
+    file_a
+        .declarations
+        .push(method_decl("helper", 52, 0, Some(0)));
+    file_a.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(52, 0),
+        enclosing_type: "Marker".to_string(),
+    });
+    file_a.inheritance.push(InheritanceRecord {
+        kind: InheritanceKind::Implements,
+        subtype_name: "Sub".to_string(),
+        supertype_name: "Marker".to_string(),
+        line: 1,
+    });
+    file_a.incomplete_supertypes.push("Sub".to_string());
+    let mut file_b = LocalIndex::new();
+    file_b
+        .declarations
+        .push(method_decl("helper", 53, 0, Some(0)));
+    file_b.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(53, 0),
+        enclosing_type: "AlsoUnrelated".to_string(),
+    });
+    let files = vec![file(52, "java", file_a), file(53, "java", file_b)];
+    let name_index = RepoNameIndex::build(&files);
+    let type_index = super::super::families::TypeIndex::build(&files);
+    // Sanity check on the fixture itself: without the guard, `allowed`
+    // would be non-empty and produce a partial (not empty, not full)
+    // match -- otherwise this test is exactly as vacuous as before.
+    assert!(
+        !type_index.supertypes_of("Sub").is_empty(),
+        "fixture bug: Sub must have a real recorded supertype for this test to discriminate"
+    );
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "helper",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(0),
+        &[],
+        &name_index,
+        &type_index,
+        None,
+        false,
+        Some("Sub"),
+        None,
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "incomplete supertype evidence must fall back to keeping the pool, \
+         never narrow to the partial match Sub's OWN (incomplete) supertypes_of would produce"
+    );
+}
+
+/// Regression guard (#1882/#1883): `apply_super_class_narrowing`'s
+/// existing "incomplete evidence -> keep the pool" contract (already
+/// shipped by the #1873/#1875 rework, untouched by #1898) must survive
+/// the #1898 fix unchanged -- over-referencing on `super(...)` remains
+/// the safe, documented fallback (see #1882's own "Expected" section: the
+/// call resolves under the bare name rather than emitting nothing).
+/// `super_class_context.is_some()` deliberately bypasses the unique-name
+/// shortcut (D3), so this exercises the real narrowing pipeline even with
+/// a single-candidate pool.
+#[test]
+fn super_class_narrowing_still_keeps_the_pool_on_incomplete_evidence_after_the_1898_fix() {
+    use crate::graph::extract::local_index::MethodOwnerRecord;
+
+    let mut file_a = LocalIndex::new();
+    file_a.declarations.push(method_decl("marker", 60, 0, Some(0)));
+    file_a.method_owners.push(MethodOwnerRecord {
+        method_symbol: make_symbol_id(60, 0),
+        enclosing_type: "Outer.Nested".to_string(),
+    });
+    file_a.incomplete_supertypes.push("Holder.Nested".to_string());
+    let files = vec![file(60, "java", file_a)];
+    let name_index = RepoNameIndex::build(&files);
+    let type_index = super::super::families::TypeIndex::build(&files);
+    let scope = FileScope {
+        package: None,
+        imports: Vec::new(),
+    };
+
+    let candidates = resolve_reference(
+        "marker",
+        REF_KIND_INVOCATION,
+        1,
+        &scope,
+        Some(0),
+        &[],
+        &name_index,
+        &type_index,
+        None,
+        false,
+        None,
+        Some("Holder.Nested"),
+        None,
+        true,
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "super(...) with incomplete supertype evidence must still resolve under the bare \
+         name, never emit zero references (#1882's documented safe-over-reference contract)"
+    );
 }

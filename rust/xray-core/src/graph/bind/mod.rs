@@ -48,7 +48,7 @@ use depth::{
 };
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
-use resolve::resolve_reference;
+use resolve::{resolve_reference, target_kind_for_ref};
 use scope::build_file_scope;
 
 pub use budget_bind::{bind_with_budget, bind_with_budget_and_completeness};
@@ -95,6 +95,7 @@ fn resolve_site(
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     receiver_type: Option<&str>,
+    receiver_type_is_positive: bool,
     same_class_context: Option<&str>,
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
@@ -110,6 +111,7 @@ fn resolve_site(
         name_index,
         type_index,
         receiver_type,
+        receiver_type_is_positive,
         same_class_context,
         super_class_context,
         caller_top_level,
@@ -169,23 +171,47 @@ fn any_family_truncated(candidates: &[(DeclInfo, u16)]) -> bool {
         .any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
 }
 
+/// #1898 round 4 (epic #1906, mandate item 3): true when `name`'s
+/// bare-name pool (every same-named declaration of `ref_kind`'s target
+/// kind, repo-wide, BEFORE any narrowing pass runs) is non-empty. Reused
+/// by every one of `resolve_all_references`'s three per-site loops to
+/// compute the "narrowed to zero candidates" counter -- Rule 4,
+/// anti-duplication, rather than three copies of the same lookup.
+fn pool_was_nonempty(name_index: &RepoNameIndex, ref_kind: u8, name: &str) -> bool {
+    !name_index.lookup(name, target_kind_for_ref(ref_kind)).is_empty()
+}
+
 /// Resolves every invocation/type-reference/construction site across
 /// EVERY file in `files` into `PendingReference`s, and returns them
 /// alongside the total candidate count (needed to reserve the CSR arena's
-/// single allocation up front, AC5) and whether ANY reference's
+/// single allocation up front, AC5), whether ANY reference's
 /// inheritance-family expansion was truncated by `families::
 /// MAX_FAMILY_SIZE` -- the signal `admission::prepare_bind`/`finish_bind`
 /// use to set `AnalysisCompleteness::ResolutionAmbiguous` at the
-/// whole-graph level.
+/// whole-graph level -- and (#1898 round 4, epic #1906 mandate item 3)
+/// how many references were genuinely NARROWED TO ZERO candidates: a
+/// reference whose bare-name pool was non-empty (a real same-named
+/// declaration exists somewhere in the repo) but whose FINAL candidate
+/// set came back empty, i.e. every narrowing pass legitimately excluded
+/// every same-named candidate (external receiver, wrong arity, wrong
+/// enclosing type/hierarchy, ...). Deliberately distinct from an
+/// out-of-repo reference (bare-name pool ALSO empty -- never counted
+/// here, that is simply "this repo declares no such name at all", not a
+/// narrowing outcome). This is the observability gap #1898's own report
+/// named as having let three rounds of narrowing regressions survive a
+/// green 531-test suite: #1897 (a sibling story in this same epic) wires
+/// this number into `analyze_graph`'s completeness reporting; this
+/// function's job is only to produce it.
 fn resolve_all_references(
     files: &[FileForBind],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     index_is_complete: bool,
-) -> (Vec<PendingReference>, usize, bool) {
+) -> (Vec<PendingReference>, usize, bool, usize) {
     let mut pending = Vec::new();
     let mut total_candidates = 0usize;
     let mut family_truncated_anywhere = false;
+    let mut narrowed_to_zero_count = 0usize;
     for file in files {
         let scope = build_file_scope(&file.index);
         // AC1/AC2 (Story #1806, S2b): the file's declared-type substrate
@@ -210,7 +236,13 @@ fn resolve_all_references(
             // muddying AC5's distinct-evidence-path design even though it
             // would not change which candidates survive (both passes
             // compute the identical allowed-types set in that case).
-            let receiver_type = match &site.receiver {
+            // Round 4 (#1898 epic #1906): the resolved type now carries
+            // its own evidence TIER (`receiver::ReceiverEvidence`) --
+            // `.type_name()`/`.is_positive()` below feed `resolve_site`'s
+            // two separate params, so the full pipeline can tell a real
+            // `TypedNameRecord` lookup hit apart from an open-world
+            // fallback GUESS (see `ReceiverEvidence`'s own doc comment).
+            let receiver_evidence = match &site.receiver {
                 crate::graph::extract::local_index::ReceiverExpr::Identifier(_)
                 | crate::graph::extract::local_index::ReceiverExpr::Chained { .. } => {
                     receiver::resolve_receiver_type(
@@ -225,8 +257,12 @@ fn resolve_all_references(
                 crate::graph::extract::local_index::ReceiverExpr::None
                 | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper
                 | crate::graph::extract::local_index::ReceiverExpr::Super
-                | crate::graph::extract::local_index::ReceiverExpr::Other => None,
+                | crate::graph::extract::local_index::ReceiverExpr::Other => {
+                    receiver::ReceiverEvidence::None
+                }
             };
+            let receiver_type = receiver_evidence.type_name().map(|t| t.to_string());
+            let receiver_type_is_positive = receiver_evidence.is_positive();
             // AC3 (Story #1806, S2b): "unqualified calls resolve against
             // the enclosing class and its supertypes first" -- applies
             // ONLY to a bare/`this` receiver, never a qualified call on
@@ -266,6 +302,7 @@ fn resolve_all_references(
                 name_index,
                 type_index,
                 receiver_type.as_deref(),
+                receiver_type_is_positive,
                 same_class_context,
                 super_class_context,
                 caller_top_level,
@@ -273,6 +310,11 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if r.candidates.is_empty()
+                && pool_was_nonempty(name_index, REF_KIND_INVOCATION, &site.callee_name)
+            {
+                narrowed_to_zero_count += 1;
+            }
             pending.push(r);
         }
         for site in &file.index.type_references {
@@ -287,6 +329,7 @@ fn resolve_all_references(
                 name_index,
                 type_index,
                 None,
+                false,
                 None,
                 None,
                 None,
@@ -294,6 +337,11 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if r.candidates.is_empty()
+                && pool_was_nonempty(name_index, REF_KIND_TYPE_REFERENCE, &site.type_name)
+            {
+                narrowed_to_zero_count += 1;
+            }
             pending.push(r);
         }
         for site in &file.index.constructions {
@@ -308,6 +356,7 @@ fn resolve_all_references(
                 name_index,
                 type_index,
                 None,
+                false,
                 None,
                 None,
                 None,
@@ -315,10 +364,20 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if r.candidates.is_empty()
+                && pool_was_nonempty(name_index, REF_KIND_CONSTRUCTION, &site.type_name)
+            {
+                narrowed_to_zero_count += 1;
+            }
             pending.push(r);
         }
     }
-    (pending, total_candidates, family_truncated_anywhere)
+    (
+        pending,
+        total_candidates,
+        family_truncated_anywhere,
+        narrowed_to_zero_count,
+    )
 }
 
 /// Full-rebuild-only binder entry point (AC4). Consumes `files` by value
