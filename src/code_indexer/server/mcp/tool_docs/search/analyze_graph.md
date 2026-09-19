@@ -219,7 +219,7 @@ pub struct ReduceFinding {
 | `g.callers_of(symbol)` | `(u32) -> Vec<u32>` | Dense ids that call this symbol. |
 | `g.reachable_from(roots, max_depth)` | `(&[u32], usize) -> Vec<u32>` | Every dense id reachable from `roots` within `max_depth` hops -- the primitive for blast-radius/reachability analysis. |
 | `g.shortest_path_to_any(from, targets, max_depth)` | `(u32, &[u32], usize) -> Option<Vec<u32>>` | Shortest call-graph path from `from` to any of `targets` -- use this to report the PATH for a reachability finding (directional asymmetry, see below). |
-| `g.strongly_connected_components()` | `() -> Vec<Vec<u32>>` | Cycle detection -- useful for layering-violation / package-cycle analysis. |
+| `g.strongly_connected_components()` | `() -> Vec<Vec<u32>>` | Cycle detection over the POST-CAP candidate arena. A multi-node component is a POSSIBLE cycle among proposed candidates, NOT a confirmed source-level reference cycle -- an unresolved candidate window can fabricate one, so verify against source before reporting. A self-recursive method is returned as a SINGLETON, so `component.len() > 1` misses all self-recursion; test `g.callees_of(d).contains(&d)`. |
 | `g.resolve_symbol(dense_id)` | `(u32) -> Option<u64>` | Dense id to real global `SymbolId`. |
 | `g.symbol_count()` | `() -> usize` | Exact number of symbols; dense ids are in `0..g.symbol_count()`. |
 | `g.dense_id_for(symbol)` | `(u64) -> Option<u32>` | Reverse lookup from a real global `SymbolId` to its dense id. |
@@ -318,7 +318,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 
 - **Orphan/dead symbols**: iterate dense ids, report `is_definitely_dead_code(i) == Some(true)`.
 - **Unwired components**: report `is_symbol_referenced(i) == false` for a specific declaration kind (e.g. Spring `@Component` classes with zero inbound edges).
-- **Layering violations / package cycles**: `g.strongly_connected_components()` over module-level symbol ids.
+- **Layering violations / package cycles**: `g.strongly_connected_components()` over module-level symbol ids. **Read the two caveats before acting on a component.** (1) `callers_of`/`callees_of` read the POST-CAP candidate arena, where a reference's candidate window may include more than one proposed target when the binder could not disambiguate -- an SCC over these edges is a POSSIBLE cycle among proposed candidates, not a confirmed source-level reference cycle. Name your findings accordingly (the shipped `find-reference-cycles` template calls them `possible_candidate_cycle`, not `reference_cycle`) and verify each component against source before reporting it. (2) Tarjan returns a self-recursive method as a SINGLETON component, so the common `component.len() > 1` filter silently misses ALL self-recursion -- check `g.callees_of(d).contains(&d)` before treating a one-node component as nothing to report.
 - **Endpoint -> sink reachability**: `g.shortest_path_to_any(endpoint, sinks, max_depth)`, always ship the path.
 - **Blast radius**: `g.reachable_from(roots, max_depth).len()` -- how much of the codebase a change to `roots` can affect.
 
