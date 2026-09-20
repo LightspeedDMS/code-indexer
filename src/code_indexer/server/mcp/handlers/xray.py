@@ -29,7 +29,7 @@ from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
-from ._utils import _mcp_response, _parse_json_string_array
+from ._utils import _mcp_response, _parse_and_collapse_repo_alias
 
 logger = logging.getLogger(__name__)
 
@@ -763,14 +763,13 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # multi-repo parameter form. Normalize first so pattern resolution
     # always receives a string alias.
     # ------------------------------------------------------------------
-    repo_alias_parsed = _parse_json_string_array(repo_alias)
-    # v10.4.5 (Defect 5): normalize single-element list to single-string for
-    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # Issue #1902 P9 review: shared parse+collapse seam (three-strike
+    # anti-duplication rule) -- v10.4.5 (Defect 5)'s single-element-list ->
+    # single-string ergonomic normalization ({"job_id":"..."}) now lives in
+    # ONE place (`_utils._parse_and_collapse_repo_alias`), also used by the
+    # sibling handler below and by `handle_analyze_graph`. Multi-element
     # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
-    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
-        candidate = repo_alias_parsed[0]
-        if isinstance(candidate, str) and candidate:
-            repo_alias_parsed = candidate
+    repo_alias_parsed = _parse_and_collapse_repo_alias(repo_alias)
 
     # Bug #1876 item 4: validate and compile include/exclude patterns ONCE
     # here, on the RAW params.get(...) values, before any repo-scoped
@@ -1502,14 +1501,13 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     # multi-repo parameter form. Normalize first so pattern resolution
     # always receives a string alias.
     # ------------------------------------------------------------------
-    repo_alias_parsed = _parse_json_string_array(repo_alias)
-    # v10.4.5 (Defect 5): normalize single-element list to single-string for
-    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # Issue #1902 P9 review: shared parse+collapse seam (three-strike
+    # anti-duplication rule) -- v10.4.5 (Defect 5)'s single-element-list ->
+    # single-string ergonomic normalization ({"job_id":"..."}) now lives in
+    # ONE place (`_utils._parse_and_collapse_repo_alias`), also used by the
+    # sibling handler below and by `handle_analyze_graph`. Multi-element
     # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
-    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
-        candidate = repo_alias_parsed[0]
-        if isinstance(candidate, str) and candidate:
-            repo_alias_parsed = candidate
+    repo_alias_parsed = _parse_and_collapse_repo_alias(repo_alias)
 
     # Bug #1876 N5: xray_explore is functionally identical to xray_search
     # (same include/exclude-filtered candidate collection) but never called

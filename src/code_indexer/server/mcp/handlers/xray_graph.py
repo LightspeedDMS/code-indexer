@@ -32,14 +32,19 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import anyio
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
-from ._utils import _mcp_response
+from ._utils import (
+    _enforce_repo_count_cap,
+    _mcp_response,
+    _parse_and_collapse_repo_alias,
+    cap_breach_response,
+)
 from .xray import (
     _get_xray_cell_limiter,
     _pattern_scope_alias,
@@ -53,6 +58,22 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 120
 _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 600
+
+# Issue #1902 P9 review (P2 remediation), Epic #1906 non-negotiable #2 (no
+# NEW config setting): the ceiling a multi-repo request's THEORETICAL total
+# (alias_count * timeout_seconds) must not exceed. Deliberately reuses
+# `_TIMEOUT_MAX` -- the SAME 600s ceiling a SINGLE-repo `timeout_seconds`
+# already promises never to exceed -- rather than inventing a new number:
+# a multi-repo request run SEQUENTIALLY (this handler's design, see
+# `_run_multi_repo_analyze_graph`'s docstring) has no principled claim to a
+# LARGER total budget than one single-repo call is already allowed to
+# legitimately take. `_AWAIT_SECONDS_MAX` (handlers/xray.py, 45.0s) was
+# considered and rejected as the source: that constant bounds a DIFFERENT
+# mechanism (xray_search's synchronous poll-then-fall-back-to-job-id
+# window), and analyze_graph's own single-repo path already legitimately
+# blocks up to `_TIMEOUT_MAX` (600s) with no such window -- reusing 45s here
+# would reject requests the single-repo path already honors today.
+_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS = _TIMEOUT_MAX
 
 # R3-2 (Codex re-review, ROUND 3): the SAME whole-repo candidate-file cap
 # Rust's `GRAPH_INDEX_MAX_FILES` (rust/xray-cli/src/main.rs) enforces --
@@ -272,11 +293,31 @@ def _parse_timeout_seconds(timeout_raw: Any) -> Tuple[int, Optional[Dict[str, An
 
 def _parse_analyze_graph_request(
     params: Any,
-) -> Tuple[str, str, List[str], List[str], int, Optional[Dict[str, Any]]]:
+) -> Tuple[
+    Union[str, List[str]], str, List[str], List[str], int, Optional[Dict[str, Any]]
+]:
     """Parses and validates `params` for `handle_analyze_graph` -- factored
     out to keep that handler itself short. Returns either the 5 real
     parsed values with a `None` error, or empty/zero placeholders with a
     populated error dict (which the caller must check FIRST).
+
+    Issue #1902: `repository_alias` now accepts a bare string, a native
+    list of strings, OR a JSON-encoded string array -- matching
+    `xray_search`'s documented contract EXACTLY, via the SAME
+    `_parse_and_collapse_repo_alias` seam `handlers/xray.py`'s
+    `handle_xray_search`/`handle_xray_explore` already use (no fourth copy
+    of this parsing). A single-element list collapses to a plain string
+    (mirrors xray.py's v10.4.5 Defect 5 ergonomic normalization), so
+    callers of a single repo see the unchanged single-repo response shape
+    regardless of which form they used.
+
+    Issue #1902 P9 review, P3: an empty string ANYWHERE inside the list
+    (`[""]`, or `["real-repo", ""]`) is rejected with the SAME
+    `repository_alias_required` error a bare `""` already gets, rather
+    than silently entering the multi-repo path where it would otherwise
+    surface much later as a per-alias `repository_not_found` -- the same
+    user mistake must not produce two different error shapes depending on
+    whether it was wrapped in a list.
     """
     if not isinstance(params, dict):
         return (
@@ -291,12 +332,19 @@ def _parse_analyze_graph_request(
             },
         )
 
-    repo_alias = params.get("repository_alias", "")
+    repo_alias_raw = params.get("repository_alias", "")
     evaluator_code = params.get("evaluator_code", "")
     pattern_name = params.get("pattern_name")
+
+    repo_alias = _parse_and_collapse_repo_alias(repo_alias_raw)
+
+    repo_alias_type_valid = isinstance(repo_alias, str) or (
+        isinstance(repo_alias, list)
+        and all(isinstance(item, str) for item in repo_alias)
+    )
     if (
         not isinstance(evaluator_code, str)
-        or not isinstance(repo_alias, str)
+        or not repo_alias_type_valid
         or (pattern_name is not None and not isinstance(pattern_name, str))
     ):
         return (
@@ -307,12 +355,20 @@ def _parse_analyze_graph_request(
             0,
             {
                 "error": "invalid_params",
-                "message": "repository_alias and evaluator_code must be strings",
+                "message": (
+                    "repository_alias must be a string, a list of strings, or a "
+                    "JSON-encoded list of strings, and evaluator_code must be a "
+                    "string"
+                ),
             },
         )
     if not evaluator_code and not pattern_name:
         return "", "", [], [], 0, {"error": "evaluator_code_required"}
-    if not repo_alias:
+    repo_alias_empty = repo_alias == "" or (
+        isinstance(repo_alias, list)
+        and (len(repo_alias) == 0 or any(item == "" for item in repo_alias))
+    )
+    if repo_alias_empty:
         return "", "", [], [], 0, {"error": "repository_alias_required"}
 
     include_patterns, err = _validate_glob_patterns(
@@ -471,21 +527,304 @@ async def _run_analyze_graph_pipeline(
     return result
 
 
+def _dedupe_preserve_order(aliases: List[str]) -> List[str]:
+    """Order-preserving de-duplication for a multi-repo alias list (Issue
+    #1902 P9 review, P3).
+
+    `["dup", "dup", "other"]` must analyze `"dup"` exactly ONCE, not twice:
+    the previous behavior ran two full graph builds of the same repo and
+    returned `len(results) == 2 != len(repositories) == 3` with `ok: true`,
+    misleading any caller that uses that equality as a completeness check.
+    `_enforce_repo_count_cap`'s own docstring already documents that it
+    expects a POST-DEDUP list ("Final merged alias list (post-expansion,
+    post-dedup)") -- this is the seam that makes that true for
+    analyze_graph's multi-repo path.
+
+    MUST run before both the repo-count cap check (N copies of one alias
+    must not consume N cap slots) and the timeout-budget ceiling check (N
+    copies must not multiply the theoretical total by N).
+    """
+    return list(dict.fromkeys(aliases))
+
+
+def _check_multi_repo_timeout_budget(
+    alias_count: int, timeout_seconds: int
+) -> Optional[Dict[str, Any]]:
+    """Rejects a multi-repo `analyze_graph` request up front when its
+    THEORETICAL total (`alias_count * timeout_seconds` -- the sequential
+    best case) already exceeds `_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS`
+    (Issue #1902 P9 review, P2).
+
+    This replaces the previous `timeout_seconds // len(aliases)` division,
+    which was measurably wrong on two fronts at once: the `_TIMEOUT_MIN`
+    floor it fell back to (10s) cannot compile+build+analyze a fleet-scale
+    repo (Epic #1906's own P0 baseline: repo-B is 280569 symbols / 10.2M
+    edges), while above roughly N=12 aliases at the default 120s timeout
+    the UNDIVIDED aggregate already exceeds what a single-repo call
+    promises to bound -- the division's own stated invariant ("stays
+    within the SAME budget a single-repo request already promises") was
+    false for exactly the requests large enough to need dividing.
+
+    The real per-alias cost this ceiling deliberately does NOT capture (an
+    honest refusal beats a false promise, but it is still not the full
+    story): `_run_analyze_graph_pipeline` passes the SAME `timeout_seconds`
+    to BOTH `limiter.acquire(timeout=...)` (the xray cell queue wait) AND
+    `backend.run_graph_analysis(timeout_seconds=...)` (the real
+    compile/build/analyze deadline) -- the queue wait sits OUTSIDE that
+    internal deadline, so a genuinely busy node can spend up to ~2x
+    `timeout_seconds` on a single alias. `_resolve_repo_and_files` (alias
+    resolution + a whole-repo `os.walk`) carries NO timeout of its own at
+    all, on top of that. This handler cannot promise a hard ceiling on REAL
+    wall-clock time; what it can and must do is refuse, loudly and up
+    front, any request whose own best-case total already exceeds a stated
+    bound, rather than silently reshaping the budget to fit (Rule 2,
+    anti-fallback) or leaving the caller to discover an open-ended hang.
+
+    Returns `None` when the request is within budget, or a structured
+    error dict (never wrapped in the multi-repo `results`/`errors` shape --
+    this is a single top-level rejection of the WHOLE request) naming the
+    computed total, the ceiling, and the two remediations available to the
+    caller (split the request, or lower `timeout_seconds`).
+    """
+    total_seconds = alias_count * timeout_seconds
+    if total_seconds <= _MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS:
+        return None
+    return {
+        "error": "multi_repo_timeout_budget_exceeded",
+        "message": (
+            f"{alias_count} repositories x {timeout_seconds}s timeout_seconds "
+            f"= {total_seconds}s total (sequential best case), exceeding the "
+            f"{_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS}s ceiling a "
+            "single-repo analyze_graph call already promises never to "
+            "exceed. Split repository_alias into smaller batches, or lower "
+            "timeout_seconds, and retry."
+        ),
+        "repository_count": alias_count,
+        "timeout_seconds": timeout_seconds,
+        "computed_total_seconds": total_seconds,
+        "ceiling_seconds": _MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS,
+    }
+
+
+# Issue #1902 P9 review, P3: fields copied from a per-alias failure result
+# into that alias's `errors[]` entry. An explicit ALLOWLIST (rather than
+# spreading `repo_result` wholesale) means a field added to a FUTURE
+# `_graph_error_result`/pipeline error shape must be deliberately added
+# here too (Rule 13, anti-silent-failure: an unbounded field must be opted
+# IN, never inherited by default). Never includes "ok" (always False on
+# this path already, redundant), "findings"/"refine" (always empty on
+# every KNOWN error path today, per `_graph_error_result`), "degradation"/
+# "cached"/"compile_ms"/"fact_graph_complete" (meaningless on a failure).
+_MULTI_REPO_ERROR_ALLOWED_FIELDS = (
+    "error",
+    "message",
+    "error_code",
+    "offending_construct",
+    "offending_line",
+    "status",
+    "build_status",
+)
+# A real `RustNativeBackend.run_graph_analysis` compile/execution failure's
+# "error" field is `{"error_type", "error_message"}`, and `error_message`
+# carries the FULL rustc/xray-cli stderr verbatim -- `_sanitize_error_message`
+# only redacts server paths, it never truncates. Appended once per FAILING
+# alias, an unbounded string multiplies that cost by N.
+_MULTI_REPO_ERROR_STRING_MAX_CHARS = 2000
+
+
+def _truncate_error_string(value: str) -> str:
+    """Caps a single string field's length for a bounded per-alias error
+    payload (Issue #1902 P9 review, P3). Leaves short strings untouched."""
+    if len(value) <= _MULTI_REPO_ERROR_STRING_MAX_CHARS:
+        return value
+    omitted = len(value) - _MULTI_REPO_ERROR_STRING_MAX_CHARS
+    return f"{value[:_MULTI_REPO_ERROR_STRING_MAX_CHARS]}... [truncated {omitted} more chars]"
+
+
+def _bound_repo_error_payload(repo_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Builds the bounded per-alias failure payload for `errors[]` (Issue
+    #1902 P9 review, P3) -- the caller must already know `repo_result` is a
+    failure (`repo_result.get("error")` truthy) before calling this.
+
+    Copies ONLY `_MULTI_REPO_ERROR_ALLOWED_FIELDS`, never the full
+    `repo_result` dict, and truncates any string value found (including
+    inside a nested `error` dict, e.g. `error.error_message`) via
+    `_truncate_error_string`. `repository_alias` is NEVER a key this
+    function can produce -- the caller adds it AFTER spreading this
+    function's return value, so a `repository_alias` key that happened to
+    already exist inside `repo_result` (were it ever added to the
+    allowlist) could never clobber the real one.
+    """
+    bounded: Dict[str, Any] = {}
+    for field in _MULTI_REPO_ERROR_ALLOWED_FIELDS:
+        if field not in repo_result:
+            continue
+        value = repo_result[field]
+        if isinstance(value, str):
+            bounded[field] = _truncate_error_string(value)
+        elif isinstance(value, dict):
+            bounded[field] = {
+                k: (_truncate_error_string(v) if isinstance(v, str) else v)
+                for k, v in value.items()
+            }
+        else:
+            bounded[field] = value
+    return bounded
+
+
+async def _run_multi_repo_analyze_graph(
+    aliases: List[str],
+    evaluator_code: str,
+    include_patterns: List[str],
+    exclude_patterns: List[str],
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    """Issue #1902 (Epic #1906 P9): runs the existing single-repo
+    `_run_analyze_graph_pipeline` once PER alias, sequentially, and returns
+    a per-repo-KEYED response -- never a merged findings list.
+
+    Decision record (Issue #1902): the issue's own text proposed ONE graph
+    over the union of repos, noting symbol ids are already globally scoped.
+    That is a real `rust/` change (a genuine cross-repo arena/binder), which
+    this Python-only fix is explicitly barred from making. The evaluator
+    contract is also one `analyze_graph(g, facts)` call over one
+    `GraphHandle` -- there is no Python-side way to hand it two graphs at
+    once. Per-repo iteration is therefore the only honest thing achievable
+    here: each alias gets its OWN real analysis, keyed by alias, so a
+    finding's `involved`/dense ids are only ever compared against the graph
+    they came from. If/when a union-graph build lands in `rust/`, this
+    function is the seam to replace -- the request-level parsing/dispatch
+    above it does not change.
+
+    Fleet-scale cost (Epic #1906 non-negotiable #5 -- state cost at fleet
+    scale before merging):
+      - Memory: SEQUENTIAL, not concurrent. Each alias's
+        `_run_analyze_graph_pipeline` call (real xray-cli subprocess) fully
+        exits before the next alias starts, so peak memory stays bounded to
+        ONE repo's graph at a time regardless of how many aliases are
+        requested -- identical to today's single-repo memory profile, never
+        N-multiplied. The existing shared xray cell limiter (acquired
+        inside `_run_analyze_graph_pipeline` itself, H8) still gates
+        admission against every other xray_search/xray_explore/
+        analyze_graph call on the node.
+      - Time (Issue #1902 P9 review, P2 -- corrects a false invariant this
+        docstring previously stated): `timeout_seconds` is a PER-REPOSITORY
+        budget, passed UNDIVIDED to every alias -- matching `xray_search`'s
+        own multi-repo contract (handlers/xray.py:914-1072, which resolves
+        timeout_seconds ONCE and hands the FULL value to every alias's job).
+        The previous implementation divided `timeout_seconds` across the
+        alias count (floored at `_TIMEOUT_MIN`) and claimed the total
+        thereby "stays within the SAME budget a single-repo request already
+        promises" -- measurably false: the `_TIMEOUT_MIN` floor (10s) cannot
+        compile+build+analyze a fleet-scale repo (Epic #1906's own P0
+        baseline: repo-B is 280569 symbols / 10.2M edges), and above
+        roughly N=12 aliases at the default 120s timeout the UNDIVIDED
+        aggregate already exceeded that same "single-repo budget" the
+        division was supposed to protect. The caller (`handle_analyze_graph`)
+        now rejects the WHOLE request up front, before this function ever
+        runs, when `alias_count * timeout_seconds` exceeds
+        `_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS` (see
+        `_check_multi_repo_timeout_budget`'s docstring for the honest
+        queue-wait/file-walk cost this ceiling still cannot fully capture).
+        `aliases` arriving here is therefore ALREADY: (a) deduplicated
+        (`_dedupe_preserve_order`), (b) within the repo-count cap, and (c)
+        within the timeout-budget ceiling -- all three enforced by the
+        caller before dispatch.
+      - Repo count itself is bounded by the SAME `omni_max_repos_per_search`
+        config cap (default 50) `xray_search`'s own omni fan-out already
+        enforces (Bug #894) -- no new setting introduced (Epic #1906
+        non-negotiable #2).
+      - Evaluator validation: the caller pre-flights `validate_rust_evaluator`
+        ONCE, before calling this function, so a forbidden-construct
+        evaluator never reaches this loop at all -- see
+        `handle_analyze_graph`'s own docstring.
+
+    Returns a dict with:
+      - "ok": True only when EVERY alias resolved and analyzed successfully
+        (Rule 13, anti-silent-failure -- a partial failure must never read
+        as a clean multi-repo success).
+      - "mode": "multi_repo" -- distinguishes this shape from the unwrapped
+        single-repo response.
+      - "repositories": `aliases` as received (already deduplicated by the
+        caller), so `len(results) + len(errors) == len(repositories)` always
+        holds -- a caller can use that as a completeness check.
+      - "results": {alias: <that alias's own, individually PayloadCache-
+        truncated, single-repo analyze_graph result>} -- only for aliases
+        that resolved and ran.
+      - "errors": [{**_bound_repo_error_payload(error_dict),
+        "repository_alias": alias}] for aliases that failed (unknown alias,
+        no candidate files, a real compile error, ...) -- never silently
+        dropped, and never an unbounded copy of the full per-alias result
+        (Issue #1902 P9 review, P3). `repository_alias` is added AFTER the
+        allowlisted spread so it can never be clobbered by a same-named key
+        inside the bounded payload.
+    """
+    results: Dict[str, Any] = {}
+    errors: List[Dict[str, Any]] = []
+    for alias in aliases:
+        repo_result = await _run_analyze_graph_pipeline(
+            evaluator_code, alias, include_patterns, exclude_patterns, timeout_seconds
+        )
+        # A per-repo failure (unresolvable alias, no candidate files, a
+        # real compile error, ...) always carries a TRUTHY "error" value.
+        # A successful `RustNativeBackend.run_graph_analysis` response also
+        # carries an "error" key, explicitly set to `None` -- checking key
+        # PRESENCE (`"error" in repo_result`) would misclassify every real
+        # success as a failure; checking truthiness does not.
+        if repo_result.get("error"):
+            errors.append(
+                {**_bound_repo_error_payload(repo_result), "repository_alias": alias}
+            )
+        else:
+            results[alias] = _truncate_graph_result(repo_result)
+    return {
+        "ok": len(errors) == 0,
+        "mode": "multi_repo",
+        "repositories": aliases,
+        "results": results,
+        "errors": errors,
+    }
+
+
 async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """MCP handler for the analyze_graph tool (Story #1811, S5, AC3).
 
     1. Auth + permission check (query_repos).
-    2. Parameter parse + validation (`_parse_analyze_graph_request`).
-    3. Delegate to `_run_analyze_graph_pipeline` (evaluator pre-flight,
-       repo resolution, file collection, real graph-mode analysis).
-    4. Return the structured result.
+    2. Parameter parse + validation (`_parse_analyze_graph_request`) --
+       `repository_alias` accepts a string, a list of strings, or a
+       JSON-encoded string array (Issue #1902).
+    3. For a multi-repo alias list: de-duplicate (order-preserving,
+       `_dedupe_preserve_order`), enforce the shared omni repo-count cap,
+       enforce the aggregate timeout-budget ceiling
+       (`_check_multi_repo_timeout_budget`), pre-flight the evaluator ONCE
+       (`validate_rust_evaluator` -- a single top-level rejection, never
+       one per alias), then delegate to `_run_multi_repo_analyze_graph`
+       (one real analysis PER alias, see that function's docstring for the
+       multi-repo semantics and fleet-scale cost decision).
+    4. For a single alias: delegate to `_run_analyze_graph_pipeline`
+       (evaluator pre-flight, repo resolution, file collection, real
+       graph-mode analysis) -- UNCHANGED from before Issue #1902.
+    5. Return the structured result.
 
     Error codes:
         auth_required                    -- unauthenticated or missing query_repos.
         invalid_params                   -- params is not an object, or
-                                             repository_alias/evaluator_code not strings.
+                                             repository_alias is not a string/list of
+                                             strings/JSON-encoded list of strings, or
+                                             evaluator_code is not a string.
         evaluator_code_required          -- evaluator_code missing/empty.
-        repository_alias_required        -- repository_alias missing/empty.
+        repository_alias_required        -- repository_alias missing/empty (string or
+                                             list), or a list containing an empty
+                                             string element (Issue #1902 P9 review).
+        repo_count_cap_exceeded          -- repository_alias list (after dedup)
+                                             exceeds the shared omni_max_repos_per_search
+                                             cap (Issue #1902).
+        multi_repo_timeout_budget_exceeded -- alias_count * timeout_seconds (after
+                                             dedup) exceeds
+                                             _MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS
+                                             (Issue #1902 P9 review, P2) -- a single
+                                             top-level rejection of the whole request,
+                                             never wrapped in the multi-repo shape.
         include_patterns_invalid /
         exclude_patterns_invalid         -- not a list of strings, or a
                                              malformed glob.
@@ -493,9 +832,16 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         mutually_exclusive_params        -- evaluator_code and pattern_name
                                              were supplied together.
         pattern_mode_mismatch             -- stored pattern is not graph mode.
-        xray_evaluator_validation_failed -- forbidden construct or missing entry point.
-        repository_not_found             -- alias cannot be resolved.
-        no_candidate_files               -- include/exclude patterns matched nothing.
+        xray_evaluator_validation_failed -- forbidden construct or missing entry
+                                             point. For a multi-repo request this is
+                                             now ONE top-level error (Issue #1902 P9
+                                             review, P3), never one per alias.
+        repository_not_found             -- alias cannot be resolved (single-repo path;
+                                             surfaced per-alias in `errors[]` for a
+                                             multi-repo request).
+        no_candidate_files               -- include/exclude patterns matched nothing
+                                             (single-repo path; per-alias in `errors[]`
+                                             for a multi-repo request).
     """
     if user is None or not user.has_permission("query_repos"):
         return _mcp_response({"error": "auth_required"})
@@ -511,6 +857,24 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     if error is not None:
         return _mcp_response(error)
 
+    if isinstance(repo_alias, list):
+        # Issue #1902 P9 review, P3: dedup BEFORE the cap check --
+        # `_enforce_repo_count_cap`'s own docstring documents that it
+        # expects a post-dedup list, and N copies of one alias must not
+        # consume N cap slots nor multiply the timeout-budget total by N.
+        repo_alias = _dedupe_preserve_order(repo_alias)
+        cap_breach = _enforce_repo_count_cap(repo_alias)
+        if cap_breach is not None:
+            return cap_breach_response(cap_breach)
+        # Issue #1902 P9 review, P2: refuse a request whose own best-case
+        # total already exceeds the aggregate ceiling, before resolving
+        # any alias or running any analysis.
+        timeout_budget_error = _check_multi_repo_timeout_budget(
+            len(repo_alias), timeout_seconds
+        )
+        if timeout_budget_error is not None:
+            return _mcp_response(timeout_budget_error)
+
     evaluator_code, resolution_error = await _resolve_evaluator_code_off_loop(
         params,
         _pattern_scope_alias(repo_alias),
@@ -519,6 +883,34 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     )
     if resolution_error is not None:
         return resolution_error
+
+    if isinstance(repo_alias, list):
+        # Issue #1902 P9 review, P3: pre-flight the evaluator ONCE here,
+        # before the per-alias loop in `_run_multi_repo_analyze_graph` --
+        # mirrors xray_search's own multi-repo pre-flight
+        # (handlers/xray.py:944). Without this hoist, a forbidden-construct
+        # evaluator produced one IDENTICAL xray_evaluator_validation_failed
+        # error PER alias (8 aliases -> 8 identical errors, 50 at the cap)
+        # instead of a single top-level rejection.
+        validation = validate_rust_evaluator(evaluator_code)
+        if not validation.ok:
+            return _mcp_response(
+                {
+                    "error": "xray_evaluator_validation_failed",
+                    "error_code": validation.error_code,
+                    "offending_construct": validation.offending_construct,
+                    "offending_line": validation.offending_line,
+                    "message": validation.reason,
+                }
+            )
+        multi_result = await _run_multi_repo_analyze_graph(
+            repo_alias,
+            evaluator_code,
+            include_patterns,
+            exclude_patterns,
+            timeout_seconds,
+        )
+        return _mcp_response(multi_result)
 
     result = await _run_analyze_graph_pipeline(
         evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds

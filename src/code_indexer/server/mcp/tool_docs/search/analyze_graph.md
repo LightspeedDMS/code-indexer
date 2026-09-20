@@ -8,8 +8,12 @@ inputSchema:
   type: object
   properties:
     repository_alias:
-      type: string
-      description: 'Repository identifier to analyze. Use list_global_repos to see available repositories.'
+      oneOf:
+      - type: string
+      - type: array
+        items:
+          type: string
+      description: 'Repository identifier(s) to analyze. String for a single repository; array of strings to analyze several. JSON-encoded string arrays (e.g. ''["repo-a","repo-b"]'') are also accepted and parsed as arrays. Use list_global_repos to see available repositories. NOTE: several repositories are analyzed ONE AT A TIME, each against its own graph -- this is NOT a union graph, and dense symbol ids are per-repository, so they never mean anything across repositories. A multi-repository request returns a different envelope: {mode: "multi_repo", repositories: [...], results: {alias: <single-repo result>}, errors: [{repository_alias, error, message}]}, with ok true only when every repository succeeded. A single string, or a one-element array, returns the ordinary single-repository shape.'
     evaluator_code:
       type: string
       description: 'Inline Rust graph evaluator defining TWO REQUIRED functions: fn collect_facts(...) and fn analyze_graph(...). Mutually exclusive with pattern_name. Both functions must be defined together; graph evaluators must not define fn evaluate_node. The same Rust security whitelist as xray_search applies.'
@@ -54,7 +58,7 @@ outputSchema:
       description: 'True when the graph pipeline completed without an error. This includes status="ran_ok" and the server-derived status="no_supported_files" (all candidate files were unsupported languages). False for every error path (validation, missing repo, build failure, timeout, internal error) -- check `error` for the reason.'
     error:
       type: object
-      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, xray_evaluator_validation_failed, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch).'
+      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, xray_evaluator_validation_failed, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch). Two rejections apply only when you pass SEVERAL repositories, and both are refused up front before any repository is touched: `repo_count_cap_exceeded` (more repositories than the server''s omni cap allows) and `multi_repo_timeout_budget_exceeded` (repository_count x timeout_seconds exceeds the server''s total wall-clock ceiling -- the error carries `repository_count`, `timeout_seconds`, `computed_total_seconds` and `ceiling_seconds`, so split the request into smaller batches, or lower `timeout_seconds` if every repository is small enough to finish in less). Note `timeout_seconds` is PER REPOSITORY, not shared across them.'
     status:
       type: string
       description: 'The real --analyze-graph ChildReport status, OR the server-derived "no_supported_files": "ran_ok" (your analyze_graph executed), "no_supported_files" (ok=true, but every candidate file was an unsupported language -- see "no_supported_files status" below), "absent" (evaluator does not export analyze_graph -- should not happen given evaluator_code validation), "load_failed" (dylib failed to load), "graph_invalid" (the built graph file was corrupt), "panicked" (your analyze_graph panicked -- caught, never crashes the server).'
