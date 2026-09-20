@@ -104,6 +104,10 @@ pub mod handle {
         callees_of_fn: fn(*const (), u32) -> Vec<u32>,
         callers_of_fn: fn(*const (), u32) -> Vec<u32>,
         reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+        /// Bug #1901: the CALLERS-direction counterpart of
+        /// `reachable_from_fn` -- see `GraphHandle::reachable_to` for the
+        /// full rationale.
+        reachable_to_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
         shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
         strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
         resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
@@ -154,6 +158,12 @@ pub mod handle {
 
     fn thunk_reachable_from(ctx: CtxPtr, roots: &[u32], max_depth: usize) -> Vec<u32> {
         graph_from_ctx(ctx).reachable_from(roots, max_depth)
+    }
+
+    /// Bug #1901: thunk for `reachable_to` -- mirrors `thunk_reachable_from`
+    /// exactly, delegating to `CodeGraph::reachable_to`.
+    fn thunk_reachable_to(ctx: CtxPtr, targets: &[u32], max_depth: usize) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_to(targets, max_depth)
     }
 
     fn thunk_shortest_path_to_any(ctx: CtxPtr, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
@@ -246,6 +256,7 @@ pub mod handle {
                 callees_of_fn: thunk_callees_of,
                 callers_of_fn: thunk_callers_of,
                 reachable_from_fn: thunk_reachable_from,
+                reachable_to_fn: thunk_reachable_to,
                 shortest_path_to_any_fn: thunk_shortest_path_to_any,
                 strongly_connected_components_fn: thunk_strongly_connected_components,
                 resolve_symbol_fn: thunk_resolve_symbol,
@@ -274,6 +285,17 @@ pub mod handle {
 
         pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
             (self.reachable_from_fn)(self.ctx, roots, max_depth)
+        }
+
+        /// Bug #1901: the CALLERS-direction counterpart of `reachable_from`
+        /// -- "how much of the codebase can a change to `targets` affect" is
+        /// the transitive CALLERS closure, the direction `reachable_from`
+        /// cannot express (it follows `callees_of`, "what the roots depend
+        /// on"). Same bounded-BFS semantics as `reachable_from`
+        /// (root-inclusive, monotonic, convergent) -- see
+        /// `CodeGraph::reachable_to`'s doc comment for the full rationale.
+        pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
+            (self.reachable_to_fn)(self.ctx, targets, max_depth)
         }
 
         pub fn shortest_path_to_any(&self, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
@@ -477,6 +499,18 @@ pub mod handle {
             assert_eq!(via_handle, via_graph);
             assert_eq!(via_handle, vec![a, b, c, d]);
             assert_eq!(handle.reachable_from(&[a], 0), vec![a]);
+
+            // Bug #1901: `reachable_to` must delegate to `CodeGraph::reachable_to`
+            // exactly like `reachable_from` above -- queried from D backward
+            // over the SAME fixture (A->B, A->C, B->D, C->D, D->A cycle),
+            // it must find every transitive caller.
+            let mut via_handle_to = handle.reachable_to(&[d], 100);
+            via_handle_to.sort_unstable();
+            let mut via_graph_to = graph.reachable_to(&[d], 100);
+            via_graph_to.sort_unstable();
+            assert_eq!(via_handle_to, via_graph_to);
+            assert_eq!(via_handle_to, vec![a, b, c, d]);
+            assert_eq!(handle.reachable_to(&[d], 0), vec![d]);
 
             assert_eq!(
                 handle.shortest_path_to_any(a, &[d], 100),

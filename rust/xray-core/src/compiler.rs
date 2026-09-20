@@ -123,7 +123,20 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// `edge_evidence` is what lets an evaluator require real evidence (e.g.
 /// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`) before trusting a hop. An
 /// ABI-11 graph artifact must never be loaded as if it matched ABI 12.
-pub const XRAY_ABI_VERSION: u64 = 12;
+///
+/// Bug #1901 bumps this AGAIN, 12 -> 13: `GraphHandle` gains a sixth new
+/// accessor fn-pointer field, `reachable_to_fn` -- the CALLERS-direction
+/// counterpart of `reachable_from_fn`. Before this, "how much of the
+/// codebase can a change to a symbol affect" (the transitive CALLERS
+/// closure) had no bounded primitive at all; an evaluator had to hand-roll
+/// its own BFS over repeated `callers_of` calls, or -- the actually
+/// observed production failure mode -- point the documented blast-radius
+/// recipe at `reachable_from` instead, which follows the OPPOSITE
+/// direction (what the root depends on) and silently returns just the root
+/// for any class-level symbol (Type/Package/Field nodes carry no outbound
+/// edges at all). An ABI-12 graph artifact must never be loaded as if it
+/// matched ABI 13.
+pub const XRAY_ABI_VERSION: u64 = 13;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -368,6 +381,7 @@ pub struct GraphHandle<'graph> {
     callees_of_fn: fn(*const (), u32) -> Vec<u32>,
     callers_of_fn: fn(*const (), u32) -> Vec<u32>,
     reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+    reachable_to_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
     shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
     strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
     resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
@@ -396,6 +410,10 @@ impl<'graph> GraphHandle<'graph> {
 
     pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
         (self.reachable_from_fn)(self.ctx, roots, max_depth)
+    }
+
+    pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
+        (self.reachable_to_fn)(self.ctx, targets, max_depth)
     }
 "#;
 
@@ -2244,9 +2262,9 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     #[test]
     fn test_graph_handle_accessor_addition_bumps_abi_version() {
         assert_eq!(
-            XRAY_ABI_VERSION, 12,
-            "Bug #1900 review round 2: adding edge_evidence (the real reason-bit accessor) to \
-             GraphHandle requires the ABI-12 bump"
+            XRAY_ABI_VERSION, 13,
+            "Bug #1901: adding reachable_to (the CALLERS-direction counterpart of \
+             reachable_from) to GraphHandle requires the ABI-13 bump"
         );
     }
 

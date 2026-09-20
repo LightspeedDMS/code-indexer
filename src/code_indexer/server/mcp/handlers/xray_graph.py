@@ -523,10 +523,40 @@ async def _run_analyze_graph_pipeline(
     # it, Rust's own max_files check cannot independently detect that --
     # OR this signal into the existing degradation path so the user is
     # honestly told, never silently truncated.
-    if collection_truncated and "error" not in result:
+    #
+    # Bug #1897 P2-1 (code review finding): the guard below used to read
+    # `"error" not in result`, checking KEY PRESENCE rather than the
+    # error's VALUE. Both `_build_graph_analysis_result` (success path,
+    # `"error": None`) and `_graph_error_result` (failure path, `"error":
+    # {...}`) -- and every early-return shape in
+    # `_run_backend_analysis_with_admission_control` above, including
+    # `xray_cell_queue_timeout` -- ALWAYS include an `"error"` key on a
+    # REAL `RustNativeBackend.run_graph_analysis` call, so `"error" not in
+    # result` was unconditionally False for every real backend response:
+    # this whole force-set block was DEAD CODE against production traffic
+    # (only reachable when a test mocks the backend to return a dict that
+    # omits "error" entirely, which no real code path ever does). Checking
+    # the VALUE instead restores the original intent -- skip the
+    # force-set only on a genuine failure (a non-None "error").
+    if collection_truncated and result.get("error") is None:
         result = dict(result)
         result["truncated_by_max_files"] = True
         result["fact_graph_complete"] = False
+        # Bug #1897 P2-1: mirrors the `main.rs` `files_from_truncated`
+        # fix (`run_build_graph`'s CLI wrapper) -- a Python-side candidate-
+        # collection truncation is semantically the same "repo-level file
+        # set was cut short" condition `RepoIndexResult.completeness_
+        # reasons` already represents for a Rust-side truncation, so it
+        # must ALSO carry a reason, never leave fact_graph_complete=False
+        # with nothing pushed onto completeness_reasons (the exact "false
+        # with no reason" symptom the whole #1897 fix exists to kill).
+        # Unlike `files_from_truncated` in main.rs (unreachable on the
+        # server path, since Python's own cap means Rust never sees an
+        # uncapped list), THIS site is the one that actually fires.
+        reasons = list(result.get("completeness_reasons") or [])
+        if "repo_index_incomplete" not in reasons:
+            reasons.append("repo_index_incomplete")
+        result["completeness_reasons"] = reasons
 
     # Bug #1860 (C2 remediation, #1858/#1859/#1860/#1861 changeset): an
     # ok=true, status="ran_ok", findings=[] response reads as a clean bill
@@ -539,26 +569,45 @@ async def _run_analyze_graph_pipeline(
     # `files_with_unsupported_language` (recognized extension, no
     # LanguageExtractor implemented -- e.g. `main.py`, since only Java has
     # one) and `unreadable_or_unsupported_files` (genuinely unrecognized
-    # extension or an escaped path -- e.g. `README.md`) are DISJOINT
-    # per-file counters: `repo_index.rs::process_one_file` routes each
-    # candidate into at most one of them. The original condition compared
-    # only the first counter against the total file count, so it never
-    # fired once a repo contained files from BOTH buckets (#1860's own
-    # repro: files_with_unsupported_language=41,
-    # unreadable_or_unsupported_files=11, neither equal to the file
-    # count) -- exactly the shape almost every real repo has (source
-    # files alongside READMEs, configs, etc). The fix sums both buckets:
-    # "zero files reached the extractor with a supported language" is
-    # true precisely when every candidate file landed in one of the two.
+    # extension or an escaped path -- e.g. `README.md`) are NOT disjoint
+    # per-file counters, despite an earlier version of this comment
+    # claiming `repo_index.rs::process_one_file` routes each candidate into
+    # "at most one" of them (Bug #1903). `record_fused_result`
+    # (`repo_index.rs`) uses four INDEPENDENT `if`s: `files_with_parse_
+    # errors` is set from `fused_result.has_syntax_error` -- a generic
+    # tree-sitter parse that runs regardless of whether a `LanguageExtractor`
+    # exists for that language -- while `files_with_unsupported_language` is
+    # set from `ExtractionStatus::LanguageNotSupported`. A file whose
+    # extension has NO extractor can genuinely trip BOTH at once: its
+    # language's real tree-sitter grammar still parses it (so `language_
+    # for_extension` succeeds and `has_syntax_error` is measured for real),
+    # and if that source is ALSO malformed under its own grammar,
+    # `has_syntax_error` is true even though the file was never going to be
+    # extracted either way. A file can therefore legitimately be counted
+    # under BOTH `files_with_unsupported_language` and `files_with_parse_
+    # errors` simultaneously -- these are orthogonal signals, not a clean
+    # partition, and restructuring `record_fused_result` to force
+    # disjointness is out of scope here (it would lose real information: a
+    # file being both "wrong language" and "malformed enough that even a
+    # fallback parse chokes" are both true facts worth keeping separate).
     #
-    # Genuine read/parse failures (`files_with_read_errors`,
-    # `files_with_parse_errors`, `files_with_extractor_panics`) are
-    # deliberately EXCLUDED from this sum -- those files have a
-    # recognized, supported-language extension (only Java has one, and
-    # only Java files can produce these) and did reach the extractor;
-    # their failure is a different, already independently signaled
-    # degradation, not "no supported files". A broken-but-Java repo is
-    # therefore never mislabelled `no_supported_files`.
+    # `unsupported_language_count + unrecognized_extension_count ==
+    # len(file_paths)` can therefore be reached "by accident" even when a
+    # genuine parse failure occurred within that same candidate set (a file
+    # double-counted into `files_with_unsupported_language` AND `files_
+    # with_parse_errors` still only occupies ONE slot in this sum, so the
+    # equality can hold while `files_with_parse_errors > 0`). The guard
+    # below explicitly excludes any candidate set with a nonzero `files_
+    # with_parse_errors` from `no_supported_files`, rather than relying on
+    # an equality that doesn't actually prove "nothing here had a real
+    # parse failure".
+    #
+    # Genuine read failures (`files_with_read_errors`, `files_with_
+    # extractor_panics`) remain deliberately EXCLUDED from the sum itself --
+    # those files have a recognized, supported-language extension (only
+    # Java has one, and only Java files can produce these) and DID reach
+    # the extractor; their failure is a different, already independently
+    # signaled degradation, not "no supported files".
     if result.get("ok") is True and result.get("status") == "ran_ok" and file_paths:
         degradation = result.get("degradation") or {}
         unsupported_language_count = (
@@ -567,7 +616,16 @@ async def _run_analyze_graph_pipeline(
         unrecognized_extension_count = (
             degradation.get("unreadable_or_unsupported_files") or 0
         )
-        if unsupported_language_count + unrecognized_extension_count == len(file_paths):
+        # Bug #1903: a nonzero genuine parse-error count means at least one
+        # candidate file had a REAL syntax failure -- never label that
+        # repo "no supported files", even if the (non-disjoint) counter sum
+        # above happens to equal the file count.
+        genuine_parse_error_count = degradation.get("files_with_parse_errors") or 0
+        if (
+            genuine_parse_error_count == 0
+            and unsupported_language_count + unrecognized_extension_count
+            == len(file_paths)
+        ):
             result = dict(result)
             result["status"] = "no_supported_files"
 

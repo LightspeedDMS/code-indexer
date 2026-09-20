@@ -147,8 +147,15 @@ fn walk_for_calls(
 }}
 
 fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {{
+    // Bug #1904: `signature_for` now prefixes a Method's cached signature
+    // with its declaring type when known (e.g. "Legacy.oldApi()" instead
+    // of the old arity-only "oldApi(0 params)") -- strip everything up to
+    // and including the last '.' before the parameter list so the AST
+    // match below still compares against the BARE method name real call
+    // sites use.
     let signature = g.signature_for({deprecated_dense}).unwrap_or("");
-    let target_name = signature.split('(').next().unwrap_or("");
+    let before_parens = signature.split('(').next().unwrap_or("");
+    let target_name = before_parens.rsplit('.').next().unwrap_or(before_parens);
     let mut findings = Vec::new();
     walk_for_calls(node, "<top-level>", false, false, target_name, &mut findings);
     findings
@@ -208,8 +215,9 @@ fn deprecated_api_census_reports_real_call_site_context_via_the_real_pipeline() 
     let deprecated_dense = graph.dense_id_for(deprecated_symbol).expect("oldApi must be interned");
     assert_eq!(
         graph.signature_for(deprecated_dense),
-        Some("oldApi(0 params)"),
-        "fixture assumption: oldApi is Legacy.java's local_index 1 declaration"
+        Some("Legacy.oldApi()"),
+        "fixture assumption: oldApi is Legacy.java's local_index 1 declaration -- Bug #1904: the \
+         cached signature now carries its declaring type and real (here, empty) parameter types"
     );
 
     let cr = xray_core::compiler::compile_evaluator(&evaluator_source_for(deprecated_dense), dir.path())

@@ -33,7 +33,8 @@ mod resolve;
 mod scope;
 
 pub use admission::{
-    bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, PreBindStats, PreparedBind,
+    bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, BindTimeFacts, PreBindStats,
+    PreparedBind,
 };
 
 use crate::graph::budget::IndexBudget;

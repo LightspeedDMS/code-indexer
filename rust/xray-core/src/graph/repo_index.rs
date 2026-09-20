@@ -123,6 +123,29 @@ pub struct RepoIndexResult {
     /// while keeping the final candidate count non-zero). See `bind::
     /// resolve_all_references`'s own doc comment for the full rationale.
     pub narrowed_to_nonempty_strict_subset_count: usize,
+    /// Bug #1897 (P1 fix, round 2): every completeness condition that
+    /// actually held about this build, captured losslessly. Two collapse
+    /// points would otherwise destroy this: `CodeGraph::downgrade_
+    /// completeness` is first-write-wins, so `graph.completeness()` alone
+    /// can only ever report ONE reason; and, one layer BELOW that,
+    /// `bind::finish_bind`'s own `if exceeded { .. } else if
+    /// family_truncated { .. }` chain already collapses `IndexBudgetExceeded`
+    /// and `ResolutionAmbiguous` into a single `AnalysisCompleteness` value
+    /// BEFORE `graph.completeness()` ever has anything to read. Reading
+    /// `graph.completeness()` here (even at the earliest possible moment)
+    /// is therefore NOT lossless -- it can only ever recover whichever ONE
+    /// of the two bind-time causes `finish_bind`'s chain happened to check
+    /// first. This field is instead built from `bind::BindTimeFacts`'s two
+    /// INDEPENDENT booleans (`index_budget_exceeded`, `family_truncated`),
+    /// returned directly by `finish_bind` alongside the graph -- see
+    /// `build_repo_graph`'s own use of them below. Empty iff
+    /// `fact_graph_complete` is true.
+    pub completeness_reasons: Vec<AnalysisCompleteness>,
+    /// Bug #1897: the raw candidate total `finish_bind`'s budget ladder
+    /// measured against -- `bind::PreBindStats::candidate_edge_count`,
+    /// surfaced verbatim (never re-derived) so a caller can report the
+    /// observed count against the configured budget limit.
+    pub candidate_count: usize,
 }
 
 /// Reuses the exact same containment technique
@@ -287,8 +310,17 @@ pub fn build_repo_graph(
     let (prepared, stats) = prepare_bind(acc.files_for_bind, index_is_complete);
     let narrowed_to_zero_count = stats.narrowed_to_zero_count;
     let narrowed_to_nonempty_strict_subset_count = stats.narrowed_to_nonempty_strict_subset_count;
-    let mut graph = finish_bind(prepared, &options.budget, &acc.file_paths);
-    let budget_exceeded = graph.completeness() != AnalysisCompleteness::Complete;
+    // Bug #1897 P1 fix: `finish_bind` returns `BindTimeFacts` -- the two
+    // INDEPENDENT booleans (`index_budget_exceeded`, `family_truncated`)
+    // it computes internally, BEFORE its own `if exceeded { .. } else if
+    // family_truncated { .. }` chain collapses them into the single
+    // `AnalysisCompleteness` value it also records onto `graph`. Reading
+    // `graph.completeness()` after the fact -- even immediately, before any
+    // `downgrade_completeness` call below -- can only ever recover ONE of
+    // the two causes: that collapse already happened one layer down, inside
+    // `finish_bind` itself. `bind_time_facts` is the lossless source these
+    // two `completeness_reasons` entries below must come from instead.
+    let (mut graph, bind_time_facts) = finish_bind(prepared, &options.budget, &acc.file_paths);
 
     // Dual-review defect D1: propagate EVERY repo-level incompleteness
     // trigger onto the graph itself, not just onto `fact_graph_complete`
@@ -300,7 +332,29 @@ pub fn build_repo_graph(
     if repo_level_incomplete {
         graph.downgrade_completeness(AnalysisCompleteness::RepoIndexIncomplete);
     }
-    let fact_graph_complete = !repo_level_incomplete && !budget_exceeded;
+
+    // Bug #1897 P1 fix: a build can be BOTH bind-time-degraded (index
+    // budget exceeded AND/OR family resolution ambiguous -- these two are
+    // themselves independent, per `BindTimeFacts`) AND repo-level-incomplete
+    // at once. Each of the (up to) three conditions is pushed from its OWN
+    // independent boolean source -- never by reading a single collapsed
+    // `AnalysisCompleteness` value back out after more than one may have
+    // applied -- so all three can appear together, never silently dropping
+    // one on the floor (the production symptom this bug was filed for:
+    // `fact_graph_complete: false` with every degradation counter at zero
+    // because the true cause was discarded before it ever reached this
+    // struct).
+    let mut completeness_reasons: Vec<AnalysisCompleteness> = Vec::new();
+    if bind_time_facts.index_budget_exceeded {
+        completeness_reasons.push(AnalysisCompleteness::IndexBudgetExceeded);
+    }
+    if bind_time_facts.family_truncated {
+        completeness_reasons.push(AnalysisCompleteness::ResolutionAmbiguous);
+    }
+    if repo_level_incomplete {
+        completeness_reasons.push(AnalysisCompleteness::RepoIndexIncomplete);
+    }
+    let fact_graph_complete = completeness_reasons.is_empty();
 
     Ok(RepoIndexResult {
         graph,
@@ -315,6 +369,8 @@ pub fn build_repo_graph(
         facts: acc.facts,
         narrowed_to_zero_count,
         narrowed_to_nonempty_strict_subset_count,
+        completeness_reasons,
+        candidate_count: stats.candidate_edge_count,
     })
 }
 
@@ -521,6 +577,213 @@ mod tests {
 
         assert_eq!(result.graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
         assert!(!result.fact_graph_complete, "a tripped index budget must flip fact_graph_complete to false");
+    }
+
+    /// Bug #1897, THE central discriminating test: a build that is BOTH
+    /// bind-time-degraded (index budget exceeded, `IndexBudget::new(0, 1)`
+    /// -- reuses `index_budget_trip_sets_fact_graph_complete_false`'s exact
+    /// three-same-named-`run()`-declarations-plus-caller fixture) AND
+    /// repo-index-incomplete (an unreadable `.java` file with its read
+    /// permission revoked -- reuses `an_unreadable_source_file_with_a_
+    /// recognized_extension_...`'s exact technique) must report BOTH
+    /// reasons in `completeness_reasons`, never collapse to just one.
+    ///
+    /// Before this fix, `graph.completeness()` alone (first-write-wins)
+    /// could only ever report the budget reason -- `RepoIndexIncomplete`
+    /// was silently dropped on the floor even though the read error
+    /// genuinely happened. This test's assertion is structured so it would
+    /// still fail meaningfully (both-reasons-present) if someone regressed
+    /// `completeness_reasons.push(...)` back to a single value, not merely
+    /// because the field doesn't exist.
+    #[test]
+    fn a_build_that_is_both_bind_time_degraded_and_repo_index_incomplete_reports_both_completeness_reasons(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "R1.java", "class R1 { void run() {} }\n");
+        write_java(&dir, "R2.java", "class R2 { void run() {} }\n");
+        write_java(&dir, "R3.java", "class R3 { void run() {} }\n");
+        write_java(&dir, "Caller.java", "class Caller { void go() { run(); } }\n");
+        write_java(&dir, "Unreadable.java", "class Unreadable {}\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path().join("Unreadable.java"), std::fs::Permissions::from_mode(0o000))
+                .expect("revoke read permission for the fixture");
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &[
+                "R1.java".to_string(),
+                "R2.java".to_string(),
+                "R3.java".to_string(),
+                "Caller.java".to_string(),
+                "Unreadable.java".to_string(),
+            ],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "the bind-time budget trip must be one of the recorded reasons, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::RepoIndexIncomplete),
+            "the repo-level read error must ALSO be one of the recorded reasons, never dropped \
+             on the floor by downgrade_completeness's first-write-wins collapse, got {:?}",
+            result.completeness_reasons
+        );
+        assert_eq!(
+            result.completeness_reasons.len(),
+            2,
+            "exactly these two reasons, never a collapsed single value, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
+    }
+
+    /// Bug #1897: the ResolutionAmbiguous counterpart, showing the two
+    /// causes are distinguishable from `RepoIndexResult` alone (never just
+    /// from internal `graph.completeness()`). Real on-disk Java source
+    /// mirroring `bind::admission`'s own hand-built `family_truncation_
+    /// reports_resolution_ambiguous_completeness_even_under_an_unlimited_
+    /// budget` fixture: a common interface `Repo.save()` implemented by
+    /// strictly more than `MAX_FAMILY_SIZE` classes, each in its OWN
+    /// distinct package so import-context narrowing collapses to just the
+    /// interface's own candidate BEFORE family expansion re-adds every
+    /// implementor up to (and truncating past) the cap -- and an unlimited
+    /// `IndexBudget` that never trips the ladder on its own, isolating
+    /// `ResolutionAmbiguous` as the ONLY reason recorded.
+    #[test]
+    fn a_build_that_only_trips_resolution_ambiguous_reports_exactly_that_one_reason() {
+        // `bind::families::MAX_FAMILY_SIZE` (currently 64) is declared in a
+        // PRIVATE `mod families;` (`bind/mod.rs`, out of this story's
+        // granted edit scope) and is not reachable from this module --
+        // `use crate::graph::bind::families::MAX_FAMILY_SIZE;` fails to
+        // compile with "module `families` is private" (verified). This
+        // local constant mirrors that same value with generous headroom
+        // (30 past it, not merely 5) so the test still trips truncation
+        // even if the real constant moves somewhat without this file being
+        // updated in lockstep.
+        const KNOWN_MAX_FAMILY_SIZE: usize = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Repo.java",
+            "package pkg.a;\npublic interface Repo {\n    void save();\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package pkg.a;\nclass Caller {\n    void run() {\n        save();\n    }\n}\n",
+        );
+
+        let implementor_count = KNOWN_MAX_FAMILY_SIZE + 30;
+        let mut paths = vec!["Repo.java".to_string(), "Caller.java".to_string()];
+        for i in 0..implementor_count {
+            let file_name = format!("Impl{i}.java");
+            let source = format!(
+                "package pkg.impl{i};\npublic class Impl{i} implements Repo {{\n    public void save() {{}}\n}}\n"
+            );
+            write_java(&dir, &file_name, &source);
+            paths.push(file_name);
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(dir.path(), &paths, &options, &NoOpCollector)
+            .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.completeness_reasons,
+            vec![AnalysisCompleteness::ResolutionAmbiguous],
+            "an unlimited budget plus a truncated inheritance family must record EXACTLY \
+             ResolutionAmbiguous, never RepoIndexIncomplete or an empty list, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
+    }
+
+    /// Bug #1897 P1 (dual-review reject), THE central discriminating test
+    /// for the EXACT reported scenario: a SINGLE `build_repo_graph` call
+    /// whose bind is BOTH index-budget-exceeded AND resolution-ambiguous at
+    /// once -- reuses `a_build_that_only_trips_resolution_ambiguous_reports_
+    /// exactly_that_one_reason`'s own family-truncation fixture verbatim,
+    /// swapping only `IndexBudget::unlimited()` for `IndexBudget::new(0,
+    /// 1)` (a zero-ceiling budget any non-empty candidate resolution trips,
+    /// mirroring `index_budget_trip_sets_fact_graph_complete_false`'s own
+    /// technique) -- so this ONE build trips both bind-time causes
+    /// simultaneously, exactly the production repro on `repo-B` (#1897's
+    /// own repro): `fact_graph_complete: false` with the true second cause
+    /// silently discarded.
+    ///
+    /// Before the fix (`bind_time_completeness = graph.completeness()`,
+    /// read after `finish_bind`'s internal `if exceeded { .. } else if
+    /// family_truncated { .. }` chain had already collapsed both facts into
+    /// ONE `AnalysisCompleteness` value), this assertion fails: `completeness_
+    /// reasons` contains only `IndexBudgetExceeded`, never `ResolutionAmbiguous`,
+    /// because the chain checks `exceeded` first and `family_truncated` is
+    /// discarded whenever it does. The fix reads `BindTimeFacts`'s two
+    /// independent booleans directly, so both survive.
+    #[test]
+    fn a_build_that_trips_both_index_budget_and_resolution_ambiguous_reports_both_reasons_never_collapsed(
+    ) {
+        const KNOWN_MAX_FAMILY_SIZE: usize = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Repo.java",
+            "package pkg.a;\npublic interface Repo {\n    void save();\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package pkg.a;\nclass Caller {\n    void run() {\n        save();\n    }\n}\n",
+        );
+
+        let implementor_count = KNOWN_MAX_FAMILY_SIZE + 30;
+        let mut paths = vec!["Repo.java".to_string(), "Caller.java".to_string()];
+        for i in 0..implementor_count {
+            let file_name = format!("Impl{i}.java");
+            let source = format!(
+                "package pkg.impl{i};\npublic class Impl{i} implements Repo {{\n    public void save() {{}}\n}}\n"
+            );
+            write_java(&dir, &file_name, &source);
+            paths.push(file_name);
+        }
+
+        // A zero-ceiling total-candidate budget: ANY non-empty candidate
+        // resolution trips `IndexBudget::is_exceeded_by`, guaranteeing the
+        // budget ladder engages on top of the (budget-independent) family
+        // truncation this fixture already trips on its own.
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(dir.path(), &paths, &options, &NoOpCollector)
+            .expect("no file_id collision in this fixture");
+
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "fixture sanity: the zero-ceiling budget must have tripped, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::ResolutionAmbiguous),
+            "THE #1897 defect: the family truncation must ALSO be reported even though the \
+             budget ALSO tripped in the SAME build -- before the fix this was silently dropped \
+             on the floor by finish_bind's own internal if/else-if collapse, got {:?}",
+            result.completeness_reasons
+        );
+        assert_eq!(
+            result.completeness_reasons.len(),
+            2,
+            "exactly these two reasons, never collapsed to one nor padded with RepoIndexIncomplete \
+             (this fixture has no repo-level indexing gap), got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
     }
 
     /// THE central AC10 discriminating test, named explicitly in the story:

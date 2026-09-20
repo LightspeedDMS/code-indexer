@@ -440,6 +440,13 @@ def _graph_error_result(
         "degradation": None,
         "cached": False,
         "compile_ms": 0,
+        # Bug #1897: same "honest not-reached" convention as
+        # fact_graph_complete above -- this error path never reached a real
+        # BuildGraphResult, so these are None, never 0/an empty list that
+        # could be misread as "a build ran and found nothing wrong".
+        "completeness_reasons": None,
+        "candidate_count": None,
+        "candidate_budget_limit": None,
     }
 
 
@@ -1361,6 +1368,10 @@ class RustNativeBackend:
             "files_with_collector_panics",
             "files_with_unsupported_language",
             "truncated_by_max_files",
+            # Bug #1897: surfaces BuildGraphResult::index_budget_exceeded
+            # verbatim -- true iff completeness_reasons contains
+            # "index_budget_exceeded" specifically.
+            "index_budget_exceeded",
         )
         return {
             "ok": ok,
@@ -1373,6 +1384,16 @@ class RustNativeBackend:
             "degradation": {key: build_result.get(key) for key in degradation_keys},
             "cached": compile_info.get("cached", False),
             "compile_ms": compile_info.get("compile_ms", 0),
+            # Bug #1897: surfaces `BuildGraphResult`'s new completeness
+            # fields verbatim -- the lossless list of every completeness
+            # condition that held (never collapsed to a single reason), plus
+            # the observed candidate count against the configured budget
+            # limit. Never re-derived from `degradation` -- `build_result`
+            # is only reached once the build's status was confirmed "ok",
+            # same guarantee `degradation`'s own bare `.get(key)` relies on.
+            "completeness_reasons": build_result.get("completeness_reasons"),
+            "candidate_count": build_result.get("candidate_count"),
+            "candidate_budget_limit": build_result.get("candidate_budget_limit"),
         }
 
     def _run_build_graph_step(

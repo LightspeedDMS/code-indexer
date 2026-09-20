@@ -429,6 +429,8 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     "callees_of",
     "callers_of",
     "reachable_from",
+    // Bug #1901: the CALLERS-direction counterpart of reachable_from.
+    "reachable_to",
     "shortest_path_to_any",
     "strongly_connected_components",
     "resolve_symbol",

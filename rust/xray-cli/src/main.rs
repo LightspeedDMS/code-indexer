@@ -791,6 +791,54 @@ struct BuildGraphResult {
     /// alone cannot see (both round-6 findings destroyed a real edge while
     /// keeping the final candidate count non-zero).
     narrowed_to_nonempty_strict_subset_count: usize,
+    /// Bug #1897: `RepoIndexResult::completeness_reasons` verbatim, each
+    /// variant rendered via `completeness_reason_str` -- the lossless list
+    /// of every completeness condition that held, never collapsed to the
+    /// single value `graph.completeness()`'s first-write-wins semantics
+    /// would report alone. Only 4 of the 7 `AnalysisCompleteness` variants
+    /// can appear here TODAY (`repo_index_incomplete`, `index_budget_
+    /// exceeded`, `resolution_ambiguous`, plus an empty list standing in
+    /// for `complete`) -- the other 3 (`fact_budget_exceeded`,
+    /// `derivation_truncated`, `parse_errors_present`) are declared on
+    /// `AnalysisCompleteness` for a later slice but never produced by any
+    /// path reaching this struct yet.
+    completeness_reasons: Vec<String>,
+    /// Bug #1897: true iff `completeness_reasons` contains
+    /// `index_budget_exceeded` specifically -- a direct, named boolean so a
+    /// caller doesn't need to string-match the list for this one
+    /// particularly actionable condition (the AC's "`degradation` gains
+    /// `index_budget_exceeded: bool`" bullet; `RustNativeBackend` folds
+    /// this into its own `degradation` dict verbatim).
+    index_budget_exceeded: bool,
+    /// Bug #1897: `RepoIndexResult::candidate_count` verbatim -- the raw
+    /// candidate total the budget ladder measured against.
+    candidate_count: usize,
+    /// Bug #1897: the configured ceiling `candidate_count` was measured
+    /// against (`GRAPH_INDEX_MAX_TOTAL_CANDIDATES`, reused verbatim --
+    /// never a second copy of the number) -- so a caller can report
+    /// "observed vs limit" without hardcoding the limit itself.
+    candidate_budget_limit: usize,
+}
+
+/// Bug #1897: exhaustive match over EVERY `AnalysisCompleteness` variant so
+/// a future addition to that enum fails this match at compile time (Rule
+/// 13, anti-silent-failure) rather than silently falling through a
+/// wildcard arm. Only `RepoIndexIncomplete`, `IndexBudgetExceeded`, and
+/// `ResolutionAmbiguous` can appear in a real `completeness_reasons` list
+/// today (`Complete` never appears there at all -- an empty list stands in
+/// for it); the other three are reachable only because this match must be
+/// exhaustive, never because any real pipeline produces them yet.
+fn completeness_reason_str(reason: xray_core::graph::budget::AnalysisCompleteness) -> &'static str {
+    use xray_core::graph::budget::AnalysisCompleteness;
+    match reason {
+        AnalysisCompleteness::Complete => "complete",
+        AnalysisCompleteness::FactBudgetExceeded => "fact_budget_exceeded",
+        AnalysisCompleteness::IndexBudgetExceeded => "index_budget_exceeded",
+        AnalysisCompleteness::DerivationTruncated => "derivation_truncated",
+        AnalysisCompleteness::ResolutionAmbiguous => "resolution_ambiguous",
+        AnalysisCompleteness::ParseErrorsPresent => "parse_errors_present",
+        AnalysisCompleteness::RepoIndexIncomplete => "repo_index_incomplete",
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -894,6 +942,15 @@ fn run_build_graph(
         }
     }
 
+    let completeness_reasons: Vec<String> = index_result
+        .completeness_reasons
+        .iter()
+        .map(|reason| completeness_reason_str(*reason).to_string())
+        .collect();
+    let index_budget_exceeded = index_result
+        .completeness_reasons
+        .contains(&xray_core::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+
     BuildGraphReport {
         status: BuildGraphStatus::Ok,
         result: Some(BuildGraphResult {
@@ -908,6 +965,10 @@ fn run_build_graph(
             narrowed_to_zero_count: index_result.narrowed_to_zero_count,
             narrowed_to_nonempty_strict_subset_count: index_result
                 .narrowed_to_nonempty_strict_subset_count,
+            completeness_reasons,
+            index_budget_exceeded,
+            candidate_count: index_result.candidate_count,
+            candidate_budget_limit: GRAPH_INDEX_MAX_TOTAL_CANDIDATES,
         }),
     }
 }
@@ -1154,10 +1215,31 @@ fn main() {
         // run_build_graph ever saw the full path count -- its own
         // internal max_files check cannot detect that independently once
         // the list handed to it is already capped, so surface it here.
+        //
+        // Bug #1897: this is the SECOND place that used to force-set
+        // `fact_graph_complete = false` with no reason attached --
+        // reproducing the exact bug this story fixes. This truncation is
+        // semantically the same "repo-level file set was cut short"
+        // condition `repo_level_incomplete` already represents inside
+        // `build_repo_graph`, so it pushes the SAME reason string onto
+        // `completeness_reasons`, deduplicated (this file-list-level
+        // truncation and `build_repo_graph`'s own `max_files` truncation
+        // are mutually exclusive in practice -- `read_file_list_capped`
+        // already caps the list `run_build_graph` receives at
+        // `GRAPH_INDEX_MAX_FILES`, so `build_repo_graph`'s own internal cap
+        // can never ALSO trip -- but never assume that and push a
+        // duplicate anyway).
         if files_from_truncated {
             if let Some(result) = report.result.as_mut() {
                 result.truncated_by_max_files = true;
                 result.fact_graph_complete = false;
+                let reason = completeness_reason_str(
+                    xray_core::graph::budget::AnalysisCompleteness::RepoIndexIncomplete,
+                )
+                .to_string();
+                if !result.completeness_reasons.contains(&reason) {
+                    result.completeness_reasons.push(reason);
+                }
             }
         }
         match serde_json::to_string(&report) {
@@ -2393,6 +2475,267 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             !result.fact_graph_complete,
             "a non-Java file in the candidate set must flip fact_graph_complete to false"
         );
+    }
+
+    /// Bug #1897: `completeness_reason_str` is an EXHAUSTIVE match (Rule
+    /// 13) -- proves it maps every one of the 7 `AnalysisCompleteness`
+    /// variants to a distinct snake_case string, including the 3 that
+    /// cannot yet be produced by any real pipeline reaching this struct
+    /// (`FactBudgetExceeded`, `DerivationTruncated`, `ParseErrorsPresent`)
+    /// -- so a future addition to that enum fails THIS test, not a silent
+    /// fallthrough, and so no documentation here ever claims more than 4
+    /// variants are reachable today.
+    #[test]
+    fn completeness_reason_str_maps_every_analysis_completeness_variant() {
+        use xray_core::graph::budget::AnalysisCompleteness;
+
+        assert_eq!(completeness_reason_str(AnalysisCompleteness::Complete), "complete");
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::FactBudgetExceeded),
+            "fact_budget_exceeded"
+        );
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::IndexBudgetExceeded),
+            "index_budget_exceeded"
+        );
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::DerivationTruncated),
+            "derivation_truncated"
+        );
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::ResolutionAmbiguous),
+            "resolution_ambiguous"
+        );
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::ParseErrorsPresent),
+            "parse_errors_present"
+        );
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::RepoIndexIncomplete),
+            "repo_index_incomplete"
+        );
+    }
+
+    /// Bug #1897: `--build-graph`'s `BuildGraphResult` must surface the new
+    /// `completeness_reasons`/`index_budget_exceeded`/`candidate_count`/
+    /// `candidate_budget_limit` fields for a REAL repo-index-incomplete
+    /// build (reuses the exact non-Java fixture above), driven through the
+    /// full `run_build_graph` pipeline -- never a re-derivation.
+    #[test]
+    fn run_build_graph_surfaces_completeness_reasons_and_candidate_counts_for_a_repo_index_incomplete_build(
+    ) {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("A.java"), "class A { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("script.py"), "def totally_unused():\n    pass\n").unwrap();
+
+        let minimal_cr = xray_core::compiler::compile_evaluator(
+            minimal_graph_mode_evaluator_source(),
+            dir.path(),
+        )
+        .expect("must compile");
+        let graph_out = dir.path().join("graph.bin");
+        let report = run_build_graph(
+            dir.path(),
+            &[PathBuf::from("A.java"), PathBuf::from("script.py")],
+            &minimal_cr.so_path,
+            &graph_out,
+            None,
+        );
+
+        assert_eq!(report.status, BuildGraphStatus::Ok);
+        let result = report.result.expect("Ok must carry a result");
+        assert_eq!(
+            result.completeness_reasons,
+            vec!["repo_index_incomplete".to_string()],
+            "a repo-level-incomplete-only build must report exactly that one reason, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(
+            !result.index_budget_exceeded,
+            "no budget was ever exceeded for this fixture"
+        );
+        assert_eq!(
+            result.candidate_budget_limit, GRAPH_INDEX_MAX_TOTAL_CANDIDATES,
+            "candidate_budget_limit must be the SAME constant run_build_graph configures, \
+             never a second hardcoded copy"
+        );
+        assert_eq!(
+            result.candidate_count, 0,
+            "A.java's run() has no invocations, and script.py is never extracted at all"
+        );
+    }
+
+    /// Bug #1897: a REAL index-budget trip (reusing `index_budget_trip_
+    /// sets_fact_graph_complete_false`'s own fixture technique from
+    /// `repo_index.rs`, driven here via `build_repo_graph` directly since
+    /// `run_build_graph`'s own budget is hardcoded to a 2,000,000-candidate
+    /// ceiling no practical unit test can reach) must produce a
+    /// `RepoIndexResult::completeness_reasons` containing `IndexBudgetExceeded`,
+    /// and `completeness_reason_str` -- the REAL conversion function
+    /// `run_build_graph` itself calls -- must render it as
+    /// `"index_budget_exceeded"`, exactly the string `index_budget_exceeded:
+    /// bool`'s `.contains` check keys off.
+    #[test]
+    fn a_real_index_budget_trip_is_recorded_as_index_budget_exceeded_by_the_real_conversion_function(
+    ) {
+        use tempfile::TempDir;
+        use xray_core::graph::budget::{AnalysisCompleteness, IndexBudget};
+        use xray_core::graph::repo_index::{build_repo_graph, RepoIndexOptions};
+        use xray_core::graph::user_facts::FactCollector;
+
+        struct NoOpCollector;
+        impl FactCollector for NoOpCollector {
+            fn collect_facts(
+                &self,
+                _root: &xray_core::owned_node::OwnedNode,
+                _file: &str,
+                _index: &xray_core::graph::extract::local_index::LocalIndex,
+            ) -> Vec<xray_core::graph::user_facts::UserFact> {
+                Vec::new()
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("R1.java"), "class R1 { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("R2.java"), "class R2 { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("R3.java"), "class R3 { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("Caller.java"), "class Caller { void go() { run(); } }\n")
+            .unwrap();
+
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &[
+                "R1.java".to_string(),
+                "R2.java".to_string(),
+                "R3.java".to_string(),
+                "Caller.java".to_string(),
+            ],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "got {:?}",
+            result.completeness_reasons
+        );
+        let index_budget_exceeded =
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded);
+        assert!(index_budget_exceeded);
+        assert_eq!(
+            completeness_reason_str(AnalysisCompleteness::IndexBudgetExceeded),
+            "index_budget_exceeded"
+        );
+    }
+
+    /// Bug #1897 P1 (dual-review reject): the JSON-boundary discriminating
+    /// test -- proves the fix survives all the way to the strings
+    /// `BuildGraphResult.completeness_reasons` actually carries in the
+    /// real `--build-graph` CLI JSON output (the front door
+    /// `RustNativeBackend`/the MCP response read verbatim, per
+    /// `xray_graph.py`'s own passthrough). Drives `build_repo_graph`
+    /// directly with a real, deliberately zero-ceiling `IndexBudget`
+    /// (mirroring the test above -- `run_build_graph`'s own budget is
+    /// hardcoded to a 2,000,000-candidate ceiling no practical unit test
+    /// can reach) against a fixture that ALSO trips
+    /// `ResolutionAmbiguous`, then runs the EXACT `completeness_reason_str`
+    /// mapping and `index_budget_exceeded` derivation `run_build_graph`
+    /// itself performs -- never a re-implementation of that logic.
+    ///
+    /// Before the #1897 P1 fix, `RepoIndexResult::completeness_reasons`
+    /// itself only ever contained `IndexBudgetExceeded` for this fixture
+    /// (the second cause was discarded inside `bind::finish_bind`, one
+    /// layer below `repo_index.rs`), so this test's two-string assertion
+    /// would fail even though `completeness_reason_str`'s mapping logic
+    /// was never the defect.
+    #[test]
+    fn a_build_that_trips_both_causes_surfaces_both_strings_in_the_build_graph_json_boundary() {
+        use tempfile::TempDir;
+        use xray_core::graph::budget::{AnalysisCompleteness, IndexBudget};
+        use xray_core::graph::repo_index::{build_repo_graph, RepoIndexOptions};
+        use xray_core::graph::user_facts::FactCollector;
+
+        struct NoOpCollector;
+        impl FactCollector for NoOpCollector {
+            fn collect_facts(
+                &self,
+                _root: &xray_core::owned_node::OwnedNode,
+                _file: &str,
+                _index: &xray_core::graph::extract::local_index::LocalIndex,
+            ) -> Vec<xray_core::graph::user_facts::UserFact> {
+                Vec::new()
+            }
+        }
+
+        const KNOWN_MAX_FAMILY_SIZE: usize = 64;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Repo.java"),
+            "package pkg.a;\npublic interface Repo {\n    void save();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Caller.java"),
+            "package pkg.a;\nclass Caller {\n    void run() {\n        save();\n    }\n}\n",
+        )
+        .unwrap();
+        let implementor_count = KNOWN_MAX_FAMILY_SIZE + 30;
+        let mut paths = vec!["Repo.java".to_string(), "Caller.java".to_string()];
+        for i in 0..implementor_count {
+            let file_name = format!("Impl{i}.java");
+            std::fs::write(
+                dir.path().join(&file_name),
+                format!(
+                    "package pkg.impl{i};\npublic class Impl{i} implements Repo {{\n    public void save() {{}}\n}}\n"
+                ),
+            )
+            .unwrap();
+            paths.push(file_name);
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let index_result = build_repo_graph(dir.path(), &paths, &options, &NoOpCollector)
+            .expect("no file_id collision in this fixture");
+
+        assert!(
+            index_result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "fixture sanity, got {:?}",
+            index_result.completeness_reasons
+        );
+        assert!(
+            index_result.completeness_reasons.contains(&AnalysisCompleteness::ResolutionAmbiguous),
+            "THE #1897 defect at the repo_index.rs layer: got {:?}",
+            index_result.completeness_reasons
+        );
+
+        // The EXACT transformation `run_build_graph` performs to build
+        // `BuildGraphResult` -- reused verbatim, never re-implemented.
+        let completeness_reasons: Vec<String> = index_result
+            .completeness_reasons
+            .iter()
+            .map(|reason| completeness_reason_str(*reason).to_string())
+            .collect();
+        let index_budget_exceeded = index_result
+            .completeness_reasons
+            .contains(&AnalysisCompleteness::IndexBudgetExceeded);
+
+        assert!(
+            completeness_reasons.contains(&"index_budget_exceeded".to_string()),
+            "got {completeness_reasons:?}"
+        );
+        assert!(
+            completeness_reasons.contains(&"resolution_ambiguous".to_string()),
+            "the JSON-boundary string list -- exactly what `BuildGraphResult.completeness_reasons` \
+             carries into the CLI's JSON output and, verbatim per `xray_graph.py`'s own passthrough, \
+             into the final MCP response -- must carry BOTH reasons, never just one, got \
+             {completeness_reasons:?}"
+        );
+        assert_eq!(completeness_reasons.len(), 2, "got {completeness_reasons:?}");
+        assert!(index_budget_exceeded, "the named boolean field must also reflect the trip");
     }
 
     /// Test-only fixture shared by the cross-file discriminating test below:

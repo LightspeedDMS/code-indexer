@@ -219,6 +219,18 @@ fn context_reasons(
 /// remains a sound reason to skip a SHORTCUT that would otherwise claim
 /// `UNIQUE_NAME_IN_REPO`/`Confidence::Exact` for it.
 ///
+/// Bug #1912 (purely additive, no candidate-selection change): when the
+/// closure check above CONFIRMS the match instead of rejecting it, the
+/// accepted singleton is now also tagged `RECEIVER_TYPE_MATCH`, not just
+/// `UNIQUE_NAME_IN_REPO` -- the closure was already computed to decide
+/// ACCEPT-vs-DECLINE and used to be discarded on the accept branch,
+/// leaving a qualified unique-name hop with confirmed receiver evidence
+/// byte-identical to one with none. Unqualified calls (`receiver_type:
+/// None`) and calls whose receiver evidence is only INCOMPLETE (the
+/// `has_incomplete_supertype_evidence` branch, where the closure is never
+/// consulted at all) still tag `UNIQUE_NAME_IN_REPO` alone -- there is no
+/// receiver corroboration to report in either case.
+///
 /// F6 (#1873/#1875 rework, LOW): reuses `apply_private_visibility_filter`
 /// (D2) instead of a hand-rolled copy of its exact "private + known
 /// cross-top-level owner" exclusion rule -- a fresh 0-bits singleton is
@@ -242,6 +254,18 @@ fn try_unique_name_shortcut(
             return None;
         }
     }
+    // Bug #1912: the closure below already exists solely to decide
+    // whether to DECLINE the shortcut on a definitional receiver-type
+    // mismatch -- `receiver_type_confirmed` captures its answer on the
+    // ACCEPT path too, purely additive to that same decision, so the
+    // caller can tag `RECEIVER_TYPE_MATCH` alongside `UNIQUE_NAME_IN_REPO`
+    // instead of discarding a check it already performed. Only the
+    // COMPLETE-evidence branch counts as confirmation: when the
+    // receiver's own supertype evidence is incomplete, the closure below
+    // is never even consulted (the shortcut still accepts, per the
+    // "missing evidence retains, never excludes" doctrine), so there is
+    // no real corroboration to tag.
+    let mut receiver_type_confirmed = false;
     if let Some(receiver_type) = receiver_type {
         if !type_index.has_incomplete_supertype_evidence(receiver_type) {
             let mut allowed = type_index.supertypes_of(receiver_type);
@@ -253,6 +277,7 @@ fn try_unique_name_shortcut(
             {
                 return None;
             }
+            receiver_type_confirmed = true;
         }
     }
     let mut singleton = vec![(only.clone(), 0u16)];
@@ -260,7 +285,11 @@ fn try_unique_name_shortcut(
     if singleton.is_empty() {
         return Some(Vec::new());
     }
-    Some(vec![(only.clone(), reasons::UNIQUE_NAME_IN_REPO)])
+    let mut bits = reasons::UNIQUE_NAME_IN_REPO;
+    if receiver_type_confirmed {
+        bits |= reasons::RECEIVER_TYPE_MATCH;
+    }
+    Some(vec![(only.clone(), bits)])
 }
 
 /// Resolves ONE reference (bare `name`, of kind `ref_kind`) into its

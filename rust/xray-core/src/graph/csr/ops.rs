@@ -77,6 +77,41 @@ impl CodeGraph {
         }
         order
     }
+
+    /// Bug #1901: the CALLERS-direction counterpart of `reachable_from` --
+    /// "how much of the codebase can a change to `targets` affect" is the
+    /// transitive CALLERS closure, the opposite of `reachable_from`'s
+    /// transitive CALLEES closure. Before this, an evaluator answering that
+    /// question had to hand-roll its own BFS over repeated `callers_of`
+    /// calls; this is the same bounded traversal `reachable_from` already
+    /// proves (root-inclusive, monotonic, convergent, Rule 14), just walked
+    /// over the REVERSE CSR adjacency (`callers_of`) instead of the forward
+    /// one (`callees_of`). Byte-for-byte identical shape to `reachable_from`
+    /// on purpose -- the two are meant to read as mirror images of each
+    /// other, never two independently-evolving traversal implementations.
+    pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
+        let mut visited: HashSet<u32> = HashSet::new();
+        let mut queue: VecDeque<(u32, usize)> = VecDeque::new();
+        for &target in targets {
+            if visited.insert(target) {
+                queue.push_back((target, 0));
+            }
+        }
+        let mut order = Vec::new();
+        while let Some((node, depth)) = queue.pop_front() {
+            order.push(node);
+            if depth >= max_depth {
+                continue;
+            }
+            for caller in self.callers_of(node) {
+                if visited.insert(caller) {
+                    queue.push_back((caller, depth + 1));
+                }
+            }
+        }
+        order
+    }
+
     /// Every candidate target (dense symbol id) of every reference written
     /// textually inside `dense_symbol_id`. M2 fix: O(out-degree) via the
     /// precomputed CSR forward adjacency index (`callees_index`, built
@@ -371,6 +406,108 @@ mod tests {
         let mut bounded = graph.reachable_from(&[a], 2);
         bounded.sort_unstable();
         assert_eq!(bounded, vec![a, b, c, d], "E is 3 hops away, beyond max_depth=2");
+    }
+
+    /// Bug #1901 AC: `reachable_to(targets, max_depth)` is the CALLERS-
+    /// direction mirror of `reachable_from` -- same bounded-BFS semantics
+    /// (root-inclusive, monotonic, convergent), just walked backward over
+    /// `callers_of` instead of forward over `callees_of`. Reuses the EXACT
+    /// SAME diamond-plus-cycle fixture `reachable_from_stops_at_max_depth_
+    /// and_never_visits_a_node_twice` builds (A->B, A->C, B->D, C->D, D->A
+    /// cycle, D->E), but queries it from the OPPOSITE end: starting at E
+    /// and walking callers backward reaches D, then D's callers {B, C},
+    /// then their caller A (found once despite two paths), then A's own
+    /// caller D again via the cycle (already visited) -- the identical
+    /// node set {A,B,C,D,E} `reachable_from(&[a], ..)` finds, proving the
+    /// two traversals are true mirror images. This is what would catch a
+    /// wrong implementation that reused `callees_of` by mistake (forward
+    /// direction, from D backward would find no callers via a forward
+    /// scan) or omitted the visited-set (infinite loop on the D<->A cycle)
+    /// or the depth check (A would leak into a max_depth=2 query, which is
+    /// beyond its true 3-hop distance from E).
+    #[test]
+    fn reachable_to_mirrors_reachable_from_over_the_reverse_adjacency() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(6);
+        let a = builder.intern_symbol(make_symbol_id(1, 0));
+        let b = builder.intern_symbol(make_symbol_id(1, 1));
+        let c = builder.intern_symbol(make_symbol_id(1, 2));
+        let d = builder.intern_symbol(make_symbol_id(1, 3));
+        let e = builder.intern_symbol(make_symbol_id(1, 4));
+
+        builder.add_reference(a, 1, 1, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
+        builder.add_reference(a, 1, 2, 0, &[Candidate::new(c, reasons::SAME_FILE)]);
+        builder.add_reference(b, 1, 3, 0, &[Candidate::new(d, reasons::SAME_FILE)]);
+        builder.add_reference(c, 1, 4, 0, &[Candidate::new(d, reasons::SAME_FILE)]);
+        builder.add_reference(d, 1, 5, 0, &[Candidate::new(a, reasons::SAME_FILE)]); // cycle back to A
+        builder.add_reference(d, 1, 6, 0, &[Candidate::new(e, reasons::SAME_FILE)]);
+
+        let graph = builder.build();
+
+        let reached = graph.reachable_to(&[e], 100);
+        let mut sorted = reached.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![a, b, c, d, e], "every caller transitively reachable, each exactly once");
+        for node in [a, b, c, d, e] {
+            assert_eq!(
+                reached.iter().filter(|&&n| n == node).count(),
+                1,
+                "node {node} must appear exactly once despite being reachable via two paths / a cycle"
+            );
+        }
+
+        // A is 3 hops from E along the shortest caller-chain (E <- D <- {B
+        // or C} <- A); max_depth=2 must exclude it while still including
+        // the diamond of callers.
+        let mut bounded = graph.reachable_to(&[e], 2);
+        bounded.sort_unstable();
+        assert_eq!(bounded, vec![b, c, d, e], "A is 3 hops away, beyond max_depth=2");
+    }
+
+    /// Bug #1901 Part A/B: the documented blast-radius symptom in one test.
+    /// A Type-node root (a class with zero outbound references, the shape
+    /// every class-level symbol carries) returns ONLY itself from
+    /// `reachable_from` -- correct, documented behaviour, not a bug -- while
+    /// pointing `reachable_to` at a REAL method root finds its true
+    /// transitive callers. `controller` is a `DeclarationKind::Type` with no
+    /// callees at all; `handler` is a method called by `router`, which is
+    /// itself called by `entrypoint`.
+    #[test]
+    fn reachable_from_on_a_type_root_returns_only_itself_while_reachable_to_on_a_method_root_finds_real_callers() {
+        use crate::graph::extract::local_index::DeclarationKind;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+        let controller = builder.intern_symbol(make_symbol_id(1, 0));
+        builder.add_kind(controller, DeclarationKind::Type);
+        // A Type declaration carries no outbound reference of its own --
+        // exactly the documented shape ("Type ... nodes carry no outbound
+        // edges") that makes reachable_from(roots=[a class], ..) silently
+        // return just the root, with nothing in the response flagging the
+        // root kind as unsuitable.
+
+        let handler = builder.intern_symbol(make_symbol_id(2, 0));
+        let router = builder.intern_symbol(make_symbol_id(2, 1));
+        let entrypoint = builder.intern_symbol(make_symbol_id(2, 2));
+        builder.add_kind(handler, DeclarationKind::Method);
+        builder.add_reference(router, 2, 1, 0, &[Candidate::new(handler, reasons::SAME_FILE)]);
+        builder.add_reference(entrypoint, 2, 2, 0, &[Candidate::new(router, reasons::SAME_FILE)]);
+
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.reachable_from(&[controller], 5),
+            vec![controller],
+            "a Type root with zero outbound edges silently returns only itself from reachable_from -- \
+             documented, correct behaviour, never a bug in reachable_from itself"
+        );
+
+        let mut blast_radius = graph.reachable_to(&[handler], 5);
+        blast_radius.sort_unstable();
+        assert_eq!(
+            blast_radius,
+            vec![handler, router, entrypoint],
+            "reachable_to on a real method root finds its true transitive callers -- \
+             this is the primitive the documented blast-radius use case actually needs"
+        );
     }
 
     /// AC7: "shortest_path_to_any(from, targets, max_depth)". Diamond

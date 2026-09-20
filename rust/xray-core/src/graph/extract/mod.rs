@@ -18,6 +18,7 @@ pub mod java;
 mod java_invocations;
 mod java_receiver;
 mod java_type_names;
+pub mod kotlin;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;
@@ -47,6 +48,10 @@ pub enum ExtractorLookup {
 pub fn extractor_for_language(ext: &str) -> ExtractorLookup {
     match ext {
         "java" => ExtractorLookup::Supported(Box::new(java::JavaExtractor)),
+        // Bug #1908: Kotlin at bind levels 0-2 -- see `kotlin` module docs
+        // for scope (declarations/references/imports/inheritance) and what
+        // is deliberately NOT covered (Java-specific levels 3-4).
+        "kt" | "kts" => ExtractorLookup::Supported(Box::new(kotlin::KotlinExtractor)),
         _ => ExtractorLookup::Unsupported,
     }
 }
@@ -59,6 +64,21 @@ mod tests {
     fn java_extension_is_supported() {
         assert!(matches!(
             extractor_for_language("java"),
+            ExtractorLookup::Supported(_)
+        ));
+    }
+
+    /// Bug #1908: both Kotlin extensions the tree-sitter grammar layer
+    /// already recognizes (`crate::languages::language_for_extension`)
+    /// must resolve to a real extractor, not merely be parseable.
+    #[test]
+    fn kotlin_extensions_are_supported() {
+        assert!(matches!(
+            extractor_for_language("kt"),
+            ExtractorLookup::Supported(_)
+        ));
+        assert!(matches!(
+            extractor_for_language("kts"),
             ExtractorLookup::Supported(_)
         ));
     }
