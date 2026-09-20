@@ -231,7 +231,7 @@ pub struct ReduceFinding {
 | `g.declaration_kind(dense_id)` | `(u32) -> Option<DeclarationKind>` | What kind of declaration this symbol is. The same value `is_definitely_dead_code` consults internally, so filtering by kind cannot drift from the predicate. |
 | `g.visibility_of(dense_id)` | `(u32) -> Visibility` | Declared visibility, also as the dead-code predicate sees it. |
 | `g.edge_reason(from, to)` | `(u32, u32) -> Option<EdgeReason>` | How many candidates a contributing reference had -- a COUNT, not a verdict. `EdgeReason::SoleCandidate` -- at least one contributing reference matched exactly ONE declaration in this repo by name and arity. `EdgeReason::MultipleCandidates` -- every contributing reference matched several. `None` -- no such edge. **`SoleCandidate` does NOT mean the edge is real**: a call on an external or JDK receiver (`someMap.put(k, v)`) whose name and arity happen to match one repo declaration reports `SoleCandidate`, because the binder never saw the receiver's real type. Use `edge_evidence` to tell those apart. |
-| `g.edge_evidence(from, to)` | `(u32, u32) -> Option<u16>` | The reason bits the binder actually recorded, ORed across every contributing reference. **This is what to audit a hop with.** Test against the mirrored constants, e.g. `evidence & RECEIVER_TYPE_MATCH != 0` (the binder resolved the receiver's declared type) or `evidence & UNIQUE_NAME_IN_REPO != 0` (unique in-repo name, and NOT contradicted by receiver evidence). A hop carrying neither -- e.g. only `ARITY_MATCH \| OVERLOAD_ARG_TYPE_MATCH` -- matched on shape alone and may not exist. Available constants: `SAME_FILE`, `SAME_PACKAGE`, `ARITY_MATCH`, `OVERLOAD_ARG_TYPE_MATCH`, `RECEIVER_TYPE_MATCH`, `UNIQUE_NAME_IN_REPO`, `QUALIFIED_NAME`, `STATIC_IMPORT`, `SAME_CLASS_OR_SUPER`, and others -- all usable unqualified in evaluator code. |
+| `g.edge_evidence(from, to)` | `(u32, u32) -> Option<u16>` | The reason bits the binder actually recorded, ORed across every contributing reference. **This is what to audit a hop with.** Test against the mirrored constants. `RECEIVER_TYPE_MATCH` is the strongest bit -- the binder resolved the receiver's declared type and this candidate's owner matched it -- but note it is only ever set when the candidate pool held MORE THAN ONE entry: a call whose name is unique in the repo takes a shortcut that returns `UNIQUE_NAME_IN_REPO` alone and never runs receiver narrowing. So the absence of `RECEIVER_TYPE_MATCH` is NOT evidence against a hop. `UNIQUE_NAME_IN_REPO` means only that one in-repo declaration bears that name and arity; for an UNQUALIFIED call (a bare `doThing(x)` inherited from a superclass outside the repo, or a static import of an external method) it is set identically whether the real target is in this repo or not. A hop carrying only `ARITY_MATCH \| OVERLOAD_ARG_TYPE_MATCH` matched on shape alone. **No bit combination proves a hop for an unqualified call** -- treat evidence as a ranking, cite `location_for` per hop, and have a human confirm anything you would act on. Available constants: `SAME_FILE`, `SAME_PACKAGE`, `ARITY_MATCH`, `OVERLOAD_ARG_TYPE_MATCH`, `RECEIVER_TYPE_MATCH`, `UNIQUE_NAME_IN_REPO`, `QUALIFIED_NAME`, `STATIC_IMPORT`, `SAME_CLASS_OR_SUPER`, and others -- all usable unqualified in evaluator code. |
 
 ### FactsHandle reference
 
@@ -316,18 +316,21 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 
         // Audit EVERY hop. A hop is only as trustworthy as its evidence, and the
         // binder deliberately over-binds -- a bare path proves nothing on its own.
-        let mut verified_hops = 0usize;
-        let mut weakest = "verified";
+        // RECEIVER_TYPE_MATCH only appears where the pool held >1 candidate, so
+        // rank hops rather than asking for a proof the binder cannot produce.
+        let mut strong_hops = 0usize;
+        let mut weakest = "receiver-resolved";
         for pair in path.windows(2) {
             let evidence = g.edge_evidence(pair[0], pair[1]).unwrap_or(0);
-            let receiver_proven = evidence & RECEIVER_TYPE_MATCH != 0;
             let sole = g.edge_reason(pair[0], pair[1]) == Some(EdgeReason::SoleCandidate);
-            if receiver_proven {
-                verified_hops += 1;                    // the binder resolved the receiver's type
+            if evidence & RECEIVER_TYPE_MATCH != 0 {
+                strong_hops += 1;                 // disambiguated AGAINST the receiver's real type
+            } else if evidence & UNIQUE_NAME_IN_REPO != 0 && sole {
+                weakest = "unique-name-only";     // one repo match; target may still be external
             } else if sole {
-                weakest = "sole-candidate-only";       // name+arity matched once; receiver NOT proven
+                weakest = "shape-only";           // name+arity shape alone
             } else {
-                weakest = "guessed";                   // one of several candidates
+                weakest = "guessed";              // one of several candidates
                 break;
             }
         }
@@ -346,7 +349,9 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-**Read the weakest link before acting on the claim.** `weakest == "verified"` means the binder resolved every hop's receiver type. `"sole-candidate-only"` means some hop matched exactly one declaration by name and arity with NO receiver evidence -- a call on an external or JDK receiver can land here, so the hop may not exist at all. `"guessed"` means a hop was one of several candidates. Only the first is a claim worth acting on unreviewed; ship the other two with the path and let a human check the named `file:line`.
+**Read the weakest link before acting on the claim.** The four ranks, strongest first: `"receiver-resolved"` -- every hop was disambiguated against the receiver's real declared type, the only rank where the binder actively ruled other candidates out. `"unique-name-only"` -- some hop matched exactly one declaration in this repo by name and arity, with no receiver evidence; a bare call inherited from a superclass OUTSIDE the repo, or a static import of an external method, produces exactly this, so the hop may not exist at all. `"shape-only"` -- matched on name and arity alone. `"guessed"` -- one of several candidates.
+
+Only `"receiver-resolved"` is worth acting on unreviewed, and it is rarer than it looks: a call whose name is unique in the repo never runs receiver narrowing at all, so a perfectly genuine hop routinely reports `"unique-name-only"`. Treat the rank as a ranking, not a verdict -- ship the path with `location_for`'s `file:line` per hop and let a human confirm.
 
 ## Use cases
 
