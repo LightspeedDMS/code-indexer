@@ -50,6 +50,16 @@
 //! evidence. The "real target keeps its own edge" half of each test is
 //! UNCHANGED and still passes -- that guarantee never depended on
 //! deletion.
+//!
+//! **#1910 SALVAGE note (Shape I below)**: a later issue (#1910) added
+//! real `record_pattern_component` extraction to this crate (kept in the
+//! salvage that reverted #1910's receiver-type deletion attempt) -- so
+//! Shape I's ORIGINAL claim that nothing in this codebase has ever heard
+//! of `record_pattern_component` is no longer true. The test's assertion
+//! is unaffected either way (`Target.helper()` keeps its real edge
+//! regardless of how `handle` resolves, since receiver-type narrowing is
+//! PERMANENTLY tag-only and can never delete a candidate), so the test is
+//! kept, with its doc comment corrected below.
 
 use std::path::Path;
 use xray_core::graph::budget::IndexBudget;
@@ -449,33 +459,30 @@ fn external_receiver_with_matching_arity_now_keeps_the_fabricated_edge_pending_t
 }
 
 // ---------------------------------------------------------------------
-// Shape I: the real deliverable -- a receiver binding form this round
-// does NOT special-case at all (a Java 21 record-pattern deconstruction
-// component, `instanceof Wrapper(Target handle)`), proving the INVERTED
-// CONTRACT degrades safely for a form nobody has taught the extractor
-// about, rather than relying on enumerating one more shape.
+// Shape I: a receiver binding form this round did NOT special-case at
+// all when originally written (a Java 21 record-pattern deconstruction
+// component, `instanceof Wrapper(Target handle)`) -- proving the
+// INVERTED CONTRACT degrades safely for a form nobody had taught the
+// extractor about, rather than relying on enumerating one more shape.
 // ---------------------------------------------------------------------
 
 /// `instanceof Wrapper(Target handle)` binds `handle` via a
-/// `record_pattern_component`, a node this extractor's `instanceof_
-/// pattern_typed_name` deliberately does NOT descend into (see its own
-/// doc comment) -- `handle` gets ZERO `TypedNameRecord` evidence, exactly
-/// like every genuinely uncovered binding form. Its receiver identifier
-/// therefore falls through to the `unambiguous_field_type` ADVISORY
-/// fallback, which -- via `Other.handle`'s coincidental field-name
-/// collision -- guesses the WRONG type `Wrong`. Unlike shapes F/G, `Wrong`
-/// here declares NO `helper` method at all (deliberately: the point of
-/// this test is the EMPTY-match branch, not the non-empty-preference one
-/// F/G already cover) -- under round 3's un-tiered hard filter this would
-/// delete `Target.helper()`'s real candidate outright (0 candidates, a
-/// silent false-dead verdict); under the #1898 scope split's tag-only
-/// contract, receiver-type evidence can NEVER remove a candidate, empty
-/// match or not, so the pool -- and `Target.helper()`'s real edge --
-/// survives untouched regardless. This is UNCHANGED by the scope split
-/// (it was already true under round 4's Advisory carve-out, and remains
-/// true a fortiori now that NEITHER tier ever deletes): nothing in this
-/// test file, `java.rs`, or `java_receiver.rs` has ever heard of
-/// `record_pattern_component`.
+/// `record_pattern_component`. **#1910 SALVAGE update**: a later issue
+/// (#1910) added real extraction for this exact node kind
+/// (`java_receiver::record_pattern_component_typed_name`, kept in the
+/// salvage that reverted #1910's receiver-type DELETION attempt) -- so
+/// `handle` now DOES get real `TypedNameRecord` evidence (`Positive
+///("Target")`), unlike when this test was first written. The assertion
+/// below is UNCHANGED and still holds for a DIFFERENT, now more
+/// fundamental reason: `Target.helper()` keeps its real caller edge
+/// regardless of how `handle` resolves, because receiver-type narrowing
+/// is PERMANENTLY tag-only (round 7's review proved it can never be made
+/// a safe hard filter on this substrate) -- so this test no longer
+/// depends on a binding form being "uncovered" at all, only on the
+/// tag-only contract itself. `Wrong.java`/`Other.java` are kept as
+/// harmless unrelated fixtures from the test's original shape (a
+/// coincidental field-name collision that no longer has any bearing on
+/// the outcome either way).
 #[test]
 fn an_uncovered_receiver_binding_form_never_deletes_the_real_candidate() {
     let dir = tempfile::tempdir().unwrap();

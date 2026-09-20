@@ -37,6 +37,26 @@ fn extracts_ordinary_static_and_wildcard_imports() {
     assert_eq!(index.imports[2].kind, ImportKind::Wildcard);
 }
 
+/// Issue #1915: `import static pkg.Util.*;` is a STATIC-ON-DEMAND import
+/// -- both wildcard (imports every member) AND static (only static
+/// members) -- which is neither an ordinary `Wildcard` (a package-level
+/// `import pkg.*;`, whose `path` is a bare package) nor a single-member
+/// `Static` import (`import static pkg.Util.helper;`, whose `path` ends
+/// in the MEMBER name). Before the fix, `extract_imports` tested
+/// `is_wildcard` before `is_static` and classified this as plain
+/// `Wildcard`, discarding the static-ness entirely. `path` must be the
+/// declaring CLASS's own dotted path (`"pkg.Util"`, never truncated to
+/// the bare package `"pkg"` and never including the trailing `*`) -- the
+/// exact shape `import_reasons` (`bind/resolve.rs`) needs to resolve a
+/// candidate's `(enclosing_type, package)` against it.
+#[test]
+fn extracts_static_on_demand_import_as_static_wildcard_kind_with_the_declaring_class_path() {
+    let index = extract_source("import static pkg.Util.*;\nclass Foo {}\n");
+    assert_eq!(index.imports.len(), 1);
+    assert_eq!(index.imports[0].kind, ImportKind::StaticWildcard);
+    assert_eq!(index.imports[0].path, "pkg.Util");
+}
+
 #[test]
 fn extracts_class_interface_and_enum_declarations() {
     let index = extract_source("interface Shape {}\nenum Color { RED }\nclass First {}\n");
@@ -500,4 +520,113 @@ fn symbol_ids_carry_the_given_file_id() {
     let index = extract_source("class First {}\n");
     let decl = index.declaration_named("First").unwrap();
     assert_eq!((decl.symbol >> 32) as u32, 7);
+}
+
+/// #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21 switch
+/// case pattern binding (`case Target handle ->`) must be recorded as a
+/// real local `TypedNameRecord`, wired through `dispatch_node`'s
+/// `"type_pattern"` arm -- the exact shape that fell through to
+/// `resolve_receiver_type`'s open-world fallback substrate before this
+/// fix.
+#[test]
+fn extracts_switch_case_type_pattern_as_a_typed_name() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source(
+        "class First {\n    void run(Object o) {\n        switch (o) {\n            case Target handle -> handle.helper();\n            default -> {}\n        }\n    }\n}\n",
+    );
+    let run_method = index.declaration_named("run").unwrap();
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("switch case type-pattern binding must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Local {
+            enclosing_method: run_method.symbol
+        }
+    );
+}
+
+/// #1910 prerequisite 3: a Java 21 record-pattern deconstruction
+/// component (`Target handle` inside `Wrapper(Target handle)`) must ALSO
+/// be recorded, wired through `dispatch_node`'s `"record_pattern_
+/// component"` arm -- at any nesting depth, with no per-level special
+/// casing, since the generic tree walk visits every descendant
+/// regardless of depth.
+#[test]
+fn extracts_record_pattern_component_as_a_typed_name() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source(
+        "class First {\n    void run(Object o) {\n        if (o instanceof Wrapper(Target handle)) {\n            handle.helper();\n        }\n    }\n}\n",
+    );
+    let run_method = index.declaration_named("run").unwrap();
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("record pattern component binding must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Local {
+            enclosing_method: run_method.symbol
+        }
+    );
+}
+
+/// #1910 prerequisite 3: a record's own COMPONENTS (`record Wrapper(Target
+/// handle) {}`) behave as implicit fields visible throughout every one of
+/// the record's own methods (including its compact constructor) -- they
+/// must be recorded as FIELD-scope typed names on the record's own type,
+/// exactly like an ordinary `field_declaration`, closing the gap where a
+/// compact constructor referencing its own component previously had NO
+/// typed-name evidence at all.
+#[test]
+fn extracts_record_components_as_field_scope_typed_names() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source("record Wrapper(Target handle) {\n}\n");
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("a record's own component must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Field {
+            enclosing_type: "Wrapper".to_string()
+        }
+    );
+}
+
+/// #1910 prerequisite 3: an enum's own CONSTANTS (`enum Color { RED }`)
+/// are effectively `public static final` instances of the enum type
+/// itself, referenceable as a bare name from any of the enum's own
+/// methods (and, via a static import, from anywhere) -- they must be
+/// recorded as FIELD-scope typed names on the enum's own type so a bare
+/// reference to one never falls through to the open-world static-type-
+/// name fallback and misresolves against an unrelated in-repo type that
+/// coincidentally shares the constant's name.
+#[test]
+fn extracts_enum_constants_as_field_scope_typed_names() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source("enum Color {\n    RED, GREEN\n}\n");
+    let red = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "RED")
+        .expect("an enum constant must be recorded as a typed name");
+    assert_eq!(red.declared_type, "Color");
+    assert_eq!(
+        red.scope,
+        NameScope::Field {
+            enclosing_type: "Color".to_string()
+        }
+    );
 }

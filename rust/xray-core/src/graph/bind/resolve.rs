@@ -45,15 +45,59 @@ fn package_prefix(path: &str) -> Option<&str> {
 /// (whose bare name is already known to equal `name`, since `decl` only
 /// ever reaches here via `RepoNameIndex::lookup(name, ..)`).
 ///
-/// `STATIC_IMPORT` is deliberately coarser than the other two: a static
-/// import path's second-to-last segment names the DECLARING CLASS (e.g.
-/// `java.lang.Math` in `import static java.lang.Math.max;`), not a
-/// package, and `LocalIndex` records a method's own package but not its
-/// enclosing class -- there is no substrate here to compare against. So
-/// this reason is name-only: any static import whose last segment matches
+/// `STATIC_IMPORT` (the `ImportKind::Static` arm below) is deliberately
+/// coarser than the other two: a SINGLE-MEMBER static import path's
+/// second-to-last segment names the DECLARING CLASS (e.g. `java.lang.Math`
+/// in `import static java.lang.Math.max;`), not a package, and `DeclInfo`
+/// carries a method's own package but not its enclosing class -- there is
+/// no substrate here to compare against for THAT kind. So that reason is
+/// name-only: any single-member static import whose last segment matches
 /// `name` counts, regardless of `decl`'s package. This is a documented
 /// scope limitation, not a bug.
-fn import_reasons(name: &str, decl: &DeclInfo, ref_scope: &FileScope) -> u16 {
+///
+/// `ImportKind::StaticWildcard` (issue #1915) does NOT share that
+/// limitation and gets a PRECISE check instead: its `path` (e.g.
+/// `"pkg.Util"` for `import static pkg.Util.*;`) is the declaring class's
+/// own dotted path, and `DeclInfo` carries `enclosing_type`, so both the
+/// class (`import.path`'s last segment) and the package (`import.path`'s
+/// prefix) can be compared against `decl` directly -- a real fix, not
+/// merely a reclassification, since before issue #1915 a static-on-demand
+/// import was misclassified as `Wildcard` (whose own check compares
+/// `decl.package` against the WHOLE `import.path`, i.e. `"pkg"` against
+/// `"pkg.Util"`, which never matches) and so contributed ZERO reason bits
+/// at all -- not even the coarse name-only signal `Static` gets.
+///
+/// #1915 follow-up (found during dual review, real repro): the FIRST
+/// `StaticWildcard` check alone still misses a static-on-demand import of
+/// a member of a NESTED declaring class (`import static pkg.Outer.Util.*;`)
+/// -- the import path's prefix (`"pkg.Outer"`) mixes the real package with
+/// a NESTED-CLASS segment, which `decl.package` (always the true Java
+/// package, `"pkg"`, never a package+class compound) can never equal
+/// directly, so the real target earned zero bits while a same-package
+/// decoy could earn `SAME_PACKAGE` and win `apply_import_context_
+/// narrowing`'s hard-narrow outright -- the exact annihilation shape
+/// #1915 was filed for. The second condition below closes the ONE-LEVEL
+/// nesting case using the SAME unambiguous-only `TypeIndex::top_level_of`
+/// substrate `apply_private_visibility_filter` (D2) already trusts for
+/// this exact reason: when the import prefix equals `{decl.package}.
+/// {top_level_of(decl.enclosing_type)}`, the import is naming a member of
+/// a type nested exactly one level under that top-level type. **This does
+/// NOT cover two-or-more levels of nesting** (`pkg.A.B.Util`): `top_level_
+/// of` only ever returns the ROOT ancestor, never an intermediate one, and
+/// this binder deliberately carries no qualified-name/lexical-chain
+/// substrate that could walk the remaining levels (see `docs/
+/// xray-architecture.md`'s "What a future round 8 would need" -- the same
+/// `(enclosing_method, name)`-shaped scope-key gap, here at the type-nesting
+/// level instead of the local-binding level). For that uncovered depth,
+/// this function correctly contributes NO bit at all -- under-tagging,
+/// never a fabricated one, is the safe direction this whole contract
+/// leans toward everywhere else.
+fn import_reasons(
+    name: &str,
+    decl: &DeclInfo,
+    ref_scope: &FileScope,
+    type_index: &super::families::TypeIndex,
+) -> u16 {
     let mut bits = 0u16;
     for import in &ref_scope.imports {
         match import.kind {
@@ -66,6 +110,27 @@ fn import_reasons(name: &str, decl: &DeclInfo, ref_scope: &FileScope) -> u16 {
             }
             ImportKind::Static => {
                 if import.path.rsplit('.').next() == Some(name) {
+                    bits |= reasons::STATIC_IMPORT;
+                }
+            }
+            ImportKind::StaticWildcard => {
+                if decl.enclosing_type.as_deref() != import.path.rsplit('.').next() {
+                    continue;
+                }
+                let Some(prefix) = package_prefix(&import.path) else {
+                    continue;
+                };
+                let matches_top_level_class = decl.package.as_deref() == Some(prefix);
+                let matches_one_level_nested_class = decl
+                    .package
+                    .as_deref()
+                    .zip(
+                        decl.enclosing_type
+                            .as_deref()
+                            .and_then(|owner| type_index.top_level_of(owner)),
+                    )
+                    .is_some_and(|(pkg, top_level)| prefix == format!("{pkg}.{top_level}"));
+                if matches_top_level_class || matches_one_level_nested_class {
                     bits |= reasons::STATIC_IMPORT;
                 }
             }
@@ -82,7 +147,13 @@ fn import_reasons(name: &str, decl: &DeclInfo, ref_scope: &FileScope) -> u16 {
 /// Every context reasons bit for `decl` relative to the reference at
 /// `ref_file_id`/`ref_scope`, computed independently of any narrowing:
 /// `SAME_FILE`, `SAME_PACKAGE`, and whichever import reasons apply.
-fn context_reasons(name: &str, decl: &DeclInfo, ref_file_id: u32, ref_scope: &FileScope) -> u16 {
+fn context_reasons(
+    name: &str,
+    decl: &DeclInfo,
+    ref_file_id: u32,
+    ref_scope: &FileScope,
+    type_index: &super::families::TypeIndex,
+) -> u16 {
     let mut bits = 0u16;
     if decl.file_id == ref_file_id {
         bits |= reasons::SAME_FILE;
@@ -90,7 +161,7 @@ fn context_reasons(name: &str, decl: &DeclInfo, ref_file_id: u32, ref_scope: &Fi
     if decl.package.is_some() && decl.package == ref_scope.package {
         bits |= reasons::SAME_PACKAGE;
     }
-    bits |= import_reasons(name, decl, ref_scope);
+    bits |= import_reasons(name, decl, ref_scope, type_index);
     bits
 }
 
@@ -265,7 +336,7 @@ pub(crate) fn resolve_reference(
     let full_pool: Vec<DeclInfo> = pool.iter().map(|d| (*d).clone()).collect();
     let mut with_reasons: Vec<(DeclInfo, u16)> = pool
         .into_iter()
-        .map(|d| (d.clone(), context_reasons(name, d, ref_file_id, ref_scope)))
+        .map(|d| (d.clone(), context_reasons(name, d, ref_file_id, ref_scope, type_index)))
         .collect();
     apply_private_visibility_filter(&mut with_reasons, caller_top_level, type_index);
     apply_arity_narrowing(&mut with_reasons, arg_count);

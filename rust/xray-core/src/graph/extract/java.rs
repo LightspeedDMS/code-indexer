@@ -120,6 +120,37 @@ fn dispatch_type_declaration(
             top_level_type: top_level_type.to_string(),
         });
     }
+    // #1910 prerequisite 3 (round4-findings.md finding 3): a record's own
+    // COMPONENTS (`record Wrapper(Target handle) {}`) behave as implicit
+    // fields visible throughout every one of the record's own methods,
+    // INCLUDING its compact constructor -- unlike an ordinary method's
+    // formal parameters (`push_parameter_typed_names`, scoped `Local` to
+    // that one method), a record component must be scoped `Field` to the
+    // record's OWN type so every method (and the synthetic scope the
+    // "block reached with no enclosing_method" rule gives a compact
+    // constructor) can see it via `FileTypedNames::lookup`'s field
+    // fallback. Reuses `parameter_name_and_type` verbatim (Rule 4,
+    // anti-duplication) -- a record's `parameters` field is syntactically
+    // just another `formal_parameters` node.
+    if node.kind == "record_declaration" {
+        if let (Some(formal_parameters), Some(type_name)) =
+            (node.child_by_kind("formal_parameters"), &enclosing_type)
+        {
+            for param in formal_parameters.named_children() {
+                if let Some((name, declared_type)) =
+                    super::java_receiver::parameter_name_and_type(param)
+                {
+                    index.typed_names.push(TypedNameRecord {
+                        name,
+                        declared_type,
+                        scope: NameScope::Field {
+                            enclosing_type: type_name.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+    }
     WalkContext {
         enclosing_type,
         top_level_type,
@@ -225,6 +256,57 @@ fn dispatch_node(
                 super::java_receiver::instanceof_pattern_typed_name(node, ctx.enclosing_method)
             {
                 index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21
+        // switch case pattern binding (`case Target handle ->`) -- written
+        // against the GRAMMAR NODE KIND (`type_pattern`) rather than
+        // "switch case patterns" as a Java feature, so any future context
+        // tree-sitter-java reuses this same production for is covered for
+        // free. See `type_pattern_typed_name`'s own doc comment.
+        "type_pattern" => {
+            if let Some(record) =
+                super::java_receiver::type_pattern_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3: a Java 21 record-pattern deconstruction
+        // component (`Target handle` inside `Wrapper(Target handle)`),
+        // reachable via `instanceof` OR a switch case pattern, at ANY
+        // nesting depth -- the generic stack walk visits every descendant
+        // regardless of depth, so no per-level recursion is needed here.
+        // See `record_pattern_component_typed_name`'s own doc comment.
+        "record_pattern_component" => {
+            if let Some(record) = super::java_receiver::record_pattern_component_typed_name(
+                node,
+                ctx.enclosing_method,
+            ) {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3: an enum's own CONSTANTS (`enum Color { RED
+        // }`) are effectively `public static final` instances of the enum
+        // type itself -- recorded as FIELD-scope typed names on the
+        // enum's own type (`ctx.enclosing_type`, already the enum being
+        // declared by the time its `enum_body` children are walked) so a
+        // bare reference to one never falls through to the open-world
+        // static-type-name fallback and misresolves against an unrelated
+        // in-repo type that coincidentally shares the constant's name.
+        "enum_constant" => {
+            if let (Some(name_node), Some(enclosing_type)) =
+                (node.child_by_kind("identifier"), ctx.enclosing_type.as_deref())
+            {
+                index.typed_names.push(TypedNameRecord {
+                    name: name_node.text().to_string(),
+                    declared_type: enclosing_type.to_string(),
+                    scope: NameScope::Field {
+                        enclosing_type: enclosing_type.to_string(),
+                    },
+                });
             }
             ctx
         }
@@ -619,7 +701,15 @@ fn extract_imports(root: &OwnedNode, index: &mut LocalIndex) {
         let is_wildcard =
             child.child_by_kind("asterisk").is_some() || child.child_by_kind("*").is_some();
         let is_static = child.child_by_kind("static").is_some();
-        let kind = if is_wildcard {
+        // Issue #1915: a STATIC-ON-DEMAND import (`import static pkg.
+        // Util.*;`) is both wildcard AND static -- it must be classified
+        // as its own `StaticWildcard` kind, checked BEFORE the plain
+        // `is_wildcard` branch, or it silently loses every static-import
+        // reason bit (see `ImportKind::StaticWildcard`'s own doc comment
+        // for the full failure chain this produced).
+        let kind = if is_wildcard && is_static {
+            ImportKind::StaticWildcard
+        } else if is_wildcard {
             ImportKind::Wildcard
         } else if is_static {
             ImportKind::Static

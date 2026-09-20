@@ -171,14 +171,59 @@ fn any_family_truncated(candidates: &[(DeclInfo, u16)]) -> bool {
         .any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
 }
 
-/// #1898 round 4 (epic #1906, mandate item 3): true when `name`'s
-/// bare-name pool (every same-named declaration of `ref_kind`'s target
-/// kind, repo-wide, BEFORE any narrowing pass runs) is non-empty. Reused
-/// by every one of `resolve_all_references`'s three per-site loops to
-/// compute the "narrowed to zero candidates" counter -- Rule 4,
-/// anti-duplication, rather than three copies of the same lookup.
-fn pool_was_nonempty(name_index: &RepoNameIndex, ref_kind: u8, name: &str) -> bool {
-    !name_index.lookup(name, target_kind_for_ref(ref_kind)).is_empty()
+/// #1898 round 4 (epic #1906, mandate item 3) + #1910 round 6 (finding 5,
+/// the mis-narrow counter): `name`'s exact bare-name pool SIZE (every
+/// same-named declaration of `ref_kind`'s target kind, repo-wide, BEFORE
+/// any narrowing pass runs). Reused by every one of `resolve_all_
+/// references`'s three per-site loops to compute BOTH the "narrowed to
+/// zero candidates" counter (pool non-empty, final candidate count zero)
+/// AND the NEW "narrowed to a non-empty strict subset" counter (pool
+/// non-empty, final count non-empty but strictly SMALLER than the pool) --
+/// Rule 4, anti-duplication, rather than two copies of the same lookup.
+fn bare_name_pool_size(name_index: &RepoNameIndex, ref_kind: u8, name: &str) -> usize {
+    name_index.lookup(name, target_kind_for_ref(ref_kind)).len()
+}
+
+/// #1910 salvage (P3, Rule 4 anti-duplication): the SAME "did this
+/// reference get mis-narrowed" accounting was copy-pasted once per
+/// resolution loop in `resolve_all_references` below (invocations, type
+/// references, constructions) -- pure counting, no behavior change from
+/// extracting it into one function. `pool_size == 0` means an ordinary
+/// out-of-repo reference, never counted by either counter (see
+/// `resolve_all_references`'s own doc comment for the full rationale).
+fn record_narrowing_outcome(
+    candidate_count: usize,
+    pool_size: usize,
+    narrowed_to_zero_count: &mut usize,
+    narrowed_to_nonempty_strict_subset_count: &mut usize,
+) {
+    if pool_size == 0 {
+        return;
+    }
+    if candidate_count == 0 {
+        *narrowed_to_zero_count += 1;
+    } else if candidate_count < pool_size {
+        *narrowed_to_nonempty_strict_subset_count += 1;
+    }
+}
+
+/// #1910 salvage (P3): `bare_name_pool_size` performs a `RepoNameIndex::
+/// lookup` (allocates a `Vec`) for every single reference across all three
+/// resolution loops, even though its result can only ever CHANGE the
+/// narrowing-outcome counters when the reference did NOT take the AC4
+/// Level 5 unique-name-in-repo shortcut. A shortcut-admitted candidate
+/// set is tagged `reasons::UNIQUE_NAME_IN_REPO` and is BY DEFINITION a
+/// singleton drawn from a pool of exactly 1 (`try_unique_name_shortcut`'s
+/// own `pool.len() != 1` precondition) -- so its pool size and final
+/// candidate count are always equal (1 == 1), and neither counter can
+/// ever fire for it. Skipping the lookup entirely for that case is a
+/// pure performance short-circuit, not a behavior change: a
+/// shortcut-admitted reference never contributed to either counter
+/// before this change either.
+fn took_unique_name_shortcut(candidates: &[(DeclInfo, u16)]) -> bool {
+    candidates
+        .iter()
+        .any(|(_, bits)| bits & reasons::UNIQUE_NAME_IN_REPO != 0)
 }
 
 /// Resolves every invocation/type-reference/construction site across
@@ -202,16 +247,30 @@ fn pool_was_nonempty(name_index: &RepoNameIndex, ref_kind: u8, name: &str) -> bo
 /// green 531-test suite: #1897 (a sibling story in this same epic) wires
 /// this number into `analyze_graph`'s completeness reporting; this
 /// function's job is only to produce it.
+///
+/// #1910 round 6 (finding 5, round4-findings.md's own remediation item 5,
+/// never built until now): ALSO returns how many references were
+/// genuinely narrowed to a non-empty STRICT SUBSET of their bare-name
+/// pool -- a DIFFERENT mis-narrow outcome `narrowed_to_zero_count` is
+/// structurally blind to (it only ever increments on a final count of
+/// EXACTLY zero). Both round-6 findings were wrong-non-empty-subset
+/// deletions (a real edge deleted, a fabricated one kept, final count
+/// staying non-zero throughout) that `narrowed_to_zero_count` reported as
+/// zero for both. This counter makes that class of mis-narrow visible
+/// without a reviewer hand-building fixtures every round.
 fn resolve_all_references(
     files: &[FileForBind],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     index_is_complete: bool,
-) -> (Vec<PendingReference>, usize, bool, usize) {
+) -> (Vec<PendingReference>, usize, bool, usize, usize) {
     let mut pending = Vec::new();
     let mut total_candidates = 0usize;
     let mut family_truncated_anywhere = false;
     let mut narrowed_to_zero_count = 0usize;
+    // #1910 round 6, finding 5: the mis-narrow counter `narrowed_to_zero_
+    // count` is blind to -- see this function's own doc comment above.
+    let mut narrowed_to_nonempty_strict_subset_count = 0usize;
     for file in files {
         let scope = build_file_scope(&file.index);
         // AC1/AC2 (Story #1806, S2b): the file's declared-type substrate
@@ -310,10 +369,15 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
-            if r.candidates.is_empty()
-                && pool_was_nonempty(name_index, REF_KIND_INVOCATION, &site.callee_name)
-            {
-                narrowed_to_zero_count += 1;
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_INVOCATION, &site.callee_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
             }
             pending.push(r);
         }
@@ -337,10 +401,15 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
-            if r.candidates.is_empty()
-                && pool_was_nonempty(name_index, REF_KIND_TYPE_REFERENCE, &site.type_name)
-            {
-                narrowed_to_zero_count += 1;
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_TYPE_REFERENCE, &site.type_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
             }
             pending.push(r);
         }
@@ -364,10 +433,15 @@ fn resolve_all_references(
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
-            if r.candidates.is_empty()
-                && pool_was_nonempty(name_index, REF_KIND_CONSTRUCTION, &site.type_name)
-            {
-                narrowed_to_zero_count += 1;
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_CONSTRUCTION, &site.type_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
             }
             pending.push(r);
         }
@@ -377,6 +451,7 @@ fn resolve_all_references(
         total_candidates,
         family_truncated_anywhere,
         narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
     )
 }
 
@@ -792,8 +867,17 @@ mod tests {
             .find(|r| r.kind == REF_KIND_INVOCATION)
             .expect("the bare call must produce a reference");
         let candidates = graph.candidates_for(reference);
-        assert_eq!(candidates.len(), 1, "Other.helper must be excluded");
-        let reasons_bits = candidates[0].reasons();
+        assert_eq!(
+            candidates.len(),
+            2,
+            "same-class-or-super narrowing is permanently tag-only -- Other.helper must \
+             survive as accepted noise, never excluded"
+        );
+        let base_candidate = candidates
+            .iter()
+            .find(|c| (graph.resolve_symbol(c.symbol()) >> 32) as u32 == BASE_FILE_ID)
+            .expect("Base.helper must be present among the candidates");
+        let reasons_bits = base_candidate.reasons();
         assert_ne!(
             reasons_bits & reasons::SAME_CLASS_OR_SUPER,
             0,

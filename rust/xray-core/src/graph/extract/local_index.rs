@@ -99,10 +99,34 @@ pub struct Declaration {
 }
 
 /// AC2: "imports (ordinary, static, wildcard)".
+///
+/// Issue #1915: `Static` is a SINGLE-MEMBER static import (`import static
+/// pkg.Util.helper;`) and `Wildcard` is an ORDINARY, non-static
+/// package-level wildcard (`import pkg.*;`) -- neither is the right kind
+/// for a STATIC-ON-DEMAND import (`import static pkg.Util.*;`, importing
+/// every static member of `Util`), which needs its own variant. Before
+/// this fix, `extract_imports` (`java.rs`) tested `is_wildcard` before
+/// `is_static` and classified a static-on-demand import as plain
+/// `Wildcard` -- `import_reasons` (`resolve.rs`) then compared its raw
+/// `path` (which still carries the declaring-CLASS segment, e.g.
+/// `"pkg.Util"`) against a candidate's PACKAGE (`"pkg"`), which never
+/// matches, so the import earned ZERO reason bits at all: not `WILDCARD_
+/// IMPORT` (wrong substrate: an ordinary wildcard import's `path` is a
+/// bare package, not `package.Class`) and not `STATIC_IMPORT` either
+/// (the `Static` arm's own name-only heuristic never ran, since the
+/// import was misclassified as `Wildcard`). Combined with a decoy
+/// same-named declaration elsewhere in the repo, this could silently
+/// destroy the real call edge outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportKind {
     Ordinary,
     Static,
+    /// Issue #1915: `import static pkg.Util.*;` -- every static member of
+    /// `Util` is imported. `ImportRecord::path` for this kind is the
+    /// DECLARING CLASS's own dotted path (`"pkg.Util"`), never a bare
+    /// package -- see `import_reasons`'s own doc comment for how this is
+    /// resolved to a `STATIC_IMPORT` reason bit.
+    StaticWildcard,
     Wildcard,
 }
 

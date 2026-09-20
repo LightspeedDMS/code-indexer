@@ -783,6 +783,14 @@ struct BuildGraphResult {
     /// survive a green test suite; sibling story #1897 folds this into
     /// `analyze_graph`'s own completeness reporting.
     narrowed_to_zero_count: usize,
+    /// #1910 round 6 (finding 5, round4-findings.md's own remediation item
+    /// 5): surfaces `RepoIndexResult::narrowed_to_nonempty_strict_subset_
+    /// count` verbatim -- how many references had a real same-named
+    /// declaration somewhere in the repo but were narrowed to a non-empty
+    /// STRICT SUBSET of it, the mis-narrow shape `narrowed_to_zero_count`
+    /// alone cannot see (both round-6 findings destroyed a real edge while
+    /// keeping the final candidate count non-zero).
+    narrowed_to_nonempty_strict_subset_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -898,6 +906,8 @@ fn run_build_graph(
             files_with_unsupported_language: index_result.files_with_unsupported_language,
             truncated_by_max_files: index_result.truncated_by_max_files,
             narrowed_to_zero_count: index_result.narrowed_to_zero_count,
+            narrowed_to_nonempty_strict_subset_count: index_result
+                .narrowed_to_nonempty_strict_subset_count,
         }),
     }
 }

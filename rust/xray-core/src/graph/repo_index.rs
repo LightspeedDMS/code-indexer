@@ -115,6 +115,14 @@ pub struct RepoIndexResult {
     /// rationale. Sibling story #1897 wires this into `analyze_graph`'s
     /// completeness reporting; this field is only where the number lives.
     pub narrowed_to_zero_count: usize,
+    /// #1910 round 6 (finding 5, round4-findings.md's own remediation item
+    /// 5): how many references across this whole repository had a
+    /// non-empty bare-name pool but were narrowed to a non-empty STRICT
+    /// SUBSET of it -- the mis-narrow shape `narrowed_to_zero_count` is
+    /// structurally blind to (both round-6 findings destroyed a real edge
+    /// while keeping the final candidate count non-zero). See `bind::
+    /// resolve_all_references`'s own doc comment for the full rationale.
+    pub narrowed_to_nonempty_strict_subset_count: usize,
 }
 
 /// Reuses the exact same containment technique
@@ -278,6 +286,7 @@ pub fn build_repo_graph(
     // to_zero_count` is reachable here for `RepoIndexResult` below.
     let (prepared, stats) = prepare_bind(acc.files_for_bind, index_is_complete);
     let narrowed_to_zero_count = stats.narrowed_to_zero_count;
+    let narrowed_to_nonempty_strict_subset_count = stats.narrowed_to_nonempty_strict_subset_count;
     let mut graph = finish_bind(prepared, &options.budget, &acc.file_paths);
     let budget_exceeded = graph.completeness() != AnalysisCompleteness::Complete;
 
@@ -305,6 +314,7 @@ pub fn build_repo_graph(
         truncated_by_max_files,
         facts: acc.facts,
         narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
     })
 }
 
@@ -618,6 +628,71 @@ mod tests {
             "exactly ONE reference (connection.close(), 0 args, vs. Something.close(int), 1 \
              param) was genuinely narrowed to zero by arity -- neverDeclaredAnywhere() is an \
              ordinary out-of-repo reference and must not be counted, got {}",
+            result.narrowed_to_zero_count
+        );
+    }
+
+    /// #1910 round 6, finding 5 (round4-findings.md's own remediation item
+    /// 5, never built until now): `narrowed_to_zero_count` only ever
+    /// increments when a reference's candidate set becomes EMPTY -- it is
+    /// BLIND to a narrowing pass excluding the real target while KEEPING a
+    /// wrong, non-empty subset (exactly the mechanism behind both round-6
+    /// findings: a real edge deleted, a fabricated edge kept, with the
+    /// candidate count staying non-zero throughout). This fixture trips a
+    /// genuine non-empty-strict-subset narrowing purely via ARITY (never
+    /// implicated in any round, so this isolates the counter itself from
+    /// any receiver-type/same-class narrowing behaviour): two unrelated
+    /// `helper` declarations of DIFFERENT arity share a bare name, and an
+    /// UNRESOLVABLE receiver (`something`, never declared anywhere, so its
+    /// evidence is `ReceiverEvidence::None` -- neither receiver-type nor
+    /// same-class-or-super narrowing ever engages) calls `helper(5)` with
+    /// exactly one argument. Arity narrowing alone excludes the 0-param
+    /// declaration, leaving exactly the 1-param one -- pool size 2, final
+    /// candidate count 1: a genuine non-empty STRICT SUBSET, never counted
+    /// by `narrowed_to_zero_count` (final count is not zero) but exactly
+    /// what the new counter must count.
+    #[test]
+    fn narrowed_to_nonempty_strict_subset_count_counts_a_wrong_subset_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Helper1.java",
+            "package m;\npublic class Helper1 {\n    void helper() {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Helper2.java",
+            "package m;\npublic class Helper2 {\n    void helper(int x) {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package m;\nclass Caller {\n    void run() {\n        something.helper(5);\n    }\n}\n",
+        );
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &[
+                "Helper1.java".to_string(),
+                "Helper2.java".to_string(),
+                "Caller.java".to_string(),
+            ],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.narrowed_to_nonempty_strict_subset_count, 1,
+            "exactly ONE reference (something.helper(5), pool size 2, narrowed by arity to \
+             exactly Helper2.helper) is a genuine non-empty strict-subset narrowing, got {}",
+            result.narrowed_to_nonempty_strict_subset_count
+        );
+        assert_eq!(
+            result.narrowed_to_zero_count, 0,
+            "this reference's final candidate count is 1, never 0 -- it must NOT also be \
+             counted by narrowed_to_zero_count, got {}",
             result.narrowed_to_zero_count
         );
     }

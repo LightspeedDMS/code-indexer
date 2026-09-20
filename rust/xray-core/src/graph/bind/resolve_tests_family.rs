@@ -63,15 +63,19 @@ fn hierarchy_and_unrelated_sibling(
     ]
 }
 
-/// AC3 (Story #1806, S2b): a bare call from `Sub` (which `extends
-/// Base`) to `helper()` must narrow to `Base.helper` -- reachable via
-/// the caller's own supertype chain -- excluding an unrelated
-/// `Other.helper` that shares only the name, with zero relation to
-/// `Sub`'s type hierarchy. Neither candidate carries any import/
-/// package/arity evidence, so `SAME_CLASS_OR_SUPER` must be the ONLY
-/// thing doing the narrowing here.
+/// AC3 (Story #1806, S2b), PERMANENTLY TAG-ONLY (#1910 salvage): a bare
+/// call from `Sub` (which `extends Base`) to `helper()` TAGS `Base.helper`
+/// -- reachable via the caller's own supertype chain -- with
+/// `SAME_CLASS_OR_SUPER`, but an unrelated `Other.helper` that shares
+/// only the name (zero relation to `Sub`'s type hierarchy) must still
+/// survive in the candidate set: `apply_same_class_or_super_narrowing`
+/// never removes a candidate, empty match or a non-empty subset alike
+/// -- see its own doc comment in `narrowing.rs` for why (the caller's own
+/// lexically-enclosing-type/static-import scope this pass cannot see,
+/// plus issue #1915's static-wildcard-import classification bug that
+/// independently breaks any hard/exemption-based form of this pass).
 #[test]
-fn same_class_or_super_narrows_an_unqualified_call_to_the_callers_own_type_hierarchy() {
+fn same_class_or_super_tags_the_callers_own_type_hierarchy_but_never_narrows() {
     use crate::graph::confidence::Confidence;
     use crate::graph::extract::local_index::InheritanceKind;
 
@@ -109,14 +113,27 @@ fn same_class_or_super_narrows_an_unqualified_call_to_the_callers_own_type_hiera
     );
     assert_eq!(
         candidates.len(),
-        1,
-        "Other.helper must be excluded -- it has no relation to Sub's hierarchy"
+        2,
+        "same-class-or-super narrowing is permanently tag-only -- Other.helper must survive \
+         as accepted noise, never excluded"
     );
-    assert_eq!(candidates[0].0.file_id, 20);
-    assert_ne!(candidates[0].1 & reasons::SAME_CLASS_OR_SUPER, 0);
+    let base_candidate = candidates
+        .iter()
+        .find(|(d, _)| d.file_id == 20)
+        .expect("Base.helper must be present");
+    assert_ne!(base_candidate.1 & reasons::SAME_CLASS_OR_SUPER, 0);
     assert_eq!(
-        Confidence::derive(candidates[0].1),
+        Confidence::derive(base_candidate.1),
         Confidence::SameClassOrSuper
+    );
+    let other_candidate = candidates
+        .iter()
+        .find(|(d, _)| d.file_id == 21)
+        .expect("Other.helper must be present (accepted noise, not silently dropped)");
+    assert_eq!(
+        other_candidate.1 & reasons::SAME_CLASS_OR_SUPER,
+        0,
+        "Other.helper has no relation to Sub's hierarchy and must never be tagged"
     );
 }
 
@@ -671,7 +688,6 @@ fn enclosing_symbol_falls_back_to_a_sentinel_when_nothing_precedes_the_line() {
 /// xray-architecture.md`'s candidate-admission section.
 #[test]
 fn receiver_type_with_no_matching_member_keeps_the_full_pool_pending_the_hard_narrowing_followup() {
-
     use crate::graph::extract::local_index::MethodOwnerRecord;
 
     let mut file_a = LocalIndex::new();
@@ -715,7 +731,7 @@ fn receiver_type_with_no_matching_member_keeps_the_full_pool_pending_the_hard_na
         2,
         "accepted regression (#1898 scope split): receiver-type narrowing is tag-only now, \
          so TimeUtil.parse(x) keeps binding to UnrelatedA.parse/UnrelatedB.parse until the \
-         hard-narrowing follow-up lands -- got {} candidate(s)",
+         hard-narrowing follow-up issue lands -- got {} candidate(s)",
         candidates.len()
     );
     assert!(
