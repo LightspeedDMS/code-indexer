@@ -33,7 +33,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import anyio
 
@@ -131,9 +131,39 @@ def _collect_graph_candidate_files(
     include_patterns: List[str],
     exclude_patterns: List[str],
     max_files: int,
-) -> Tuple[List[str], bool]:
+    extractor_extensions: Dict[str, str],
+) -> Tuple[List[str], bool, int, int, List[str]]:
     """Whole-repo, glob-filtered file walk producing repo-relative POSIX
     paths for `--build-graph`'s `--files-from` list.
+
+    Bug #1907 (the most dangerous defect in epic #1906): scoping
+    `include_patterns`/`exclude_patterns` to one extractable language on a
+    mixed-language repo used to make `analyze_graph` report
+    `fact_graph_complete: true` with every degradation counter at zero,
+    while the graph was missing every call site in the excluded language
+    -- an excluded file never became a candidate, so no Rust-side counter
+    could ever count it. Narrowing the scope did NOT improve completeness,
+    it HID the incompleteness, and a method called only from the unread
+    language could be reported `is_definitely_dead_code() == Some(true)`:
+    a false dead verdict on live code.
+
+    `extractor_extensions` (obtained from `xray-cli --print-graph-
+    extractor-extensions` via `rust_backend.get_graph_extractor_
+    extensions`, the single source of truth Rust's extractor registry
+    owns) is what lets this walk classify a file it is about to exclude:
+    `files_excluded_with_extractor` counts an excluded file whose language
+    genuinely COULD have contributed a real call edge had it been read --
+    the caller MUST downgrade `fact_graph_complete` on a nonzero count
+    here. `files_excluded_without_extractor` counts an excluded file whose
+    language has no extractor at all (e.g. `README.md`) -- excluding it
+    changes nothing about completeness, since including it would not have
+    produced any real call edges either way. Conflating the two would
+    re-create this bug in a new shape. `languages_excluded_with_extractor`
+    (sorted, deduplicated) names WHICH languages went unread, so a caller
+    learns what is missing, not merely that something is (AC3).
+    Classification is a bare extension lookup against the already-in-hand
+    `extractor_extensions` dict -- no filesystem call per file, so this
+    adds no measurable cost to the walk at fleet scale (~900 repos).
 
     Deliberately a plain path walk, not the CLI indexing pipeline's
     `Config`-bound `FileFinder` (Rule 4 anti-duplication does not apply
@@ -196,11 +226,25 @@ def _collect_graph_candidate_files(
     selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
     results: List[str] = []
     collection_truncated = False
+    files_excluded_with_extractor = 0
+    files_excluded_without_extractor = 0
+    languages_excluded_with_extractor: Set[str] = set()
     for dirpath, dirnames, filenames in os.walk(repo_path):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
         for filename in sorted(filenames):
             rel = Path(dirpath, filename).relative_to(repo_path).as_posix()
             if not selector.select(rel):
+                # Bug #1907: this file will NEVER reach Rust -- classify it
+                # NOW, while its extension is still in hand, or it becomes
+                # permanently invisible to every completeness counter.
+                # Extension lookup only, no filesystem call.
+                ext = Path(filename).suffix.lstrip(".").lower()
+                language = extractor_extensions.get(ext) if ext else None
+                if language is not None:
+                    files_excluded_with_extractor += 1
+                    languages_excluded_with_extractor.add(language)
+                else:
+                    files_excluded_without_extractor += 1
                 continue
             if len(results) >= max_files:
                 collection_truncated = True
@@ -209,7 +253,13 @@ def _collect_graph_candidate_files(
         if collection_truncated:
             break
     results.sort()
-    return results, collection_truncated
+    return (
+        results,
+        collection_truncated,
+        files_excluded_with_extractor,
+        files_excluded_without_extractor,
+        sorted(languages_excluded_with_extractor),
+    )
 
 
 def _validate_glob_patterns(
@@ -249,14 +299,24 @@ def _validate_glob_patterns(
 
 def _resolve_repo_and_files(
     repo_alias: str, include_patterns: List[str], exclude_patterns: List[str]
-) -> Tuple[Optional[Path], Optional[List[str]], bool, Optional[Dict[str, Any]]]:
+) -> Tuple[
+    Optional[Path],
+    Optional[List[str]],
+    bool,
+    int,
+    int,
+    List[str],
+    Optional[Dict[str, Any]],
+]:
     """Resolves `repo_alias` to a real path and collects its candidate
     files. Synchronous by design -- the caller (`_run_analyze_graph_
     pipeline`) MUST invoke this via `anyio.to_thread.run_sync`, since both
-    alias resolution and the real file walk are blocking filesystem
-    operations. Returns `(repo_path, file_paths, collection_truncated,
-    None)` on success, or `(None, None, False, error_dict)` on any
-    failure.
+    alias resolution and the real file walk (plus the extractor-extension
+    lookup subprocess below) are blocking operations. Returns `(repo_path,
+    file_paths, collection_truncated, files_excluded_with_extractor,
+    files_excluded_without_extractor, languages_excluded_with_extractor,
+    None)` on success, or `(None, None, False, 0, 0, [], error_dict)` on
+    any failure.
 
     R3-2 (Codex re-review, ROUND 3): `collection_truncated` is True when
     `_collect_graph_candidate_files` stopped early at
@@ -265,6 +325,17 @@ def _resolve_repo_and_files(
     degradation fields, since Rust's own `max_files` check would
     otherwise never independently detect it (Python already handed it a
     capped, not-oversized, file list).
+
+    Bug #1907: before the candidate walk can honestly classify a file it
+    is about to exclude, it must know which extensions have a REAL graph
+    extractor -- asked here, once per request, via `rust_backend.
+    get_graph_extractor_extensions()` (itself backed by `xray-cli
+    --print-graph-extractor-extensions`, the single source of truth
+    `graph::extract::graph_extractor_extensions` owns on the Rust side).
+    A lookup failure fails the WHOLE request loudly (`extractor_extension_
+    lookup_failed`, Rule 2 anti-fallback) rather than silently treating
+    "unknown" as "no extractor here" -- that would reproduce exactly the
+    false-completeness bug this function exists to prevent.
     """
     repo_path_str = _resolve_repo_path(repo_alias)
     if repo_path_str is None:
@@ -272,29 +343,71 @@ def _resolve_repo_and_files(
             None,
             None,
             False,
+            0,
+            0,
+            [],
             {
                 "error": "repository_not_found",
                 "message": f"Repository alias {repo_alias!r} not found",
             },
         )
     repo_path = Path(repo_path_str)
-    file_paths, collection_truncated = _collect_graph_candidate_files(
+
+    from code_indexer.xray.rust_backend import get_graph_extractor_extensions
+
+    extractor_extensions, lookup_error = get_graph_extractor_extensions()
+    if extractor_extensions is None:
+        return (
+            None,
+            None,
+            False,
+            0,
+            0,
+            [],
+            {
+                "error": "extractor_extension_lookup_failed",
+                "message": (
+                    "could not determine which languages have a graph "
+                    f"extractor: {lookup_error}"
+                ),
+            },
+        )
+
+    (
+        file_paths,
+        collection_truncated,
+        files_excluded_with_extractor,
+        files_excluded_without_extractor,
+        languages_excluded_with_extractor,
+    ) = _collect_graph_candidate_files(
         repo_path,
         include_patterns,
         exclude_patterns,
         max_files=_GRAPH_CANDIDATE_FILES_CAP,
+        extractor_extensions=extractor_extensions,
     )
     if not file_paths:
         return (
             None,
             None,
             False,
+            0,
+            0,
+            [],
             {
                 "error": "no_candidate_files",
                 "message": "no files matched include/exclude patterns",
             },
         )
-    return repo_path, file_paths, collection_truncated, None
+    return (
+        repo_path,
+        file_paths,
+        collection_truncated,
+        files_excluded_with_extractor,
+        files_excluded_without_extractor,
+        languages_excluded_with_extractor,
+        None,
+    )
 
 
 def _parse_timeout_seconds(timeout_raw: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
@@ -470,11 +583,25 @@ async def _run_analyze_graph_pipeline(
         }
 
     resolve_result: Tuple[
-        Optional[Path], Optional[List[str]], bool, Optional[Dict[str, Any]]
+        Optional[Path],
+        Optional[List[str]],
+        bool,
+        int,
+        int,
+        List[str],
+        Optional[Dict[str, Any]],
     ] = await anyio.to_thread.run_sync(
         lambda: _resolve_repo_and_files(repo_alias, include_patterns, exclude_patterns)
     )
-    repo_path, file_paths, collection_truncated, error = resolve_result
+    (
+        repo_path,
+        file_paths,
+        collection_truncated,
+        files_excluded_with_extractor,
+        files_excluded_without_extractor,
+        languages_excluded_with_extractor,
+        error,
+    ) = resolve_result
     if error is not None:
         return error
     assert repo_path is not None  # guaranteed by _resolve_repo_and_files
@@ -538,25 +665,55 @@ async def _run_analyze_graph_pipeline(
     # omits "error" entirely, which no real code path ever does). Checking
     # the VALUE instead restores the original intent -- skip the
     # force-set only on a genuine failure (a non-None "error").
-    if collection_truncated and result.get("error") is None:
+    if result.get("error") is None:
         result = dict(result)
-        result["truncated_by_max_files"] = True
-        result["fact_graph_complete"] = False
-        # Bug #1897 P2-1: mirrors the `main.rs` `files_from_truncated`
-        # fix (`run_build_graph`'s CLI wrapper) -- a Python-side candidate-
-        # collection truncation is semantically the same "repo-level file
-        # set was cut short" condition `RepoIndexResult.completeness_
-        # reasons` already represents for a Rust-side truncation, so it
-        # must ALSO carry a reason, never leave fact_graph_complete=False
-        # with nothing pushed onto completeness_reasons (the exact "false
-        # with no reason" symptom the whole #1897 fix exists to kill).
-        # Unlike `files_from_truncated` in main.rs (unreachable on the
-        # server path, since Python's own cap means Rust never sees an
-        # uncapped list), THIS site is the one that actually fires.
-        reasons = list(result.get("completeness_reasons") or [])
-        if "repo_index_incomplete" not in reasons:
-            reasons.append("repo_index_incomplete")
-        result["completeness_reasons"] = reasons
+        # Bug #1907: surface the two new candidate-collection counters
+        # UNCONDITIONALLY (even when both are zero) so the response schema
+        # is stable regardless of whether include/exclude patterns excluded
+        # anything -- mirrors `degradation_keys`'s own always-present
+        # fields in `_build_graph_analysis_result`.
+        degradation = dict(result.get("degradation") or {})
+        degradation["files_excluded_with_extractor"] = files_excluded_with_extractor
+        degradation["files_excluded_without_extractor"] = (
+            files_excluded_without_extractor
+        )
+        result["degradation"] = degradation
+        result["languages_excluded_with_extractor"] = languages_excluded_with_extractor
+
+        needs_incomplete_reason = False
+        if collection_truncated:
+            result["truncated_by_max_files"] = True
+            needs_incomplete_reason = True
+        if files_excluded_with_extractor:
+            # THE core fix (Bug #1907): a file whose language HAS a graph
+            # extractor was excluded by include/exclude patterns before it
+            # ever became a candidate -- narrowing the scope can never be
+            # allowed to manufacture a clean fact_graph_complete=true while
+            # the graph is missing every call site in that language. A file
+            # whose language has NO extractor at all
+            # (files_excluded_without_extractor) does NOT trip this --
+            # including it would not have produced any real call edge
+            # either way, so its exclusion changes nothing about
+            # completeness.
+            needs_incomplete_reason = True
+        if needs_incomplete_reason:
+            result["fact_graph_complete"] = False
+            # Bug #1897 P2-1: mirrors the `main.rs` `files_from_truncated`
+            # fix (`run_build_graph`'s CLI wrapper) -- a Python-side
+            # candidate-collection gap (truncation OR an excluded
+            # extractor-backed file) is semantically the same "repo-level
+            # file set was cut short" condition `RepoIndexResult.
+            # completeness_reasons` already represents for a Rust-side
+            # truncation, so it must ALSO carry a reason, never leave
+            # fact_graph_complete=False with nothing pushed onto
+            # completeness_reasons (the exact "false with no reason"
+            # symptom the whole #1897 fix exists to kill) -- and Bug #1907
+            # feeds this SAME existing list rather than inventing a
+            # parallel undiscoverable channel.
+            reasons = list(result.get("completeness_reasons") or [])
+            if "repo_index_incomplete" not in reasons:
+                reasons.append("repo_index_incomplete")
+            result["completeness_reasons"] = reasons
 
     # Bug #1860 (C2 remediation, #1858/#1859/#1860/#1861 changeset): an
     # ok=true, status="ran_ok", findings=[] response reads as a clean bill
@@ -1024,6 +1181,15 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         no_candidate_files               -- include/exclude patterns matched nothing
                                              (single-repo path; per-alias in `errors[]`
                                              for a multi-repo request).
+        extractor_extension_lookup_failed -- could not determine which file
+                                             extensions have a graph extractor
+                                             (Bug #1907; `xray-cli --print-graph-
+                                             extractor-extensions` failed or the
+                                             binary is missing). The request fails
+                                             loudly rather than silently assuming no
+                                             excluded file mattered (single-repo
+                                             path; per-alias in `errors[]` for a
+                                             multi-repo request).
     """
     if user is None or not user.has_permission("query_repos"):
         return _mcp_response(

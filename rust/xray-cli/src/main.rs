@@ -1055,6 +1055,45 @@ fn run_compile_only(dynlib_path: &std::path::Path, cache_dir: &std::path::Path) 
     }
 }
 
+/// Bug #1907: one extension-to-language entry surfaced by
+/// `--print-graph-extractor-extensions`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct GraphExtractorExtensionEntry {
+    extension: String,
+    language: String,
+}
+
+/// Bug #1907: the full `--print-graph-extractor-extensions` JSON body.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct GraphExtractorExtensionsOutput {
+    extensions: Vec<GraphExtractorExtensionEntry>,
+}
+
+/// Builds `--print-graph-extractor-extensions`'s JSON body from the REAL
+/// extractor registry (`graph::extract::graph_extractor_extensions`) --
+/// never a second, hand-maintained list. Python's candidate-collection walk
+/// (`xray_graph.py::_collect_graph_candidate_files`) calls this ONCE per
+/// `analyze_graph` request, before ever invoking `--compile-only`/
+/// `--build-graph`, so it can classify a file it is about to exclude via
+/// `include_patterns`/`exclude_patterns` as "this language would have
+/// contributed real call edges had it been read" vs "this file was never
+/// going to be extracted either way" -- the distinction Bug #1907 exists to
+/// make honest. A file with an available extractor that a caller chose to
+/// exclude MUST downgrade `fact_graph_complete` to `false`; a file whose
+/// language has no extractor at all changes nothing about completeness,
+/// since including it would not have produced any real call edges anyway.
+fn build_graph_extractor_extensions_output() -> GraphExtractorExtensionsOutput {
+    GraphExtractorExtensionsOutput {
+        extensions: xray_core::graph::extract::graph_extractor_extensions()
+            .iter()
+            .map(|(ext, lang)| GraphExtractorExtensionEntry {
+                extension: (*ext).to_string(),
+                language: (*lang).to_string(),
+            })
+            .collect(),
+    }
+}
+
 fn main() {
     let wall_start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1082,6 +1121,25 @@ fn main() {
         match serde_json::to_string(&output) {
             Ok(json) => println!("{}", json),
             Err(e) => eprintln!("Error: failed to serialize CompileOnlyOutput: {}", e),
+        }
+        std::process::exit(0);
+    }
+
+    // Bug #1907: early-exit subcommand -- no arguments, no compilation, no
+    // repo walk. Prints the REAL extractor registry (`graph::extract::
+    // graph_extractor_extensions`) as JSON so Python's candidate-collection
+    // walk can classify an about-to-be-excluded file as "has a real
+    // extractor" before that file is dropped and becomes invisible to
+    // every Rust-side counter forever. Mirrors `--print-cache-identity`'s
+    // near-instant bridge shape immediately below.
+    if args.first().map(|s| s.as_str()) == Some("--print-graph-extractor-extensions") {
+        let output = build_graph_extractor_extensions_output();
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!(
+                "Error: failed to serialize GraphExtractorExtensionsOutput: {}",
+                e
+            ),
         }
         std::process::exit(0);
     }
@@ -2110,6 +2168,45 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
         let output = run_compile_only(&src_path, dir.path());
         assert!(output.error.is_some(), "malformed source must report a structured error, not silently succeed");
         assert!(output.so_path.is_empty());
+    }
+
+    // --- Bug #1907: --print-graph-extractor-extensions bridges Python's
+    // candidate-collection walk to the REAL extractor registry, so
+    // narrowing include/exclude patterns to one extractable language can
+    // never again manufacture a clean fact_graph_complete=true while
+    // hiding every call site in an excluded-but-extractable language.
+    // RED phase: build_graph_extractor_extensions_output does not exist yet.
+
+    /// The output must list every extension `graph::extract::
+    /// graph_extractor_extensions` actually backs -- Java and Kotlin today
+    /// -- with a human-readable language name, never a re-derived/
+    /// hardcoded copy of that list.
+    #[test]
+    fn build_graph_extractor_extensions_output_lists_every_real_extractor_extension() {
+        let output = build_graph_extractor_extensions_output();
+        let entries: Vec<(&str, &str)> = output
+            .extensions
+            .iter()
+            .map(|e| (e.extension.as_str(), e.language.as_str()))
+            .collect();
+        assert_eq!(
+            entries,
+            xray_core::graph::extract::graph_extractor_extensions().to_vec(),
+            "the CLI bridge must surface graph_extractor_extensions() verbatim, never a second list"
+        );
+        assert!(entries.contains(&("java", "Java")));
+        assert!(entries.contains(&("kt", "Kotlin")));
+        assert!(entries.contains(&("kts", "Kotlin")));
+    }
+
+    /// The struct must round-trip through JSON (this is what actually
+    /// crosses the process boundary to Python).
+    #[test]
+    fn graph_extractor_extensions_output_serializes_to_json_with_extension_and_language_keys() {
+        let output = build_graph_extractor_extensions_output();
+        let json = serde_json::to_string(&output).expect("must serialize");
+        assert!(json.contains("\"extension\":\"java\""), "json={json}");
+        assert!(json.contains("\"language\":\"Java\""), "json={json}");
     }
 
     // --- Bug #1784: --print-cache-identity bridges Python to the ONE

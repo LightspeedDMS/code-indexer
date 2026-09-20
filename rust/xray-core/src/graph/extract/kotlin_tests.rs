@@ -464,3 +464,289 @@ fn extracts_a_top_level_infix_call_with_an_identifier_receiver() {
     assert_eq!(site.arg_count, Some(1));
     assert_eq!(site.receiver, ReceiverExpr::Identifier("b".to_string()));
 }
+
+// ---------------------------------------------------------------------
+// Bug #1917: operator-convention calls (`binary_expression`,
+// `index_expression`)
+// ---------------------------------------------------------------------
+
+#[test]
+fn extracts_a_binary_plus_expression_as_a_plus_invocation() {
+    let index = extract_source(
+        "class Vec(val x: Int) {\n    operator fun plus(o: Vec) = Vec(x + o.x)\n    fun sum(a: Vec, b: Vec) = a + b\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "plus" && i.receiver == ReceiverExpr::Identifier("a".to_string()))
+        .expect("`a + b` must be extracted as a `plus` invocation on receiver `a`");
+    assert_eq!(site.arg_count, Some(1));
+}
+
+#[test]
+fn extracts_a_relational_binary_expression_as_a_compareto_invocation() {
+    let index = extract_source(
+        "class Money(val cents: Int) {\n    operator fun compareTo(o: Money) = cents - o.cents\n    fun bigger(a: Money, b: Money) = a > b\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "compareTo" && i.receiver == ReceiverExpr::Identifier("a".to_string()))
+        .expect("`a > b` must be extracted as a `compareTo` invocation on receiver `a`");
+}
+
+#[test]
+fn extracts_a_structural_equality_binary_expression_as_an_equals_invocation() {
+    let index = extract_source(
+        "class Point(val x: Int) {\n    override fun equals(other: Any?) = other is Point && other.x == x\n    fun same(a: Point, b: Point) = a == b\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "equals" && i.receiver == ReceiverExpr::Identifier("a".to_string()))
+        .expect("`a == b` must be extracted as an `equals` invocation on receiver `a`");
+}
+
+/// `&&` is one of `binary_expression`'s own operator tokens in this
+/// grammar, but Kotlin does NOT allow a user to overload it (no
+/// corresponding `operator fun` convention exists) -- mapping it would
+/// fabricate a callee that can never exist, so no invocation is emitted
+/// for the top-level `&&` itself (its operands are still walked normally).
+#[test]
+fn a_logical_and_binary_expression_produces_no_operator_convention_invocation() {
+    let index = extract_source("fun both(a: Boolean, b: Boolean) = a && b\n");
+    assert!(
+        index.invocations.iter().all(|i| i.callee_name != "and"),
+        "&& has no user-overloadable convention and must never synthesize an invocation"
+    );
+}
+
+#[test]
+fn extracts_an_index_read_as_a_get_invocation() {
+    let index = extract_source(
+        "class Registry {\n    operator fun get(key: String) = key.length\n    fun lookup(k: String) = this[k]\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "get")
+        .expect("`this[k]` must be extracted as a `get` invocation");
+    assert_eq!(site.arg_count, Some(1));
+    assert_eq!(site.receiver, ReceiverExpr::SelfOrSuper);
+}
+
+#[test]
+fn extracts_a_multi_argument_index_read_as_a_get_invocation_with_arity_two() {
+    let index = extract_source(
+        "class Grid {\n    operator fun get(row: Int, col: Int) = row + col\n    fun at(g: Grid, r: Int, c: Int) = g[r, c]\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "get")
+        .expect("`g[r, c]` must be extracted as a `get` invocation");
+    assert_eq!(site.arg_count, Some(2));
+}
+
+/// The read/write discrimination the AC requires: `m[k] = v` must resolve
+/// to `set`, and must NOT also emit a spurious `get` for the very same
+/// index expression (that would be a double count at one source
+/// position, not a second real evaluation).
+#[test]
+fn extracts_an_index_write_as_a_set_invocation_and_never_a_get_for_the_same_site() {
+    let index = extract_source(
+        "class Registry {\n    operator fun set(key: String, value: Int) {}\n    fun store(k: String, v: Int) { this[k] = v }\n}\n",
+    );
+    let set_site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "set")
+        .expect("`this[k] = v` must be extracted as a `set` invocation");
+    assert_eq!(set_site.arg_count, Some(2));
+    assert_eq!(set_site.receiver, ReceiverExpr::SelfOrSuper);
+    assert!(
+        index.invocations.iter().all(|i| i.callee_name != "get"),
+        "the assignment target `this[k]` must not ALSO be recorded as a `get` invocation"
+    );
+}
+
+/// A plain (non-indexed) assignment target must never be mistaken for an
+/// indexed write -- no `set` invocation is fabricated.
+#[test]
+fn a_plain_variable_assignment_never_produces_a_set_invocation() {
+    let index = extract_source("fun run() { var x = 1; x = 2 }\n");
+    assert!(
+        index.invocations.iter().all(|i| i.callee_name != "set"),
+        "a plain `x = 2` assignment must never synthesize a `set` invocation"
+    );
+}
+
+/// Documented gap: a COMPOUND assignment onto an indexed target
+/// (`m[k] += v`) is not disambiguated into its own `plusAssign`/`get`+`set`
+/// desugaring -- it falls back to the safe `get` default (over-binding,
+/// never silently dropped).
+#[test]
+fn a_compound_assignment_onto_an_indexed_target_falls_back_to_a_get_invocation() {
+    let index = extract_source(
+        "class Counters {\n    operator fun get(key: String) = 0\n    fun bump(k: String) { this[k] += 1 }\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "get")
+        .expect("a compound-assignment indexed target must still fall back to a `get` invocation");
+}
+
+// ---------------------------------------------------------------------
+// Bug #1917 (second round): unary, range, containment, non-indexed
+// compound assignment
+// ---------------------------------------------------------------------
+
+#[test]
+fn extracts_a_prefix_not_expression_as_a_not_invocation() {
+    let index = extract_source(
+        "class Flag(val on: Boolean) {\n    operator fun not() = Flag(!on)\n    fun flip(f: Flag) = !f\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "not" && i.receiver == ReceiverExpr::Identifier("f".to_string()))
+        .expect("`!f` must be extracted as a `not` invocation on receiver `f`");
+    assert_eq!(site.arg_count, Some(0));
+}
+
+#[test]
+fn extracts_a_prefix_unary_minus_as_a_unaryminus_invocation() {
+    let index = extract_source(
+        "class Vec(val x: Int) {\n    operator fun unaryMinus() = Vec(-x)\n    fun negate(v: Vec) = -v\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "unaryMinus" && i.receiver == ReceiverExpr::Identifier("v".to_string()))
+        .expect("`-v` must be extracted as a `unaryMinus` invocation on receiver `v`");
+}
+
+#[test]
+fn extracts_a_postfix_increment_as_an_inc_invocation() {
+    let index = extract_source(
+        "class Counter(val n: Int) {\n    operator fun inc() = Counter(n + 1)\n    fun bump(c: Counter): Counter { var x = c; x++; return x }\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "inc" && i.receiver == ReceiverExpr::Identifier("x".to_string()))
+        .expect("`x++` must be extracted as an `inc` invocation on receiver `x`");
+}
+
+#[test]
+fn extracts_a_prefix_decrement_as_a_dec_invocation() {
+    let index = extract_source(
+        "class Counter(val n: Int) {\n    operator fun dec() = Counter(n - 1)\n    fun bump(c: Counter): Counter { var x = c; --x; return x }\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "dec" && i.receiver == ReceiverExpr::Identifier("x".to_string()))
+        .expect("`--x` must be extracted as a `dec` invocation on receiver `x`");
+}
+
+/// `!!` (not-null assertion) is fixed language semantics with no
+/// corresponding `operator fun` convention -- mapping it would fabricate a
+/// nonexistent callee, so no invocation is emitted for it.
+#[test]
+fn a_not_null_assertion_produces_no_operator_convention_invocation() {
+    let index = extract_source("fun demo(s: String?): Int = s!!.length\n");
+    assert!(
+        index.invocations.iter().all(|i| i.callee_name != "not!!" && i.callee_name != "assertNotNull"),
+        "`!!` has no user-overloadable convention and must never synthesize an invocation"
+    );
+}
+
+#[test]
+fn extracts_a_range_to_expression_as_a_rangeto_invocation() {
+    let index = extract_source(
+        "class Span(val a: Int, val b: Int) {\n    operator fun rangeTo(o: Span) = b - o.a\n    fun gap(x: Span, y: Span) = x..y\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "rangeTo" && i.receiver == ReceiverExpr::Identifier("x".to_string()))
+        .expect("`x..y` must be extracted as a `rangeTo` invocation on receiver `x`");
+    assert_eq!(site.arg_count, Some(1));
+}
+
+#[test]
+fn extracts_a_range_until_expression_as_a_rangeuntil_invocation() {
+    let index = extract_source("fun demo(x: Int, y: Int) = x..<y\n");
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "rangeUntil")
+        .expect("`x..<y` must be extracted as a `rangeUntil` invocation");
+}
+
+#[test]
+fn extracts_an_in_expression_as_a_contains_invocation_on_the_right_operand() {
+    let index = extract_source(
+        "class Bag {\n    operator fun contains(s: String) = s.isNotEmpty()\n    fun has(b: Bag, s: String) = s in b\n}\n",
+    );
+    let site = index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "contains")
+        .expect("`s in b` must be extracted as a `contains` invocation");
+    assert_eq!(
+        site.receiver,
+        ReceiverExpr::Identifier("b".to_string()),
+        "`x in y` calls `y.contains(x)` -- the receiver is the RIGHT operand, not the left"
+    );
+}
+
+#[test]
+fn extracts_a_not_in_expression_as_a_contains_invocation_too() {
+    let index = extract_source(
+        "class Bag {\n    operator fun contains(s: String) = s.isNotEmpty()\n    fun hasNot(b: Bag, s: String) = s !in b\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "contains" && i.receiver == ReceiverExpr::Identifier("b".to_string()))
+        .expect("`s !in b` must ALSO be extracted as a `contains` invocation (same convention as `in`)");
+}
+
+/// The over-binding fallback requirement: a non-indexed `+=` with no
+/// `plusAssign` in scope must ALSO surface a `plus` candidate, since the
+/// extractor cannot determine which desugaring Kotlin actually chose
+/// without receiver-type/mutability evidence it does not track.
+#[test]
+fn a_non_indexed_compound_assignment_emits_both_the_assign_and_plain_convention_names() {
+    let index = extract_source(
+        "class Counter(val n: Int) {\n    operator fun plusAssign(k: Int) {}\n    operator fun plus(k: Int) = Counter(n)\n    fun bump(c: Counter) { var x = c; x += 1 }\n}\n",
+    );
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "plusAssign" && i.receiver == ReceiverExpr::Identifier("x".to_string()))
+        .expect("`x += 1` must emit a `plusAssign` invocation on receiver `x`");
+    index
+        .invocations
+        .iter()
+        .find(|i| i.callee_name == "plus" && i.receiver == ReceiverExpr::Identifier("x".to_string()))
+        .expect("`x += 1` must ALSO emit a `plus` invocation on receiver `x` (over-binding, \
+                 since the extractor cannot know whether `plusAssign` really applies here)");
+}
+
+/// A plain (non-compound) assignment to a non-indexed target must never
+/// fabricate an operator-convention invocation.
+#[test]
+fn a_plain_non_indexed_assignment_never_produces_an_operator_convention_invocation() {
+    let index = extract_source("fun run() { var x = 1; x = 2 }\n");
+    assert!(
+        index
+            .invocations
+            .iter()
+            .all(|i| !["plusAssign", "plus", "minusAssign", "minus"].contains(&i.callee_name.as_str())),
+        "a plain `x = 2` assignment must never synthesize any operator-convention invocation"
+    );
+}

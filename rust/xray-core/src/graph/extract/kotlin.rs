@@ -36,18 +36,90 @@
 //! constructor-reference syntax (`::Foo`), which is ALSO syntactically
 //! identical to a bare top-level function reference (`::topLevelFn`).
 //!
-//! **Known, deliberate gap (Bug #1908 follow-up, reviewer finding B):**
-//! operator-convention calls (`a + b` desugaring to `a.plus(b)`, `m[k]`
-//! desugaring to `m.get(k)`, and every other `operator fun` convention --
-//! `binary_expression`, `index_expression`, unary/compound-assignment
-//! operators) are NOT extracted as invocations. Only `infix_expression`
-//! (a genuine `infix fun` called via `a fn b` syntax) is handled below.
-//! A `private operator fun plus(...)`/`get(...)` called only through its
-//! operator syntax therefore still under-binds today -- tracked as a
-//! separate, explicitly-acknowledged gap rather than silently absent.
-//! Under-binding here is the same unsafe direction the rest of this
-//! module goes out of its way to avoid; do not extend this list to
-//! new callers without also closing this one.
+//! **Operator-convention calls (Bug #1917, closes the #1908 follow-up gap
+//! below).** `binary_expression` (`a + b`, desugaring to `a.plus(b)`) and
+//! `index_expression` (`m[k]`, desugaring to `m.get(k)`/`m.set(k, v)`) ARE
+//! now extracted as invocation candidates, mapped through Kotlin's own
+//! finite operator-convention table (verified against the real
+//! tree-sitter-kotlin-ng 1.1.0 grammar dump -- see `extract_binary_
+//! expression`/`extract_index_expression`/`extract_assignment_to_index`
+//! below for the exact node shapes). A `private operator fun plus(...)`/
+//! `get(...)`/`set(...)` called only through its operator syntax now binds
+//! a real inbound edge instead of under-binding to zero callers.
+//!
+//! Within `binary_expression`, only the operators Kotlin actually allows a
+//! user to overload are mapped: `+`/`-`/`*`/`/`/`%` -> `plus`/`minus`/
+//! `times`/`div`/`rem`; `<`/`<=`/`>`/`>=` -> `compareTo`; `==`/`!=` ->
+//! `equals`. The grammar's `binary_expression` also carries `&&`, `||`,
+//! `?:`, `===`, and `!==` in the same `operator` token set, but NONE of
+//! those five are user-overloadable Kotlin operators (they are fixed
+//! language semantics with no corresponding `operator fun` convention) --
+//! mapping them to a synthesized name would fabricate a callee that can
+//! never exist, so they are deliberately left unmapped (no candidate
+//! emitted; their operand subtrees are still walked normally for any real
+//! calls nested inside them).
+//!
+//! For `index_expression`, read (`m[k]`) versus write (`m[k] = v`) is
+//! resolved by structural assignment context, not guessed: `m[k] = v`
+//! parses as an `assignment` node whose LEFT child is the `index_
+//! expression` itself (verified via the real grammar dump) -- when a plain
+//! `=` assignment's target is an `index_expression`, that occurrence is
+//! recorded as a `set` call (receiver + index arguments + the assigned
+//! value as the final argument) and is EXCLUDED from also producing a
+//! spurious `get` at the same source position (`claimed_write_targets` in
+//! `extract`, keyed by the node's own `start_byte`, which is unique within
+//! one parsed file). Every other occurrence of `index_expression` --
+//! including as the plain right-hand VALUE of an assignment, or as the
+//! target of a COMPOUND assignment (`m[k] += v`, an `assignment` node with
+//! a `+=`/`-=`/`*=`/`/=`/`%=` operator) -- is recorded as `get`: compound
+//! index-assignment operator conventions (`plusAssign` and friends applied
+//! through an indexed target) are a distinct, more complex desugaring this
+//! extractor does not attempt to disambiguate, so it falls back to the
+//! always-true fact that reading via `get` is at minimum part of what such
+//! an expression evaluates -- over-binding, never under-binding, per the
+//! module's governing mandate below.
+//!
+//! **Second round (Bug #1917 follow-up): unary, range, containment, and
+//! non-indexed compound assignment.** `unary_expression` (`!f`, `-x`, `+x`,
+//! `x++`, `--x` -- the SAME grammar node for both prefix and postfix,
+//! discriminated only by whether the operator token is the first or
+//! second child) maps `!`/`+`/`-`/`++`/`--` to `not`/`unaryPlus`/
+//! `unaryMinus`/`inc`/`dec`; `!!` (not-null assertion) is left unmapped --
+//! it is fixed language semantics with no `operator fun` convention, the
+//! same reasoning as `&&`/`||`/`?:`/`===`/`!==` above. `range_expression`
+//! (`a..b`, and `a..<b` -- verified as the SAME node with a `..`-vs-`..<`
+//! operator token, both real Kotlin conventions) maps to `rangeTo`/
+//! `rangeUntil`. `in_expression` (`x in y`, `x !in y`) maps BOTH keyword
+//! forms to `contains` (Kotlin desugars `!in` to a negated `.contains(...)`
+//! call, the same convention `in` uses).
+//!
+//! Non-indexed compound assignment (`x += y` etc., an `assignment` node
+//! whose LEFT side is NOT an `index_expression`) is genuinely ambiguous in
+//! a way the other conventions above are not: Kotlin resolves `+=` to
+//! `plusAssign` when that member exists, but falls back to the plain
+//! `x = x.plus(y)` desugaring when it does not (legal only when `x` is a
+//! mutable `var`) -- and telling these apart requires knowing whether a
+//! `plusAssign` overload exists on `x`'s real type, which is receiver-type
+//! evidence (level 6) this extractor does not track. Per the over-binding
+//! mandate, BOTH candidates are emitted for every non-indexed compound
+//! assignment (`plusAssign`+`plus`, `minusAssign`+`minus`,
+//! `timesAssign`+`times`, `divAssign`+`div`, `remAssign`+`rem`) rather than
+//! guessing one -- guessing wrong would under-bind the real target exactly
+//! as badly as not extracting it at all.
+//!
+//! **Still NOT extracted (explicit, deliberate gap, not silently absent):**
+//! a COMPOUND assignment onto an INDEXED target (`m[k] += v`) is not
+//! disambiguated into its own desugaring (see the `index_expression`
+//! paragraph above -- it still falls back to a plain `get`), and the
+//! `invoke` convention (`f(x)` where `f` is a value of a type with an
+//! `operator fun invoke`) is indistinguishable from an ordinary
+//! bare-identifier `call_expression` without receiver-type information
+//! this extractor does not track (level 6, out of scope) -- inventing a
+//! decision here would fabricate an edge from syntax that is genuinely
+//! silent about which case it is, the same reasoning that keeps `&&`/`||`/
+//! `?:`/`===`/`!==`/`!!` unmapped. A `private operator fun` reached ONLY
+//! through one of these two remaining forms still under-binds today. Do
+//! not extend the covered list above without also closing one of these.
 
 use super::local_index::{
     ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
@@ -57,7 +129,7 @@ use super::local_index::{
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
 use crate::owned_node::OwnedNode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct KotlinExtractor;
 
@@ -91,13 +163,31 @@ impl LanguageExtractor for KotlinExtractor {
         extract_package(root, file_id, &mut next_local, &mut index);
         let aliases = extract_imports(root, &mut index);
 
+        // Bug #1917: `start_byte` values of every `index_expression` node
+        // already claimed as an indexed-assignment WRITE target (`m[k] =
+        // v`) by its enclosing `assignment` node -- see `extract_
+        // assignment_to_index`. Checked when the walk later reaches that
+        // SAME node via the generic stack traversal below, so it is
+        // recorded once as `set` and never a second time as a spurious
+        // `get`. `start_byte` is unique per node within one parsed file
+        // (no two distinct nodes share a byte span), and this set is fresh
+        // per `extract()` call, so there is no cross-file leakage.
+        let mut claimed_write_targets: HashSet<usize> = HashSet::new();
+
         let mut stack: Vec<(&OwnedNode, WalkContext)> = vec![(root, WalkContext::root())];
         // Bounded: each iteration pops one node from `stack` and pushes its
         // (finite) children; total pushes across the walk equal the tree's
         // finite node count -- mirrors `JavaExtractor::extract`'s identical
         // bound.
         while let Some((node, ctx)) = stack.pop() {
-            let child_context = dispatch_node(node, file_id, &mut next_local, ctx, &mut index);
+            let child_context = dispatch_node(
+                node,
+                file_id,
+                &mut next_local,
+                ctx,
+                &mut claimed_write_targets,
+                &mut index,
+            );
             for child in &node.children {
                 stack.push((child, child_context.clone()));
             }
@@ -122,6 +212,7 @@ fn dispatch_node(
     file_id: u32,
     next_local: &mut u32,
     ctx: WalkContext,
+    claimed_write_targets: &mut HashSet<usize>,
     index: &mut LocalIndex,
 ) -> WalkContext {
     match node.kind.as_str() {
@@ -165,6 +256,60 @@ fn dispatch_node(
         // what is still NOT covered (operator-convention calls).
         "infix_expression" => {
             extract_infix_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            ctx
+        }
+        // Bug #1917: an operator-convention binary call (`a + b`, `a ==
+        // b`, ...). See the module doc for exactly which `binary_
+        // expression` operators map to a convention name and which five
+        // (`&&`, `||`, `?:`, `===`, `!==`) are deliberately left unmapped
+        // (not user-overloadable in Kotlin).
+        "binary_expression" => {
+            extract_binary_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            ctx
+        }
+        // Bug #1917: `m[k]` read via the `[]` index convention -- UNLESS
+        // this exact node was already claimed as an indexed-assignment
+        // WRITE target by its enclosing `assignment` (see `extract_
+        // assignment_to_index`, which inserts into `claimed_write_
+        // targets` on the way down the stack BEFORE this node is popped).
+        "index_expression" => {
+            if !claimed_write_targets.contains(&node.start_byte) {
+                extract_index_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            }
+            ctx
+        }
+        // Bug #1917: `m[k] = v` (plain `=` on an indexed target, desugars
+        // to `m.set(k, v)`) and `x += y`/etc. (compound assignment on a
+        // NON-indexed target, desugars to BOTH `plusAssign`-family AND the
+        // plain `plus`-family form -- see the module doc for why both are
+        // emitted). A compound operator on an INDEXED target (`m[k] += v`)
+        // is a no-op here and falls through to the plain `index_expression`
+        // arm above as a `get`, the documented remaining gap.
+        "assignment" => {
+            extract_assignment(
+                node,
+                ctx.enclosing_type.as_deref(),
+                ctx.enclosing_method,
+                claimed_write_targets,
+                index,
+            );
+            ctx
+        }
+        // Bug #1917: a unary/postfix operator-convention call (`!f`, `-x`,
+        // `+x`, `x++`, `--x`). See the module doc for the full mapping and
+        // why `!!` (not-null assertion) is deliberately left unmapped.
+        "unary_expression" => {
+            extract_unary_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            ctx
+        }
+        // Bug #1917: `a..b` / `a..<b` -- the range-convention call.
+        "range_expression" => {
+            extract_range_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            ctx
+        }
+        // Bug #1917: `x in y` / `x !in y` -- both map to `contains`.
+        "in_expression" => {
+            extract_in_expression(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
             ctx
         }
         // A qualified callable reference (`Foo::method`, `f::method`) uses
@@ -1017,6 +1162,342 @@ fn extract_infix_expression(
     let arg_shape = classify_expr_shape(right);
     push_invocation_and_maybe_construction(
         name_node.text().to_string(),
+        node.start_line,
+        Some(1),
+        vec![arg_shape],
+        receiver,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// Kotlin's user-overloadable `binary_expression` operators mapped to
+/// their `operator fun` convention name -- `None` for any operator this
+/// grammar's `binary_expression` also carries (`&&`, `||`, `?:`, `===`,
+/// `!==`) that Kotlin does NOT allow a user to overload (see the module
+/// doc). `==`/`!=` both map to `equals`: Kotlin desugars structural
+/// (in)equality to a null-safe `.equals(...)` call for BOTH operators
+/// (`!=` is `!(a.equals(b))`), so both share the one real convention
+/// function a user can actually override.
+fn operator_convention_name(operator: &str) -> Option<&'static str> {
+    match operator {
+        "+" => Some("plus"),
+        "-" => Some("minus"),
+        "*" => Some("times"),
+        "/" => Some("div"),
+        "%" => Some("rem"),
+        "<" | "<=" | ">" | ">=" => Some("compareTo"),
+        "==" | "!=" => Some("equals"),
+        _ => None,
+    }
+}
+
+/// `a + b` / `a == b` / ... -- an operator-convention BINARY call. Grammar
+/// shape verified against a real tree-sitter-kotlin-ng 1.1.0 parse dump:
+/// `binary_expression` has exactly three direct children in source order
+/// -- the left operand, the operator token (an UNNAMED leaf whose `kind`
+/// is the literal operator text, e.g. `"+"` -- unlike `infix_expression`'s
+/// middle child, which is a NAMED `identifier`), and the right operand.
+/// Always exactly one argument (the right operand), mirroring `extract_
+/// infix_expression`'s identical arity contract. A no-op (no invocation
+/// emitted) when the operator has no convention mapping -- see `operator_
+/// convention_name` -- but the walk still reaches `left`/`right`'s own
+/// children normally via the generic stack traversal, so any real call
+/// nested inside either operand (e.g. `f() + g()`) is never missed.
+fn extract_binary_expression(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let children = &node.children;
+    let Some((left, operator_node, right)) = (match children.as_slice() {
+        [left, operator_node, right] if !operator_node.is_named => Some((left, operator_node, right)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some(convention_name) = operator_convention_name(operator_node.text()) else {
+        return;
+    };
+    let receiver = build_receiver_expr(Some(left));
+    let arg_shape = classify_expr_shape(right);
+    push_invocation_and_maybe_construction(
+        convention_name.to_string(),
+        node.start_line,
+        Some(1),
+        vec![arg_shape],
+        receiver,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// `m[k]` -- an operator-convention index READ (`m.get(k)`). Grammar shape
+/// verified against a real tree-sitter-kotlin-ng 1.1.0 parse dump:
+/// `index_expression`'s named children are the receiver expression
+/// followed by one or more index-argument expressions (the `[`, `]`, and
+/// any `,` separators are unnamed punctuation, never named children) --
+/// `m[a, b]` (a multi-parameter `get` overload) is supported uniformly by
+/// treating every named child after the first as an index argument.
+fn extract_index_expression(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let named = node.named_children();
+    let Some((receiver, index_args)) = named.split_first() else {
+        return;
+    };
+    let receiver_expr = build_receiver_expr(Some(*receiver));
+    let arg_shapes: Vec<ArgShape> = index_args.iter().map(|arg| classify_expr_shape(arg)).collect();
+    let arg_count = arg_shapes.len();
+    push_invocation_and_maybe_construction(
+        "get".to_string(),
+        node.start_line,
+        Some(arg_count),
+        arg_shapes,
+        receiver_expr,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// Non-indexed compound-assignment operators mapped to their `(*Assign,
+/// plain)` convention name PAIR -- see the module doc's second-round
+/// paragraph for why BOTH are emitted rather than choosing one: the real
+/// desugaring depends on whether a `*Assign` overload exists on the
+/// target's real type, receiver-type evidence (level 6) this extractor
+/// does not track.
+fn compound_assign_convention_names(operator: &str) -> Option<(&'static str, &'static str)> {
+    match operator {
+        "+=" => Some(("plusAssign", "plus")),
+        "-=" => Some(("minusAssign", "minus")),
+        "*=" => Some(("timesAssign", "times")),
+        "/=" => Some(("divAssign", "div")),
+        "%=" => Some(("remAssign", "rem")),
+        _ => None,
+    }
+}
+
+/// `m[k] = v` (indexed WRITE, desugars to `m.set(k, v)`) and `x += y`/etc.
+/// (non-indexed COMPOUND assignment, desugars to `x.plusAssign(y)` OR
+/// `x = x.plus(y)` -- both candidates emitted, see `compound_assign_
+/// convention_names`). A no-op for a plain `=` on a non-indexed target
+/// (no operator-convention evidence at all) and for a COMPOUND operator on
+/// an INDEXED target (`m[k] += v` -- see the module doc for why that
+/// combination is left as a documented remaining gap). Grammar shape
+/// verified against a real tree-sitter-kotlin-ng 1.1.0 parse dump:
+/// `assignment` has exactly three direct children in source order -- the
+/// left (target) expression, the operator token (an UNNAMED leaf, the same
+/// positional shape `extract_binary_expression` destructures), and the
+/// right (value) expression.
+///
+/// On an indexed-write match, marks the target `index_expression` node's
+/// own `start_byte` in `claimed_write_targets` so the generic `"index_
+/// expression"` dispatch arm -- which will still reach this SAME node
+/// moments later via the ordinary stack walk, since `assignment`'s
+/// children are pushed unconditionally like any other node's -- skips
+/// emitting a second, spurious `get` for it.
+fn extract_assignment(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    claimed_write_targets: &mut HashSet<usize>,
+    index: &mut LocalIndex,
+) {
+    let children = &node.children;
+    let Some((target, operator_node, value)) = (match children.as_slice() {
+        [target, operator_node, value] if !operator_node.is_named => Some((target, operator_node, value)),
+        _ => None,
+    }) else {
+        return;
+    };
+    if target.kind == "index_expression" && operator_node.kind == "=" {
+        let named = target.named_children();
+        let Some((receiver, index_args)) = named.split_first() else {
+            return;
+        };
+        claimed_write_targets.insert(target.start_byte);
+        let receiver_expr = build_receiver_expr(Some(*receiver));
+        let mut arg_shapes: Vec<ArgShape> = index_args.iter().map(|arg| classify_expr_shape(arg)).collect();
+        arg_shapes.push(classify_expr_shape(value));
+        let arg_count = arg_shapes.len();
+        push_invocation_and_maybe_construction(
+            "set".to_string(),
+            node.start_line,
+            Some(arg_count),
+            arg_shapes,
+            receiver_expr,
+            enclosing_type,
+            enclosing_method,
+            index,
+        );
+        return;
+    }
+    // A compound operator on an indexed target (`m[k] += v`) is the
+    // documented remaining gap: fall through without emitting anything
+    // here (the plain `index_expression` arm still fires normally as a
+    // `get`, since this node was never claimed above).
+    if target.kind == "index_expression" {
+        return;
+    }
+    let Some((assign_name, plain_name)) = compound_assign_convention_names(operator_node.kind.as_str())
+    else {
+        return;
+    };
+    let receiver_expr = build_receiver_expr(Some(target));
+    let arg_shape = classify_expr_shape(value);
+    push_invocation_and_maybe_construction(
+        assign_name.to_string(),
+        node.start_line,
+        Some(1),
+        vec![arg_shape.clone()],
+        receiver_expr.clone(),
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+    push_invocation_and_maybe_construction(
+        plain_name.to_string(),
+        node.start_line,
+        Some(1),
+        vec![arg_shape],
+        receiver_expr,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// Kotlin's unary/postfix operator-convention tokens mapped to their
+/// `operator fun` convention name. `!!` (not-null assertion) is fixed
+/// language semantics with no convention function and is deliberately left
+/// unmapped, the same reasoning `operator_convention_name` applies to
+/// `&&`/`||`/`?:`/`===`/`!==`.
+fn unary_convention_name(operator: &str) -> Option<&'static str> {
+    match operator {
+        "!" => Some("not"),
+        "+" => Some("unaryPlus"),
+        "-" => Some("unaryMinus"),
+        "++" => Some("inc"),
+        "--" => Some("dec"),
+        _ => None,
+    }
+}
+
+/// `!f` / `-x` / `+x` / `x++` / `--x` -- a unary or postfix
+/// operator-convention call. Grammar shape verified against a real
+/// tree-sitter-kotlin-ng 1.1.0 parse dump: `unary_expression` has exactly
+/// two direct children, one the operand and the other an UNNAMED operator
+/// token -- PREFIX forms (`!f`, `-x`, `--c`) place the operator FIRST,
+/// POSTFIX forms (`c++`) place it LAST. Kotlin's `inc`/`dec` conventions
+/// apply identically whether written prefix or postfix, so the two shapes
+/// are handled uniformly here by simply locating whichever child is the
+/// (unnamed) operator versus the (named) operand, without needing to know
+/// which position it came from.
+fn extract_unary_expression(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let children = &node.children;
+    let Some((operand, operator_node)) = (match children.as_slice() {
+        [a, b] if !a.is_named && b.is_named => Some((b, a)),
+        [a, b] if a.is_named && !b.is_named => Some((a, b)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some(convention_name) = unary_convention_name(operator_node.text()) else {
+        return;
+    };
+    let receiver = build_receiver_expr(Some(operand));
+    push_invocation_and_maybe_construction(
+        convention_name.to_string(),
+        node.start_line,
+        Some(0),
+        Vec::new(),
+        receiver,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// `a..b` -> `rangeTo`, `a..<b` -> `rangeUntil` -- the range-convention
+/// call. Grammar shape verified against a real tree-sitter-kotlin-ng 1.1.0
+/// parse dump: `range_expression` has exactly three direct children in
+/// source order -- left operand, the operator token (an UNNAMED leaf,
+/// either `..` or `..<`), and right operand -- the same positional shape
+/// `extract_binary_expression` destructures.
+fn extract_range_expression(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let children = &node.children;
+    let Some((left, operator_node, right)) = (match children.as_slice() {
+        [left, operator_node, right] if !operator_node.is_named => Some((left, operator_node, right)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let convention_name = match operator_node.kind.as_str() {
+        ".." => "rangeTo",
+        "..<" => "rangeUntil",
+        _ => return,
+    };
+    let receiver = build_receiver_expr(Some(left));
+    let arg_shape = classify_expr_shape(right);
+    push_invocation_and_maybe_construction(
+        convention_name.to_string(),
+        node.start_line,
+        Some(1),
+        vec![arg_shape],
+        receiver,
+        enclosing_type,
+        enclosing_method,
+        index,
+    );
+}
+
+/// `x in y` / `x !in y` -- both keywords desugar to the SAME `contains`
+/// convention (`!in` is a negated `.contains(...)` call, not a distinct
+/// convention function). Grammar shape verified against a real
+/// tree-sitter-kotlin-ng 1.1.0 parse dump: `in_expression` has exactly
+/// three direct children in source order -- left operand, the keyword
+/// token (an UNNAMED leaf, either `in` or `!in`), and right operand. The
+/// CONTAINER is the right operand (`y` in `x in y` calls `y.contains(x)`),
+/// unlike every other operator-convention call above where the receiver is
+/// the LEFT operand -- this is Kotlin's own convention, not a choice made
+/// here.
+fn extract_in_expression(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let children = &node.children;
+    let Some((left, operator_node, right)) = (match children.as_slice() {
+        [left, operator_node, right] if !operator_node.is_named => Some((left, operator_node, right)),
+        _ => None,
+    }) else {
+        return;
+    };
+    if operator_node.kind != "in" && operator_node.kind != "!in" {
+        return;
+    }
+    let receiver = build_receiver_expr(Some(right));
+    let arg_shape = classify_expr_shape(left);
+    push_invocation_and_maybe_construction(
+        "contains".to_string(),
         node.start_line,
         Some(1),
         vec![arg_shape],

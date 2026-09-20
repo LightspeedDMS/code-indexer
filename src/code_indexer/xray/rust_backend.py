@@ -194,6 +194,12 @@ _RUSTC_STDERR_LOG_LIMIT = 200
 # Maximum stderr bytes to include in an xray-cli non-zero-exit error message.
 _XRAY_CLI_STDERR_ERROR_LIMIT = 200
 
+# Timeout for the `xray-cli --print-graph-extractor-extensions` subprocess
+# call (Bug #1907) -- no compilation and no repo walk happens on this path,
+# just serializing a fixed, tiny static list, so this stays generous
+# without risking a hung candidate-collection walk.
+_GRAPH_EXTRACTOR_EXTENSIONS_TIMEOUT_SECS = 10
+
 # Environment variable that overrides the CIDX data directory root.
 # When set, the xray cache lives at $CIDX_DATA_DIR/xray-cache instead of
 # ~/.cidx-server/xray-cache, matching the server's IPC path alignment (Bug #879).
@@ -301,6 +307,81 @@ def _find_project_root() -> Path:
 
 _PROJECT_ROOT = _find_project_root()
 _XRAY_CLI_DEFAULT = _PROJECT_ROOT / "rust" / "target" / "release" / "xray-cli"
+
+
+def get_graph_extractor_extensions(
+    xray_cli_path: Optional[Path] = None,
+    timeout_seconds: float = _GRAPH_EXTRACTOR_EXTENSIONS_TIMEOUT_SECS,
+) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Bug #1907: asks `xray-cli --print-graph-extractor-extensions` for the
+    REAL extension-to-language map of every language with a graph
+    extractor (Java, Kotlin today) -- the single source of truth
+    `graph::extract::graph_extractor_extensions` owns on the Rust side.
+
+    Candidate collection (`xray_graph.py::_collect_graph_candidate_files`)
+    applies `include_patterns`/`exclude_patterns` BEFORE any file ever
+    reaches Rust, so an excluded file leaves no trace in any Rust-side
+    counter. Scoping to one extractable language on a mixed-language repo
+    used to make the response report `fact_graph_complete: true` with
+    every degradation counter at zero, while the graph was missing every
+    call site in the excluded language -- narrowing the scope hid the
+    incompleteness instead of improving it. This function is what lets
+    Python tell, for a file it is about to exclude, whether that file's
+    language would have contributed real call edges had it been read.
+
+    Deliberately NOT a hardcoded Python-side extension list (the bug
+    report's rejected option 1): that would silently under-report the
+    moment a new language's extractor lands in Rust without a matching
+    Python update -- the exact failure mode this function exists to
+    prevent. Deliberately NOT cached across calls either (KISS/YAGNI): this
+    subprocess does no compilation and no repo walk, so its cost is
+    negligible next to the compile/build-graph/analyze-graph subprocesses
+    `run_graph_analysis` already spawns for the SAME request, and a cache
+    would need its own invalidation story for an auto-updater binary swap
+    mid-fleet that this simpler call sidesteps entirely.
+
+    Never raises: any subprocess/parse failure returns `(None, message)`
+    so the caller can fail the request loudly (Rule 2, anti-fallback) --
+    silently treating "lookup failed" as "no extractor here" would
+    reproduce exactly the false-completeness bug this function exists to
+    prevent.
+
+    Returns `(extension_to_language, None)` on success (extensions are
+    bare, lowercase, no leading dot -- e.g. `{"java": "Java", "kt":
+    "Kotlin", "kts": "Kotlin"}`), or `(None, error_message)` on failure.
+    """
+    path = xray_cli_path if xray_cli_path is not None else _XRAY_CLI_DEFAULT
+    if not path.exists():
+        return None, f"xray-cli binary not found at {path}."
+    try:
+        result = subprocess.run(
+            [str(path), "--print-graph-extractor-extensions"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never raise, always report
+        return None, f"failed to invoke --print-graph-extractor-extensions: {exc}"
+    if result.returncode != 0:
+        return None, (
+            "--print-graph-extractor-extensions exited "
+            f"{result.returncode}; "
+            f"stderr={result.stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]!r}"
+        )
+    try:
+        payload = json.loads(result.stdout)
+        entries = payload["extensions"]
+        mapping = {
+            str(entry["extension"]).lower(): str(entry["language"]) for entry in entries
+        }
+    except Exception as exc:  # noqa: BLE001 -- malformed CLI output
+        return None, f"malformed --print-graph-extractor-extensions output: {exc}"
+    if not mapping:
+        return (
+            None,
+            "--print-graph-extractor-extensions returned an empty extension list",
+        )
+    return mapping, None
 
 
 def _get_xray_tmp_dir() -> Path:
