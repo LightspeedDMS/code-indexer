@@ -336,7 +336,7 @@ async def test_per_alias_exception_server_path_is_never_leaked_to_caller() -> No
     that, not bypass it.
     """
     handler = _import_handler()
-    leaking_path = "/home/jsbattig/Dev/code-indexer-master/secret-internal-repo"
+    leaking_path = "/home/serviceaccount/srv/example-internal-repo"
 
     async def _pipeline_side_effect(
         evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
