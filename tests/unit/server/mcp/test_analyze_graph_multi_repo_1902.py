@@ -393,45 +393,16 @@ async def test_timeout_seconds_passed_full_not_divided_per_alias() -> None:
     assert parsed["ok"] is True
 
 
-@pytest.mark.asyncio
-async def test_total_timeout_budget_exceeding_ceiling_rejected_up_front() -> None:
-    """Issue #1902 P9 review, P2: when the theoretical total (alias_count *
-    timeout_seconds) exceeds the stated wall-clock ceiling, the WHOLE
-    request must be refused loudly and up front -- before any alias is
-    resolved or any pipeline call is made -- rather than silently
-    reshaping the budget or leaving the caller to discover a
-    multi-minute-or-longer hang."""
-    multi_search_limits_config = (
-        get_config_service().get_config().multi_search_limits_config
-    )
-    assert multi_search_limits_config is not None
-    cap = multi_search_limits_config.omni_max_repos_per_search
-    alias_count = 6
-    if alias_count > cap:
-        pytest.skip(f"omni_max_repos_per_search={cap} too small for this test")
-    handler = _import_handler()
-    aliases = [f"repo-{i}" for i in range(alias_count)]
-    params = {
-        "repository_alias": aliases,
-        "evaluator_code": _evaluator_for("ceiling_probe"),
-        "timeout_seconds": 120,  # 6 * 120 = 720s > 600s ceiling
-    }
-    with (
-        patch(
-            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
-        ) as mock_resolve,
-        patch(
-            "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline"
-        ) as mock_pipeline,
-    ):
-        result = await handler(params, _make_user())
-    mock_resolve.assert_not_called()
-    mock_pipeline.assert_not_called()
-    parsed = _parse_response(result)
-    assert parsed["error"] == "multi_repo_timeout_budget_exceeded"
-    assert parsed["computed_total_seconds"] == 720
-    assert "repositories" not in parsed  # never wrapped in the multi_repo shape
-    assert "mode" not in parsed
+# Bug #1913 removed `_check_multi_repo_timeout_budget` (the up-front
+# `alias_count * timeout_seconds > 600` admission predicate this module
+# used to test here as `test_total_timeout_budget_exceeding_ceiling_
+# rejected_up_front`) in favor of an ELAPSED-WALL-CLOCK deadline enforced
+# per-alias inside `_run_multi_repo_analyze_graph`. See
+# tests/unit/server/mcp/test_analyze_graph_deadline_1913.py for the
+# replacement coverage -- including
+# `test_request_old_rule_would_refuse_now_runs_instead`, which asserts the
+# OPPOSITE of what this deleted test asserted: the same 6-alias/120s
+# request that used to be refused up front now actually RUNS.
 
 
 @pytest.mark.asyncio
