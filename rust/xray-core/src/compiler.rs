@@ -104,7 +104,26 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// enumeration and SymbolId-to-dense-id lookup, making the advertised
 /// dead-code and reachability evaluators expressible without a guessed bound.
 /// An ABI-9 graph artifact must never be loaded as if it matched ABI 10.
-pub const XRAY_ABI_VERSION: u64 = 10;
+///
+/// Bug #1900 bumps this AGAIN, 10 -> 11: `GraphHandle` gains four new
+/// accessor fn-pointer fields -- `location_for_raw_fn`, `declaration_kind_fn`,
+/// `visibility_of_fn`, `edge_reason_fn` -- exposing per-symbol declaration
+/// location/kind/visibility and a candidate-count-based edge tier, closing
+/// the gap where every graph-mode finding shipped as an unchaseable bare
+/// `name(N params)` string with no per-hop confidence at all. An ABI-10
+/// graph artifact must never be loaded as if it matched ABI 11.
+///
+/// Bug #1900 review round 2 bumps this AGAIN, 11 -> 12: `GraphHandle` gains
+/// a fifth new accessor fn-pointer field, `edge_evidence_fn`, exposing the
+/// REAL `graph::reasons::*` evidence bits behind an edge -- the review
+/// proved the ABI-11 `edge_reason` tier alone lets a fabricated edge (a
+/// single surviving candidate backed by nothing stronger than
+/// `SAME_PACKAGE`/`ARITY_MATCH`) report the SAME top tier as a genuinely
+/// verified one, since that tier is a candidate COUNT, never a truth claim.
+/// `edge_evidence` is what lets an evaluator require real evidence (e.g.
+/// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`) before trusting a hop. An
+/// ABI-11 graph artifact must never be loaded as if it matched ABI 12.
+pub const XRAY_ABI_VERSION: u64 = 12;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -358,6 +377,11 @@ pub struct GraphHandle<'graph> {
     signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
     symbol_count_fn: fn(*const ()) -> usize,
     dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
+    location_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize, usize)>,
+    declaration_kind_fn: fn(*const (), u32) -> Option<DeclarationKind>,
+    visibility_of_fn: fn(*const (), u32) -> Visibility,
+    edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
+    edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -425,6 +449,50 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
         let (ptr, len) = (self.signature_for_raw_fn)(self.ctx, dense_id)?;
         Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
     }
+
+    pub fn location_for(&self, dense_id: u32) -> Option<(&str, usize)> {
+        let (ptr, len, line) = (self.location_for_raw_fn)(self.ctx, dense_id)?;
+        Some((unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }, line))
+    }
+
+    pub fn declaration_kind(&self, dense_id: u32) -> Option<DeclarationKind> {
+        (self.declaration_kind_fn)(self.ctx, dense_id)
+    }
+
+    pub fn visibility_of(&self, dense_id: u32) -> Visibility {
+        (self.visibility_of_fn)(self.ctx, dense_id)
+    }
+
+    pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+        (self.edge_reason_fn)(self.ctx, from, to)
+    }
+
+    pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+        (self.edge_evidence_fn)(self.ctx, from, to)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    Type,
+    Method,
+    Field,
+    Constant,
+    Package,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeReason {
+    SoleCandidate,
+    MultipleCandidates,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +556,35 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_5: &str = r#"
 pub struct FileContext {
     pub file: String,
 }
+"#;
+
+/// Bug #1900 (epic #1906 P2, review round 2): mirrors the REAL
+/// `graph::reasons::*` bit constants (`reasons.rs`) so evaluator code that
+/// calls `GraphHandle::edge_evidence` has something to test the returned
+/// `u16` against by NAME -- "a `u16` nobody can interpret is not
+/// observability". Structurally parity-checked against the real constants
+/// by `preamble_ac18_parity.rs` (name AND value, not just name), exactly
+/// like `DeclarationKind`/`Visibility`/`EdgeReason` are checked above.
+/// Deliberately plain `pub const` items (Messi Rule 17, anti-magic,
+/// matching `reasons.rs`'s own rationale) rather than a bitflags type, and
+/// declared at crate-root scope like everything else in this preamble so
+/// evaluator code can reference them unqualified (e.g. `evidence &
+/// RECEIVER_TYPE_MATCH != 0`).
+pub(crate) const GRAPH_PREAMBLE_EXTRA_6: &str = r#"
+pub const SAME_FILE: u16 = 1 << 0;
+pub const SAME_PACKAGE: u16 = 1 << 1;
+pub const IMPORTED: u16 = 1 << 2;
+pub const STATIC_IMPORT: u16 = 1 << 3;
+pub const WILDCARD_IMPORT: u16 = 1 << 4;
+pub const ARITY_MATCH: u16 = 1 << 5;
+pub const UNIQUE_NAME_IN_REPO: u16 = 1 << 6;
+pub const QUALIFIED_NAME: u16 = 1 << 7;
+pub const STRING_HEURISTIC: u16 = 1 << 8;
+pub const INHERITANCE_FAMILY: u16 = 1 << 9;
+pub const OVERLOAD_ARG_TYPE_MATCH: u16 = 1 << 10;
+pub const FAMILY_TRUNCATED: u16 = 1 << 11;
+pub const RECEIVER_TYPE_MATCH: u16 = 1 << 12;
+pub const SAME_CLASS_OR_SUPER: u16 = 1 << 13;
 "#;
 
 /// Story #1787 AC8: dylib exports for a graph-mode evaluator --
@@ -618,23 +715,24 @@ fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> St
 
 /// Story #1787 AC8 / Story #1792 (S3, AC1): assembles a graph-mode
 /// evaluator's complete compilable source -- the COMMON `PREAMBLE`
-/// (OwnedNode/EvalFinding/debug_log, shared with legacy mode) plus all 5
+/// (OwnedNode/EvalFinding/debug_log, shared with legacy mode) plus all 6
 /// `GRAPH_PREAMBLE_EXTRA_*` slices (GraphHandle/FactsHandle/UserFact/
-/// GraphResult/ReduceFinding/FileContext), followed by user code, followed
-/// by `GRAPH_EPILOGUE` (xray_collect_facts + xray_analyze_graph, never
-/// xray_evaluate_node) plus `GRAPH_REFINE_EPILOGUE` (xray_refine) ONLY when
-/// `user_code` defines `fn refine` -- AC1's "all-or-none with the graph
-/// family" applies to whether the export exists at all, not to whether this
-/// function is invoked.
+/// GraphResult/ReduceFinding/FileContext/reasons-bit-constants), followed by
+/// user code, followed by `GRAPH_EPILOGUE` (xray_collect_facts +
+/// xray_analyze_graph, never xray_evaluate_node) plus `GRAPH_REFINE_EPILOGUE`
+/// (xray_refine) ONLY when `user_code` defines `fn refine` -- AC1's
+/// "all-or-none with the graph family" applies to whether the export exists
+/// at all, not to whether this function is invoked.
 fn assemble_graph_evaluator_source(user_code: &str) -> String {
     let preamble = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         PREAMBLE,
         GRAPH_PREAMBLE_EXTRA_1,
         GRAPH_PREAMBLE_EXTRA_2,
         GRAPH_PREAMBLE_EXTRA_3,
         GRAPH_PREAMBLE_EXTRA_4,
         GRAPH_PREAMBLE_EXTRA_5,
+        GRAPH_PREAMBLE_EXTRA_6,
     );
     let epilogue = if has_top_level_fn(user_code, "refine") {
         format!("{}\n{}", GRAPH_EPILOGUE, GRAPH_REFINE_EPILOGUE)
@@ -2145,7 +2243,11 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 
     #[test]
     fn test_graph_handle_accessor_addition_bumps_abi_version() {
-        assert_eq!(XRAY_ABI_VERSION, 10, "adding GraphHandle accessors requires the ABI-10 bump");
+        assert_eq!(
+            XRAY_ABI_VERSION, 12,
+            "Bug #1900 review round 2: adding edge_evidence (the real reason-bit accessor) to \
+             GraphHandle requires the ABI-12 bump"
+        );
     }
 
     #[test]

@@ -226,7 +226,12 @@ pub struct ReduceFinding {
 | `g.resolve_string(string_id)` | `(u32) -> Option<&str>` | Interned string lookup. |
 | `g.is_symbol_referenced(dense_id)` | `(u32) -> bool` | True if ANY inbound edge exists, regardless of graph completeness. |
 | `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = the symbol has an inbound reference edge. `Some(true)` = unreferenced, its declaration kind is `Method` or `Type`, and its visibility is provably `Private`. `None` = every other case: `Public`, `Protected`, or `Unknown` visibility, and every `Field`, `Constant`, `Package`, or unknown-kind symbol. Java extraction creates inbound edges for direct calls, method references, `new` expressions, explicit `this(...)`/`super(...)` constructor invocations, `Type::new`, and annotation usages (an edge to the annotation type's declaration); it preserves plausible overload and varargs targets. `super` calls bind only to a KNOWN, recorded superclass edge; the conservative "no evidence" fallback applies only when a class has NEITHER an `extends` NOR an `implements` clause (e.g. implicit `java.lang.Object`, never tracked) -- a class with no `extends` but a real `implements` clause still narrows against its recorded interfaces. With neither clause, `super.m()` falls into the same "no supertype evidence" case as a genuine extraction gap, so it can still self-loop when the enclosing type's own method is the sole matching candidate. Java-private candidates from a different known top-level type are excluded. **This predicate does NOT consult `fact_graph_complete`** -- it returns `Some(true)` on an incomplete graph exactly as it would on a complete one. Field and constant reads therefore cannot produce `Some(true)`: those declaration kinds are outside the predicate's allowlist, regardless of whether their reads are represented by graph edges. A `Some(true)` for an allowed private `Method` or `Type` can still be falsified by reflection, JNI, dependency injection, or other runtime behavior invisible to the graph. |
-| `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature line, for reporting. |
+| `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature line, for reporting. Name and arity only -- no declaring type, no parameter types, no annotations. |
+| `g.location_for(dense_id)` | `(u32) -> Option<(&str, usize)>` | The DECLARATION's own repo-relative file path and 1-based line -- not a call site's. `None` when the symbol has no recorded location. Use it so every finding you report can be chased to source. |
+| `g.declaration_kind(dense_id)` | `(u32) -> Option<DeclarationKind>` | What kind of declaration this symbol is. The same value `is_definitely_dead_code` consults internally, so filtering by kind cannot drift from the predicate. |
+| `g.visibility_of(dense_id)` | `(u32) -> Visibility` | Declared visibility, also as the dead-code predicate sees it. |
+| `g.edge_reason(from, to)` | `(u32, u32) -> Option<EdgeReason>` | How many candidates a contributing reference had -- a COUNT, not a verdict. `EdgeReason::SoleCandidate` -- at least one contributing reference matched exactly ONE declaration in this repo by name and arity. `EdgeReason::MultipleCandidates` -- every contributing reference matched several. `None` -- no such edge. **`SoleCandidate` does NOT mean the edge is real**: a call on an external or JDK receiver (`someMap.put(k, v)`) whose name and arity happen to match one repo declaration reports `SoleCandidate`, because the binder never saw the receiver's real type. Use `edge_evidence` to tell those apart. |
+| `g.edge_evidence(from, to)` | `(u32, u32) -> Option<u16>` | The reason bits the binder actually recorded, ORed across every contributing reference. **This is what to audit a hop with.** Test against the mirrored constants, e.g. `evidence & RECEIVER_TYPE_MATCH != 0` (the binder resolved the receiver's declared type) or `evidence & UNIQUE_NAME_IN_REPO != 0` (unique in-repo name, and NOT contradicted by receiver evidence). A hop carrying neither -- e.g. only `ARITY_MATCH \| OVERLOAD_ARG_TYPE_MATCH` -- matched on shape alone and may not exist. Available constants: `SAME_FILE`, `SAME_PACKAGE`, `ARITY_MATCH`, `OVERLOAD_ARG_TYPE_MATCH`, `RECEIVER_TYPE_MATCH`, `UNIQUE_NAME_IN_REPO`, `QUALIFIED_NAME`, `STATIC_IMPORT`, `SAME_CLASS_OR_SUPER`, and others -- all usable unqualified in evaluator code. |
 
 ### FactsHandle reference
 
@@ -287,7 +292,7 @@ A related case that deliberately does NOT get its own status: a repo with real J
 
 ## Directional asymmetry (dead-code vs reachability)
 
-Per the epic's design: **dead-code analysis must UNDER-report (safe)**. The engine enforces the declaration-kind and visibility floor for `is_definitely_dead_code`: only an unreferenced private `Method` or `Type` can produce `Some(true)`; every field, constant, package, unknown-kind, or non-private symbol produces `None` unless it has an inbound reference, which produces `Some(false)`. The predicate still does not consult `fact_graph_complete`, so your evaluator must check completeness before trusting any `Some(true)`; runtime behavior such as reflection, JNI, or dependency injection can remain invisible even for an allowed kind. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's confidence, since a caller relying on a reachability claim needs to audit exactly how strong that claim is rather than trusting a bare boolean.
+Per the epic's design: **dead-code analysis must UNDER-report (safe)**. The engine enforces the declaration-kind and visibility floor for `is_definitely_dead_code`: only an unreferenced private `Method` or `Type` can produce `Some(true)`; every field, constant, package, unknown-kind, or non-private symbol produces `None` unless it has an inbound reference, which produces `Some(false)`. The predicate still does not consult `fact_graph_complete`, so your evaluator must check completeness before trusting any `Some(true)`; runtime behavior such as reflection, JNI, or dependency injection can remain invisible even for an allowed kind. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's evidence, using `g.edge_evidence(from, to)` for the reason bits and `g.edge_reason(from, to)` for the candidate count, since a caller relying on a reachability claim needs to audit exactly how strong that claim is rather than trusting a bare boolean. The example below does exactly that; a finding that ships a bare path is not complete.
 
 ```rust
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
@@ -300,12 +305,39 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         for dense_id in &path {
             if let Some(sym) = g.resolve_symbol(*dense_id) {
                 involved.push(sym);
-                signatures.push(g.signature_for(*dense_id).unwrap_or("").to_string());
+                // location_for gives file:line so a reader can check the hop against source.
+                let where_ = match g.location_for(*dense_id) {
+                    Some((file, line)) => format!("{}:{}", file, line),
+                    None => "<no location>".to_string(),
+                };
+                signatures.push(format!("{} @ {}", g.signature_for(*dense_id).unwrap_or("?"), where_));
             }
         }
+
+        // Audit EVERY hop. A hop is only as trustworthy as its evidence, and the
+        // binder deliberately over-binds -- a bare path proves nothing on its own.
+        let mut verified_hops = 0usize;
+        let mut weakest = "verified";
+        for pair in path.windows(2) {
+            let evidence = g.edge_evidence(pair[0], pair[1]).unwrap_or(0);
+            let receiver_proven = evidence & RECEIVER_TYPE_MATCH != 0;
+            let sole = g.edge_reason(pair[0], pair[1]) == Some(EdgeReason::SoleCandidate);
+            if receiver_proven {
+                verified_hops += 1;                    // the binder resolved the receiver's type
+            } else if sole {
+                weakest = "sole-candidate-only";       // name+arity matched once; receiver NOT proven
+            } else {
+                weakest = "guessed";                   // one of several candidates
+                break;
+            }
+        }
+
         result.findings.push(ReduceFinding {
             pattern: "endpoint_reaches_sink".to_string(),
-            message: format!("path length {}", path.len()),
+            message: format!(
+                "path length {}, {}/{} hops receiver-verified, weakest link: {}",
+                path.len(), verified_hops, path.len().saturating_sub(1), weakest
+            ),
             involved,
             signatures,
         });
@@ -313,6 +345,8 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     result
 }
 ```
+
+**Read the weakest link before acting on the claim.** `weakest == "verified"` means the binder resolved every hop's receiver type. `"sole-candidate-only"` means some hop matched exactly one declaration by name and arity with NO receiver evidence -- a call on an external or JDK receiver can land here, so the hop may not exist at all. `"guessed"` means a hop was one of several candidates. Only the first is a claim worth acting on unreviewed; ship the other two with the path and let a human check the named `file:line`.
 
 ## Use cases
 

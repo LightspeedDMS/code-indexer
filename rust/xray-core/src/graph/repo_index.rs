@@ -152,6 +152,14 @@ struct IndexAccumulator {
     files_with_extractor_panics: usize,
     files_with_collector_panics: usize,
     files_with_unsupported_language: usize,
+    /// Bug #1900 (epic #1906 P5): `file_id -> repo-relative path`, captured
+    /// at the SAME site `file_id_val` is already computed in
+    /// `record_fused_result` -- `FileForBind` itself carries only the
+    /// one-way-hashed `file_id`, never the real path string, so this is
+    /// the one place in the whole binder pipeline that still has both.
+    /// Threaded into `finish_bind` so `location_for` can report a real
+    /// declaration's file path for a graph built through this front door.
+    file_paths: std::collections::HashMap<u32, String>,
 }
 
 /// Handles one `Some(fused_result)` outcome from `process_file_fused`:
@@ -174,6 +182,7 @@ fn record_fused_result(full_path: &Path, relative_path: &str, fused_result: Fuse
     }
     if let Some(index) = fused_result.index {
         let file_id_val = file_id(relative_path);
+        acc.file_paths.insert(file_id_val, relative_path.to_string());
         for fact in &fused_result.facts {
             // Story #1785 / ADR-001: a fact naming a `custom_key` is a
             // genuinely non-symbol value (config key, event topic,
@@ -269,7 +278,7 @@ pub fn build_repo_graph(
     // to_zero_count` is reachable here for `RepoIndexResult` below.
     let (prepared, stats) = prepare_bind(acc.files_for_bind, index_is_complete);
     let narrowed_to_zero_count = stats.narrowed_to_zero_count;
-    let mut graph = finish_bind(prepared, &options.budget);
+    let mut graph = finish_bind(prepared, &options.budget, &acc.file_paths);
     let budget_exceeded = graph.completeness() != AnalysisCompleteness::Complete;
 
     // Dual-review defect D1: propagate EVERY repo-level incompleteness
@@ -871,6 +880,49 @@ mod tests {
             result.facts.get(&would_be_enclosing).is_empty(),
             "a custom-keyed fact must NEVER also be attributed to its enclosing symbol -- \
              that would reintroduce the false identity ADR-001's closed sum type exists to prevent"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P5): the CENTRAL discriminating test for
+    /// `location_for` driven through the REAL production path
+    /// (`build_repo_graph`), not a hand-built `CodeGraphBuilder` fixture.
+    /// `A.java` (the caller) invokes `helper()`, which is DECLARED in
+    /// `B.java` on a DIFFERENT line than the call site. `location_for` on
+    /// `helper`'s dense id must report `B.java` and `helper`'s own
+    /// declaration line -- never `A.java`/the call-site line, which is the
+    /// exact trap `Reference.file`/`.line` (a one-way hashed call-site
+    /// coordinate) would otherwise set. `RED against unmodified code`: the
+    /// production binder does not yet thread real file paths into
+    /// `add_location`, so `location_for` returns `None` for every symbol.
+    #[test]
+    fn location_for_reports_the_declarations_own_file_and_line_not_the_call_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A {\n    void run() {\n        helper();\n    }\n}\n");
+        write_java(&dir, "B.java", "class B {\n    void helper() {}\n}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "B.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        // Local index 0 is `B`'s own TYPE declaration (extracted before its
+        // members, line 1); `helper()`'s METHOD declaration is local index
+        // 1 -- the real java extractor's declaration order, distinct from
+        // the hand-built LocalIndex fixtures elsewhere in this crate that
+        // assign a method local index 0 directly.
+        let helper_file_id = crate::graph::identity::file_id("B.java");
+        let helper_symbol = crate::graph::identity::make_symbol_id(helper_file_id, 1);
+        let helper_dense = result.graph.dense_id_for(helper_symbol).expect("helper() must be interned");
+
+        assert_eq!(
+            result.graph.location_for(helper_dense),
+            Some(("B.java", 2)),
+            "location_for must report helper()'s OWN declaration file+line (B.java:2), \
+             never the caller's file or the call-site line (A.java:3)"
         );
     }
 }

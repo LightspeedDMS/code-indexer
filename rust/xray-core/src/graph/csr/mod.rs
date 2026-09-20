@@ -20,7 +20,7 @@ pub mod wire;
 mod wire_cursor;
 
 pub use candidate::Candidate;
-pub use code_graph::CodeGraph;
+pub use code_graph::{CodeGraph, EdgeReason};
 pub use reference::Reference;
 pub use builder::CodeGraphBuilder;
 pub use handle::GraphHandle;
@@ -65,7 +65,8 @@ pub use handle::GraphHandle;
 /// (Rule 4, anti-duplication) and would be a larger, unrequested redesign
 /// than this ABI slice calls for (Rule 9, anti-divergent-creativity).
 pub mod handle {
-    use super::code_graph::CodeGraph;
+    use super::code_graph::{CodeGraph, EdgeReason};
+    use crate::graph::extract::local_index::{DeclarationKind, Visibility};
     use crate::graph::identity::SymbolId;
     use std::marker::PhantomData;
 
@@ -114,6 +115,23 @@ pub mod handle {
         signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
         symbol_count_fn: fn(*const ()) -> usize,
         dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
+        /// Bug #1900 (epic #1906 P5): raw `(ptr, len, line)` parts of a
+        /// symbol's declaration location -- see `GraphHandle::location_for`
+        /// for why a bare `fn` pointer cannot return a borrowed `&str`
+        /// directly here, mirroring `signature_for_raw_fn` exactly.
+        location_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize, usize)>,
+        /// Bug #1900: exposes `CodeGraph::kind_for` -- see
+        /// `GraphHandle::declaration_kind`.
+        declaration_kind_fn: fn(*const (), u32) -> Option<DeclarationKind>,
+        /// Bug #1900: exposes `CodeGraph::visibility_for` -- see
+        /// `GraphHandle::visibility_of`.
+        visibility_of_fn: fn(*const (), u32) -> Visibility,
+        /// Bug #1900: exposes `CodeGraph::edge_reason` -- see
+        /// `GraphHandle::edge_reason`.
+        edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
+        /// Bug #1900 (review round 2): exposes `CodeGraph::edge_evidence` --
+        /// see `GraphHandle::edge_evidence`.
+        edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -192,6 +210,31 @@ pub mod handle {
         graph_from_ctx(ctx).dense_id_for(symbol)
     }
 
+    /// Bug #1900: raw-parts thunk for `location_for` -- mirrors
+    /// `thunk_signature_for_raw` exactly.
+    fn thunk_location_for_raw(ctx: CtxPtr, dense_id: u32) -> Option<(*const u8, usize, usize)> {
+        let (path, line) = graph_from_ctx(ctx).location_for(dense_id)?;
+        Some((path.as_ptr(), path.len(), line))
+    }
+
+    fn thunk_declaration_kind(ctx: CtxPtr, dense_id: u32) -> Option<DeclarationKind> {
+        graph_from_ctx(ctx).kind_for(dense_id)
+    }
+
+    fn thunk_visibility_of(ctx: CtxPtr, dense_id: u32) -> Visibility {
+        graph_from_ctx(ctx).visibility_for(dense_id)
+    }
+
+    fn thunk_edge_reason(ctx: CtxPtr, from: u32, to: u32) -> Option<EdgeReason> {
+        graph_from_ctx(ctx).edge_reason(from, to)
+    }
+
+    /// Bug #1900 (review round 2): thunk for `edge_evidence` -- mirrors
+    /// `thunk_edge_reason` exactly.
+    fn thunk_edge_evidence(ctx: CtxPtr, from: u32, to: u32) -> Option<u16> {
+        graph_from_ctx(ctx).edge_evidence(from, to)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -212,6 +255,11 @@ pub mod handle {
                 signature_for_raw_fn: thunk_signature_for_raw,
                 symbol_count_fn: thunk_symbol_count,
                 dense_id_for_fn: thunk_dense_id_for,
+                location_for_raw_fn: thunk_location_for_raw,
+                declaration_kind_fn: thunk_declaration_kind,
+                visibility_of_fn: thunk_visibility_of,
+                edge_reason_fn: thunk_edge_reason,
+                edge_evidence_fn: thunk_edge_evidence,
                 _graph: PhantomData,
             }
         }
@@ -304,6 +352,70 @@ pub mod handle {
             // `thunk_signature_for_raw`), guaranteed valid UTF-8 and alive
             // for at least `'graph`, which outlives `&self`.
             Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+        }
+
+        /// Bug #1900 (epic #1906 P5): this symbol's DECLARATION file path
+        /// and 1-based line (`CodeGraph::location_for`), or `None` if
+        /// extraction never recorded one. Returns a `&str` borrowed from
+        /// the graph's shared string table, with a lifetime tied to
+        /// `&self`, never an owned `String` -- mirrors `resolve_string`/
+        /// `signature_for`'s exact contract.
+        pub fn location_for(&self, dense_id: u32) -> Option<(&str, usize)> {
+            let (ptr, len, line) = (self.location_for_raw_fn)(self.ctx, dense_id)?;
+            // SAFETY: identical to `resolve_string`/`signature_for` above --
+            // `ptr`/`len` come from `CodeGraph::location_for`'s own `&str`
+            // (via `thunk_location_for_raw`), guaranteed valid UTF-8 and
+            // alive for at least `'graph`, which outlives `&self`.
+            Some((unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }, line))
+        }
+
+        /// Bug #1900: this symbol's extracted `DeclarationKind`
+        /// (`CodeGraph::kind_for`), or `None` if the extractor never
+        /// recorded one -- see that method's doc comment for why `None`
+        /// must be read as "unproven", never as license to report a symbol
+        /// dead. Lets an evaluator implementing the "unwired components"
+        /// use case filter findings by declaration kind, which was
+        /// previously unreachable from `GraphHandle` even though the
+        /// dead-code predicate already consults it internally.
+        pub fn declaration_kind(&self, dense_id: u32) -> Option<DeclarationKind> {
+            (self.declaration_kind_fn)(self.ctx, dense_id)
+        }
+
+        /// Bug #1900: this symbol's declared `Visibility`
+        /// (`CodeGraph::visibility_for`), defaulting to `Visibility::Unknown`
+        /// when the extractor recorded no modifier evidence -- see that
+        /// method's doc comment for why `Unknown` is always the safe
+        /// default, never a restricted one.
+        pub fn visibility_of(&self, dense_id: u32) -> Visibility {
+            (self.visibility_of_fn)(self.ctx, dense_id)
+        }
+
+        /// Bug #1900 (epic #1906 P2): whether the `(from, to)` edge is
+        /// backed by at least one call site where `to` was the reference's
+        /// ONLY candidate (`Some(EdgeReason::SoleCandidate)`), every
+        /// contributing call site offered several candidates
+        /// (`Some(EdgeReason::MultipleCandidates)`), or `from` never
+        /// targets `to` at all (`None`) -- a COUNT-based tier only, never a
+        /// truth/provenance claim (see `edge_evidence` for that). See
+        /// `CodeGraph::edge_reason`'s doc comment for the full rationale
+        /// and complexity guarantee: O(out-degree of `from`), cheap for a
+        /// path or an SCC member scan, NOT for annotating every edge in
+        /// the graph.
+        pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+            (self.edge_reason_fn)(self.ctx, from, to)
+        }
+
+        /// Bug #1900 (epic #1906 P2, review round 2): the REAL evidence
+        /// accessor -- the bitwise-OR of `graph::reasons::*` bits across
+        /// every candidate that contributed the `(from, to)` edge, or
+        /// `None` if `from` never targets `to` at all. See
+        /// `CodeGraph::edge_evidence`'s doc comment for the full rationale
+        /// (this is what lets an evaluator require e.g.
+        /// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO` before trusting a
+        /// hop, rather than trusting `edge_reason`'s candidate count
+        /// alone) and the same complexity caveat as `edge_reason` above.
+        pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+            (self.edge_evidence_fn)(self.ctx, from, to)
         }
     }
 
@@ -479,6 +591,90 @@ pub mod handle {
             assert_eq!(handle.signature_for(with_sig), graph.signature_for(with_sig));
             assert_eq!(handle.signature_for(without_sig), None, "a symbol with no cached signature must return None, never panic or fabricate one");
             assert_eq!(handle.signature_for(u32::MAX), None, "an out-of-range dense id must return None, never panic");
+        }
+
+        /// Bug #1900 (epic #1906 P5): `location_for` must be reachable
+        /// through the ONLY surface a graph-mode evaluator ever receives,
+        /// delegating byte-for-byte to `CodeGraph::location_for`. `RED
+        /// against unmodified code`: `GraphHandle` has no `location_for`
+        /// method yet, so this fails to compile.
+        #[test]
+        fn location_for_delegates_to_the_real_graph_and_returns_none_when_absent() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let with_location = builder.intern_symbol(make_symbol_id(6, 0));
+            let without_location = builder.intern_symbol(make_symbol_id(6, 1));
+            let file_string_id = builder.intern_string("com/example/Handle.java");
+            builder.add_location(with_location, file_string_id, 9);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.location_for(with_location), Some(("com/example/Handle.java", 9)));
+            assert_eq!(handle.location_for(with_location), graph.location_for(with_location));
+            assert_eq!(handle.location_for(without_location), None, "a symbol with no location must return None, never fabricate one");
+        }
+
+        /// Bug #1900: `declaration_kind`/`visibility_of` must be reachable
+        /// through `GraphHandle` and agree EXACTLY with the values
+        /// `CodeGraph::is_definitely_dead_code` consults internally for the
+        /// SAME dense id -- an evaluator implementing the documented
+        /// "unwired components" use case for a specific declaration kind
+        /// currently cannot filter by kind at all. `RED against unmodified
+        /// code`: neither method exists on `GraphHandle` yet.
+        #[test]
+        fn declaration_kind_and_visibility_of_agree_with_what_is_definitely_dead_code_consults() {
+            use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let unreferenced_private_method = builder.intern_symbol(make_symbol_id(7, 0));
+            builder.add_kind(unreferenced_private_method, DeclarationKind::Method);
+            builder.add_visibility(unreferenced_private_method, Visibility::Private);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.declaration_kind(unreferenced_private_method), Some(DeclarationKind::Method));
+            assert_eq!(handle.declaration_kind(unreferenced_private_method), graph.kind_for(unreferenced_private_method));
+            assert_eq!(handle.visibility_of(unreferenced_private_method), Visibility::Private);
+            assert_eq!(handle.visibility_of(unreferenced_private_method), graph.visibility_for(unreferenced_private_method));
+            // The predicate these two values back: Method + Private on an
+            // unreferenced symbol is exactly the one case that proves dead.
+            assert_eq!(graph.is_definitely_dead_code(unreferenced_private_method), Some(true));
+        }
+
+        /// Bug #1900: `edge_reason` must be reachable through `GraphHandle`,
+        /// delegating byte-for-byte to `CodeGraph::edge_reason`. `RED
+        /// against unmodified code`: `GraphHandle` has no `edge_reason`
+        /// method yet.
+        #[test]
+        fn edge_reason_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+            let caller = builder.intern_symbol(make_symbol_id(8, 0));
+            let target = builder.intern_symbol(make_symbol_id(8, 1));
+            builder.add_reference(caller, 8, 1, 0, &[Candidate::new(target, reasons::UNIQUE_NAME_IN_REPO)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.edge_reason(caller, target), graph.edge_reason(caller, target));
+            assert_eq!(handle.edge_reason(caller, target), Some(EdgeReason::SoleCandidate));
+            assert_eq!(handle.edge_reason(caller, 999), None);
+        }
+
+        /// Bug #1900 (epic #1906 P2, review round 2): `edge_evidence` must be
+        /// reachable through `GraphHandle`, delegating byte-for-byte to
+        /// `CodeGraph::edge_evidence` -- the real evidence-bit accessor
+        /// `edge_reason` alone cannot provide. `RED against unmodified
+        /// code`: `GraphHandle` has no `edge_evidence` method yet.
+        #[test]
+        fn edge_evidence_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+            let caller = builder.intern_symbol(make_symbol_id(9, 0));
+            let target = builder.intern_symbol(make_symbol_id(9, 1));
+            builder.add_reference(caller, 9, 1, 0, &[Candidate::new(target, reasons::SAME_PACKAGE | reasons::ARITY_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.edge_evidence(caller, target), graph.edge_evidence(caller, target));
+            assert_eq!(handle.edge_evidence(caller, target), Some(reasons::SAME_PACKAGE | reasons::ARITY_MATCH));
+            assert_eq!(handle.edge_evidence(caller, 999), None, "a pair with no edge at all must report None through the handle too");
         }
     }
 }

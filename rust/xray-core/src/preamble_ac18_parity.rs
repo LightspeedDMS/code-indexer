@@ -20,7 +20,7 @@
 //! never a bare `assert!(a == b)` that would force a developer to diff two
 //! multi-hundred-line strings by hand to find the one line that changed.
 
-use syn::{Fields, File, ImplItem, ImplItemFn, Item, ItemStruct, Type, Visibility};
+use syn::{Fields, File, ImplItem, ImplItemFn, Item, ItemConst, ItemEnum, ItemStruct, Type, Visibility};
 
 const OWNED_NODE_SRC: &str = include_str!("owned_node.rs");
 const FINDING_SRC: &str = include_str!("finding.rs");
@@ -37,6 +37,15 @@ const ANALYZE_RESULT_SRC: &str = include_str!("graph/analyze/result.rs");
 /// context an optional `refine` callback receives, mirrored into
 /// `compiler::GRAPH_PREAMBLE_EXTRA_5`.
 const REFINE_SRC: &str = include_str!("graph/refine.rs");
+/// Bug #1900 (epic #1906 P2/P5): real sources for the mirrored
+/// `DeclarationKind`/`Visibility` (`local_index.rs`) and `EdgeReason`
+/// (`code_graph.rs`) fieldless enums -- see `diff_mirrored_enum`.
+const LOCAL_INDEX_SRC: &str = include_str!("graph/extract/local_index.rs");
+const CODE_GRAPH_SRC: &str = include_str!("graph/csr/code_graph.rs");
+/// Bug #1900 (epic #1906 P2, review round 2): real source for the
+/// `graph::reasons::*` bit-flag constants mirrored into
+/// `compiler::GRAPH_PREAMBLE_EXTRA_6` -- see `diff_mirrored_const`.
+const REASONS_SRC: &str = include_str!("graph/reasons.rs");
 
 /// Parses `src` as a sequence of top-level Rust items. Panics naming `label`
 /// on a parse failure -- this helper is only ever fed known-good Rust source
@@ -111,6 +120,90 @@ fn struct_field_signature(s: &ItemStruct) -> Vec<(String, bool, Type)> {
             s.ident, other
         ),
     }
+}
+
+/// Bug #1900: finds an `enum <name> { ... }` item anywhere in `file`,
+/// including nested inside a `mod` block (see `flatten_items`). Panics
+/// naming `name`/`label` when absent, mirroring `find_struct` exactly.
+fn find_enum<'a>(file: &'a File, name: &str, label: &str) -> &'a ItemEnum {
+    flatten_items(&file.items)
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Enum(e) if e.ident == name => Some(e),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("enum {name} not found in {label}"))
+}
+
+/// Bug #1900: compares two fieldless C-like enums' variant NAME and ORDER
+/// (never their discriminant values, which neither side declares
+/// explicitly) -- this is the property that actually matters for a
+/// `GraphHandle` accessor crossing the FFI-like boundary as a plain enum
+/// value: with no `#[repr]` on either side, the runtime discriminant is
+/// decided by declaration order alone, so a reordered variant would
+/// silently misinterpret every value crossing the boundary (e.g. `Private`
+/// read back as `Protected`) with no type error to catch it. Deliberately
+/// does NOT compare variant fields/attrs: every enum this check targets
+/// (`DeclarationKind`, `Visibility`, `EdgeReason`) is fieldless by
+/// contract, and a future fielded variant would need a different mirroring
+/// strategy entirely (raw parts, like `signature_for`), not this check.
+fn diff_enum_variants(real: &ItemEnum, mirror: &ItemEnum, label: &str) -> Option<String> {
+    let real_names: Vec<String> = real.variants.iter().map(|v| v.ident.to_string()).collect();
+    let mirror_names: Vec<String> = mirror.variants.iter().map(|v| v.ident.to_string()).collect();
+    if real_names != mirror_names {
+        return Some(format!(
+            "{label}: enum variant NAMES/ORDER diverged -- real={real_names:?}, mirror={mirror_names:?}"
+        ));
+    }
+    None
+}
+
+/// Bug #1900: pairs `find_enum` + `diff_enum_variants` the same way
+/// `diff_mirrored_struct` pairs `find_struct` + `diff_struct_fields`.
+fn diff_mirrored_enum(real_file: &File, real_label: &str, mirror_file: &File, name: &str) -> Option<String> {
+    let real = find_enum(real_file, name, real_label);
+    let mirror = find_enum(mirror_file, name, "GRAPH_PREAMBLE_EXTRA");
+    diff_enum_variants(real, mirror, name)
+}
+
+/// Bug #1900 (review round 2): finds a `pub const <name>: u16 = <expr>;`
+/// item anywhere in `file`, including nested inside a `mod` block (see
+/// `flatten_items`). Panics naming `name`/`label` when absent, mirroring
+/// `find_struct`/`find_enum` exactly.
+fn find_const<'a>(file: &'a File, name: &str, label: &str) -> &'a ItemConst {
+    flatten_items(&file.items)
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Const(c) if c.ident == name => Some(c),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("const {name} not found in {label}"))
+}
+
+/// Bug #1900 (review round 2): compares two bit-flag consts' VALUE
+/// EXPRESSION (e.g. `1 << 5`) for exact structural equality -- catches a
+/// transcription slip (wrong shift amount, a copy-pasted flag) between
+/// `graph::reasons` and its `GRAPH_PREAMBLE_EXTRA_6` mirror the same way
+/// `diff_enum_variants` catches a reordered enum. Deliberately does not
+/// EVALUATE either expression: both sides use the identical `1 << N` shift
+/// form by convention (see `GRAPH_PREAMBLE_EXTRA_6`'s doc comment), so
+/// structural AST equality is exact value equality here, and a real
+/// divergence (a different shift amount, or an entirely different
+/// expression) is exactly what this must catch without requiring a `const`
+/// evaluator.
+fn diff_const_value(real: &ItemConst, mirror: &ItemConst, label: &str) -> Option<String> {
+    if *real.expr != *mirror.expr {
+        return Some(format!("{label}: const VALUE EXPRESSION diverged -- real={:#?}, mirror={:#?}", real.expr, mirror.expr));
+    }
+    None
+}
+
+/// Bug #1900 (review round 2): pairs `find_const` + `diff_const_value` the
+/// same way `diff_mirrored_enum` pairs `find_enum` + `diff_enum_variants`.
+fn diff_mirrored_const(real_file: &File, real_label: &str, mirror_file: &File, name: &str) -> Option<String> {
+    let real = find_const(real_file, name, real_label);
+    let mirror = find_const(mirror_file, name, "GRAPH_PREAMBLE_EXTRA");
+    diff_const_value(real, mirror, name)
 }
 
 /// Compares two field-signature lists (see `struct_field_signature`) and
@@ -350,6 +443,41 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     // Bug #1828: exact graph enumeration and SymbolId reverse lookup.
     "symbol_count",
     "dense_id_for",
+    // Bug #1900 (epic #1906 P2/P5): declaration location, kind, visibility,
+    // and edge-confidence -- the observability accessors that let a
+    // graph-mode finding be audited against real source instead of
+    // shipping as a bare, unchaseable name(N params) string.
+    "location_for",
+    "declaration_kind",
+    "visibility_of",
+    "edge_reason",
+    // Bug #1900 review round 2: the real evidence accessor -- see
+    // `GraphHandle::edge_evidence`'s doc comment.
+    "edge_evidence",
+];
+
+/// Bug #1900 (epic #1906 P2, review round 2): every `graph::reasons::*`
+/// bit-flag constant name, in the SAME order `reasons::ALL_FLAGS` declares
+/// them -- checked via `diff_mirrored_const` against the
+/// `GRAPH_PREAMBLE_EXTRA_6` mirror. Kept as an explicit list (rather than
+/// deriving it from `reasons::ALL_FLAGS` at test time) so this file stays
+/// self-contained the same way `MIRRORED_GRAPH_HANDLE_METHODS` is an
+/// explicit list rather than a runtime reflection over `GraphHandle`.
+const REASONS_FLAG_NAMES: &[&str] = &[
+    "SAME_FILE",
+    "SAME_PACKAGE",
+    "IMPORTED",
+    "STATIC_IMPORT",
+    "WILDCARD_IMPORT",
+    "ARITY_MATCH",
+    "UNIQUE_NAME_IN_REPO",
+    "QUALIFIED_NAME",
+    "STRING_HEURISTIC",
+    "INHERITANCE_FAMILY",
+    "OVERLOAD_ARG_TYPE_MATCH",
+    "FAMILY_TRUNCATED",
+    "RECEIVER_TYPE_MATCH",
+    "SAME_CLASS_OR_SUPER",
 ];
 
 /// Compares struct `name` between `real_file` (labeled `real_label` in any
@@ -389,14 +517,32 @@ fn diff_mirrored_method(
 /// nor `FactsHandle` has an intentional Drop-impl asymmetry to check --
 /// both are plain `Copy` dispatch tables with no owned/heap fields, so
 /// there is nothing analogous to Bug #1795's fix to guard.
+#[allow(clippy::too_many_arguments)]
 fn collect_ac8_graph_mirror_divergences(
     csr_mod_file: &File,
     user_facts_file: &File,
     analyze_result_file: &File,
     refine_file: &File,
+    local_index_file: &File,
+    code_graph_file: &File,
+    reasons_file: &File,
     graph_preamble_file: &File,
 ) -> Vec<String> {
     let mut divergences: Vec<String> = Vec::new();
+
+    // Bug #1900: enum-variant-order parity for the three fieldless enums
+    // that now cross the GraphHandle FFI-like boundary by value.
+    divergences.extend(diff_mirrored_enum(local_index_file, "graph/extract/local_index.rs", graph_preamble_file, "DeclarationKind"));
+    divergences.extend(diff_mirrored_enum(local_index_file, "graph/extract/local_index.rs", graph_preamble_file, "Visibility"));
+    divergences.extend(diff_mirrored_enum(code_graph_file, "graph/csr/code_graph.rs", graph_preamble_file, "EdgeReason"));
+
+    // Bug #1900 review round 2: value parity for every reason-bit constant
+    // mirrored into GRAPH_PREAMBLE_EXTRA_6 -- a `u16` nobody can interpret
+    // is not observability, and a silently-diverged bit value would be
+    // worse than no accessor at all (a caller trusting the WRONG bit).
+    for name in REASONS_FLAG_NAMES {
+        divergences.extend(diff_mirrored_const(reasons_file, "graph/reasons.rs", graph_preamble_file, name));
+    }
 
     divergences.extend(diff_mirrored_struct(csr_mod_file, "graph/csr/mod.rs", graph_preamble_file, "GraphHandle"));
     for method in MIRRORED_GRAPH_HANDLE_METHODS {
@@ -469,6 +615,69 @@ mod tests {
         let file = parse_items(src, "nested-mod fixture");
         let found = find_impl_method(&file, "Inner", "greet", "nested-mod fixture");
         assert_eq!(found.sig.ident, "greet");
+    }
+
+    /// Bug #1900: `DeclarationKind`/`Visibility`/`EdgeReason` cross the
+    /// GraphHandle FFI-like boundary as PLAIN, fieldless C-like enums,
+    /// mirrored by NAME in the PREAMBLE rather than imported -- their
+    /// runtime discriminant is decided by DECLARATION ORDER alone (no
+    /// `#[repr]`), so a variant-order swap between the real enum and its
+    /// mirror would silently misinterpret every value crossing the
+    /// boundary (e.g. `Private` read back as `Protected`) with no type
+    /// error to catch it. `RED against unmodified code`: `diff_enum_
+    /// variants` does not exist yet.
+    #[test]
+    fn detects_an_enum_variant_order_divergence_between_two_synthetic_enums() {
+        let real_src = "enum Foo { A, B, C }";
+        let mirror_src = "enum Foo { A, C, B }";
+        let real_file = parse_items(real_src, "real");
+        let mirror_file = parse_items(mirror_src, "mirror");
+        let real_enum = find_enum(&real_file, "Foo", "real");
+        let mirror_enum = find_enum(&mirror_file, "Foo", "mirror");
+
+        let diff = diff_enum_variants(real_enum, mirror_enum, "Foo");
+        assert!(diff.is_some(), "a genuine variant-order divergence must be detected");
+    }
+
+    #[test]
+    fn reports_no_divergence_for_identically_ordered_enum_variants() {
+        let src = "enum Foo { A, B, C }";
+        let real_file = parse_items(src, "real");
+        let mirror_file = parse_items(src, "mirror");
+        let real_enum = find_enum(&real_file, "Foo", "real");
+        let mirror_enum = find_enum(&mirror_file, "Foo", "mirror");
+
+        assert!(diff_enum_variants(real_enum, mirror_enum, "Foo").is_none());
+    }
+
+    /// Bug #1900 (review round 2): `diff_const_value` must catch a
+    /// transcription slip in a bit-flag constant's shift amount -- the
+    /// exact class of divergence that would silently misinterpret an
+    /// evidence bit crossing the GraphHandle FFI boundary (e.g. an
+    /// evaluator testing the WRONG bit for `RECEIVER_TYPE_MATCH`).
+    #[test]
+    fn detects_a_const_value_divergence_between_two_synthetic_consts() {
+        let real_src = "pub const FOO: u16 = 1 << 5;";
+        let mirror_src = "pub const FOO: u16 = 1 << 6;";
+        let real_file = parse_items(real_src, "real");
+        let mirror_file = parse_items(mirror_src, "mirror");
+        let real_const = find_const(&real_file, "FOO", "real");
+        let mirror_const = find_const(&mirror_file, "FOO", "mirror");
+
+        let diff = diff_const_value(real_const, mirror_const, "FOO");
+        assert!(diff.is_some(), "a genuine const value divergence must be detected");
+        assert!(diff.unwrap().contains("FOO"), "divergence message must name the diverging const");
+    }
+
+    #[test]
+    fn reports_no_divergence_for_identically_valued_consts() {
+        let src = "pub const FOO: u16 = 1 << 5;";
+        let real_file = parse_items(src, "real");
+        let mirror_file = parse_items(src, "mirror");
+        let real_const = find_const(&real_file, "FOO", "real");
+        let mirror_const = find_const(&mirror_file, "FOO", "mirror");
+
+        assert!(diff_const_value(real_const, mirror_const, "FOO").is_none());
     }
 
     #[test]
@@ -604,27 +813,37 @@ impl Foo {
     }
 
     /// THE AC8 GATE (Story #1787, ADR-002): parses the REAL
-    /// `graph/csr/mod.rs`, `graph/user_facts.rs`, `graph/analyze/result.rs`
-    /// and the ACTUAL assembled `compiler::GRAPH_PREAMBLE_EXTRA_1..4` text
-    /// compiled into every graph-mode evaluator artifact, and asserts
-    /// field-for-field / method-for-method structural parity via
-    /// `collect_ac8_graph_mirror_divergences`. Mirrored surface: `GraphHandle`'s
-    /// fields plus its 7 accessor methods, `FactsHandle`'s fields plus its
-    /// 2 accessor methods, `UserFact`'s fields, and `GraphResult`/
-    /// `ReduceFinding`'s fields.
+    /// `graph/csr/mod.rs`, `graph/user_facts.rs`, `graph/analyze/result.rs`,
+    /// `graph/extract/local_index.rs`, `graph/csr/code_graph.rs`, and
+    /// `graph/reasons.rs`, and the ACTUAL assembled
+    /// `compiler::GRAPH_PREAMBLE_EXTRA_1..6` text compiled into every
+    /// graph-mode evaluator artifact, and asserts field-for-field /
+    /// method-for-method structural parity via
+    /// `collect_ac8_graph_mirror_divergences`. Mirrored surface:
+    /// `GraphHandle`'s fields plus every method in
+    /// `MIRRORED_GRAPH_HANDLE_METHODS` (including Bug #1900's
+    /// `location_for`/`declaration_kind`/`visibility_of`/`edge_reason`/
+    /// `edge_evidence`), `FactsHandle`'s fields plus its 2 accessor methods,
+    /// `UserFact`'s fields, `GraphResult`/`ReduceFinding`'s fields, the
+    /// `DeclarationKind`/`Visibility`/`EdgeReason` enum variant orders, and
+    /// (review round 2) every `graph::reasons::*` bit-flag constant's value.
     #[test]
     fn graph_mode_mirror_matches_real_types_structurally() {
         let csr_mod_file = parse_items(CSR_MOD_SRC, "graph/csr/mod.rs");
         let user_facts_file = parse_items(USER_FACTS_SRC, "graph/user_facts.rs");
         let analyze_result_file = parse_items(ANALYZE_RESULT_SRC, "graph/analyze/result.rs");
         let refine_file = parse_items(REFINE_SRC, "graph/refine.rs");
+        let local_index_file = parse_items(LOCAL_INDEX_SRC, "graph/extract/local_index.rs");
+        let code_graph_file = parse_items(CODE_GRAPH_SRC, "graph/csr/code_graph.rs");
+        let reasons_file = parse_items(REASONS_SRC, "graph/reasons.rs");
         let graph_preamble_text = format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             crate::compiler::GRAPH_PREAMBLE_EXTRA_1,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_2,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_3,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_4,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_5,
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_6,
         );
         let graph_preamble_file = parse_items(&graph_preamble_text, "compiler::GRAPH_PREAMBLE_EXTRA_*");
 
@@ -633,6 +852,9 @@ impl Foo {
             &user_facts_file,
             &analyze_result_file,
             &refine_file,
+            &local_index_file,
+            &code_graph_file,
+            &reasons_file,
             &graph_preamble_file,
         );
 

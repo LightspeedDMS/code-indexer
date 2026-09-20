@@ -46,8 +46,18 @@ pub(super) fn intern_declarations_and_attach_signatures(
     files: &[FileForBind],
     builder: &mut CodeGraphBuilder,
     exceeded: bool,
+    file_paths: &std::collections::HashMap<u32, String>,
 ) {
     for file in files {
+        // Bug #1900 (epic #1906 P5): interned ONCE per file (not per
+        // declaration) -- `intern_string` dedups internally too, but there
+        // is no reason to pay even a HashMap lookup per declaration when
+        // one file may declare hundreds of symbols. Absent from
+        // `file_paths` (every caller except `repo_index::build_repo_graph`
+        // today) means no location is ever recorded for this file's
+        // declarations -- the same safe "unknown" default `location_for`
+        // already returns for a dense id it never saw.
+        let file_string_id = file_paths.get(&file.file_id).map(|path| builder.intern_string(path));
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
             // Story #1835: visibility is ANALYTICAL data `is_definitely_
@@ -69,6 +79,14 @@ pub(super) fn intern_declarations_and_attach_signatures(
             // possibly-absent map lookup), so there is no `Option` to
             // unwrap here.
             builder.add_kind(dense, declaration.kind);
+            // Bug #1900: DECLARATION location, like visibility/kind, is
+            // analytical data an evaluator needs to audit a finding -- it
+            // MUST survive budget pressure, so this too runs
+            // unconditionally, before the `exceeded` early return below
+            // (which gates only the signature cache).
+            if let Some(file_string_id) = file_string_id {
+                builder.add_location(dense, file_string_id, declaration.line as u32);
+            }
             if exceeded {
                 continue;
             }
@@ -128,7 +146,13 @@ pub fn bind_with_budget_and_completeness(
     index_is_complete: bool,
 ) -> CodeGraph {
     let (prepared, _stats) = super::admission::prepare_bind(files, index_is_complete);
-    super::admission::finish_bind(prepared, budget)
+    // Bug #1900: this generic entry point has no path-tracking caller --
+    // only `repo_index::build_repo_graph` knows real repo-relative paths
+    // and threads them through `finish_bind` directly. An empty map here
+    // preserves this function's pre-existing "no location data" behavior
+    // exactly (every `location_for` call on graphs built through this path
+    // returns `None`, unchanged).
+    super::admission::finish_bind(prepared, budget, &std::collections::HashMap::new())
 }
 
 #[cfg(test)]

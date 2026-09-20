@@ -99,7 +99,7 @@ pub fn prepare_bind(
 /// pre-AC12 `bind_with_budget` body, starting at the ONE CSR-arena
 /// allocation point (`CodeGraphBuilder::with_candidate_capacity`). Never
 /// called by `bind_with_admission_gate` when the gate denies.
-pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
+pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget, file_paths: &HashMap<u32, String>) -> CodeGraph {
     let PreparedBind {
         files,
         mut depths,
@@ -112,7 +112,7 @@ pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
     let capacity = capped_candidate_total(&pending, exceeded, max_per_reference);
 
     let mut builder = CodeGraphBuilder::with_candidate_capacity(capacity);
-    intern_declarations_and_attach_signatures(&files, &mut builder, exceeded);
+    intern_declarations_and_attach_signatures(&files, &mut builder, exceeded, file_paths);
 
     for reference in pending {
         let depth = depths
@@ -181,6 +181,7 @@ pub fn bind_with_admission_gate<F>(
     files: Vec<FileForBind>,
     budget: &IndexBudget,
     index_is_complete: bool,
+    file_paths: &HashMap<u32, String>,
     gate: F,
 ) -> BindOutcome
 where
@@ -190,7 +191,7 @@ where
     if !gate(&stats) {
         return BindOutcome::Denied(stats);
     }
-    BindOutcome::Built(Box::new(finish_bind(prepared, budget)))
+    BindOutcome::Built(Box::new(finish_bind(prepared, budget, file_paths)))
 }
 
 #[cfg(test)]
@@ -262,7 +263,7 @@ mod tests {
         assert_eq!(stats.call_site_count, 2);
         assert_eq!(stats.candidate_edge_count, 2);
 
-        let graph = finish_bind(prepared, &IndexBudget::unlimited());
+        let graph = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
         let actual_candidates: usize = graph
             .references()
             .iter()
@@ -284,7 +285,7 @@ mod tests {
         let via_public_api =
             super::super::bind_with_budget(two_file_fixture(), &IndexBudget::unlimited());
         let (prepared, _stats) = prepare_bind(two_file_fixture(), true);
-        let via_split_api = finish_bind(prepared, &IndexBudget::unlimited());
+        let via_split_api = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
 
         assert_eq!(via_public_api.completeness(), via_split_api.completeness());
         assert_eq!(
@@ -310,6 +311,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |_stats| false,
         );
 
@@ -333,6 +335,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |_stats| true,
         );
 
@@ -349,6 +352,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |stats| {
                 stats.declaration_count == 2
                     && stats.call_site_count == 2
@@ -454,7 +458,7 @@ mod tests {
         }
 
         let (prepared, _stats) = prepare_bind(files, true);
-        let graph = finish_bind(prepared, &IndexBudget::unlimited());
+        let graph = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
 
         assert_eq!(
             graph.completeness(),
