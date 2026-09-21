@@ -37,6 +37,69 @@ use super::reference::Reference;
 pub(super) struct AdjacencyIndex {
     offsets: Vec<u32>,
     edges: Vec<u32>,
+    /// Bug #1900 (epic #1906 P2): parallel to `edges` -- `ambiguous[i]` is
+    /// true when the `Reference` that contributed `edges[i]` had MORE THAN
+    /// ONE surviving candidate in its window (`cand_len > 1`, via
+    /// `Reference::is_ambiguous`). Populated for both directions (forward
+    /// and reverse) by the same `build_from_edges` pass, though only the
+    /// FORWARD index is ever queried for it today (`CodeGraph::edge_reason`,
+    /// directional by construction). Kept on both to avoid a second,
+    /// divergent `AdjacencyIndex` shape for one direction only.
+    ///
+    /// Bug #1900 review round 2 (BLOCKING P2): this is a COUNT-based
+    /// property of the reference's candidate window -- it says nothing
+    /// about which EVIDENCE bits (`graph::reasons`) actually backed
+    /// `edges[i]`. A reference with exactly one surviving candidate can
+    /// still be a fabricated resolution (e.g. a same-named `put(2 params)`
+    /// method landed on by arity/package heuristics alone, no
+    /// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`) -- `ambiguous` alone
+    /// cannot distinguish that from a truly unique, provably-correct
+    /// resolution. See `reasons` below, which carries the REAL evidence
+    /// bits per occurrence for exactly that reason.
+    ambiguous: Vec<bool>,
+    /// Bug #1900 (epic #1906 P2, review round 2): parallel to `edges` --
+    /// `reasons[i]` is the CANDIDATE's own `Candidate::reasons()` bitmask
+    /// (`graph::reasons::*`) for the specific candidate that contributed
+    /// `edges[i]`. This is the provenance `edge_evidence` needs: `ambiguous`
+    /// answers "how many candidates survived at this call site", while
+    /// `reasons` answers "what evidence actually backed the surviving
+    /// candidate this edge occurrence came from" -- e.g. whether
+    /// `RECEIVER_TYPE_MATCH` or `UNIQUE_NAME_IN_REPO` fired, versus only
+    /// weaker structural bits like `SAME_PACKAGE`/`ARITY_MATCH`. Populated
+    /// for both directions by the same `build_from_edges` pass, mirroring
+    /// `ambiguous` exactly.
+    ///
+    /// Bug #1900 review round 3 (coordinator-authorized): NO LONGER
+    /// populated for both directions -- see `has_evidence` below. This doc
+    /// comment's "populated for both directions" is now historical; kept
+    /// for the rationale trail, not the current behavior.
+    reasons: Vec<u16>,
+    /// Bug #1900 review round 3 (coordinator-authorized): true when
+    /// `ambiguous`/`reasons` were ACTUALLY populated for this index --
+    /// `true` for the forward index, `false` for the reverse index.
+    /// `edge_reason`/`edge_evidence` are directional by construction and
+    /// only ever read `CodeGraph::forward_index`, so populating
+    /// `ambiguous`/`reasons` on the reverse index was pure dead weight:
+    /// at repo-B's measured 10.2M out-edges, that is 10.2M x (1 byte
+    /// `bool` + 2 bytes `u16`) = ~30.6 MB per analyze child that was
+    /// allocated, written, and never read. `build_reverse` now leaves
+    /// `ambiguous`/`reasons` as empty `Vec`s (`has_evidence: false`);
+    /// `edges`/`offsets` (what `callers_of` actually reads) are populated
+    /// exactly as before on both directions -- this field affects ONLY the
+    /// two evidence arrays, never edge presence/correctness.
+    ///
+    /// `ambiguous_for_edge`/`evidence_for_edge` check this FIRST and return
+    /// `None` immediately when `false`, before ever indexing into
+    /// `ambiguous`/`reasons` -- chosen over a type-level "impossible to
+    /// call" split (e.g. separate `Forward`/`Reverse` marker types) because
+    /// both methods are `pub(super)`, reachable only from `code_graph.rs`,
+    /// which already calls them exclusively on `forward_index`; a
+    /// fail-safe runtime guard gives the same panic-proof guarantee (no
+    /// out-of-bounds read of a shorter-than-`edges` array -- the same
+    /// defect class as the `file_string_id` panic fixed earlier in this
+    /// epic) without a larger, unrequested type redesign of a
+    /// crate-internal module (Rule 9, anti-divergent-creativity).
+    has_evidence: bool,
 }
 
 impl AdjacencyIndex {
@@ -56,11 +119,78 @@ impl AdjacencyIndex {
         &self.edges[start..end]
     }
 
+    /// Bug #1900: whether the `(node -> target)` edge is backed by AT LEAST
+    /// ONE contributing reference whose candidate window held exactly one
+    /// surviving candidate (`Some(false)` -- unambiguous, real single-target
+    /// evidence) versus every contributing reference offering multiple
+    /// candidates (`Some(true)` -- ambiguous only). `None` when `target` is
+    /// not among `node`'s edges at all. O(out-degree of `node`) -- scans
+    /// only `node`'s own CSR slice, exactly like `edges_of`, never the
+    /// whole edge arena.
+    pub(super) fn ambiguous_for_edge(&self, node: u32, target: u32) -> Option<bool> {
+        if !self.has_evidence {
+            return None;
+        }
+        let node_usize = node as usize;
+        if node_usize + 1 >= self.offsets.len() {
+            return None;
+        }
+        let start = self.offsets[node_usize] as usize;
+        let end = self.offsets[node_usize + 1] as usize;
+        let mut found = false;
+        for i in start..end {
+            if self.edges[i] == target {
+                found = true;
+                if !self.ambiguous[i] {
+                    return Some(false);
+                }
+            }
+        }
+        found.then_some(true)
+    }
+
+    /// Bug #1900 (epic #1906 P2, review round 2): the REAL evidence half of
+    /// this index. Returns the bitwise-OR of `Candidate::reasons()` across
+    /// EVERY contributing occurrence of the `(node -> target)` edge --
+    /// `None` when `target` is not among `node`'s edges at all, `Some(0)`
+    /// when it is but no evidence bit was ever set on any contributing
+    /// candidate (a candidate built with an empty reasons mask). Unlike
+    /// `ambiguous_for_edge` (which answers "how many candidates survived"),
+    /// this answers "what evidence actually backed this edge" -- the
+    /// distinction that lets an evaluator require e.g.
+    /// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO` before trusting a hop,
+    /// rather than trusting count alone. O(out-degree of `node`) -- scans
+    /// only `node`'s own CSR slice, exactly like `edges_of`/
+    /// `ambiguous_for_edge`, never the whole edge arena.
+    pub(super) fn evidence_for_edge(&self, node: u32, target: u32) -> Option<u16> {
+        if !self.has_evidence {
+            return None;
+        }
+        let node_usize = node as usize;
+        if node_usize + 1 >= self.offsets.len() {
+            return None;
+        }
+        let start = self.offsets[node_usize] as usize;
+        let end = self.offsets[node_usize + 1] as usize;
+        let mut found = false;
+        let mut evidence = 0u16;
+        for i in start..end {
+            if self.edges[i] == target {
+                found = true;
+                evidence |= self.reasons[i];
+            }
+        }
+        found.then_some(evidence)
+    }
+
     /// Builds the FORWARD index (callees): keyed by each `Reference.from`,
     /// targeting every one of that reference's candidates' `symbol()`.
+    /// `needs_evidence: true` -- this is the ONLY direction
+    /// `edge_reason`/`edge_evidence` ever query, so `ambiguous`/`reasons`
+    /// are populated.
     pub(super) fn build_forward(symbol_count: usize, references: &[Reference], candidates: &[Candidate]) -> Self {
         let pairs = edge_pairs(references, candidates);
-        build_from_edges(symbol_count, &pairs)
+        build_from_edges(symbol_count, &pairs, true)
     }
 
     /// Builds the REVERSE index (callers): keyed by each candidate's
@@ -68,37 +198,70 @@ impl AdjacencyIndex {
     /// SAME `edge_pairs` extraction as `build_forward` -- just swaps
     /// (key, value) into (value, key) before the shared CSR construction
     /// pass, rather than duplicating the reference/candidate traversal.
+    ///
+    /// `needs_evidence: false` (review round 3, coordinator-authorized):
+    /// nothing ever queries edge tier/evidence on the REVERSE direction, so
+    /// `ambiguous`/`reasons` are left as empty `Vec`s -- see
+    /// `AdjacencyIndex::has_evidence`'s doc comment for the ~30.6 MB/analyze
+    /// child this avoids at repo-B's out-edge scale. `edges`/`offsets`
+    /// (what `callers_of` reads) are completely unaffected.
     pub(super) fn build_reverse(symbol_count: usize, references: &[Reference], candidates: &[Candidate]) -> Self {
-        let pairs: Vec<(u32, u32)> =
-            edge_pairs(references, candidates).into_iter().map(|(from, to)| (to, from)).collect();
-        build_from_edges(symbol_count, &pairs)
+        let pairs: Vec<EdgePair> = edge_pairs(references, candidates)
+            .into_iter()
+            .map(|(from, to, ambiguous, reasons)| (to, from, ambiguous, reasons))
+            .collect();
+        build_from_edges(symbol_count, &pairs, false)
     }
 }
 
-/// Extracts every `(reference.from, candidate.symbol())` edge pair in
-/// build order -- ONE O(E) pass over `references`/`candidates`, shared by
-/// both `build_forward` and `build_reverse` (which only differ in which
-/// half of each pair becomes the CSR key).
-fn edge_pairs(references: &[Reference], candidates: &[Candidate]) -> Vec<(u32, u32)> {
+/// One extracted `(reference.from, candidate.symbol(), ambiguous, reasons)`
+/// edge occurrence. `ambiguous` is `reference.is_ambiguous()` (a property of
+/// the REFERENCE's whole candidate window, uniform across every candidate in
+/// it); `reasons` is `candidate.reasons()` (a property of the individual
+/// CANDIDATE that produced this specific occurrence) -- see
+/// `AdjacencyIndex`'s field docs for why these are deliberately different
+/// properties, not two views of the same fact.
+type EdgePair = (u32, u32, bool, u16);
+
+/// Extracts every `(reference.from, candidate.symbol(), ambiguous, reasons)`
+/// edge occurrence in build order -- ONE O(E) pass over
+/// `references`/`candidates`, shared by both `build_forward` and
+/// `build_reverse` (which only differ in which half of each pair becomes the
+/// CSR key). Bug #1900: `ambiguous` is `reference.is_ambiguous()` (Rule 4:
+/// reuses the existing predicate rather than re-deriving `cand_len > 1`
+/// here) -- true when MORE THAN ONE candidate survived in that reference's
+/// own window. `reasons` (review round 2) is the CANDIDATE's own
+/// `reasons()` bitmask, the real per-occurrence evidence `edge_evidence`
+/// needs and `ambiguous` cannot provide.
+fn edge_pairs(references: &[Reference], candidates: &[Candidate]) -> Vec<EdgePair> {
     let mut pairs = Vec::with_capacity(candidates.len());
     for reference in references {
         let start = reference.cand_start as usize;
         let end = start + reference.cand_len as usize;
+        let ambiguous = reference.is_ambiguous();
         for candidate in &candidates[start..end] {
-            pairs.push((reference.from, candidate.symbol()));
+            pairs.push((reference.from, candidate.symbol(), ambiguous, candidate.reasons()));
         }
     }
     pairs
 }
 
 /// Standard two-pass counting-sort CSR construction from a flat list of
-/// `(key, value)` edges: pass 1 counts each key's out-degree to compute
-/// prefix-sum offsets, pass 2 scatters each edge into its slot via a
-/// per-key write cursor (a copy of `offsets`, incremented as each edge is
-/// placed). O(V+E) time; allocates exactly three `Vec<u32>` buffers
-/// (`offsets`, its `cursor` copy, and `edges`) regardless of graph size --
-/// never one allocation per symbol.
-fn build_from_edges(symbol_count: usize, pairs: &[(u32, u32)]) -> AdjacencyIndex {
+/// `(key, value, ambiguous, reasons)` edges: pass 1 counts each key's
+/// out-degree to compute prefix-sum offsets, pass 2 scatters each edge (and,
+/// when `needs_evidence` is true, its `ambiguous` flag and `reasons`
+/// bitmask, Bug #1900) into its slot via a per-key write cursor (a copy of
+/// `offsets`, incremented as each edge is placed). O(V+E) time.
+///
+/// Review round 3 (coordinator-authorized): `needs_evidence` gates whether
+/// `ambiguous`/`reasons` are allocated and populated AT ALL -- `false`
+/// (the reverse-index caller) leaves both as empty `Vec`s, allocating
+/// exactly three `Vec` buffers (`offsets`, its `cursor` copy, `edges`)
+/// instead of five; `true` (the forward-index caller) allocates all five,
+/// exactly as before. `edges`/`offsets` construction is IDENTICAL either
+/// way -- `needs_evidence` never affects edge presence or `callers_of`/
+/// `callees_of` correctness, only whether the two evidence arrays exist.
+fn build_from_edges(symbol_count: usize, pairs: &[EdgePair], needs_evidence: bool) -> AdjacencyIndex {
     // Defensive: real binder-produced graphs always keep every
     // Reference.from/Candidate.symbol() strictly below symbol_count (both
     // are interned dense ids from the SAME SymbolTable that produced
@@ -107,13 +270,13 @@ fn build_from_edges(symbol_count: usize, pairs: &[(u32, u32)]) -> AdjacencyIndex
     // callees_of/callers_of -- sizing off the ACTUAL max key seen (never
     // shrinking below symbol_count) means such data is stored safely
     // instead of panicking, with zero behavior change for any real graph.
-    let max_key = pairs.iter().map(|&(key, _value)| key as usize).max();
+    let max_key = pairs.iter().map(|&(key, _value, _ambiguous, _reasons)| key as usize).max();
     let n = match max_key {
         Some(max_key) => symbol_count.max(max_key + 1),
         None => symbol_count,
     };
     let mut offsets = vec![0u32; n + 1];
-    for &(key, _value) in pairs {
+    for &(key, _value, _ambiguous, _reasons) in pairs {
         offsets[key as usize + 1] += 1;
     }
     for i in 0..n {
@@ -121,12 +284,18 @@ fn build_from_edges(symbol_count: usize, pairs: &[(u32, u32)]) -> AdjacencyIndex
     }
     let mut cursor = offsets.clone();
     let mut edges = vec![0u32; pairs.len()];
-    for &(key, value) in pairs {
+    let mut ambiguous = if needs_evidence { vec![false; pairs.len()] } else { Vec::new() };
+    let mut reasons = if needs_evidence { vec![0u16; pairs.len()] } else { Vec::new() };
+    for &(key, value, edge_ambiguous, edge_reasons) in pairs {
         let slot = cursor[key as usize] as usize;
         edges[slot] = value;
+        if needs_evidence {
+            ambiguous[slot] = edge_ambiguous;
+            reasons[slot] = edge_reasons;
+        }
         cursor[key as usize] += 1;
     }
-    AdjacencyIndex { offsets, edges }
+    AdjacencyIndex { offsets, edges, ambiguous, reasons, has_evidence: needs_evidence }
 }
 
 #[cfg(test)]
@@ -181,6 +350,128 @@ mod tests {
         assert_eq!(d_callers, vec![0, 1], "both A and B call D");
     }
 
+    /// Bug #1900 (epic #1906 P2, review round 2 -- the CENTRAL discriminating
+    /// test for the fabricated-edge fix): `edge_evidence`/`evidence_for_edge`
+    /// must OR the REAL `Candidate::reasons()` bits of every contributing
+    /// occurrence, never derive anything from `cand_len`. Mirrors the
+    /// review's own reproduction shape: a reference resolved to a SINGLE
+    /// candidate (so `ambiguous_for_edge` would report `Some(false)`,
+    /// "unambiguous") whose reasons carry ONLY weak structural bits
+    /// (`SAME_PACKAGE | ARITY_MATCH`, no `RECEIVER_TYPE_MATCH`/
+    /// `UNIQUE_NAME_IN_REPO`) -- proving the count-based tier and the
+    /// evidence bits are genuinely independent signals.
+    #[test]
+    fn evidence_for_edge_ors_the_reason_bits_of_every_contributing_occurrence() {
+        use crate::graph::reasons;
+
+        let candidates = vec![
+            // A -> B: single candidate, weak evidence only (the fabricated-
+            // edge shape from the review: no RECEIVER_TYPE_MATCH/
+            // UNIQUE_NAME_IN_REPO despite being the sole survivor).
+            Candidate::new(1, reasons::SAME_PACKAGE | reasons::ARITY_MATCH),
+        ];
+        let references = vec![Reference { from: 0, file: 1, line: 10, kind: 0, cand_start: 0, cand_len: 1 }];
+        let index = AdjacencyIndex::build_forward(2, &references, &candidates);
+
+        assert_eq!(
+            index.evidence_for_edge(0, 1),
+            Some(reasons::SAME_PACKAGE | reasons::ARITY_MATCH),
+            "evidence must be the candidate's real reasons bitmask, not a count-derived flag"
+        );
+        assert!(
+            index.evidence_for_edge(0, 1).unwrap() & reasons::RECEIVER_TYPE_MATCH == 0,
+            "the fabricated-edge fixture carries no RECEIVER_TYPE_MATCH bit -- an evaluator \
+             checking for it must be able to tell this hop apart from a truly verified one"
+        );
+    }
+
+    /// A pair reached by TWO occurrences (two separate references, or two
+    /// candidates in one window) must report the OR of BOTH occurrences'
+    /// reason bits -- real evidence from either call site counts, mirroring
+    /// `edge_reason`'s own "one real call site is enough" mixed-evidence
+    /// rule (kept unchanged by this fix).
+    #[test]
+    fn evidence_for_edge_ors_bits_across_multiple_occurrences_of_the_same_pair() {
+        use crate::graph::reasons;
+
+        let candidates = vec![
+            Candidate::new(1, reasons::SAME_PACKAGE),
+            Candidate::new(1, reasons::UNIQUE_NAME_IN_REPO),
+        ];
+        let references = vec![
+            Reference { from: 0, file: 1, line: 10, kind: 0, cand_start: 0, cand_len: 1 },
+            Reference { from: 0, file: 1, line: 11, kind: 0, cand_start: 1, cand_len: 1 },
+        ];
+        let index = AdjacencyIndex::build_forward(2, &references, &candidates);
+
+        assert_eq!(index.evidence_for_edge(0, 1), Some(reasons::SAME_PACKAGE | reasons::UNIQUE_NAME_IN_REPO));
+    }
+
+    #[test]
+    fn evidence_for_edge_returns_none_for_a_pair_with_no_edge_at_all() {
+        let (references, candidates) = sample_graph();
+        let index = AdjacencyIndex::build_forward(4, &references, &candidates);
+
+        assert_eq!(index.evidence_for_edge(0, 999), None, "no edge at all must report None, never a fabricated Some(0)");
+    }
+
+    /// Bug #1900 (review round 3, coordinator-authorized): the reverse
+    /// index's `ambiguous`/`reasons` arrays are DEAD WEIGHT -- only the
+    /// FORWARD index is ever queried for edge tier/evidence
+    /// (`CodeGraph::edge_reason`/`edge_evidence`, directional by
+    /// construction). This is the CENTRAL discriminating test for skipping
+    /// their population on the reverse index:
+    ///
+    /// 1. `callers_of` (via `edges_of`) must stay byte-for-byte correct on
+    ///    a fixture that includes an AMBIGUOUS reference (B has two
+    ///    candidates, C and D) -- proving the skip does not silently drop
+    ///    or corrupt any edge, only the evidence arrays.
+    /// 2. `ambiguous_for_edge`/`evidence_for_edge` called on the reverse
+    ///    index must return `None` -- fail-safe, never an out-of-bounds
+    ///    read of a shorter-than-`edges` array (the same defect class as
+    ///    the `file_string_id` panic fixed earlier in this epic).
+    ///
+    /// `RED against unmodified code`: today's `build_reverse` DOES
+    /// populate `ambiguous`/`reasons`, so `ambiguous_for_edge`/
+    /// `evidence_for_edge` on the reverse index currently return
+    /// `Some(..)`, not `None` -- this test's `None` assertions fail until
+    /// the `needs_evidence` gate is added.
+    #[test]
+    fn reverse_index_skips_evidence_population_but_still_serves_callers_of_correctly() {
+        use crate::graph::reasons;
+
+        // A -> {C, D} ambiguous (two candidates); B -> D sole candidate.
+        let candidates = vec![
+            Candidate::new(2, reasons::SAME_PACKAGE), // ref0 -> C
+            Candidate::new(3, reasons::SAME_PACKAGE), // ref0 -> D (ambiguous with C)
+            Candidate::new(3, reasons::UNIQUE_NAME_IN_REPO), // ref1 -> D
+        ];
+        let references = vec![
+            Reference { from: 0, file: 1, line: 10, kind: 0, cand_start: 0, cand_len: 2 }, // A -> {C, D}
+            Reference { from: 1, file: 1, line: 11, kind: 0, cand_start: 2, cand_len: 1 }, // B -> D
+        ];
+        let reverse = AdjacencyIndex::build_reverse(4, &references, &candidates);
+
+        // 1. callers_of must be exactly correct, unaffected by skipping evidence.
+        assert!(reverse.edges_of(2).contains(&0), "A must still be recorded as a caller of C");
+        let mut d_callers = reverse.edges_of(3).to_vec();
+        d_callers.sort_unstable();
+        assert_eq!(d_callers, vec![0, 1], "both A and B must still be recorded as callers of D");
+
+        // 2. Evidence accessors on the reverse index must fail safe (None),
+        // never read a short/empty vector out of bounds or answer wrong.
+        assert_eq!(
+            reverse.ambiguous_for_edge(2, 0),
+            None,
+            "ambiguous_for_edge on the reverse index must return None, never read unpopulated evidence"
+        );
+        assert_eq!(
+            reverse.evidence_for_edge(3, 0),
+            None,
+            "evidence_for_edge on the reverse index must return None, never read unpopulated evidence"
+        );
+    }
+
     #[test]
     fn edges_of_out_of_range_node_is_empty_not_a_panic() {
         let (references, candidates) = sample_graph();
@@ -214,5 +505,36 @@ mod tests {
         assert!(index.edges_of(0).is_empty());
         assert!(index.edges_of(1).is_empty());
         assert!(index.edges_of(2).is_empty());
+    }
+
+    /// Bug #1900 (review round 3, coordinator-authorized): MEASURED (not
+    /// theoretical) proof of the per-edge byte savings, at a scale cheap
+    /// enough to build in a unit test (50,000 edges, one per symbol pair).
+    /// `Vec::capacity()` on the private `ambiguous`/`reasons` fields
+    /// (accessible here since this test module is `super::*` in the same
+    /// file) shows the forward index allocates both fully (one `bool` +
+    /// one `u16` per edge, as before), while the reverse index allocates
+    /// ZERO capacity for both -- real evidence that `needs_evidence: false`
+    /// skips the allocation entirely, not merely leaves it unpopulated.
+    #[test]
+    fn reverse_index_allocates_zero_capacity_for_evidence_arrays_while_forward_allocates_fully() {
+        const EDGE_COUNT: usize = 50_000;
+        let mut candidates = Vec::with_capacity(EDGE_COUNT);
+        let mut references = Vec::with_capacity(EDGE_COUNT);
+        for i in 0..EDGE_COUNT as u32 {
+            candidates.push(Candidate::new(i + 1, 0));
+            references.push(Reference { from: i, file: 1, line: 1, kind: 0, cand_start: i, cand_len: 1 });
+        }
+
+        let forward = AdjacencyIndex::build_forward(EDGE_COUNT + 1, &references, &candidates);
+        let reverse = AdjacencyIndex::build_reverse(EDGE_COUNT + 1, &references, &candidates);
+
+        assert_eq!(forward.ambiguous.capacity(), EDGE_COUNT, "forward index must still allocate the full ambiguous array");
+        assert_eq!(forward.reasons.capacity(), EDGE_COUNT, "forward index must still allocate the full reasons array");
+        assert_eq!(reverse.ambiguous.capacity(), 0, "reverse index must allocate ZERO capacity for ambiguous -- measured, not assumed");
+        assert_eq!(reverse.reasons.capacity(), 0, "reverse index must allocate ZERO capacity for reasons -- measured, not assumed");
+
+        // edges/offsets (what callers_of actually reads) are unaffected.
+        assert_eq!(reverse.edges.len(), EDGE_COUNT, "edge presence must be identical regardless of needs_evidence");
     }
 }

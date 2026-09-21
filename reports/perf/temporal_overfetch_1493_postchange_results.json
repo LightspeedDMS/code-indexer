@@ -1,7 +1,7 @@
 {
   "label": "postchange",
   "captured_at": "2026-08-03T14:01:18.113100+00:00",
-  "repo": "/tmp/claude-1000/-home-jsbattig-Dev-code-indexer/bf453024-c658-4c98-bc2d-eebbb3ac44f3/scratchpad/1493_recall/repo",
+  "repo": "/tmp/claude-1000/-home-opuser-Dev-code-indexer/bf453024-c658-4c98-bc2d-eebbb3ac44f3/scratchpad/1493_recall/repo",
   "query_set_file": "reports/perf/temporal_overfetch_1493_query_set.json",
   "results": [
     {

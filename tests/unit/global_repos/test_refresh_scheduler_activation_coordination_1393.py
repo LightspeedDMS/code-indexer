@@ -120,7 +120,7 @@ class TestCheckRefreshNotInProgress:
         )
 
         # Must not raise.
-        scheduler.check_refresh_not_in_progress("evolution")
+        scheduler.check_refresh_not_in_progress("example-repo")
 
     def test_active_refresh_job_raises_duplicate_job_error(
         self,
@@ -145,17 +145,17 @@ class TestCheckRefreshNotInProgress:
         )
 
         job_tracker_db.register_job(
-            "refresh-evolution-global",
+            "refresh-example-repo-global",
             operation_type="global_repo_refresh",
             username="system",
-            repo_alias="evolution-global",
+            repo_alias="example-repo-global",
         )
-        job_tracker_db.update_status("refresh-evolution-global", status="running")
+        job_tracker_db.update_status("refresh-example-repo-global", status="running")
 
         with pytest.raises(DuplicateJobError) as exc_info:
-            scheduler.check_refresh_not_in_progress("evolution")
+            scheduler.check_refresh_not_in_progress("example-repo")
 
-        assert exc_info.value.existing_job_id == "refresh-evolution-global"
+        assert exc_info.value.existing_job_id == "refresh-example-repo-global"
 
     def test_different_alias_refresh_job_does_not_raise(
         self,
@@ -182,8 +182,8 @@ class TestCheckRefreshNotInProgress:
         )
         job_tracker_db.update_status("refresh-other-repo-global", status="running")
 
-        # Must not raise -- "evolution" != "other-repo".
-        scheduler.check_refresh_not_in_progress("evolution")
+        # Must not raise -- "example-repo" != "other-repo".
+        scheduler.check_refresh_not_in_progress("example-repo")
 
     def test_no_job_tracker_is_noop(
         self, golden_repos_dir, config_mgr, query_tracker, cleanup_manager
@@ -198,4 +198,4 @@ class TestCheckRefreshNotInProgress:
         )
 
         # Must not raise (and must not AttributeError on self._job_tracker).
-        scheduler.check_refresh_not_in_progress("evolution")
+        scheduler.check_refresh_not_in_progress("example-repo")

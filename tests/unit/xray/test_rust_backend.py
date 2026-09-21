@@ -1281,7 +1281,7 @@ def test_error_message_sanitizes_xray_cache_paths():
 
     raw_stderr = (
         "error[E0425]: cannot find value `x` in this scope\n"
-        " --> /home/jsbattig/.cidx-server/xray-cache/59d0fc1a2b3c4d.rs:3:5\n"
+        " --> /home/opuser/.cidx-server/xray-cache/59d0fc1a2b3c4d.rs:3:5\n"
         "  |\n"
         "3 |     x + 1\n"
         "  |     ^ not found in this scope"
@@ -1303,7 +1303,7 @@ def test_error_message_sanitizes_xray_cache_paths():
     _matches, errors, _meta = results[0]
     assert len(errors) == 1
     msg = errors[0]["error_message"]
-    assert "/home/jsbattig/.cidx-server/xray-cache/" not in msg, (
+    assert "/home/opuser/.cidx-server/xray-cache/" not in msg, (
         f"xray-cache path must be sanitized from error message. Got: {msg!r}"
     )
     assert "evaluator.rs" in msg, (
@@ -1335,7 +1335,7 @@ def test_error_message_sanitizes_nested_build_dir_xray_cache_paths():
 
     raw_stderr = (
         "error[E0425]: cannot find value `x` in this scope\n"
-        " --> /home/jsbattig/.cidx-server/xray-cache/"
+        " --> /home/opuser/.cidx-server/xray-cache/"
         "build-59d0fc1a2b3c4d-9k2pQz/59d0fc1a2b3c4d.rs:3:5\n"
         "  |\n"
         "3 |     x + 1\n"
@@ -1358,7 +1358,7 @@ def test_error_message_sanitizes_nested_build_dir_xray_cache_paths():
     _matches, errors, _meta = results[0]
     assert len(errors) == 1
     msg = errors[0]["error_message"]
-    assert "/home/jsbattig/.cidx-server/xray-cache/" not in msg, (
+    assert "/home/opuser/.cidx-server/xray-cache/" not in msg, (
         f"xray-cache path must be sanitized from error message. Got: {msg!r}"
     )
     assert "evaluator.rs" in msg, (
@@ -1385,7 +1385,7 @@ def test_error_message_sanitizes_home_paths():
 
     # --- /home/ non-cache path ---
     for raw_path in [
-        "/home/jsbattig/project/evaluator_custom.rs",
+        "/home/opuser/project/evaluator_custom.rs",
         "/root/tmp/evaluator_build.rs",
         "/tmp/evaluator_work.rs",
     ]:

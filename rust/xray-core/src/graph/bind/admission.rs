@@ -34,6 +34,44 @@ pub struct PreBindStats {
     pub declaration_count: usize,
     pub call_site_count: usize,
     pub candidate_edge_count: usize,
+    /// #1898 round 4 (epic #1906, mandate item 3): how many references
+    /// had a non-empty bare-name pool (a real same-named declaration
+    /// exists somewhere in the repo) but were narrowed all the way down
+    /// to ZERO final candidates -- see `super::resolve_all_references`'s
+    /// own doc comment for the full rationale and how this is
+    /// distinguished from an ordinary out-of-repo reference.
+    pub narrowed_to_zero_count: usize,
+    /// #1910 round 6 (finding 5, the mis-narrow counter `narrowed_to_zero_
+    /// count` is blind to): how many references had a non-empty bare-name
+    /// pool but were narrowed to a non-empty STRICT SUBSET of it -- see
+    /// `super::resolve_all_references`'s own doc comment.
+    pub narrowed_to_nonempty_strict_subset_count: usize,
+}
+
+/// Bug #1897 P1 fix: the two INDEPENDENT bind-time facts `finish_bind`
+/// itself observes while building the graph, returned LOSSLESSLY
+/// alongside the built `CodeGraph`.
+///
+/// `CodeGraph::set_completeness` (called once by `finish_bind`, below)
+/// collapses these two booleans into a SINGLE first-write-wins
+/// `AnalysisCompleteness` value -- that collapsed enum is exactly right
+/// for `CodeGraph::is_definitely_dead_code`'s own internal suppression
+/// (which only ever needs "is this graph anything other than `Complete`"),
+/// so `CodeGraph`'s own single-slot completeness is left UNCHANGED by this
+/// fix. But that same collapsed value is NOT a lossless record of what
+/// actually happened during THIS bind: when `exceeded` and
+/// `family_truncated` are both true, the old `if exceeded { .. } else if
+/// family_truncated { .. }` chain (still below) reports only
+/// `IndexBudgetExceeded`, silently discarding the fact that the family cap
+/// also truncated. `repo_index::build_repo_graph` -- the one caller that
+/// promises a LOSSLESS `completeness_reasons` list (#1897's own
+/// requirement) -- reads these two booleans directly instead, never
+/// reconstructing them from `graph.completeness()` after the collapse has
+/// already happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BindTimeFacts {
+    pub index_budget_exceeded: bool,
+    pub family_truncated: bool,
 }
 
 /// Everything `finish_bind` needs to complete the build. Deliberately
@@ -67,8 +105,13 @@ pub fn prepare_bind(
             .entry(file.language.clone())
             .or_insert_with(|| BinderDepth::new(file.language.clone()));
     }
-    let (pending, total_candidates, family_truncated) =
-        resolve_all_references(&files, &name_index, &type_index, index_is_complete);
+    let (
+        pending,
+        total_candidates,
+        family_truncated,
+        narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
+    ) = resolve_all_references(&files, &name_index, &type_index, index_is_complete);
     let declaration_count = files.iter().map(|f| f.index.declarations.len()).sum();
     let call_site_count = pending.len();
 
@@ -76,6 +119,8 @@ pub fn prepare_bind(
         declaration_count,
         call_site_count,
         candidate_edge_count: total_candidates,
+        narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
     };
     let prepared = PreparedBind {
         files,
@@ -91,7 +136,18 @@ pub fn prepare_bind(
 /// pre-AC12 `bind_with_budget` body, starting at the ONE CSR-arena
 /// allocation point (`CodeGraphBuilder::with_candidate_capacity`). Never
 /// called by `bind_with_admission_gate` when the gate denies.
-pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
+///
+/// Bug #1897 P1 fix: returns `BindTimeFacts` alongside the built
+/// `CodeGraph` -- the two independent booleans this function itself
+/// computes (`exceeded`, `family_truncated`) BEFORE they are collapsed
+/// into the single `AnalysisCompleteness` value `builder.set_completeness`
+/// records. See `BindTimeFacts`'s own doc comment for why this second,
+/// lossless channel exists.
+pub fn finish_bind(
+    prepared: PreparedBind,
+    budget: &IndexBudget,
+    file_paths: &HashMap<u32, String>,
+) -> (CodeGraph, BindTimeFacts) {
     let PreparedBind {
         files,
         mut depths,
@@ -104,7 +160,7 @@ pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
     let capacity = capped_candidate_total(&pending, exceeded, max_per_reference);
 
     let mut builder = CodeGraphBuilder::with_candidate_capacity(capacity);
-    intern_declarations_and_attach_signatures(&files, &mut builder, exceeded);
+    intern_declarations_and_attach_signatures(&files, &mut builder, exceeded, file_paths);
 
     for reference in pending {
         let depth = depths
@@ -153,7 +209,8 @@ pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
     } else {
         AnalysisCompleteness::Complete
     });
-    builder.build()
+    let facts = BindTimeFacts { index_budget_exceeded: exceeded, family_truncated };
+    (builder.build(), facts)
 }
 
 /// Outcome of a gated bind attempt (AC12 Gate 2). `Denied` carries the
@@ -173,6 +230,7 @@ pub fn bind_with_admission_gate<F>(
     files: Vec<FileForBind>,
     budget: &IndexBudget,
     index_is_complete: bool,
+    file_paths: &HashMap<u32, String>,
     gate: F,
 ) -> BindOutcome
 where
@@ -182,7 +240,13 @@ where
     if !gate(&stats) {
         return BindOutcome::Denied(stats);
     }
-    BindOutcome::Built(Box::new(finish_bind(prepared, budget)))
+    // `BindTimeFacts` is discarded here -- `bind_with_admission_gate` has no
+    // current caller that needs the lossless bind-time reasons (only
+    // `repo_index::build_repo_graph` does today, and it calls `finish_bind`
+    // directly, not through this gate). Add a `Built` facts field if a
+    // future caller needs it; never re-derive from `graph.completeness()`.
+    let (graph, _facts) = finish_bind(prepared, budget, file_paths);
+    BindOutcome::Built(Box::new(graph))
 }
 
 #[cfg(test)]
@@ -254,7 +318,7 @@ mod tests {
         assert_eq!(stats.call_site_count, 2);
         assert_eq!(stats.candidate_edge_count, 2);
 
-        let graph = finish_bind(prepared, &IndexBudget::unlimited());
+        let (graph, _facts) = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
         let actual_candidates: usize = graph
             .references()
             .iter()
@@ -276,7 +340,7 @@ mod tests {
         let via_public_api =
             super::super::bind_with_budget(two_file_fixture(), &IndexBudget::unlimited());
         let (prepared, _stats) = prepare_bind(two_file_fixture(), true);
-        let via_split_api = finish_bind(prepared, &IndexBudget::unlimited());
+        let (via_split_api, _facts) = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
 
         assert_eq!(via_public_api.completeness(), via_split_api.completeness());
         assert_eq!(
@@ -302,6 +366,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |_stats| false,
         );
 
@@ -325,6 +390,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |_stats| true,
         );
 
@@ -341,6 +407,7 @@ mod tests {
             two_file_fixture(),
             &IndexBudget::unlimited(),
             true,
+            &HashMap::new(),
             |stats| {
                 stats.declaration_count == 2
                     && stats.call_site_count == 2
@@ -353,17 +420,15 @@ mod tests {
         );
     }
 
-    /// Memory-safety amendment: `apply_inheritance_family_expansion`'s
-    /// `MAX_FAMILY_SIZE` cap truncating a family anywhere in the bind must
-    /// surface at the WHOLE-GRAPH level as `AnalysisCompleteness::
-    /// ResolutionAmbiguous` -- even under an `unlimited()` `IndexBudget`
-    /// that never exceeds its own (unrelated) raw-candidate ceiling. This
-    /// proves the two completeness signals are independent: a family cap
-    /// is a resolution-time concern, not a budget-ladder concern, so it
-    /// must be reported even when the ladder itself never engages.
-    #[test]
-    fn family_truncation_reports_resolution_ambiguous_completeness_even_under_an_unlimited_budget()
-    {
+    /// Shared by `family_truncation_reports_resolution_ambiguous_
+    /// completeness_even_under_an_unlimited_budget` and Bug #1897's own
+    /// both-reasons discriminating test below: a common interface
+    /// `Repo.save()` implemented by strictly more than `MAX_FAMILY_SIZE`
+    /// classes, each in its OWN distinct package so import-context
+    /// narrowing collapses to just the interface's own candidate BEFORE
+    /// family expansion re-adds (and truncates past the cap) every
+    /// implementor.
+    fn family_truncation_fixture() -> Vec<FileForBind> {
         use super::super::families::MAX_FAMILY_SIZE;
         use crate::graph::extract::local_index::{
             InheritanceKind, InheritanceRecord, MethodOwnerRecord,
@@ -444,14 +509,74 @@ mod tests {
             });
             files.push(file(file_id, "java", impl_file));
         }
+        files
+    }
 
-        let (prepared, _stats) = prepare_bind(files, true);
-        let graph = finish_bind(prepared, &IndexBudget::unlimited());
+    /// Memory-safety amendment: `apply_inheritance_family_expansion`'s
+    /// `MAX_FAMILY_SIZE` cap truncating a family anywhere in the bind must
+    /// surface at the WHOLE-GRAPH level as `AnalysisCompleteness::
+    /// ResolutionAmbiguous` -- even under an `unlimited()` `IndexBudget`
+    /// that never exceeds its own (unrelated) raw-candidate ceiling. This
+    /// proves the two completeness signals are independent: a family cap
+    /// is a resolution-time concern, not a budget-ladder concern, so it
+    /// must be reported even when the ladder itself never engages.
+    #[test]
+    fn family_truncation_reports_resolution_ambiguous_completeness_even_under_an_unlimited_budget()
+    {
+        let (prepared, _stats) = prepare_bind(family_truncation_fixture(), true);
+        let (graph, facts) = finish_bind(prepared, &IndexBudget::unlimited(), &HashMap::new());
 
         assert_eq!(
             graph.completeness(),
             crate::graph::budget::AnalysisCompleteness::ResolutionAmbiguous,
             "a truncated inheritance family must be visible at the whole-graph completeness level"
+        );
+        assert!(!facts.index_budget_exceeded, "an unlimited budget must never report exceeded");
+        assert!(facts.family_truncated, "BindTimeFacts must independently record the family truncation");
+    }
+
+    /// Bug #1897 P1 (dual-review reject), THE central discriminating test
+    /// for this specific fix: a SINGLE `finish_bind` call whose two
+    /// bind-time facts are BOTH true at once -- `index_budget_exceeded`
+    /// (a deliberately zero-ceiling `IndexBudget::new(0, 1)`, which any
+    /// non-empty candidate resolution trips) AND `family_truncated` (the
+    /// same `family_truncation_fixture` used above, whose truncation is
+    /// driven entirely by `families::MAX_FAMILY_SIZE`, independent of any
+    /// external `IndexBudget`).
+    ///
+    /// Before this fix, `finish_bind` returned only a `CodeGraph`, and its
+    /// `if exceeded { .. } else if family_truncated { .. }` chain collapsed
+    /// both facts into the single `AnalysisCompleteness::IndexBudgetExceeded`
+    /// value -- `family_truncated` was computed, then silently discarded,
+    /// never reaching any caller. This is `repo_index.rs`'s own equivalent
+    /// test, but isolated at the UNIT level: it proves the fact itself
+    /// survives `finish_bind`'s own return value, one layer below where
+    /// `repo_index::build_repo_graph` reads it.
+    #[test]
+    fn finish_bind_reports_both_bind_time_facts_when_budget_and_family_truncation_both_trip_at_once(
+    ) {
+        let (prepared, _stats) = prepare_bind(family_truncation_fixture(), true);
+        let (graph, facts) = finish_bind(prepared, &IndexBudget::new(0, 1), &HashMap::new());
+
+        assert!(
+            facts.index_budget_exceeded,
+            "fixture sanity: any non-empty candidate resolution must trip a zero-ceiling budget"
+        );
+        assert!(
+            facts.family_truncated,
+            "the family truncation must be reported EVEN THOUGH the budget ALSO tripped in the \
+             SAME bind -- this is exactly the fact #1897 was filed because it got silently \
+             dropped when both conditions held at once"
+        );
+        // `CodeGraph`'s own single-slot completeness is UNCHANGED by this
+        // fix -- it still collapses to whichever branch the `if/else if`
+        // chain hits first (budget, checked first). That collapse is
+        // correct for `is_definitely_dead_code`'s own suppression, which
+        // only needs "not Complete"; `BindTimeFacts` above is the lossless
+        // channel a caller that needs BOTH reasons must use instead.
+        assert_eq!(
+            graph.completeness(),
+            crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded
         );
     }
 }

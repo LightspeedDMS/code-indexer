@@ -2,8 +2,8 @@
 Tests for SCIPMultiService._get_repository_path bug fix (Story #45).
 
 BUG: _get_repository_path uses GoldenRepoManager.list_golden_repos() which returns
-repos with `alias` field (e.g., "evolution"), but users pass global repo names
-like "evolution-global" with `alias_name` field.
+repos with `alias` field (e.g., "example-repo"), but users pass global repo names
+like "example-repo-global" with `alias_name` field.
 
 FIX: Use GlobalRegistry with `alias_name` lookup and AliasManager for current path.
 
@@ -25,8 +25,8 @@ class TestGetRepositoryPathBugFix:
         BUG FIX VERIFICATION: _get_repository_path must use GlobalRegistry, not GoldenRepoManager.
 
         The bug is that it uses GoldenRepoManager.list_golden_repos() which returns repos
-        with `alias` field (e.g., "evolution"), but users pass global repo names like
-        "evolution-global" which need `alias_name` lookup from GlobalRegistry.
+        with `alias` field (e.g., "example-repo"), but users pass global repo names like
+        "example-repo-global" which need `alias_name` lookup from GlobalRegistry.
 
         This test reads the source code to verify correct classes are used.
         """
@@ -57,10 +57,10 @@ class TestGetRepositoryPathBugFix:
         """
         BUG FIX VERIFICATION: _get_repository_path must look up by 'alias_name', not 'alias'.
 
-        GoldenRepoManager returns repos with 'alias' field (e.g., "evolution").
-        GlobalRegistry returns repos with 'alias_name' field (e.g., "evolution-global").
+        GoldenRepoManager returns repos with 'alias' field (e.g., "example-repo").
+        GlobalRegistry returns repos with 'alias_name' field (e.g., "example-repo-global").
 
-        Users pass global repo names like "evolution-global", so we need 'alias_name' lookup.
+        Users pass global repo names like "example-repo-global", so we need 'alias_name' lookup.
         """
         from code_indexer.server.multi.scip_multi_service import SCIPMultiService
 

@@ -26,11 +26,11 @@ from code_indexer.server.storage.shared.ontap_flexclone_client import (
 def client() -> OntapFlexCloneClient:
     """A pre-configured client instance pointing at a test endpoint."""
     return OntapFlexCloneClient(
-        endpoint="100.99.60.248",
+        endpoint="203.0.113.10",
         username="fsxadmin",
         password="secret",
-        svm_name="sebaV2",
-        parent_volume="seba_vol1",
+        svm_name="svm1",
+        parent_volume="vol1",
         verify_ssl=False,
     )
 
@@ -52,25 +52,25 @@ def _mock_response(json_data: dict, status_code: int = 200) -> MagicMock:
 def test_endpoint_scheme_prepended_when_missing() -> None:
     """Bare hostname gets https:// prepended."""
     c = OntapFlexCloneClient(
-        endpoint="100.99.60.248",
+        endpoint="203.0.113.10",
         username="u",
         password="p",
         svm_name="svm",
         parent_volume="vol",
     )
-    assert c._endpoint == "https://100.99.60.248"
+    assert c._endpoint == "https://203.0.113.10"
 
 
 def test_endpoint_scheme_preserved_when_present() -> None:
     """Existing https:// scheme is not doubled."""
     c = OntapFlexCloneClient(
-        endpoint="https://100.99.60.248",
+        endpoint="https://203.0.113.10",
         username="u",
         password="p",
         svm_name="svm",
         parent_volume="vol",
     )
-    assert c._endpoint == "https://100.99.60.248"
+    assert c._endpoint == "https://203.0.113.10"
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +95,8 @@ def test_create_clone_sends_correct_post_body(client: OntapFlexCloneClient) -> N
     _, kwargs = mock_post.call_args
     body = kwargs["json"]
 
-    assert body["svm"]["name"] == "sebaV2"
-    assert body["clone"]["parent_volume"]["name"] == "seba_vol1"
+    assert body["svm"]["name"] == "svm1"
+    assert body["clone"]["parent_volume"]["name"] == "vol1"
     assert body["clone"]["is_flexclone"] is True
     assert body["nas"]["path"] == "/cidx_clone_myrepo_1700000000"
     assert body["name"] == "cidx_clone_myrepo_1700000000"
@@ -284,7 +284,7 @@ def test_list_clones_filters_by_prefix(client: OntapFlexCloneClient) -> None:
     records = [
         {"uuid": "u1", "name": "cidx_clone_repo_a_111"},
         {"uuid": "u2", "name": "cidx_clone_repo_b_222"},
-        {"uuid": "u3", "name": "seba_vol1"},  # should be excluded
+        {"uuid": "u3", "name": "vol1"},  # should be excluded
         {"uuid": "u4", "name": "other_volume"},  # should be excluded
     ]
     get_response = _mock_response({"records": records})
@@ -316,7 +316,7 @@ def test_list_clones_empty_when_no_matching_volumes(
     client: OntapFlexCloneClient,
 ) -> None:
     """list_clones returns empty list when no volumes match the prefix."""
-    get_response = _mock_response({"records": [{"uuid": "u1", "name": "seba_vol1"}]})
+    get_response = _mock_response({"records": [{"uuid": "u1", "name": "vol1"}]})
 
     with patch("requests.get", return_value=get_response):
         result = client.list_clones()

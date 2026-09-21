@@ -265,7 +265,7 @@ class TestOAuthManagerComplete:
     # Environment variable issuer URL support
     def test_issuer_uses_environment_variable_when_set(self, temp_db_path, monkeypatch):
         """Test that issuer uses CIDX_ISSUER_URL environment variable when set."""
-        test_issuer = "https://linner.ddns.net:8383"
+        test_issuer = "https://cidx.example.com:8383"
         monkeypatch.setenv("CIDX_ISSUER_URL", test_issuer)
         from code_indexer.server.auth.oauth.oauth_manager import OAuthManager
 

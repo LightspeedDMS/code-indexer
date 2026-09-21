@@ -16,6 +16,37 @@ use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
 
+/// Bug #1900 (epic #1906 P2): the single distinction `CodeGraph::edge_reason`
+/// promises -- whether the `(from, to)` edge is backed by at least one call
+/// site where `to` was the ONLY surviving candidate (`SoleCandidate`) or
+/// every contributing call site offered several candidates
+/// (`MultipleCandidates`). This is the exact mechanism the cycle-precision
+/// bug (#1899) needs to filter a finding (an SCC, a reachability path) down
+/// to a trustworthy CANDIDATE-SET SHAPE.
+///
+/// Review round 2 (BLOCKING P2): this tier is renamed from
+/// `Unambiguous`/`Ambiguous` to `SoleCandidate`/`MultipleCandidates` because
+/// it is, and always was, a COUNT of surviving candidates -- never a claim
+/// about whether the evidence backing that candidate is actually TRUE.
+/// `Unambiguous` invited exactly that misreading: a call site can have
+/// exactly one surviving candidate that is still a fabrication (e.g. a
+/// same-named `put(2 params)` landed on via `SAME_PACKAGE`/`ARITY_MATCH`
+/// alone, with no `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`), and this
+/// enum alone cannot tell that apart from a provably-correct single
+/// candidate. `edge_evidence` (below) is the accessor that carries the
+/// REAL evidence bits for that judgment -- this enum answers a narrower,
+/// honestly-named question: "how many candidates survived at the strongest
+/// contributing call site", nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeReason {
+    /// At least one reference resolving `from` to `to` had exactly one
+    /// surviving candidate in its window.
+    SoleCandidate,
+    /// Every reference resolving `from` to `to` had more than one
+    /// surviving candidate in its window.
+    MultipleCandidates,
+}
+
 /// Immutable, query-only whole-repository code graph. The only way to
 /// build one is `CodeGraphBuilder::build` -- there is no public
 /// constructor here that could assemble an internally-inconsistent graph
@@ -46,6 +77,12 @@ pub struct CodeGraph {
     /// `kind_for`'s doc comment for why that MUST be treated as unproven,
     /// never as license to report a symbol dead.
     kinds: HashMap<u32, DeclarationKind>,
+    /// Bug #1900 (epic #1906 P5): per-symbol DECLARATION location -- a
+    /// `(file_string_id, line)` pair into the shared `strings` table below.
+    /// See `location_for`'s doc comment for why this is keyed by the
+    /// declaration's own file+line, never a `Reference`'s call-site
+    /// coordinates.
+    locations: HashMap<u32, (u32, u32)>,
     /// Dual-review defect M2 fix: CSR forward adjacency (callees), built
     /// ONCE here rather than re-scanned per query -- see `super::adjacency`
     /// module docs for why `callees_of`/`strongly_connected_components`
@@ -75,6 +112,7 @@ impl CodeGraph {
         signatures: HashMap<u32, String>,
         visibilities: HashMap<u32, Visibility>,
         kinds: HashMap<u32, DeclarationKind>,
+        locations: HashMap<u32, (u32, u32)>,
     ) -> Self {
         let forward_index = super::adjacency::AdjacencyIndex::build_forward(symbols.len(), &references, &candidates);
         let reverse_index = super::adjacency::AdjacencyIndex::build_reverse(symbols.len(), &references, &candidates);
@@ -89,6 +127,7 @@ impl CodeGraph {
             signatures,
             visibilities,
             kinds,
+            locations,
             forward_index,
             reverse_index,
         }
@@ -127,6 +166,43 @@ impl CodeGraph {
     /// reads `Visibility::Unknown`: no evidence, so no confident verdict.
     pub fn kind_for(&self, dense_symbol_id: u32) -> Option<DeclarationKind> {
         self.kinds.get(&dense_symbol_id).copied()
+    }
+
+    /// Bug #1900 (epic #1906 P5): this symbol's DECLARATION file path and
+    /// 1-based line, or `None` if extraction never recorded one. This is
+    /// DELIBERATELY distinct from any `Reference`'s `file`/`line` fields
+    /// (`Reference.file` is a one-way SHA-256-derived hash, not even
+    /// resolvable to a path string, and in any case names a CALL SITE, not
+    /// a declaration) -- every production graph-mode finding today ships a
+    /// bare `name(N params)` string with no way to chase it to source; this
+    /// is the accessor that closes that gap. Returns a `&str` borrowed from
+    /// the shared string table, with a lifetime tied to `&self`, never an
+    /// owned `String` -- mirrors `resolve_string`/`signature_for`'s exact
+    /// contract.
+    ///
+    /// Review round 2 (BLOCKING P3): uses the CHECKED `try_resolve`, never
+    /// the panicking `resolve`. `thunk_location_for_raw` (`csr::mod::handle`)
+    /// is an FFI thunk reached from a dylib-supplied `GraphHandle` on
+    /// caller-controlled input (a corrupt or hand-crafted `--graph-in` file
+    /// whose `file_string_id` is outside the decoded string table) --
+    /// ADR-002 Defect 2 exists precisely so a panic can never cross that
+    /// boundary, exactly like `try_resolve_symbol`/`try_resolve_string`
+    /// already do for every other GraphHandle-reachable resolution. Returns
+    /// `None` on an out-of-range `file_string_id` rather than panicking.
+    pub fn location_for(&self, dense_symbol_id: u32) -> Option<(&str, usize)> {
+        let &(file_string_id, line) = self.locations.get(&dense_symbol_id)?;
+        let path = self.strings.try_resolve(file_string_id)?;
+        Some((path, line as usize))
+    }
+
+    /// Bug #1900: crate-internal UNRESOLVED counterpart to `location_for`,
+    /// returning the raw `(file_string_id, line)` pair as stored rather
+    /// than resolving `file_string_id` through the string table. Exists so
+    /// `csr::wire`'s writer can serialize this section directly off the
+    /// same ids `write_strings` already wrote, without re-interning or
+    /// re-resolving a `&str` it would immediately have to look back up.
+    pub(super) fn raw_location_for(&self, dense_symbol_id: u32) -> Option<(u32, u32)> {
+        self.locations.get(&dense_symbol_id).copied()
     }
 
     /// AC6 step 1: this symbol's cached AC2 signature line, or `None` if
@@ -312,6 +388,54 @@ impl CodeGraph {
         None
     }
 
+    /// Bug #1900 (epic #1906 P2): whether the `(from, to)` edge is backed
+    /// by at least one call site where `to` was the reference's ONLY
+    /// candidate (`Some(EdgeReason::SoleCandidate)`), every contributing
+    /// call site offered several candidates
+    /// (`Some(EdgeReason::MultipleCandidates)`), or `from` never targets
+    /// `to` at all (`None`). See `EdgeReason`'s doc comment for why this is
+    /// a COUNT-based tier only, never a truth/provenance claim -- use
+    /// `edge_evidence` for the latter.
+    ///
+    /// Complexity (review round 2 correction): O(out-degree of `from`) via
+    /// the precomputed forward adjacency index -- never an O(edges) scan of
+    /// `references()`. This is cheap for what an evaluator actually does
+    /// with it: querying a handful of edges along a PATH (a reachability
+    /// hop chain, typically a few hops) or the members of ONE SCC. It is
+    /// NOT cheap to call once per edge while annotating every edge in the
+    /// graph -- doing that for every node's out-edges is O(sum of
+    /// out-degree^2), not O(edges): a single hub with a large out-degree
+    /// dominates that sum on its own (measured ~0.55ns/edge-pair; a 100k
+    /// out-degree hub alone costs ~5.5s under that usage pattern).
+    pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+        self.forward_index
+            .ambiguous_for_edge(from, to)
+            .map(|ambiguous| if ambiguous { EdgeReason::MultipleCandidates } else { EdgeReason::SoleCandidate })
+    }
+
+    /// Bug #1900 (epic #1906 P2, review round 2): the REAL evidence
+    /// accessor `edge_reason` cannot provide -- the bitwise-OR of
+    /// `graph::reasons::*` bits across every candidate that contributed the
+    /// `(from, to)` edge. `None` when `from` never targets `to` at all;
+    /// `Some(0)` when it does but no candidate ever set an evidence bit
+    /// (an edge built from a bare `Candidate::new(sym, 0)`, which real
+    /// binder output never produces but a hand-built graph could). This is
+    /// what lets an evaluator require e.g. `RECEIVER_TYPE_MATCH` or
+    /// `UNIQUE_NAME_IN_REPO` before trusting a hop, rather than trusting
+    /// `edge_reason`'s candidate COUNT alone -- the fabricated-edge case
+    /// the review proved (a same-named overload landed on by
+    /// `SAME_PACKAGE`/`ARITY_MATCH` alone, reported `SoleCandidate` despite
+    /// being wrong) is exactly what this closes: `edge_evidence` on that
+    /// same pair carries no `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`
+    /// bit, so a caller checking for either can tell the two cases apart.
+    ///
+    /// Same complexity profile and caveat as `edge_reason` above: O(out-
+    /// degree of `from`), cheap for a path or an SCC member scan, NOT for
+    /// annotating every edge in the graph.
+    pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+        self.forward_index.evidence_for_edge(from, to)
+    }
+
     /// Dual-review defect D1 fix: records that `repo_index::build_repo_graph`
     /// (or any other caller ABOVE the binder that knows about a gap the
     /// binder itself cannot see -- `max_files` truncation, a parse error,
@@ -340,6 +464,7 @@ impl CodeGraph {
 mod tests {
     use super::super::builder::CodeGraphBuilder;
     use super::super::candidate::Candidate;
+    use super::EdgeReason;
     use crate::graph::bind::depth::BinderDepth;
     use crate::graph::identity::make_symbol_id;
     use crate::graph::reasons;
@@ -751,5 +876,229 @@ mod tests {
         // The two queries are deliberately not synonyms for unreferenced API.
         assert_eq!(graph.is_definitely_dead_code(unreferenced_api_a), None);
         assert_eq!(graph.is_definitely_dead_code(unreferenced_api_b), None);
+    }
+
+    /// Bug #1900 (epic #1906 P2, inherited from #1899's AC): the CENTRAL
+    /// discriminating test for `edge_reason`. `caller` has two outbound
+    /// references: one resolved to a SINGLE surviving candidate
+    /// (`unambiguous_target`), and one whose window held TWO surviving
+    /// candidates (`ambiguous_target_a`/`_b`). A caller filtering a graph
+    /// finding (e.g. an SCC or a reachability path) to trustworthy edges
+    /// needs to tell these apart -- this is the exact mechanism the
+    /// cycle-precision bug (#1899) asks for. `RED against unmodified code`:
+    /// neither `CodeGraph::edge_reason` nor `EdgeReason` exist yet, so this
+    /// fails to compile -- once implemented, a wrong implementation (e.g.
+    /// always reporting `Ambiguous`, or never distinguishing by window
+    /// size) would still fail these specific assertions.
+    #[test]
+    fn edge_reason_distinguishes_unambiguous_single_candidate_from_ambiguous_multi_candidate_edges() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(3);
+        let caller = builder.intern_symbol(make_symbol_id(1, 0));
+        let unambiguous_target = builder.intern_symbol(make_symbol_id(1, 1));
+        let ambiguous_target_a = builder.intern_symbol(make_symbol_id(1, 2));
+        let ambiguous_target_b = builder.intern_symbol(make_symbol_id(1, 3));
+
+        // Reference 0: caller -> unambiguous_target, exactly ONE candidate.
+        builder.add_reference(caller, 1, 10, 0, &[Candidate::new(unambiguous_target, reasons::UNIQUE_NAME_IN_REPO)]);
+        // Reference 1: caller -> {ambiguous_target_a, ambiguous_target_b}, TWO candidates.
+        builder.add_reference(
+            caller,
+            1,
+            11,
+            0,
+            &[
+                Candidate::new(ambiguous_target_a, reasons::SAME_PACKAGE),
+                Candidate::new(ambiguous_target_b, reasons::SAME_PACKAGE),
+            ],
+        );
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.edge_reason(caller, unambiguous_target),
+            Some(EdgeReason::SoleCandidate),
+            "a single-candidate reference window must report SoleCandidate"
+        );
+        assert_eq!(
+            graph.edge_reason(caller, ambiguous_target_a),
+            Some(EdgeReason::MultipleCandidates),
+            "a multi-candidate reference window must report MultipleCandidates for every candidate in it"
+        );
+        assert_eq!(graph.edge_reason(caller, ambiguous_target_b), Some(EdgeReason::MultipleCandidates));
+        assert_eq!(
+            graph.edge_reason(caller, 999),
+            None,
+            "a pair with no edge at all must report None, never a fabricated tier"
+        );
+    }
+
+    /// A single symbol pair reached by BOTH an ambiguous and an
+    /// unambiguous reference must report `Unambiguous` -- real, positive
+    /// single-target evidence from ONE call site is never invalidated by a
+    /// separate, weaker call site that also happens to target the same
+    /// symbol.
+    #[test]
+    fn edge_reason_prefers_unambiguous_when_the_same_pair_has_both_kinds_of_evidence() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(3);
+        let caller = builder.intern_symbol(make_symbol_id(2, 0));
+        let target = builder.intern_symbol(make_symbol_id(2, 1));
+        let other = builder.intern_symbol(make_symbol_id(2, 2));
+
+        // Reference 0: caller -> {target, other}, ambiguous.
+        builder.add_reference(
+            caller,
+            2,
+            5,
+            0,
+            &[Candidate::new(target, reasons::SAME_PACKAGE), Candidate::new(other, reasons::SAME_PACKAGE)],
+        );
+        // Reference 1: caller -> target, unambiguous.
+        builder.add_reference(caller, 2, 6, 0, &[Candidate::new(target, reasons::UNIQUE_NAME_IN_REPO)]);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.edge_reason(caller, target),
+            Some(EdgeReason::SoleCandidate),
+            "one sole-candidate call site is real evidence, regardless of a separate multi-candidate one"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P2, review round 2 -- the CENTRAL discriminating
+    /// test for the fabricated-edge fix, at the `CodeGraph` level): a
+    /// `SoleCandidate` edge (per `edge_reason`) can still carry weak
+    /// evidence only -- `edge_evidence` must report the candidate's REAL
+    /// `reasons()` bitmask, never derive anything from the candidate count.
+    /// Reproduces the review's own `java.util.Map.put` shape: a single
+    /// surviving candidate resolved via `SAME_PACKAGE`/`ARITY_MATCH` alone,
+    /// with no `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`.
+    #[test]
+    fn edge_evidence_reports_weak_evidence_for_a_sole_candidate_edge() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+        let caller = builder.intern_symbol(make_symbol_id(5, 0));
+        let fabricated_target = builder.intern_symbol(make_symbol_id(5, 1));
+
+        // A single surviving candidate (edge_reason == SoleCandidate) whose
+        // ONLY evidence is weak structural matching -- the exact shape the
+        // review proved gets mislabeled by cand_len alone.
+        builder.add_reference(
+            caller,
+            5,
+            1,
+            0,
+            &[Candidate::new(fabricated_target, reasons::SAME_PACKAGE | reasons::ARITY_MATCH)],
+        );
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.edge_reason(caller, fabricated_target),
+            Some(EdgeReason::SoleCandidate),
+            "fixture sanity: this is exactly the count-based tier a fabricated single candidate reports"
+        );
+        assert_eq!(
+            graph.edge_evidence(caller, fabricated_target),
+            Some(reasons::SAME_PACKAGE | reasons::ARITY_MATCH),
+            "edge_evidence must report the candidate's REAL reasons bitmask, not a count-derived flag"
+        );
+        assert_eq!(
+            graph.edge_evidence(caller, fabricated_target).unwrap() & reasons::RECEIVER_TYPE_MATCH,
+            0,
+            "the fabricated edge carries no RECEIVER_TYPE_MATCH bit -- a caller checking for \
+             strong evidence can now tell this apart from a genuinely verified hop"
+        );
+    }
+
+    /// Bug #1900 (review round 2, reviewer-relay finding): a single
+    /// pre-combined candidate cannot distinguish "OR of every contributing
+    /// occurrence" from "just returns the first/only match's reasons" -- an
+    /// implementation that picked ONE candidate's reasons rather than
+    /// OR-ing across occurrences would still pass the test above. This test
+    /// uses TWO SEPARATE references from the same caller to the same
+    /// target, each carrying a DIFFERENT, non-overlapping reason bit, and
+    /// asserts `edge_evidence` reports the bitwise UNION of both -- the
+    /// only way that union can appear is if both occurrences were actually
+    /// combined.
+    #[test]
+    fn edge_evidence_ors_bits_across_two_separate_references_to_the_same_target() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+        let caller = builder.intern_symbol(make_symbol_id(6, 0));
+        let target = builder.intern_symbol(make_symbol_id(6, 1));
+
+        // Reference 0: caller -> target, evidence bit A only.
+        builder.add_reference(caller, 6, 1, 0, &[Candidate::new(target, reasons::SAME_PACKAGE)]);
+        // Reference 1: a SEPARATE call site, caller -> target again, evidence bit B only.
+        builder.add_reference(caller, 6, 2, 0, &[Candidate::new(target, reasons::UNIQUE_NAME_IN_REPO)]);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.edge_evidence(caller, target),
+            Some(reasons::SAME_PACKAGE | reasons::UNIQUE_NAME_IN_REPO),
+            "edge_evidence must be the OR of BOTH occurrences' reason bits, not either one alone"
+        );
+    }
+
+    #[test]
+    fn edge_evidence_returns_none_for_a_pair_with_no_edge() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+        let caller = builder.intern_symbol(make_symbol_id(7, 0));
+        let target = builder.intern_symbol(make_symbol_id(7, 1));
+        builder.add_reference(caller, 7, 1, 0, &[Candidate::new(target, reasons::SAME_FILE)]);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.edge_evidence(caller, 999),
+            None,
+            "a pair with no edge at all must report None, never a fabricated Some(0)"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P2/P5): `location_for` must report a
+    /// DECLARATION's own file+line -- captured via `add_location`,
+    /// independent of any `Reference`'s call-site coordinates -- and must
+    /// return `None`, never fabricate one, for a symbol with no recorded
+    /// location. `RED against unmodified code`: `CodeGraphBuilder` has no
+    /// `add_location` method yet, so this fails to compile.
+    #[test]
+    fn location_for_returns_the_declared_file_and_line_and_none_when_absent() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let with_location = builder.intern_symbol(make_symbol_id(4, 0));
+        let without_location = builder.intern_symbol(make_symbol_id(4, 1));
+        let file_string_id = builder.intern_string("com/example/Foo.java");
+        builder.add_location(with_location, file_string_id, 42);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.location_for(with_location),
+            Some(("com/example/Foo.java", 42)),
+            "location_for must resolve the interned file path and the exact recorded line"
+        );
+        assert_eq!(
+            graph.location_for(without_location),
+            None,
+            "a symbol never passed to add_location must return None, never a fabricated location"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P2, review round 2 -- BLOCKING P3): a corrupt
+    /// `file_string_id` (out of range for this graph's string table) must
+    /// make `location_for` return `None`, never panic. `thunk_location_for_
+    /// raw` is an FFI thunk reached from a dylib-supplied `GraphHandle` on
+    /// caller-controlled input; ADR-002 Defect 2 exists precisely so a
+    /// panic can never cross that boundary, exactly like
+    /// `try_resolve_symbol`/`try_resolve_string` already guarantee for
+    /// every other GraphHandle-reachable resolution. This builds the
+    /// corrupt state directly via `add_location` (bypassing `intern_string`
+    /// entirely) -- the same shape a corrupt `--graph-in` file would
+    /// produce if it ever slipped past `read_locations`'s own wire-level
+    /// validation (see `wire.rs`). `RED against the pre-fix code`: the old
+    /// `self.strings.resolve(file_string_id)` panics here instead of
+    /// returning `None`.
+    #[test]
+    fn location_for_returns_none_instead_of_panicking_for_a_corrupt_file_string_id() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let symbol = builder.intern_symbol(make_symbol_id(9, 0));
+        const OUT_OF_RANGE_STRING_ID: u32 = 999;
+        builder.add_location(symbol, OUT_OF_RANGE_STRING_ID, 1);
+        let graph = builder.build();
+
+        assert_eq!(graph.location_for(symbol), None, "an out-of-range file_string_id must return None, never panic");
     }
 }

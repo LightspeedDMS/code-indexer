@@ -311,7 +311,7 @@ class TestLegacyRemoteMigration:
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:jsbattig/test-repo.git",
+                "git@github.com:example-org/test-repo.git",
             ],
             cwd=repo_path,
             check=True,
@@ -452,7 +452,7 @@ class TestLegacyRemoteMigration:
         )
         origin_url = result.stdout.strip()
 
-        assert origin_url == "git@github.com:jsbattig/test-repo.git"
+        assert origin_url == "git@github.com:example-org/test-repo.git"
         assert not origin_url.startswith("/")
 
     def test_migration_is_idempotent(
@@ -487,7 +487,7 @@ class TestLegacyRemoteMigration:
         )
         remotes = result.stdout
 
-        assert "origin\tgit@github.com:jsbattig/test-repo.git" in remotes
+        assert "origin\tgit@github.com:example-org/test-repo.git" in remotes
         assert f"golden\t{golden_repo_with_remote}" in remotes
 
     def test_detect_already_migrated_repo_returns_false(
@@ -518,7 +518,7 @@ class TestLegacyRemoteMigration:
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:jsbattig/test-repo.git",
+                "git@github.com:example-org/test-repo.git",
             ],
             cwd=repo_path,
             check=True,

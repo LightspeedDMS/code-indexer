@@ -5,7 +5,7 @@ non-retryable terminal state -- excluded from the pending set (so it
 neither blocks done-detection nor is retried every tick) -- rather than
 looping it through the ordinary quarantine-then-retry cycle forever.
 
-Confirmed production incident this closes: the "evolution" golden repo's
+Confirmed production incident this closes: the "example-repo" golden repo's
 chunks.db was corrupt with its legacy source already deleted; the
 scheduler retried it every tick (481 consecutive failures) and never
 stopped scheduling once done, running a no-op job every tick forever.
@@ -56,7 +56,7 @@ def _build_unrecoverable_corrupt_repo(golden_repos_dir: Path, alias: str) -> Pat
     genuinely, permanently unrecoverable: the chunks_db discriminator is
     committed (so resolve_chunk_layout reports CHUNKS_DB), chunks.db
     itself is corrupt/unopenable, and the legacy vector_*.json source is
-    entirely absent -- reproducing the exact confirmed 'evolution'
+    entirely absent -- reproducing the exact confirmed 'example-repo'
     incident state."""
     base_clone = golden_repos_dir / alias
     index_path = base_clone / ".code-indexer" / "index"
@@ -102,10 +102,12 @@ class TestUnrecoverableCorruptionIsNotRetriedAndDoesNotBlockAutoStop:
     ) -> None:
         refresh_scheduler = _make_refresh_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
-        corrupt_base = _build_unrecoverable_corrupt_repo(golden_repos_dir, "evolution")
+        corrupt_base = _build_unrecoverable_corrupt_repo(
+            golden_repos_dir, "example-repo"
+        )
         backend = _make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"evolution": corrupt_base}, sqlite_backend=backend
+            {"example-repo": corrupt_base}, sqlite_backend=backend
         )
         scheduler = _make_scheduler(
             tmp_path,
@@ -120,11 +122,11 @@ class TestUnrecoverableCorruptionIsNotRetriedAndDoesNotBlockAutoStop:
         # Never raises UnrecoverableConsolidationCorruptionError through
         # the scheduler -- it is caught, recorded, and the sweep moves on.
         assert result == {"status": "nothing_to_migrate"}
-        state = backend.get_fleet_migration_failure_state("evolution")
+        state = backend.get_fleet_migration_failure_state("example-repo")
         assert state is not None
         assert state["failure_cause"] == UNRECOVERABLE_FAILURE_CAUSE
         candidate = next(iter(enumerate_fleet_migration_candidates(golden)))
-        assert is_permanently_unrecoverable(golden, "evolution") is True
+        assert is_permanently_unrecoverable(golden, "example-repo") is True
         # NOT the ordinary quarantine mechanism -- a genuinely distinct
         # classification the scheduler consults separately.
         assert is_quarantined(golden, candidate) is False
@@ -134,10 +136,12 @@ class TestUnrecoverableCorruptionIsNotRetriedAndDoesNotBlockAutoStop:
     ) -> None:
         refresh_scheduler = _make_refresh_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
-        corrupt_base = _build_unrecoverable_corrupt_repo(golden_repos_dir, "evolution")
+        corrupt_base = _build_unrecoverable_corrupt_repo(
+            golden_repos_dir, "example-repo"
+        )
         backend = _make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"evolution": corrupt_base}, sqlite_backend=backend
+            {"example-repo": corrupt_base}, sqlite_backend=backend
         )
         scheduler = _make_scheduler(
             tmp_path,
@@ -254,10 +258,10 @@ class TestQuarantinePermanentUnrecoverableClassification:
         backend = _make_backend(tmp_path)
         golden = _FakeGoldenRepoManager({}, sqlite_backend=backend)
 
-        record_unrecoverable_corruption(golden, "evolution", "corrupt, legacy gone")
+        record_unrecoverable_corruption(golden, "example-repo", "corrupt, legacy gone")
 
-        assert is_permanently_unrecoverable(golden, "evolution") is True
-        state = backend.get_fleet_migration_failure_state("evolution")
+        assert is_permanently_unrecoverable(golden, "example-repo") is True
+        state = backend.get_fleet_migration_failure_state("example-repo")
         assert state["failure_cause"] == UNRECOVERABLE_FAILURE_CAUSE
 
     def test_ordinary_generic_failure_is_not_permanently_unrecoverable(
@@ -289,14 +293,16 @@ class TestQuarantinePermanentUnrecoverableClassification:
         has no signature that could ever prove "recovered"; only an
         explicit reset_migration_failure() call may clear it."""
         golden_repos_dir = tmp_path / "golden-repos"
-        corrupt_base = _build_unrecoverable_corrupt_repo(golden_repos_dir, "evolution")
+        corrupt_base = _build_unrecoverable_corrupt_repo(
+            golden_repos_dir, "example-repo"
+        )
         backend = _make_backend(tmp_path)
         golden = _FakeGoldenRepoManager(
-            {"evolution": corrupt_base}, sqlite_backend=backend
+            {"example-repo": corrupt_base}, sqlite_backend=backend
         )
 
-        record_unrecoverable_corruption(golden, "evolution", "corrupt, legacy gone")
-        assert is_permanently_unrecoverable(golden, "evolution") is True
+        record_unrecoverable_corruption(golden, "example-repo", "corrupt, legacy gone")
+        assert is_permanently_unrecoverable(golden, "example-repo") is True
 
         # Genuinely change the on-disk directory content -- the exact
         # kind of change is_quarantined()'s signature-based auto-clear
@@ -306,7 +312,7 @@ class TestQuarantinePermanentUnrecoverableClassification:
         )
         (collection_dir / "new_file_added_after_the_fact.txt").write_text("changed")
 
-        assert is_permanently_unrecoverable(golden, "evolution") is True, (
+        assert is_permanently_unrecoverable(golden, "example-repo") is True, (
             "Bug: the permanent unrecoverable classification was cleared "
             "by a mere on-disk directory change -- it must only clear via "
             "an explicit reset_migration_failure() call."
@@ -327,16 +333,20 @@ class TestRecordUnrecoverableFailsClosed:
         golden = _FakeGoldenRepoManager({})  # sqlite_backend=None (default)
 
         with pytest.raises(QuarantineStateUnavailableError):
-            record_unrecoverable_corruption(golden, "evolution", "corrupt, legacy gone")
+            record_unrecoverable_corruption(
+                golden, "example-repo", "corrupt, legacy gone"
+            )
 
     def test_scheduler_aborts_tick_rather_than_silently_proceeding_when_recording_fails(
         self, tmp_path: Path
     ) -> None:
         refresh_scheduler = _make_refresh_scheduler(tmp_path)
         golden_repos_dir = tmp_path / "golden-repos"
-        corrupt_base = _build_unrecoverable_corrupt_repo(golden_repos_dir, "evolution")
+        corrupt_base = _build_unrecoverable_corrupt_repo(
+            golden_repos_dir, "example-repo"
+        )
         # Deliberately NO backend -- the exact fail-closed scenario.
-        golden = _FakeGoldenRepoManager({"evolution": corrupt_base})
+        golden = _FakeGoldenRepoManager({"example-repo": corrupt_base})
         scheduler = _make_scheduler(
             tmp_path,
             golden,

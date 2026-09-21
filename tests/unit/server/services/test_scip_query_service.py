@@ -1699,11 +1699,11 @@ class TestAnalyzeImpactScoping:
             ) as mock_composite,
         ):
             result = service.analyze_impact(
-                "LSAuthenticator", depth=3, repository_alias="evolution-global"
+                "LSAuthenticator", depth=3, repository_alias="example-repo-global"
             )
 
         mock_find.assert_called_once_with(
-            repository_alias="evolution-global", username=None
+            repository_alias="example-repo-global", username=None
         )
         mock_composite.assert_not_called()  # the expensive scan must be skipped
         assert result["total_affected"] == 0
@@ -1720,7 +1720,7 @@ class TestAnalyzeImpactScoping:
 
         with pytest.raises(ValueError, match="depth must be at least 1"):
             service.analyze_impact(
-                "LSAuthenticator", depth=0, repository_alias="evolution-global"
+                "LSAuthenticator", depth=0, repository_alias="example-repo-global"
             )
 
     def test_scopes_composite_to_project_scip_dir(self):
@@ -1730,7 +1730,9 @@ class TestAnalyzeImpactScoping:
         from code_indexer.scip.query.composites import ImpactAnalysisResult
 
         service = self._service()
-        scip_file = Path("/data/golden-repos/evolution/.code-indexer/scip/idx.scip.db")
+        scip_file = Path(
+            "/data/golden-repos/example-repo/.code-indexer/scip/idx.scip.db"
+        )
         empty = ImpactAnalysisResult(
             target_symbol="X",
             target_location=None,
@@ -1749,11 +1751,11 @@ class TestAnalyzeImpactScoping:
                 return_value=empty,
             ) as mock_composite,
         ):
-            service.analyze_impact("X", depth=3, repository_alias="evolution-global")
+            service.analyze_impact("X", depth=3, repository_alias="example-repo-global")
 
         # composite called with the scoped .code-indexer/scip dir
         called_dir = mock_composite.call_args.args[1]
-        assert called_dir == Path("/data/golden-repos/evolution/.code-indexer/scip")
+        assert called_dir == Path("/data/golden-repos/example-repo/.code-indexer/scip")
 
     def test_scip_dir_for_files_finds_code_indexer_scip(self):
         from code_indexer.server.services.scip_query_service import SCIPQueryService

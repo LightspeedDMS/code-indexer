@@ -177,7 +177,7 @@ cd "{self.home_dir}"
 
         Args:
             port: Server port
-            issuer_url: OAuth issuer URL (e.g., https://linner.ddns.net:8383)
+            issuer_url: OAuth issuer URL (e.g., https://cidx.example.com:8383)
             voyage_api_key: VoyageAI API key (WARNING: stored in plaintext in service file)
 
         Returns:

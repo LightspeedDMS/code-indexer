@@ -329,22 +329,22 @@ class TestCountQuarantined:
     ) -> None:
         golden_repo_manager = _FakeGoldenRepoManagerWithBackend(sqlite_backend)
         click_candidate = _make_candidate(tmp_path, "click")
-        evolution_candidate = _make_candidate(tmp_path, "evolution")
+        evolution_candidate = _make_candidate(tmp_path, "example-repo")
         click_sig = compute_repo_state_signature(click_candidate)
         evolution_sig = compute_repo_state_signature(evolution_candidate)
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
             record_migration_failure(golden_repo_manager, "click", click_sig)
-        record_migration_failure(golden_repo_manager, "evolution", evolution_sig)
+        record_migration_failure(golden_repo_manager, "example-repo", evolution_sig)
 
-        count = count_quarantined(golden_repo_manager, ["click", "evolution"])
+        count = count_quarantined(golden_repo_manager, ["click", "example-repo"])
         assert count == 1
 
     def test_zero_when_no_failures_recorded(
         self, tmp_path: Path, sqlite_backend
     ) -> None:
         golden_repo_manager = _FakeGoldenRepoManagerWithBackend(sqlite_backend)
-        assert count_quarantined(golden_repo_manager, ["click", "evolution"]) == 0
+        assert count_quarantined(golden_repo_manager, ["click", "example-repo"]) == 0
 
     def test_degrades_gracefully_with_no_backend_attribute(self) -> None:
         golden_repo_manager = _FakeGoldenRepoManagerNoBackend()
@@ -549,7 +549,7 @@ class TestIsQuarantinedThrottlesExpensiveRecheck:
     test, Codex round-3 review): Codex measured the full nested-shard
     signature walk at ~0.5s / ~45,338 stat() calls / ~27,020 iterdir()
     calls / ~22,668 is_dir() calls on a synthetic 21,518-file collection
-    deliberately matching the real "evolution" golden repo's actual scale.
+    deliberately matching the real "example-repo" golden repo's actual scale.
     `is_quarantined()` calls this walk for EVERY already-quarantined
     candidate the scheduler's per-candidate loop encounters, on EVERY
     tick -- an I/O storm on NFS (this project's actual staging/cluster

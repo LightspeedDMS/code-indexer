@@ -78,12 +78,14 @@ def test_discover_and_enforce_temporal_retention_finds_temporal_aliases_only(
     alias_manager = AliasManager(str(tmp_path / "aliases"))
 
     alias_manager.create_alias(
-        "evolution-global", "/mnt/cow/.versioned/evolution/v_999", repo_name="evolution"
+        "example-repo-global",
+        "/mnt/cow/.versioned/example-repo/v_999",
+        repo_name="example-repo",
     )
     alias_manager.create_alias(
-        "evolution-temporal-voyage_code_3-2024Q1",
-        "/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_300",
-        repo_name="evolution-temporal-voyage_code_3-2024Q1",
+        "example-repo-temporal-voyage_code_3-2024Q1",
+        "/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_300",
+        repo_name="example-repo-temporal-voyage_code_3-2024Q1",
     )
     alias_manager.create_alias(
         "other-repo-temporal-voyage_code_3-2024Q1",
@@ -92,9 +94,9 @@ def test_discover_and_enforce_temporal_retention_finds_temporal_aliases_only(
     )
 
     snaps = [
-        ("/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_100", 100),
-        ("/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_200", 200),
-        ("/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_300", 300),
+        ("/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_100", 100),
+        ("/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_200", 200),
+        ("/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_300", 300),
     ]
     sm = _snapshot_manager_with(snaps)
 
@@ -103,7 +105,7 @@ def test_discover_and_enforce_temporal_retention_finds_temporal_aliases_only(
     ) as gcs:
         gcs.return_value.get_config.return_value.snapshot_retention_keep_last = 1
         discover_and_enforce_temporal_retention(
-            "evolution",
+            "example-repo",
             snapshot_manager=sm,
             alias_manager=alias_manager,
             cleanup_manager=cm,
@@ -111,13 +113,13 @@ def test_discover_and_enforce_temporal_retention_finds_temporal_aliases_only(
 
     scheduled = {c.args[0] for c in cm.schedule_cleanup.call_args_list}
     assert scheduled == {
-        "/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_100",
-        "/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_200",
+        "/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_100",
+        "/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_200",
     }
     # list_snapshots must have been called ONLY for the temporal alias,
     # never for the semantic golden alias or the other repo's temporal alias.
     called_aliases = {c.args[0] for c in sm.list_snapshots.call_args_list}
-    assert called_aliases == {"evolution-temporal-voyage_code_3-2024Q1"}
+    assert called_aliases == {"example-repo-temporal-voyage_code_3-2024Q1"}
 
 
 def test_discover_and_enforce_temporal_retention_no_op_when_no_temporal_aliases(
@@ -126,12 +128,14 @@ def test_discover_and_enforce_temporal_retention_no_op_when_no_temporal_aliases(
     cm = MagicMock(spec=CleanupManager)
     alias_manager = AliasManager(str(tmp_path / "aliases"))
     alias_manager.create_alias(
-        "evolution-global", "/mnt/cow/.versioned/evolution/v_999", repo_name="evolution"
+        "example-repo-global",
+        "/mnt/cow/.versioned/example-repo/v_999",
+        repo_name="example-repo",
     )
     sm = _snapshot_manager_with([])
 
     discover_and_enforce_temporal_retention(
-        "evolution",
+        "example-repo",
         snapshot_manager=sm,
         alias_manager=alias_manager,
         cleanup_manager=cm,
@@ -149,13 +153,13 @@ def test_discover_and_enforce_temporal_retention_no_op_when_snapshot_manager_non
     cm = MagicMock(spec=CleanupManager)
     alias_manager = AliasManager(str(tmp_path / "aliases"))
     alias_manager.create_alias(
-        "evolution-temporal-voyage_code_3-2024Q1",
-        "/mnt/cow/.versioned/evolution-temporal-voyage_code_3-2024Q1/v_300",
-        repo_name="evolution-temporal-voyage_code_3-2024Q1",
+        "example-repo-temporal-voyage_code_3-2024Q1",
+        "/mnt/cow/.versioned/example-repo-temporal-voyage_code_3-2024Q1/v_300",
+        repo_name="example-repo-temporal-voyage_code_3-2024Q1",
     )
 
     discover_and_enforce_temporal_retention(
-        "evolution",
+        "example-repo",
         snapshot_manager=None,
         alias_manager=alias_manager,
         cleanup_manager=cm,

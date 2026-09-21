@@ -87,10 +87,10 @@ def test_known_resolvable_alias_returns_the_fixed_root(tmp_path: Path) -> None:
 
     manager = _manager(tmp_path)
     expected = server_temporal_index_root(
-        tmp_path / "data" / "golden-repos", "evolution"
+        tmp_path / "data" / "golden-repos", "example-repo"
     )
 
-    assert manager._resolve_temporal_index_dir("evolution") == expected
+    assert manager._resolve_temporal_index_dir("example-repo") == expected
 
 
 def test_temporal_worker_known_alias_with_unresolvable_root_raises(

@@ -135,10 +135,10 @@ class TestFleetMigrationFailureStatesAreIndependentPerAlias:
     def test_two_aliases_track_independent_counters(self, backend):
         backend.record_fleet_migration_failure("click", "sig-1")
         backend.record_fleet_migration_failure("click", "sig-1")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
 
         click_state = backend.get_fleet_migration_failure_state("click")
-        evolution_state = backend.get_fleet_migration_failure_state("evolution")
+        evolution_state = backend.get_fleet_migration_failure_state("example-repo")
         assert click_state["consecutive_failure_count"] == 2
         assert evolution_state["consecutive_failure_count"] == 1
 
@@ -165,12 +165,12 @@ class TestResetFleetMigrationFailure:
 
     def test_reset_only_affects_the_named_alias(self, backend):
         backend.record_fleet_migration_failure("click", "sig-1")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
 
         backend.reset_fleet_migration_failure("click")
 
         assert backend.get_fleet_migration_failure_state("click") is None
-        assert backend.get_fleet_migration_failure_state("evolution") is not None
+        assert backend.get_fleet_migration_failure_state("example-repo") is not None
 
 
 class TestSoftResetFleetMigrationFailureCount:
@@ -213,8 +213,8 @@ class TestSoftResetFleetMigrationFailureCount:
 
     def test_soft_reset_only_affects_the_named_alias(self, backend):
         backend.record_fleet_migration_failure("click", "sig-1")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
 
         backend.soft_reset_fleet_migration_failure_count("click")
 
@@ -225,7 +225,7 @@ class TestSoftResetFleetMigrationFailureCount:
             == 0
         )
         assert (
-            backend.get_fleet_migration_failure_state("evolution")[
+            backend.get_fleet_migration_failure_state("example-repo")[
                 "consecutive_failure_count"
             ]
             == 2
@@ -268,20 +268,20 @@ class TestListFleetMigrationFailureStates:
     def test_returns_every_tracked_alias(self, backend):
         backend.record_fleet_migration_failure("click", "sig-1")
         backend.record_fleet_migration_failure("click", "sig-1")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
 
         rows = backend.list_fleet_migration_failure_states()
         by_alias = {row["golden_alias"]: row for row in rows}
-        assert set(by_alias) == {"click", "evolution"}
+        assert set(by_alias) == {"click", "example-repo"}
         assert by_alias["click"]["consecutive_failure_count"] == 2
-        assert by_alias["evolution"]["consecutive_failure_count"] == 1
+        assert by_alias["example-repo"]["consecutive_failure_count"] == 1
 
     def test_reset_alias_no_longer_appears_in_the_list(self, backend):
         backend.record_fleet_migration_failure("click", "sig-1")
-        backend.record_fleet_migration_failure("evolution", "sig-e")
+        backend.record_fleet_migration_failure("example-repo", "sig-e")
 
         backend.reset_fleet_migration_failure("click")
 
         rows = backend.list_fleet_migration_failure_states()
         aliases = {row["golden_alias"] for row in rows}
-        assert aliases == {"evolution"}
+        assert aliases == {"example-repo"}

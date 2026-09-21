@@ -167,7 +167,7 @@ class TestOrphanedAliasIsReaped:
         self, db_path, sqlite_backend, monkeypatch
     ):
         manager = _FakeGoldenRepoManager(sqlite_backend, repos={})
-        record_unrecoverable_corruption(manager, "evolution", "corrupt detail")
+        record_unrecoverable_corruption(manager, "example-repo", "corrupt detail")
         _patch_golden_repo_manager(monkeypatch, manager)
 
         service = _make_health_service(db_path)
@@ -177,7 +177,7 @@ class TestOrphanedAliasIsReaped:
 
         assert has_warning is False
         assert reasons == []
-        assert get_failure_state(manager, "evolution") is None
+        assert get_failure_state(manager, "example-repo") is None
 
 
 class TestGenuinelyBrokenStaysReported:
@@ -241,7 +241,7 @@ class TestReconciliationFailsOpenWithoutGoldenRepoManager:
     ):
         manager_for_write_only = _FakeGoldenRepoManager(sqlite_backend, repos={})
         record_unrecoverable_corruption(
-            manager_for_write_only, "evolution", "corrupt detail"
+            manager_for_write_only, "example-repo", "corrupt detail"
         )
 
         def _raise_unavailable():
@@ -258,5 +258,5 @@ class TestReconciliationFailsOpenWithoutGoldenRepoManager:
         )
 
         assert has_warning is True
-        assert any("evolution" in reason for reason in reasons)
-        assert get_failure_state(manager_for_write_only, "evolution") is not None
+        assert any("example-repo" in reason for reason in reasons)
+        assert get_failure_state(manager_for_write_only, "example-repo") is not None

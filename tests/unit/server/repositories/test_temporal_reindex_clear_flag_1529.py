@@ -34,7 +34,7 @@ from code_indexer.services.temporal.temporal_server_paths import (
 )
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-ALIAS = "evolution"
+ALIAS = "example-repo"
 SHARD = "code-indexer-temporal-voyage_code_3-2024Q1"
 VECTOR_SIZE = 8
 

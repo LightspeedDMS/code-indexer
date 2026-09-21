@@ -93,7 +93,7 @@ class TestRecordDedupOutcomeCumulativeSemantics:
     def test_second_pass_adds_to_cumulative_counts(self, backend):
         _record(
             backend,
-            "evolution",
+            "example-repo",
             duplicate_groups=5,
             records_before=1000,
             records_deleted=6,
@@ -103,7 +103,7 @@ class TestRecordDedupOutcomeCumulativeSemantics:
         )
         second = _record(
             backend,
-            "evolution",
+            "example-repo",
             duplicate_groups=2,
             records_before=1050,
             records_deleted=3,
@@ -120,13 +120,13 @@ class TestRecordDedupOutcomeCumulativeSemantics:
     def test_second_pass_overwrites_the_snapshot_fields(self, backend):
         _record(
             backend,
-            "evolution",
+            "example-repo",
             records_before=1000,
             collection_total=1000,
         )
         second = _record(
             backend,
-            "evolution",
+            "example-repo",
             records_before=1050,
             collection_total=1050,
         )

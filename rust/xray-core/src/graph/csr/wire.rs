@@ -47,7 +47,7 @@ use std::path::Path;
 /// silently misparsed (its bytes would otherwise be read as if they were
 /// the completeness byte). Same safety argument as the #1835 bump: this
 /// is a same-invocation parent/child handoff, never a persistent cache.
-const MAGIC: &[u8; 8] = b"XRAYGRF3";
+const MAGIC: &[u8; 8] = b"XRAYGRF4";
 /// `from`(4) + `file`(4) + `line`(4) + `kind`(1) + `cand_start`(4) + `cand_len`(2).
 const REFERENCE_RECORD_MIN_BYTES: usize = 19;
 /// `symbol`(4) + `reasons`(2).
@@ -62,13 +62,16 @@ const SIGNATURE_RECORD_MIN_BYTES: usize = 8;
 const VISIBILITY_RECORD_MIN_BYTES: usize = 5;
 /// `dense_id`(4) + `kind`(1).
 const KIND_RECORD_MIN_BYTES: usize = 5;
+/// `dense_id`(4) + `file_string_id`(4) + `line`(4).
+const LOCATION_RECORD_MIN_BYTES: usize = 12;
 
 /// Writes `graph` to `path` in the AC7 wire format. Sections, in order:
 /// magic, references, candidates (recomputed from `candidates_for` in
 /// reference order -- see module docs on why that reconstructs the exact
 /// original flat arena), interned strings, interned symbols, referenced
 /// bits, per-symbol cached signatures, per-symbol visibility (Story
-/// #1835), per-symbol declaration kind (Bug #1858), completeness byte.
+/// #1835), per-symbol declaration kind (Bug #1858), per-symbol
+/// DECLARATION location (Bug #1900), completeness byte.
 pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     let mut w = io::BufWriter::new(std::fs::File::create(path)?);
     w.write_all(MAGIC)?;
@@ -78,6 +81,7 @@ pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     write_signatures(&mut w, graph)?;
     write_visibilities(&mut w, graph)?;
     write_kinds(&mut w, graph)?;
+    write_locations(&mut w, graph)?;
     w.write_all(&[completeness_to_byte(graph.completeness())])?;
     w.flush()
 }
@@ -194,6 +198,30 @@ fn write_kinds(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
     Ok(())
 }
 
+/// Bug #1900 (epic #1906 P5): mirrors `write_kinds` exactly, but for
+/// `location_for` -- only writes entries with a KNOWN location. A dense id
+/// absent from this section decodes back to `None` via
+/// `CodeGraph::location_for` on read, the identical "absent means the safe
+/// default" contract `signature_for`/`write_visibilities`/`write_kinds`
+/// already use. `file_string_id` refers into the SAME interned-strings
+/// section `write_strings` already wrote above, so no separate string
+/// table is needed for this section.
+fn write_locations(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, u32, u32)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if let Some((file_string_id, line)) = graph.raw_location_for(id) {
+            present.push((id, file_string_id, line));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, file_string_id, line) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&file_string_id.to_le_bytes())?;
+        w.write_all(&line.to_le_bytes())?;
+    }
+    Ok(())
+}
+
 fn kind_to_byte(k: DeclarationKind) -> u8 {
     match k {
         DeclarationKind::Type => 0,
@@ -294,6 +322,7 @@ fn read_strings_symbols_and_signatures(data: &[u8], pos: &mut usize, builder: &m
     }
     read_visibilities(data, pos, builder, symbol_count)?;
     read_kinds(data, pos, builder, symbol_count)?;
+    read_locations(data, pos, builder, symbol_count, string_count)?;
     Ok(symbol_count)
 }
 
@@ -343,6 +372,42 @@ fn read_kinds(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symb
         let byte = take(data, pos, size_of::<u8>())?[0];
         let kind = kind_from_byte(byte).ok_or_else(|| invalid(&format!("corrupt kind byte: {byte}")))?;
         builder.add_kind(dense_id, kind);
+    }
+    Ok(())
+}
+
+/// Bug #1900 (epic #1906 P5): mirrors the kind-reading loop directly above,
+/// but for the location section `write_locations` appends right after
+/// declaration kind. Rejects a `dense_id` outside the decoded symbol
+/// table -- the same corruption check every other sparse section applies.
+///
+/// Review round 2 (BLOCKING P3): `file_string_id` IS now validated against
+/// the decoded string count too, symmetric with `dense_id`'s check against
+/// `symbol_count`. The prior doc comment here justified skipping this check
+/// by pointing at `CodeGraph::location_for`'s `self.strings.resolve` call
+/// as an accepted panicking consumer -- that reasoning was wrong: unlike
+/// `write_strings`'s own trusted internal `resolve_string` calls (which
+/// only ever read ids THIS SAME PROCESS just wrote), `location_for` is
+/// reachable from a dylib-supplied `GraphHandle` on a `--graph-in` file
+/// this process did not produce, and ADR-002 Defect 2 exists precisely so
+/// no panic can cross that boundary. `location_for` itself was ALSO fixed
+/// to use the checked `try_resolve` (defense in depth), but rejecting the
+/// corruption here, at decode time, is the earlier and more informative
+/// failure point.
+fn read_locations(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize, string_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let location_count = read_count_capped(data, pos, LOCATION_RECORD_MIN_BYTES)?;
+    for _ in 0..location_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("location dense_id outside decoded symbol table"));
+        }
+        let file_string_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if file_string_id as usize >= string_count {
+            return Err(invalid("location file_string_id outside decoded string table"));
+        }
+        let line = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        builder.add_location(dense_id, file_string_id, line);
     }
     Ok(())
 }
@@ -430,6 +495,36 @@ mod tests {
     use super::*;
     use crate::graph::identity::make_symbol_id;
     use crate::graph::reasons;
+
+    /// Bug #1900 (epic #1906 P2, review round 2 -- BLOCKING P3): mirrors
+    /// `read_visibilities`/`read_kinds`'s own `dense_id` bounds check, but
+    /// for `file_string_id` against the DECODED STRING table -- the
+    /// missing symmetry the review found: `read_locations` validated
+    /// `dense_id` but not `file_string_id`, and `CodeGraph::location_for`
+    /// (pre-fix) called the panicking `StringTable::resolve` on whatever
+    /// value decoded, so a corrupt/hand-crafted `--graph-in` file could
+    /// panic the analyze child across the GraphHandle FFI boundary. `RED
+    /// against unmodified code`: `read_locations` takes no `string_count`
+    /// parameter yet, so this fails to compile.
+    #[test]
+    fn read_locations_rejects_a_file_string_id_outside_the_decoded_string_table() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes()); // location_count = 1
+        data.extend_from_slice(&0u32.to_le_bytes()); // dense_id = 0 (valid)
+        data.extend_from_slice(&999u32.to_le_bytes()); // file_string_id -- OUT OF RANGE
+        data.extend_from_slice(&5u32.to_le_bytes()); // line
+        let mut pos = 0usize;
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(1, 0));
+
+        let result = read_locations(&data, &mut pos, &mut builder, /* symbol_count */ 1, /* string_count */ 0);
+
+        assert!(
+            result.is_err(),
+            "a file_string_id outside the decoded string table must be rejected, \
+             mirroring the existing dense_id bounds check"
+        );
+    }
 
     fn small_graph() -> CodeGraph {
         let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
@@ -529,6 +624,45 @@ mod tests {
             reloaded.is_definitely_dead_code(public_dense),
             None,
             "a Public symbol must stay undecidable after the wire round trip too"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P5): mirrors
+    /// `visibility_round_trips_through_a_real_file_via_mmap`/
+    /// `kind_round_trips_through_a_real_file_via_mmap` exactly, but for
+    /// `location_for` -- the same `--graph-out`/`--graph-in` parent/child
+    /// handoff is the ONLY place `analyze_graph` ever actually reads a
+    /// `CodeGraph` from in production, so if declaration location silently
+    /// disappeared across this file boundary, `location_for` would work in
+    /// every in-process unit test and still be dead on arrival for any
+    /// real CLI invocation. `RED against unmodified code`: the wire format
+    /// has no location section yet, so this fails to compile
+    /// (`add_location` does not exist).
+    #[test]
+    fn location_round_trips_through_a_real_file_via_mmap() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let with_location = builder.intern_symbol(make_symbol_id(4, 0));
+        builder.intern_symbol(make_symbol_id(4, 1));
+        let file_string_id = builder.intern_string("com/example/Widget.java");
+        builder.add_location(with_location, file_string_id, 17);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_location.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let with_location_dense = reloaded.dense_id_for(make_symbol_id(4, 0)).unwrap();
+        let without_location_dense = reloaded.dense_id_for(make_symbol_id(4, 1)).unwrap();
+        assert_eq!(
+            reloaded.location_for(with_location_dense),
+            Some(("com/example/Widget.java", 17)),
+            "a recorded declaration location must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.location_for(without_location_dense),
+            None,
+            "a symbol with no recorded location must stay None after the wire round trip too"
         );
     }
 

@@ -1194,14 +1194,14 @@ class DeploymentExecutor:
         Bug #1245 (v11.10.0 fix was INCOMPLETE -- proven on the live staging
         cluster): the original probe recognized a user install ONLY when
         code_indexer.__file__ contained the substring "/.local/". Staging
-        nodes run an EDITABLE install at a jsbattig-owned path such as
-        /home/jsbattig/code-indexer/src/code_indexer/__init__.py -- which
+        nodes run an EDITABLE install at an operator-owned path such as
+        /home/opuser/code-indexer/src/code_indexer/__init__.py -- which
         has NO "/.local/" segment at all. The substring-only probe returned
         False there -> use_sudo=True -> sudo's root pip targeted
         /root/.local and /root/.cache/pip/wheels, both READ-ONLY on the
         immutable host -> fatal "Pip install failed" -> the auto-updater
         dead-looped forever, even though the auto-updater's OWN process user
-        (jsbattig, non-root) already owns and can write the install dir.
+        (opuser, non-root) already owns and can write the install dir.
 
         Re-fix: key on WRITABILITY instead of the "/.local/" substring. pip
         (editable `-e .` plus dependency wheel builds such as hnswlib)
@@ -3492,7 +3492,7 @@ class DeploymentExecutor:
     def _ensure_sudoers_restart(self) -> bool:
         """Ensure sudoers rule exists for service user to restart systemd service.
 
-        On production servers where the service runs as a non-root user (e.g., jsbattig),
+        On production servers where the service runs as a non-root user (e.g., opuser),
         the web diagnostics restart feature requires sudo privileges to run
         'systemctl restart cidx-server'. This method creates a sudoers rule to allow
         the service user to restart the service without a password prompt.

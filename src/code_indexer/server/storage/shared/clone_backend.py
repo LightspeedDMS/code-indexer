@@ -442,7 +442,7 @@ class CowDaemonBackend:
         The daemon's own server-side validation requires namespace/name
         values to contain only alphanumeric characters, hyphens, and
         underscores. Real cluster usernames are email addresses (e.g.
-        ``Seba.Battig@lightspeeddms.com``), so any character outside that
+        ``Jane.Doe@example.com``), so any character outside that
         allowed set -- not just dots -- must be replaced, or the daemon
         rejects the request with HTTP 400 VALIDATION_ERROR (Issue #1465).
         Every disallowed character maps to a single underscore.
@@ -478,7 +478,7 @@ class CowDaemonBackend:
         #
         # On the CoW daemon host (e.g. cluster node 23), the same logical
         # filesystem is reached via daemon_storage_path directly
-        # (/home/jsbattig/cow-storage/...) — the symlink resolves there
+        # (/home/opuser/cow-storage/...) — the symlink resolves there
         # because the local layout points to the source rather than the
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
@@ -517,8 +517,8 @@ class CowDaemonBackend:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
 
         The daemon job response contains clone_path as the daemon-local absolute path
-        (e.g. ``home/jsbattig/cow-storage/ns/name`` without leading slash, or
-        ``/home/jsbattig/cow-storage/ns/name`` with leading slash).
+        (e.g. ``home/opuser/cow-storage/ns/name`` without leading slash, or
+        ``/home/opuser/cow-storage/ns/name`` with leading slash).
 
         When daemon_storage_path is configured we strip it and replace with mount_point.
         When daemon_storage_path is empty the clone_path is already relative (``ns/name``)
@@ -568,7 +568,7 @@ class CowDaemonBackend:
         unaffected by the extra ``.versioned`` path segment.
 
         Sanitizes namespace and name (dots->underscores) so aliases containing
-        dots (e.g. ``langfuse_Claude_Code_seba.battig_...``) pass daemon
+        dots (e.g. ``langfuse_Claude_Code_jane.doe_...``) pass daemon
         validation. Returns the canonical CIDX mount-point path.
         """
         sanitized_namespace = self._sanitize_identifier(namespace)

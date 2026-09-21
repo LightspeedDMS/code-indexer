@@ -20,7 +20,7 @@ use crate::graph::reasons;
 /// least its one varargs parameter, but this keeps the arithmetic total
 /// rather than trusting that invariant). A non-varargs declaration keeps
 /// the pre-existing exact-equality check.
-fn param_count_matches_arity(decl: &DeclInfo, arg_count: usize) -> bool {
+pub(super) fn param_count_matches_arity(decl: &DeclInfo, arg_count: usize) -> bool {
     let Some(param_count) = decl.param_count else {
         return false;
     };
@@ -32,34 +32,53 @@ fn param_count_matches_arity(decl: &DeclInfo, arg_count: usize) -> bool {
 }
 
 /// AC4 Level 1 ("+arity"): tags every candidate whose declared
-/// `param_count` matches `arg_count` with `ARITY_MATCH`, and NARROWS the
-/// set to just those matches -- but only when that is safe: `arg_count`
-/// must be known, at least one candidate must match, and the match must
-/// be a PROPER subset (never silently wipe every candidate, and never
-/// "narrow" to the same set that was already there).
+/// `param_count` matches `arg_count` with `ARITY_MATCH`, and narrows the
+/// set to exactly those matches -- including down to EMPTY when nothing
+/// matches.
+///
+/// Bug #1898 (P1 of epic #1906): the pre-fix version of this function
+/// treated an empty match as "unsafe to narrow" and silently kept the
+/// ENTIRE bare-name pool instead -- when the call site's real target is
+/// external to the repo (e.g. a JDK method) and no in-repo declaration
+/// shares its arity, that fallback fabricated an edge to a wrong-arity
+/// in-repo candidate. The correct candidate set when `arg_count` is known
+/// and nothing matches it is EMPTY, never the unfiltered pool. `arg_count:
+/// None` (unknown arity) is the only case that still skips narrowing
+/// entirely; varargs/exact-arity semantics both live in
+/// `param_count_matches_arity`, which this function trusts as-is.
+///
+/// P2-1 (#1898 code review, Anti-Silent-Failure): `param_count_matches_
+/// arity` returns `false` for a candidate whose OWN `param_count` is
+/// `None` -- that is correct for deciding whether to tag `ARITY_MATCH`
+/// (missing evidence is never a confirmed match), but WRONG for deciding
+/// whether to DELETE the candidate: missing arity evidence is not proof
+/// of a mismatch, and retaining is the same "missing/ambiguous evidence
+/// retains the candidate" doctrine `apply_private_visibility_filter`
+/// already documents. Latent for the Java extractor today (every Java
+/// method declaration carries a real `param_count`), but Kotlin is P4 of
+/// this same epic -- an extractor that omits param counts must never
+/// silently zero every arity-known call as a side effect of this
+/// function's hard-empty fix.
 pub(super) fn apply_arity_narrowing(
     candidates: &mut Vec<(DeclInfo, u16)>,
     arg_count: Option<usize>,
 ) {
     let Some(arg_count) = arg_count else { return };
-    let matching: Vec<usize> = candidates
+    let retained: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, (d, _))| param_count_matches_arity(d, arg_count))
+        .filter(|(_, (d, _))| d.param_count.is_none() || param_count_matches_arity(d, arg_count))
         .map(|(i, _)| i)
         .collect();
-    if matching.is_empty() {
-        return;
+    for &i in &retained {
+        if candidates[i].0.param_count.is_some() {
+            candidates[i].1 |= reasons::ARITY_MATCH;
+        }
     }
-    for &i in &matching {
-        candidates[i].1 |= reasons::ARITY_MATCH;
-    }
-    if matching.len() < candidates.len() {
-        *candidates = matching
-            .into_iter()
-            .map(|i| candidates[i].clone())
-            .collect();
-    }
+    *candidates = retained
+        .into_iter()
+        .map(|i| candidates[i].clone())
+        .collect();
 }
 
 /// AC2 (Story #1793, S4): `decl`'s declared parameter TYPE at call-site
@@ -168,8 +187,13 @@ fn named_type_match_count(
 /// AC2 (Story #1793, S4) Level 4 "overload discrimination": candidate-set
 /// REDUCTION beyond arity, never exact resolution. Two independent
 /// passes, each following the SAME "narrow only if safe" pattern as
-/// `apply_arity_narrowing`/`apply_import_context_narrowing` (never empty
-/// the set, never a no-op "narrow" to the same set already there):
+/// `apply_import_context_narrowing` (never empty the set, never a no-op
+/// "narrow" to the same set already there) -- deliberately DIFFERENT from
+/// `apply_arity_narrowing` since #1898: literal-shape/named-type evidence
+/// is a weaker, open-world heuristic (see `literal_shape_is_incompatible`'s
+/// doc comment), so an empty match here stays a genuine "inconclusive",
+/// never treated as proof of an external target the way a hard arity
+/// mismatch is:
 /// (1) exclude candidates with a definite literal-shape mismatch;
 /// (2) among survivors, prefer the highest cast/constructor named-type
 /// match count. `OVERLOAD_ARG_TYPE_MATCH` is marked on every surviving
@@ -269,40 +293,95 @@ fn indices_matching_enclosing_type(
         .collect()
 }
 
-/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): tags/narrows
+/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): TAGS
 /// candidates whose `enclosing_type` matches the resolved RECEIVER type
 /// (`receiver_type`, computed by the caller via
 /// `super::receiver::resolve_receiver_type` from the call's own
 /// `ReceiverExpr`) or one of that type's transitive supertypes -- e.g.
-/// `obj.doSomething()` where `obj`'s declared type is `Foo` narrows to
-/// declarations of `doSomething` on `Foo` or an ancestor of `Foo`. `None`
-/// means the receiver's type could not be resolved (unknown variable,
-/// unsupported receiver shape, ambiguous chained return type) -- never a
-/// guessed narrowing. Same "narrow only if safe" pattern as every other
-/// pass here.
+/// `obj.doSomething()` where `obj`'s declared type is `Foo` tags
+/// declarations of `doSomething` on `Foo` or an ancestor of `Foo` with
+/// `RECEIVER_TYPE_MATCH`. `None` means the receiver's type could not be
+/// resolved (unknown variable, unsupported receiver shape, ambiguous
+/// chained return type) -- never a guessed tag.
+///
+/// #1898 SCOPE SPLIT (epic #1906, round-4 review, `.analysis/
+/// 1898-review-rounds/round4-findings.md`): this function is TAG-ONLY --
+/// it may NEVER remove a candidate from the set, on an empty match or a
+/// non-empty one, under Positive evidence or Advisory. Rounds 1-4 each
+/// tried a hard-empty variant of this filter (round 1: unconditional;
+/// round 4: gated on `receiver::ReceiverEvidence::is_positive`) and each
+/// was rejected for the SAME root shape: deleting a candidate on receiver-
+/// type evidence that turned out not to be closed-world. Round 4's own
+/// review (findings 1-2) proved `Positive` itself is not closed-world --
+/// `receiver::FileTypedNames` keys locals by `(enclosing_method, name)`
+/// while Java scopes by BLOCK, so two same-named locals in different
+/// blocks of the SAME method collide, last-write-wins, and a hard filter
+/// keyed on the wrong one deletes a genuinely live candidate (round4-
+/// findings.md findings 1, 3, 4 are all "matching non-empty -> WRONG
+/// subset", a path NEITHER evidence tier ever guarded).
+///
+/// **#1910 SALVAGE (issue #1910, rounds 5-7)**: a follow-up attempt tried
+/// exactly the redesign this doc used to defer to -- an ambiguity-safe
+/// `LocalLookup` (kept, see `receiver::LocalLookup`), per-chain-step
+/// pseudo-type rejection (kept), and JLS-6.3-comprehensive local-binding
+/// extraction feeding a `Positive`/`Advisory` evidence tier that would
+/// hard-narrow under `Positive`. Round 6 found the first attempt itself
+/// unsound (an `Ambiguous` local result fell through to the fallback
+/// chain instead of staying terminal); round 7 then proved by EXECUTION
+/// that `Positive` still cannot be closed-world on this substrate: any
+/// substrate promoted to `Positive` on a `FileTypedNames::lookup` `Missing`
+/// result is trusting "genuinely no local binding", but a captured local
+/// in an anonymous/local class is looked up under the WRONG (inner)
+/// enclosing-method key and can produce a FALSE `Missing` for a real
+/// local -- indistinguishable, from the caller's side, from an actual
+/// absence. Nothing built on top of that lookup can be proven closed-
+/// world without fixing the underlying `(enclosing_method, name)` scope
+/// key (see `docs/xray-architecture.md`'s candidate-admission section for
+/// what a future attempt would need). Five straight rounds across two
+/// issues could not converge on a safe hard-empty contract, so hard
+/// receiver-type narrowing is retired for good, not merely deferred.
+/// Receiver-type evidence contributes only the `RECEIVER_TYPE_MATCH`
+/// reason bit (and hence `Confidence::ReceiverType`) -- real signal for a
+/// caller that wants it, never a candidate-set exclusion.
+///
+/// `try_unique_name_shortcut` (`resolve.rs`) is a SEPARATE, narrower
+/// mechanism this change does not touch: it still declines to admit a
+/// sole candidate whose enclosing type does not match a POSITIVE receiver
+/// type. That is an ADMISSION decision (whether to take a shortcut that
+/// bypasses the rest of the pipeline), not a DELETION of an already-built
+/// candidate set -- declining the shortcut simply falls through to the
+/// (now tag-only) full pipeline, which keeps the pool. The two are
+/// orthogonal: this function governs the general N-candidate case, the
+/// shortcut governs only the N == 1 case before this function ever runs.
+///
+/// PRESERVE (#1882/#1883): still skips tagging entirely when
+/// `receiver_type`'s OWN supertype evidence is recorded incomplete
+/// (`type_index.has_incomplete_supertype_evidence`, same substrate
+/// `apply_super_class_narrowing` already consults for this exact reason)
+/// -- `supertypes_of` may be missing the real supertype a genuine match
+/// lives on, so an incomplete `allowed` set would under-tag (never
+/// over-tag, since tagging never removes anything either way) rather than
+/// report confidently on partial evidence.
 pub(super) fn apply_receiver_type_narrowing(
-    candidates: &mut Vec<(DeclInfo, u16)>,
+    candidates: &mut [(DeclInfo, u16)],
     receiver_type: Option<&str>,
     type_index: &super::families::TypeIndex,
 ) {
     let Some(receiver_type) = receiver_type else {
         return;
     };
+    if type_index.has_incomplete_supertype_evidence(receiver_type) {
+        return;
+    }
     let mut allowed = type_index.supertypes_of(receiver_type);
     allowed.insert(receiver_type.to_string());
     let matching = indices_matching_enclosing_type(candidates, &allowed);
-    if matching.is_empty() {
-        return;
-    }
     for &i in &matching {
         candidates[i].1 |= reasons::RECEIVER_TYPE_MATCH;
     }
-    if matching.len() < candidates.len() {
-        *candidates = matching
-            .into_iter()
-            .map(|i| candidates[i].clone())
-            .collect();
-    }
+    // TAG-ONLY, PERMANENTLY (#1898 scope split, epic #1906; reconfirmed by
+    // the #1910 salvage): deliberately no narrowing step here at all,
+    // empty match or not -- see this function's own doc comment above.
 }
 
 /// AC3 (Story #1806, S2b): "unqualified calls resolve against the
@@ -312,32 +391,107 @@ pub(super) fn apply_receiver_type_narrowing(
 /// enclosing type is known -- `None` for a qualified call (a receiver-type
 /// match is a DIFFERENT evidence path, AC1) or a reference kind AC3 does
 /// not apply to (type references/constructions have no "calling class").
-/// Follows the same "narrow only if safe" pattern as every other
-/// narrowing pass here: never empties the set, never no-ops onto the same
-/// set already there.
+///
+/// Bug #1898 (P1 of epic #1906) -- KEPT SOFT PERMANENTLY, deliberately
+/// DIFFERENT from `apply_arity_narrowing` (the only sibling pass that
+/// stays hard-empty -- `apply_receiver_type_narrowing` is ALSO tag-only,
+/// see its own doc comment): this pass's `allowed` set (`{enclosing_type}
+/// U supertypes_of(enclosing_type)`) covers only DIRECT inheritance
+/// evidence. Java's real unqualified-call scope is strictly larger than
+/// that in two ways this substrate does not model at all:
+///
+/// 1. **Lexically enclosing types.** An inner/anonymous/static-nested/
+///    local class's bare call can resolve against ANY lexically enclosing
+///    type (not just its own declared supertypes) -- e.g. an inner class
+///    calling its outer class's `private` method. `enclosing_type` here is
+///    the caller's OWN immediate type (`"Inner"`), which has no
+///    inheritance relationship whatsoever to the outer type (`"Outer"`)
+///    that legitimately owns the target.
+/// 2. **Static imports.** `import static util.Util.helper;` then a bare
+///    `helper()` call resolves against `Util`, which likewise has no
+///    inheritance relationship to the caller's own enclosing type.
+///
+/// An empty `matching` set here is therefore NOT reliable evidence of an
+/// external target the way it is for arity (a call's argument count is
+/// exhaustive) -- it can just as easily mean "the real target lives in a
+/// lexically enclosing type or arrived via a static import, neither of
+/// which `allowed` can see".
+///
+/// **#1910 SALVAGE (issue #1910, second scope item, rounds 6-7)**: two
+/// follow-up attempts tried widening `allowed` to the caller's full
+/// lexical nest (`TypeIndex::lexical_nest_of`, backed by a new
+/// `LexicalParentRecord` substrate keyed `(file_id, bare type name)`)
+/// plus exempting `reasons::STATIC_IMPORT`-tagged candidates, then
+/// hard-narrowing unconditionally. Round 7's review proved BOTH halves
+/// still unsound by execution: (1) the `(file_id, bare type name)` key
+/// still collides WITHIN one file -- two different outer classes each
+/// declaring a same-named nested class (`OuterA.Builder`/`OuterB.Builder`)
+/// share the same key, and the caller-side context this pass receives
+/// (`same_class_context`/`site.enclosing_type`) is ITSELF only ever a bare
+/// simple name, never a qualified one, so even a properly-qualified
+/// substrate could not disambiguate the two without threading a
+/// qualified/unique symbol id through the entire reference-site pipeline
+/// (`MethodOwnerRecord`, `site.enclosing_type`, `TypeIndex`'s own
+/// family/supertype maps -- all bare-name-keyed today, a much broader
+/// pre-existing limitation, not specific to the lexical-parent work
+/// alone); (2) the `STATIC_IMPORT` exemption depends on `import_reasons`
+/// classifying a static-on-demand import (`import static pkg.Util.*;`)
+/// correctly, which it did NOT (see `resolve.rs::import_reasons`'s own
+/// doc comment, issue #1915) -- a decoy same-named method elsewhere in
+/// the repo, not statically imported, silently annihilated the real edge
+/// with zero import bits ever set to trigger the exemption at all. Both
+/// defects are independent of #1915's fix: even with the classification
+/// bug fixed, defect (1) alone is enough to keep this pass unsafe to
+/// hard-narrow, so this pass stays soft PERMANENTLY -- not pending a
+/// follow-up, retired. Widening `allowed` to the caller's full lexical
+/// nest plus exempting static-imported candidates remains a documented,
+/// UNIMPLEMENTED idea for tagging precision only (`SAME_CLASS_OR_SUPER`
+/// tag accuracy), never as grounds for a hard-narrow, unless a future
+/// attempt first threads a qualified/unique type identity through the
+/// entire reference-site pipeline (see `docs/xray-architecture.md`'s
+/// candidate-admission section).
+///
+/// A/B-probed end-to-end on real javac-valid source (inner/anonymous/
+/// static-nested/local class calling an outer `private` method; a
+/// static-imported in-repo method): hard-narrowing here flips
+/// `is_definitely_dead_code` from `Some(false)` to a FALSE `Some(true)`
+/// on a live private target -- the exact outcome epic #1786 declared
+/// structurally impossible -- while the arity hard-narrowing (kept, see
+/// its own doc) produces no such regression when isolated. This pass
+/// keeps the pre-#1898 soft "no match, or a non-empty wrong subset --
+/// keep the pool either way" fallback rather than risk a live->dead
+/// regression for a narrower win.
+///
+/// Known consequence, recorded rather than silently accepted: #1885
+/// (`super.m()` with an implicit `Object` superclass) does NOT close under
+/// this change -- `apply_super_class_narrowing` (below) still early-returns
+/// on `allowed.is_empty()` for exactly that reason, unchanged by #1898.
+///
+/// PRESERVE (#1882/#1883): identical guard to
+/// `apply_receiver_type_narrowing`'s -- when `enclosing_type`'s own
+/// supertype evidence is recorded incomplete, narrowing is skipped
+/// entirely and the pool is kept, since `supertypes_of` may be missing
+/// the real supertype the target actually lives on.
 pub(super) fn apply_same_class_or_super_narrowing(
-    candidates: &mut Vec<(DeclInfo, u16)>,
+    candidates: &mut [(DeclInfo, u16)],
     same_class_context: Option<&str>,
     type_index: &super::families::TypeIndex,
 ) {
     let Some(enclosing_type) = same_class_context else {
         return;
     };
+    if type_index.has_incomplete_supertype_evidence(enclosing_type) {
+        return;
+    }
     let mut allowed = type_index.supertypes_of(enclosing_type);
     allowed.insert(enclosing_type.to_string());
     let matching = indices_matching_enclosing_type(candidates, &allowed);
-    if matching.is_empty() {
-        return;
-    }
     for &i in &matching {
         candidates[i].1 |= reasons::SAME_CLASS_OR_SUPER;
     }
-    if matching.len() < candidates.len() {
-        *candidates = matching
-            .into_iter()
-            .map(|i| candidates[i].clone())
-            .collect();
-    }
+    // TAG-ONLY, PERMANENTLY (#1910 salvage): deliberately no narrowing
+    // step here at all, empty match or a non-empty subset alike -- see
+    // this function's own doc comment above.
 }
 
 /// D3: a genuine `super.foo()`/`super::foo` reference. `super_class_context`

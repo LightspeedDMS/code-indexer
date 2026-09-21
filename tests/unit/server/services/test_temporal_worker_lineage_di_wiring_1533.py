@@ -60,7 +60,7 @@ from code_indexer.services.temporal.temporal_server_paths import (
 
 USERNAME = "alice"
 ACTIVATED_ALIAS = "myclone"
-GOLDEN_ALIAS = "evolution"
+GOLDEN_ALIAS = "example-repo"
 
 
 class _WorkerInput:

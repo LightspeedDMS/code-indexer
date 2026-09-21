@@ -398,3 +398,166 @@ async def test_graph_java_with_unrecognized_extension_file_does_not_report_no_su
 
     assert parsed.get("ok") is True, parsed
     assert parsed["status"] != "no_supported_files", parsed
+
+
+@pytest.mark.asyncio
+async def test_graph_analyze_response_surfaces_new_completeness_fields_for_a_clean_java_build(
+    tmp_path: Path,
+) -> None:
+    """Bug #1897 wire-through proof: `handle_analyze_graph`'s MCP response
+    dict must carry `completeness_reasons`/`candidate_count`/
+    `candidate_budget_limit` (top-level) and `degradation.
+    index_budget_exceeded` (nested) -- never only reachable from
+    `rust_backend.py`'s own return value. Drives the REAL xray-cli
+    pipeline (same pattern every other test in this file already uses),
+    never a stub of `RustNativeBackend.run_graph_analysis`.
+    """
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip("xray-cli binary is required for graph execution")
+
+    parsed = await _run_graph_analysis_over_files(
+        tmp_path, {"Main.java": "class Main { void run() {} }\n"}
+    )
+
+    assert parsed.get("ok") is True, parsed
+    assert parsed["completeness_reasons"] == [], (
+        f"a clean, fully-in-budget single-file Java build must report an "
+        f"EMPTY completeness_reasons list, got: {parsed}"
+    )
+    assert isinstance(parsed["candidate_count"], int), parsed
+    assert isinstance(parsed["candidate_budget_limit"], int), parsed
+    assert parsed["candidate_budget_limit"] > 0, parsed
+    assert parsed["degradation"]["index_budget_exceeded"] is False, parsed
+
+
+@pytest.mark.asyncio
+async def test_graph_analyze_response_surfaces_completeness_reasons_for_a_degraded_build(
+    tmp_path: Path,
+) -> None:
+    """Bug #1897 wire-through proof, degraded case: reuses the mixed-
+    unsupported-language fixture (both files land in `files_with_
+    unsupported_language`, none in `unreadable_or_unsupported_files`) --
+    `handle_analyze_graph`'s response must carry `completeness_reasons ==
+    ["repo_index_incomplete"]` at the TOP level of the MCP response, not
+    only inside `degradation`.
+    """
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip("xray-cli binary is required for graph execution")
+
+    parsed = await _run_graph_analysis_over_files(
+        tmp_path,
+        {
+            "main.py": "def run():\n    return 1\n",
+            "README.md": "# not source code\n",
+        },
+    )
+
+    assert parsed.get("ok") is True, parsed
+    assert parsed["completeness_reasons"] == ["repo_index_incomplete"], parsed
+    assert parsed["degradation"]["index_budget_exceeded"] is False, parsed
+    assert parsed["candidate_count"] == 0, parsed
+    assert parsed["candidate_budget_limit"] > 0, parsed
+
+
+@pytest.mark.asyncio
+async def test_graph_analyze_response_surfaces_repo_index_incomplete_for_python_side_collection_truncation(
+    tmp_path: Path,
+) -> None:
+    """Bug #1897 P2-1 (code review finding): a THIRD force-set site, in
+    `_run_analyze_graph_pipeline` itself (right after the real backend
+    call), OR's Python's OWN candidate-collection truncation
+    (`collection_truncated`, from `_collect_graph_candidate_files`
+    stopping early at `_GRAPH_CANDIDATE_FILES_CAP`) into the final
+    result -- but used to set `fact_graph_complete = False` with nothing
+    pushed onto `completeness_reasons`, reproducing the exact "false with
+    no reason" symptom the whole #1897 fix exists to kill. Unlike the
+    `files_from_truncated` site fixed in `main.rs` (which Python's own
+    cap makes unreachable on the server path, since Rust never sees an
+    uncapped list), THIS site is the one that actually fires in
+    production.
+
+    Reproduces it for real: two real Java files, `_GRAPH_CANDIDATE_FILES_
+    CAP` patched down to 1 so the walk genuinely truncates (reviewer-
+    suggested approach -- avoids writing 50,000 real files).
+    """
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip("xray-cli binary is required for graph execution")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "A.java").write_text("class A { void run() {} }\n", encoding="utf-8")
+    (repo / "B.java").write_text("class B { void helper() {} }\n", encoding="utf-8")
+
+    from code_indexer.server.mcp.handlers.xray_graph import handle_analyze_graph
+
+    params = {
+        "repository_alias": "repo-global",
+        "evaluator_code": GRAPH_EVALUATOR_WITHOUT_PARAMS,
+        "timeout_seconds": 60,
+    }
+    with (
+        patch(
+            "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path",
+            return_value=str(repo),
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray_graph._GRAPH_CANDIDATE_FILES_CAP",
+            1,
+        ),
+    ):
+        result = await handle_analyze_graph(params, _user())
+
+    parsed = _data(result)
+    assert parsed["truncated_by_max_files"] is True, (
+        f"fixture sanity: Python's own candidate collection must have "
+        f"truncated at cap=1 against 2 real files, got: {parsed}"
+    )
+    assert parsed["fact_graph_complete"] is False, parsed
+    assert parsed["completeness_reasons"] == ["repo_index_incomplete"], (
+        f"collection_truncated=True must push repo_index_incomplete onto "
+        f"completeness_reasons, never leave fact_graph_complete=False with "
+        f"an empty/missing reason list, got: {parsed}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_unsupported_language_file_with_a_genuine_parse_error_does_not_report_no_supported_files(
+    tmp_path: Path,
+) -> None:
+    """Bug #1903: `files_with_unsupported_language` and `files_with_parse_
+    errors` are NOT disjoint counters -- `repo_index.rs::record_fused_
+    result` uses four independent `if`s, and a file whose language has no
+    `LanguageExtractor` (e.g. Python) can ALSO trip a genuine tree-sitter
+    syntax error under its own real grammar (Python's grammar IS
+    registered via `language_for_extension`, it simply has no graph
+    extractor). This fixture (`clean.py` well-formed, `broken.py`
+    genuinely malformed) verified via a real xray-cli run produces
+    `files_with_unsupported_language=2, unreadable_or_unsupported_files=0,
+    files_with_parse_errors=1` -- BEFORE the fix, the old condition
+    (`2 + 0 == 2`) fires `no_supported_files` regardless of the real parse
+    error; the fix's `files_with_parse_errors == 0` guard must prevent
+    that, since a genuine parse failure happened.
+    """
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip("xray-cli binary is required for graph execution")
+
+    parsed = await _run_graph_analysis_over_files(
+        tmp_path,
+        {
+            "clean.py": "def clean_fn():\n    return 1\n",
+            "broken.py": "def broken_fn(\n    pass\n",
+        },
+    )
+
+    assert parsed.get("ok") is True, parsed
+    assert parsed["degradation"]["files_with_unsupported_language"] == 2, parsed
+    assert parsed["degradation"]["unreadable_or_unsupported_files"] == 0, parsed
+    assert parsed["degradation"]["files_with_parse_errors"] == 1, (
+        "fixture sanity: broken.py must have produced a REAL parse error, "
+        f"got: {parsed}"
+    )
+    assert parsed["status"] != "no_supported_files", (
+        "a candidate set with a genuine parse error must never be mislabelled "
+        f"no_supported_files just because the (non-disjoint) unsupported-language "
+        f"and unrecognized-extension counters happen to sum to the file count, got: {parsed}"
+    )

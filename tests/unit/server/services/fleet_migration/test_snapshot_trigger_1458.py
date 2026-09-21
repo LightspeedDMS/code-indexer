@@ -59,12 +59,12 @@ class TestTriggerPostConsolidationSnapshotFirstPublish:
         (source_path / ".code-indexer" / "config.json").write_text("{}")
 
         new_target = trigger_post_consolidation_snapshot(
-            scheduler, "evolution", str(source_path)
+            scheduler, "example-repo", str(source_path)
         )
 
         assert Path(new_target).exists()
         assert (Path(new_target) / ".code-indexer" / "config.json").exists()
-        assert scheduler.alias_manager.read_alias("evolution-global") == new_target
+        assert scheduler.alias_manager.read_alias("example-repo-global") == new_target
 
     def test_accepts_alias_with_or_without_global_suffix_identically(
         self, tmp_path: Path
@@ -74,10 +74,10 @@ class TestTriggerPostConsolidationSnapshotFirstPublish:
         source_path.mkdir(parents=True)
 
         new_target = trigger_post_consolidation_snapshot(
-            scheduler, "evolution-global", str(source_path)
+            scheduler, "example-repo-global", str(source_path)
         )
 
-        assert scheduler.alias_manager.read_alias("evolution-global") == new_target
+        assert scheduler.alias_manager.read_alias("example-repo-global") == new_target
 
 
 class TestTriggerPostConsolidationSnapshotRepublish:
@@ -88,7 +88,7 @@ class TestTriggerPostConsolidationSnapshotRepublish:
         (source_path / ".code-indexer" / "config.json").write_text("{}")
 
         first_target = trigger_post_consolidation_snapshot(
-            scheduler, "evolution", str(source_path)
+            scheduler, "example-repo", str(source_path)
         )
 
         # Mutate the base clone (simulating consolidation having changed it)
@@ -98,16 +98,18 @@ class TestTriggerPostConsolidationSnapshotRepublish:
         (source_path / ".code-indexer" / "marker.txt").write_text("consolidated")
 
         second_target = trigger_post_consolidation_snapshot(
-            scheduler, "evolution", str(source_path)
+            scheduler, "example-repo", str(source_path)
         )
 
         assert second_target != first_target
         assert (Path(second_target) / ".code-indexer" / "marker.txt").exists()
-        assert scheduler.alias_manager.read_alias("evolution-global") == second_target
+        assert (
+            scheduler.alias_manager.read_alias("example-repo-global") == second_target
+        )
         # AC10: previous_path is preserved for rollback (swap_alias's contract) --
         # this is the observable proof that the swap went through swap_alias(),
         # not create_alias() overwriting the pointer without history.
         assert (
-            scheduler.alias_manager.get_previous_path("evolution-global")
+            scheduler.alias_manager.get_previous_path("example-repo-global")
             == first_target
         )

@@ -212,6 +212,266 @@ pub(super) fn local_variable_typed_names(
     typed_names_from_declarators(node, NameScope::Local { enclosing_method })
 }
 
+/// P1-B (#1898 code review round 2, epic #1906): one `TypedNameRecord`
+/// for an `enhanced_for_statement`'s loop variable (`for (Type name :
+/// expr)`), scoped to `enclosing_method`. Verified real grammar shape:
+/// direct-child fields `type` (`_unannotated_type`) and `name`
+/// (`identifier`), with `name` always positioned before the `value`
+/// expression (Java requires `for (Type name : value)` in that source
+/// order) -- `child_by_kind("identifier")` unambiguously finds the loop
+/// variable even when `value` is itself a bare identifier expression
+/// (`for (Foo x : someList)`: `someList` is a second `identifier`, but it
+/// always follows `x` in child order). `None` when `enclosing_method` is
+/// unknown or the loop variable's name cannot be found at all
+/// (malformed/error-recovery parse) -- never a guessed name/scope.
+/// Missing type evidence (a shape `base_type_name` does not resolve, e.g.
+/// a primitive/array type) records the empty-string sentinel rather than
+/// omitting the record entirely -- the record's PRESENCE, not its type,
+/// is what blocks `receiver::resolve_receiver_type`'s static-type-name
+/// fallback from misresolving this name against an unrelated same-named
+/// in-repo type (Bug #1898 P1-B).
+pub(super) fn enhanced_for_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    let name_node = node.child_by_kind("identifier")?;
+    let declared_type = super::java_type_names::base_type_name(node).unwrap_or_default();
+    Some(TypedNameRecord {
+        name: name_node.text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// P1-B: a try-with-resources `resource` node's own `TypedNameRecord`,
+/// scoped to `enclosing_method`. Real grammar shape: `resource`'s `name`
+/// and `type` fields are BOTH optional -- the "existing variable"
+/// resource form (`try (alreadyDeclaredVar) { ... }`, Java 9+)
+/// introduces no NEW binding at all (its sole named child is the bare
+/// `identifier`/`field_access` expression itself, with no `name`/`type`
+/// field), so this returns `None` for that shape rather than fabricating
+/// a fresh scope for a name declared elsewhere -- discriminated by named-
+/// child COUNT (the declaring form always has at least `type` + `name`,
+/// so >= 2; the bare-reference form has exactly 1). When `name` IS
+/// present (the declaring form, `try (Type var = init)`), `type` is
+/// always present too under real javac-valid source.
+pub(super) fn resource_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    if node.named_children().len() < 2 {
+        return None;
+    }
+    let name_node = node.child_by_kind("identifier")?;
+    let declared_type = super::java_type_names::base_type_name(node).unwrap_or_default();
+    Some(TypedNameRecord {
+        name: name_node.text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// P1-B: a `catch_formal_parameter`'s own `TypedNameRecord`, scoped to
+/// `enclosing_method`. Verified real grammar shape: `name` (`identifier`)
+/// is a direct field; the caught type(s) live under a `catch_type` child,
+/// which itself carries one OR MORE `_unannotated_type` named children
+/// (multiple for a multi-catch `catch (IOException | SQLException e)`).
+/// A single caught type resolves via the SAME `resolve_type_node_base_
+/// name` every other declared-type read in this module uses; a multi-
+/// catch (or a `catch_type` this extractor cannot resolve) records the
+/// empty-string sentinel -- genuinely ambiguous/missing type evidence,
+/// never a guessed single type, but the record's presence still blocks
+/// the static-type-name misresolution this fix exists for.
+pub(super) fn catch_parameter_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    let name_node = node.child_by_kind("identifier")?;
+    let declared_type = node
+        .child_by_kind("catch_type")
+        .map(|catch_type| catch_type.named_children())
+        .filter(|types| types.len() == 1)
+        .and_then(|types| super::java_type_names::resolve_type_node_base_name(types[0]))
+        .unwrap_or_default();
+    Some(TypedNameRecord {
+        name: name_node.text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// Bug #1898 round 4 (epic #1906): an `instanceof_expression`'s TYPE
+/// PATTERN binding (`if (o instanceof Svc handle) { handle.helper(); }`),
+/// scoped to `enclosing_method`. Verified real tree-sitter-java 0.23.5
+/// grammar shape: `named_children()` is `[left, type]` (2 elements) for a
+/// plain instanceof test with no binding (`o instanceof Svc`), or
+/// `[left, type, name]` (3 elements) when a pattern variable IS bound --
+/// `name` is always the LAST named child, always an `identifier` for a
+/// simple type-pattern binding. A `record_pattern` in the type position
+/// (Java 21 deconstruction, e.g. `instanceof Wrapper(Target handle)`) has
+/// no third named child at all (the component bindings live nested inside
+/// the `record_pattern` itself) -- this function does not descend into
+/// that shape and returns `None`, never a guessed/misattributed name
+/// (Rule 2, anti-fallback; deliberately out of scope for this round, see
+/// `bug_1898_round4_narrowing_regressions.rs`'s own "unknown binding form"
+/// test for why leaving it uncovered is safe under the round-4 evidence-
+/// tier fix). This binder is intentionally METHOD-granular, not flow-
+/// sensitive (same simplification `local_variable_typed_names` already
+/// makes): a NEGATED instanceof pattern (`if (!(o instanceof Svc handle))
+/// { return; } handle.helper();`, where the binding is only in scope
+/// AFTER the guard) is covered automatically by this same extraction --
+/// the record's presence, not its precise flow position, is what matters
+/// to `receiver::resolve_receiver_type`.
+pub(super) fn instanceof_pattern_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    let named = node.named_children();
+    if named.len() < 3 {
+        return None;
+    }
+    let type_node = named[named.len() - 2];
+    let name_node = named[named.len() - 1];
+    if name_node.kind != "identifier" {
+        return None;
+    }
+    let declared_type = super::java_type_names::base_name_of_type_node(type_node);
+    Some(TypedNameRecord {
+        name: name_node.text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21 switch
+/// case PATTERN LABEL's `type_pattern` binding (`case Target handle ->`),
+/// scoped to `enclosing_method`. Verified real tree-sitter-java 0.23.5
+/// grammar shape: `type_pattern`'s named children are always exactly
+/// `[_unannotated_type, identifier]`, in that order. This is deliberately
+/// written against the GRAMMAR NODE KIND rather than "switch case
+/// patterns" as a Java feature: `type_pattern` is the one production
+/// Java's pattern-matching grammar uses for every "bind a name to a type
+/// test" position, so extracting it generically here closes not just
+/// today's switch case labels but any future context tree-sitter-java
+/// reuses the same node for -- the exact structural fix the round-4
+/// postmortem asked for in place of enumerating one more Java feature.
+/// `None` when `enclosing_method` is unknown or the two expected named
+/// children are not both present as `[type, identifier]` (malformed/
+/// error-recovery parse) -- never a guessed name/scope.
+pub(super) fn type_pattern_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    let named = node.named_children();
+    if named.len() != 2 || named[1].kind != "identifier" {
+        return None;
+    }
+    let declared_type = super::java_type_names::base_name_of_type_node(named[0]);
+    Some(TypedNameRecord {
+        name: named[1].text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// #1910 prerequisite 3 (round4-findings.md finding 3, and the round-4
+/// "uncovered binding form" test's own former subject): one binding
+/// introduced by a Java 21 RECORD PATTERN's own component (`Target
+/// handle` inside `Wrapper(Target handle)`), reachable via an
+/// `instanceof` pattern OR a switch case pattern, at ANY nesting depth --
+/// a nested `record_pattern_body` contains either another `record_pattern`
+/// (walked generically; `super::java`'s own stack-based tree walk already
+/// visits every descendant regardless of depth, so no recursion is needed
+/// HERE) or a leaf `record_pattern_component`, which is exactly this node.
+/// Verified real grammar shape: named children are the declared type
+/// followed by EITHER a bound `identifier` OR an `underscore_pattern`
+/// (Java's `_`, explicitly UNNAMED -- introduces no binding at all).
+/// Real tree-sitter-java 0.23.5 output (verified by parsing a live
+/// fixture, not guessed from `node-types.json` alone): a bare `_` in this
+/// position surfaces as an `identifier` node whose TEXT is `"_"`, not a
+/// distinct `underscore_pattern` node -- both the node-kind check and the
+/// literal-text check are therefore required to correctly treat it as
+/// "no binding". `None` for either unnamed form, an unknown `enclosing_
+/// method`, or an unexpected child shape (malformed/error-recovery
+/// parse) -- never a guessed name/scope.
+pub(super) fn record_pattern_component_typed_name(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Option<TypedNameRecord> {
+    let enclosing_method = enclosing_method?;
+    let named = node.named_children();
+    if named.len() != 2 || named[1].kind != "identifier" || named[1].text() == "_" {
+        return None;
+    }
+    let declared_type = super::java_type_names::base_name_of_type_node(named[0]);
+    Some(TypedNameRecord {
+        name: named[1].text().to_string(),
+        declared_type,
+        scope: NameScope::Local { enclosing_method },
+    })
+}
+
+/// P1-B: every `TypedNameRecord` for a `lambda_expression`'s parameter(s),
+/// scoped to `enclosing_method`. Three real grammar shapes for the
+/// `parameters` field, always the lambda's FIRST named child (it precedes
+/// `->` and the body in source order, so this is never ambiguous with a
+/// bare-identifier BODY, e.g. `x -> y`): `formal_parameters` (explicitly
+/// typed, `(Foo x) -> ...` -- delegates to `parameter_name_and_type`, the
+/// SAME per-parameter extraction a method declaration's own formal
+/// parameters already use, Rule 4 anti-duplication); a bare `identifier`
+/// (a single untyped parameter with no parens, `x -> ...`); or
+/// `inferred_parameters` (multiple untyped parameters, `(x, y) -> ...`).
+/// The untyped shapes carry NO declared-type evidence at all (Java
+/// infers it; this extractor performs no type inference) -- the empty-
+/// string sentinel still registers the NAME as a genuine local binding,
+/// which is exactly what blocks the static-type-name misresolution (Bug
+/// #1898 P1-B). `Vec::new()` when `enclosing_method` is unknown or the
+/// `parameters` field cannot be found at all.
+pub(super) fn lambda_param_typed_names(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+) -> Vec<TypedNameRecord> {
+    let Some(enclosing_method) = enclosing_method else {
+        return Vec::new();
+    };
+    let Some(parameters) = node.named_children().into_iter().next() else {
+        return Vec::new();
+    };
+    match parameters.kind.as_str() {
+        "formal_parameters" => parameters
+            .named_children()
+            .into_iter()
+            .filter_map(parameter_name_and_type)
+            .map(|(name, declared_type)| TypedNameRecord {
+                name,
+                declared_type,
+                scope: NameScope::Local { enclosing_method },
+            })
+            .collect(),
+        "identifier" => vec![TypedNameRecord {
+            name: parameters.text().to_string(),
+            declared_type: String::new(),
+            scope: NameScope::Local { enclosing_method },
+        }],
+        "inferred_parameters" => parameters
+            .named_children()
+            .into_iter()
+            .filter(|c| c.kind == "identifier")
+            .map(|c| TypedNameRecord {
+                name: c.text().to_string(),
+                declared_type: String::new(),
+                scope: NameScope::Local { enclosing_method },
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +576,70 @@ mod tests {
         assert_eq!(
             parameter_name_and_type(params[1]),
             Some(("rest".to_string(), "Bar".to_string()))
+        );
+    }
+
+    /// #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21
+    /// switch case PATTERN LABEL's `type_pattern` binding (`case Target
+    /// handle -> ...`) must be extracted as a real `TypedNameRecord`,
+    /// exactly like every other local-binding form -- this closes the
+    /// exact shape that fell through to `resolve_receiver_type`'s
+    /// open-world fallback substrate before this fix.
+    #[test]
+    fn type_pattern_typed_name_reads_a_switch_case_pattern_binding() {
+        use crate::graph::identity::make_symbol_id;
+
+        let typed = parse_first_of_kind(
+            "class First {\n    void run(Object o) {\n        switch (o) {\n            case String s -> System.out.println(s);\n            default -> {}\n        }\n    }\n}\n",
+            "type_pattern",
+        );
+        let enclosing_method = make_symbol_id(1, 0);
+        let record = type_pattern_typed_name(&typed, Some(enclosing_method))
+            .expect("a switch case type pattern must yield a typed-name record");
+        assert_eq!(record.name, "s");
+        assert_eq!(record.declared_type, "String");
+        assert_eq!(record.scope, NameScope::Local { enclosing_method });
+    }
+
+    /// #1910 prerequisite 3: a Java 21 RECORD PATTERN's own component
+    /// (`Target handle` inside `Wrapper(Target handle)`) must ALSO be
+    /// extracted -- this is the SAME node kind whether reached via an
+    /// `instanceof` pattern or a switch case pattern, and at any nesting
+    /// depth, which is exactly why this is written against the grammar's
+    /// own `record_pattern_component` node rather than re-derived per
+    /// Java feature.
+    #[test]
+    fn record_pattern_component_typed_name_reads_a_bound_component() {
+        use crate::graph::identity::make_symbol_id;
+
+        let typed = parse_first_of_kind(
+            "class First {\n    void run(Object o) {\n        if (o instanceof Wrapper(Target handle)) {\n            handle.run();\n        }\n    }\n}\n",
+            "record_pattern_component",
+        );
+        let enclosing_method = make_symbol_id(1, 0);
+        let record = record_pattern_component_typed_name(&typed, Some(enclosing_method))
+            .expect("a bound record pattern component must yield a typed-name record");
+        assert_eq!(record.name, "handle");
+        assert_eq!(record.declared_type, "Target");
+        assert_eq!(record.scope, NameScope::Local { enclosing_method });
+    }
+
+    /// Companion: Java's `_` (underscore pattern) inside a record pattern
+    /// component explicitly introduces NO binding at all -- extracting a
+    /// fabricated name for it would be worse than not extracting anything.
+    #[test]
+    fn record_pattern_component_typed_name_returns_none_for_an_underscore_component() {
+        use crate::graph::identity::make_symbol_id;
+
+        let typed = parse_first_of_kind(
+            "class First {\n    void run(Object o) {\n        if (o instanceof Wrapper(Target _)) {\n            System.out.println(\"matched\");\n        }\n    }\n}\n",
+            "record_pattern_component",
+        );
+        let enclosing_method = make_symbol_id(1, 0);
+        assert_eq!(
+            record_pattern_component_typed_name(&typed, Some(enclosing_method)),
+            None,
+            "an underscore-pattern component introduces no binding and must yield no record"
         );
     }
 

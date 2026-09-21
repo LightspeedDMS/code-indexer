@@ -59,6 +59,17 @@ pub struct CodeGraphBuilder {
     /// the predicate must treat as unproven (undecidable), never as
     /// license to report `Some(true)`.
     kinds: HashMap<u32, DeclarationKind>,
+    /// Bug #1900 (epic #1906 P5): per-symbol DECLARATION location -- a
+    /// `(file_string_id, line)` pair, where `file_string_id` is an id into
+    /// this SAME builder's shared `strings` table (see `intern_string`).
+    /// Deliberately keyed by the declaration's OWN file+line, never a
+    /// `Reference`'s call-site coordinates (`Reference.file`/`.line`,
+    /// which name where a symbol was CALLED FROM, not where it is
+    /// declared) -- see `CodeGraph::location_for`'s doc comment for the
+    /// full rationale. A dense id absent here reads back as `None` via
+    /// `CodeGraph::location_for`, the same "absent means unknown" contract
+    /// `signatures`/`visibilities`/`kinds` already use.
+    locations: HashMap<u32, (u32, u32)>,
 }
 
 #[cfg(test)]
@@ -112,6 +123,7 @@ impl CodeGraphBuilder {
             signatures: HashMap::new(),
             visibilities: HashMap::new(),
             kinds: HashMap::new(),
+            locations: HashMap::new(),
         }
     }
 
@@ -158,6 +170,14 @@ impl CodeGraphBuilder {
         self.kinds.insert(dense_symbol_id, kind);
     }
 
+    /// Bug #1900 (epic #1906 P5): attaches `dense_symbol_id`'s DECLARATION
+    /// location -- `file_string_id` (an id already returned by
+    /// `intern_string` on THIS builder) and its 1-based `line`. Mirrors
+    /// `add_visibility`/`add_kind`'s sparse-map-keyed-by-dense-id shape.
+    pub fn add_location(&mut self, dense_symbol_id: u32, file_string_id: u32, line: u32) {
+        self.locations.insert(dense_symbol_id, (file_string_id, line));
+    }
+
     /// Interns a symbol NAME string, returning its dense id in the shared
     /// string table (see `super::super::string_table::StringTable`).
     pub fn intern_string(&mut self, s: &str) -> u32 {
@@ -202,6 +222,7 @@ impl CodeGraphBuilder {
             self.signatures,
             self.visibilities,
             self.kinds,
+            self.locations,
         )
     }
 }

@@ -12,6 +12,8 @@
 use super::{FileForBind, PendingReference};
 use crate::graph::budget::IndexBudget;
 use crate::graph::csr::{CodeGraph, CodeGraphBuilder};
+use crate::graph::extract::local_index::{Declaration, DeclarationKind};
+use crate::graph::identity::SymbolId;
 
 /// AC6: the exact final CSR candidate-arena size once the ladder's step-2
 /// cap is (or is not) applied -- must be computed BEFORE
@@ -34,6 +36,55 @@ pub(super) fn capped_candidate_total(
         .sum()
 }
 
+/// Bug #1904: widens a `Method` declaration's cached signature to carry
+/// its declaring type's bare name and its real, per-parameter bare type
+/// names (e.g. `"TimeUtil.parse(XMLGregorianCalendar)"`) instead of the
+/// arity-only `"name(N params)"` shape the shipped signature-matching
+/// template (`docs/xray-templates/callers-of-symbols-matching-signature-
+/// text.rs`) cannot match against by name or declaring type at all.
+/// Fully LANGUAGE-AGNOSTIC: it reads only `Declaration`/
+/// `MethodOwnerRecord`, both already populated by every extractor (Java
+/// AND Kotlin, #1908) at extraction time -- this is the ONE place this
+/// widening needs to happen for every current and future language,
+/// never a per-extractor duplicate (Rule 4, anti-duplication).
+///
+/// `None` for every non-`Method` `DeclarationKind` (`Type`/`Field`/
+/// `Constant`/`Package`) -- those already name the one thing they
+/// declare via their own `"{keyword} {name}"`-shaped cached signature,
+/// and there is no separate "declaring type" for them at this layer
+/// without inventing data the extractor does not actually capture here
+/// (Rule 10, fact-verification). The caller falls back to the original
+/// cached string in that case.
+///
+/// `owner` is `None` when the extractor could not determine the
+/// immediately enclosing type (see `MethodOwnerRecord`'s own doc
+/// comment) -- the plain `"name(Type, Type)"` form is used then, never a
+/// fabricated declaring type.
+///
+/// `declaration.param_types` is BARE, generic-stripped text (never
+/// fully-qualified with a package -- that resolution does not exist at
+/// this layer, see `Declaration::param_types`'s own doc comment) and can
+/// be SHORTER than `declaration.param_count` when the extractor could
+/// not read every parameter's type. Presenting a shorter list as if it
+/// were the complete signature would be fabrication, so this falls back
+/// to the original arity-only `"(N params)"` form (still prefixed with
+/// the declaring type when known) whenever the two counts disagree --
+/// under-reporting is the safe direction here, never a guessed param list.
+fn widen_method_signature(declaration: &Declaration, owner: Option<&str>) -> Option<String> {
+    if declaration.kind != DeclarationKind::Method {
+        return None;
+    }
+    let params_text = if declaration.param_types.len() == declaration.param_count.unwrap_or(usize::MAX) {
+        declaration.param_types.join(", ")
+    } else {
+        format!("{} params", declaration.param_count.unwrap_or(0))
+    };
+    Some(match owner {
+        Some(owner) => format!("{owner}.{}({params_text})", declaration.name),
+        None => format!("{}({params_text})", declaration.name),
+    })
+}
+
 /// Interns EVERY declared symbol across `files` -- not just symbols that
 /// happen to appear as a reference's `from` or as some candidate's target
 /// -- and, unless `exceeded` (AC6 ladder step 1, "drop snippets first"),
@@ -46,8 +97,28 @@ pub(super) fn intern_declarations_and_attach_signatures(
     files: &[FileForBind],
     builder: &mut CodeGraphBuilder,
     exceeded: bool,
+    file_paths: &std::collections::HashMap<u32, String>,
 ) {
     for file in files {
+        // Bug #1900 (epic #1906 P5): interned ONCE per file (not per
+        // declaration) -- `intern_string` dedups internally too, but there
+        // is no reason to pay even a HashMap lookup per declaration when
+        // one file may declare hundreds of symbols. Absent from
+        // `file_paths` (every caller except `repo_index::build_repo_graph`
+        // today) means no location is ever recorded for this file's
+        // declarations -- the same safe "unknown" default `location_for`
+        // already returns for a dense id it never saw.
+        let file_string_id = file_paths.get(&file.file_id).map(|path| builder.intern_string(path));
+        // Bug #1904: per-file lookup from a method-shaped symbol to its
+        // immediately enclosing type's bare name, built ONCE per file
+        // (O(declared methods in this file)) rather than re-scanning
+        // `method_owners` per declaration.
+        let owners_by_symbol: std::collections::HashMap<SymbolId, &str> = file
+            .index
+            .method_owners
+            .iter()
+            .map(|owner| (owner.method_symbol, owner.enclosing_type.as_str()))
+            .collect();
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
             // Story #1835: visibility is ANALYTICAL data `is_definitely_
@@ -69,11 +140,26 @@ pub(super) fn intern_declarations_and_attach_signatures(
             // possibly-absent map lookup), so there is no `Option` to
             // unwrap here.
             builder.add_kind(dense, declaration.kind);
+            // Bug #1900: DECLARATION location, like visibility/kind, is
+            // analytical data an evaluator needs to audit a finding -- it
+            // MUST survive budget pressure, so this too runs
+            // unconditionally, before the `exceeded` early return below
+            // (which gates only the signature cache).
+            if let Some(file_string_id) = file_string_id {
+                builder.add_location(dense, file_string_id, declaration.line as u32);
+            }
             if exceeded {
                 continue;
             }
             if let Some(signature) = file.index.signatures.get(&declaration.symbol) {
-                builder.add_signature(dense, signature.clone());
+                // Bug #1904: for a Method declaration, replace the cached
+                // arity-only text with the widened declaring-type +
+                // real-param-types form; every other DeclarationKind keeps
+                // its existing cached signature UNCHANGED (`widen_method_
+                // signature` returns None for them).
+                let owner = owners_by_symbol.get(&declaration.symbol).copied();
+                let widened = widen_method_signature(declaration, owner).unwrap_or_else(|| signature.clone());
+                builder.add_signature(dense, widened);
             }
         }
     }
@@ -128,7 +214,19 @@ pub fn bind_with_budget_and_completeness(
     index_is_complete: bool,
 ) -> CodeGraph {
     let (prepared, _stats) = super::admission::prepare_bind(files, index_is_complete);
-    super::admission::finish_bind(prepared, budget)
+    // Bug #1900: this generic entry point has no path-tracking caller --
+    // only `repo_index::build_repo_graph` knows real repo-relative paths
+    // and threads them through `finish_bind` directly. An empty map here
+    // preserves this function's pre-existing "no location data" behavior
+    // exactly (every `location_for` call on graphs built through this path
+    // returns `None`, unchanged).
+    //
+    // Bug #1897 P1 fix: `finish_bind` now also returns `BindTimeFacts` --
+    // discarded here (`.0`) since this convenience entry point's contract
+    // is "return a `CodeGraph`" byte-for-byte, unchanged. The lossless
+    // reasons only `repo_index::build_repo_graph` needs are read directly
+    // from `finish_bind`'s return value at that call site instead.
+    super::admission::finish_bind(prepared, budget, &std::collections::HashMap::new()).0
 }
 
 #[cfg(test)]
@@ -136,7 +234,7 @@ mod tests {
     use super::*;
     use crate::graph::budget::AnalysisCompleteness;
     use crate::graph::extract::local_index::{
-        Declaration, DeclarationKind, InvocationSite, LocalIndex,
+        Declaration, DeclarationKind, InvocationSite, LocalIndex, MethodOwnerRecord,
     };
     use crate::graph::identity::{make_symbol_id, SymbolId};
 
@@ -175,6 +273,122 @@ mod tests {
             language: language.to_string(),
             index,
         }
+    }
+
+    /// Bug #1904: a single-file fixture with one Method declaration
+    /// carrying real `param_types` and (optionally) a `MethodOwnerRecord`
+    /// linking it to its declaring type -- mirrors what a real extractor
+    /// (Java or Kotlin, #1908) actually populates at extraction time, but
+    /// stays independent of BOTH concrete extractors: this exercises
+    /// `budget_bind`'s own language-agnostic widening logic, never one
+    /// language's extraction code. `index.signatures` is seeded with the
+    /// OLD arity-only text every real extractor still inserts (java.rs/
+    /// kotlin.rs `format!("{name}({param_count} params)")`) -- the text
+    /// `widen_method_signature` must REPLACE for a Method declaration,
+    /// never merely copy through.
+    fn single_method_fixture(
+        name: &str,
+        owner: Option<&str>,
+        param_count: Option<usize>,
+        param_types: Vec<String>,
+    ) -> (Vec<FileForBind>, SymbolId) {
+        let symbol = make_symbol_id(1, 1);
+        let mut index = LocalIndex::new();
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: name.to_string(),
+            line: 5,
+            symbol,
+            param_count,
+            param_types,
+            is_varargs: false,
+        });
+        index
+            .signatures
+            .insert(symbol, format!("{name}({} params)", param_count.unwrap_or(0)));
+        if let Some(owner) = owner {
+            index.method_owners.push(MethodOwnerRecord {
+                method_symbol: symbol,
+                enclosing_type: owner.to_string(),
+            });
+        }
+        (vec![file(1, "java", index)], symbol)
+    }
+
+    /// Bug #1904 discriminating RED/GREEN: a Method's cached signature
+    /// must carry its declaring type and real parameter types, never just
+    /// arity -- this is what lets the shipped signature-matching template
+    /// (`docs/xray-templates/callers-of-symbols-matching-signature-text.rs`)
+    /// match on a real declaring-class name instead of matching nothing.
+    #[test]
+    fn method_declaration_with_real_param_types_and_a_known_owner_produces_the_widened_signature() {
+        let (files, symbol) =
+            single_method_fixture("parse", Some("TimeUtil"), Some(1), vec!["XMLGregorianCalendar".to_string()]);
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+        let dense = graph.dense_id_for(symbol).expect("method must be interned");
+        assert_eq!(graph.signature_for(dense), Some("TimeUtil.parse(XMLGregorianCalendar)"));
+    }
+
+    /// Bug #1904: with no `MethodOwnerRecord` at all (the extractor could
+    /// not determine the enclosing type), the plain `name(Types)` form is
+    /// used -- never a fabricated declaring type.
+    #[test]
+    fn method_declaration_with_no_known_owner_omits_the_prefix_but_still_lists_real_param_types() {
+        let (files, symbol) = single_method_fixture("parse", None, Some(1), vec!["String".to_string()]);
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+        let dense = graph.dense_id_for(symbol).expect("method must be interned");
+        assert_eq!(graph.signature_for(dense), Some("parse(String)"));
+    }
+
+    /// Bug #1904: `param_count` says 2 parameters but only 1 type was
+    /// successfully read -- presenting that ONE type as if it were the
+    /// complete list would be fabrication (Rule 10). Must fall back to
+    /// the arity-only `"N params"` form, still prefixed with the known
+    /// owner -- under-reporting is the safe direction, never a guessed
+    /// partial param list.
+    #[test]
+    fn method_declaration_with_incomplete_param_types_falls_back_to_the_arity_only_form_without_fabricating() {
+        let (files, symbol) = single_method_fixture("connect", Some("Client"), Some(2), vec!["String".to_string()]);
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+        let dense = graph.dense_id_for(symbol).expect("method must be interned");
+        assert_eq!(graph.signature_for(dense), Some("Client.connect(2 params)"));
+    }
+
+    /// Bug #1904: `MethodOwnerRecord`'s own doc comment says a constructor
+    /// gets an owner record too (constructors use `DeclarationKind::
+    /// Method` so invocation sites resolve by the ordinary method path) --
+    /// widening must behave sensibly for one, not just an ordinary method.
+    #[test]
+    fn constructor_declaration_widens_using_its_owner_exactly_like_an_ordinary_method() {
+        let (files, symbol) = single_method_fixture("OrderService", Some("OrderService"), Some(0), Vec::new());
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+        let dense = graph.dense_id_for(symbol).expect("constructor must be interned");
+        assert_eq!(graph.signature_for(dense), Some("OrderService.OrderService()"));
+    }
+
+    /// Bug #1904 constraint: the widening must alter Method signature
+    /// CONTENT only -- every other `DeclarationKind` keeps its existing
+    /// cached signature byte-for-byte, since `widen_method_signature`
+    /// returns `None` for them and the caller falls back to the original
+    /// cached string unchanged.
+    #[test]
+    fn non_method_declarations_keep_their_existing_cached_signature_unchanged() {
+        let symbol = make_symbol_id(1, 0);
+        let mut index = LocalIndex::new();
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Type,
+            name: "OrderService".to_string(),
+            line: 1,
+            symbol,
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+        });
+        index.signatures.insert(symbol, "class OrderService".to_string());
+        let files = vec![file(1, "java", index)];
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+        let dense = graph.dense_id_for(symbol).expect("type must be interned");
+        assert_eq!(graph.signature_for(dense), Some("class OrderService"));
     }
 
     /// Three same-named `run` declarations, none sharing a file (or
@@ -414,7 +628,15 @@ mod tests {
             &IndexBudget::unlimited(),
         );
         let dense = unlimited_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
-        assert_eq!(unlimited_graph.signature_for(dense), Some("solo()"));
+        // Bug #1904: `method_decl`'s fixture shape uses `param_count: None`
+        // (arity untracked in this minimal test helper -- a real extractor
+        // always sets `Some`, see `widen_method_signature`'s doc comment),
+        // so `param_types.len() (0) != param_count.unwrap_or(usize::MAX)`
+        // and the widening falls back to the arity-only form; no
+        // `MethodOwnerRecord` is set here either, so there is no declaring-
+        // type prefix. This test's own purpose (presence-vs-dropped under
+        // budget pressure) is unaffected by the CONTENT of the string.
+        assert_eq!(unlimited_graph.signature_for(dense), Some("solo(0 params)"));
         assert_eq!(
             unlimited_graph.completeness(),
             AnalysisCompleteness::Complete

@@ -1,8 +1,8 @@
 """Bare-to-global alias fallback helper for READ-ONLY MCP handlers (Story #1039).
 
 This module provides a single helper, ``try_global_fallback``, that transparently
-promotes a bare repository alias (e.g. ``"evolution"``) to its globally-activated
-form (``"evolution-global"``) when:
+promotes a bare repository alias (e.g. ``"example-repo"``) to its globally-activated
+form (``"example-repo-global"``) when:
 
   1. The alias does not already end with ``"-global"``.
   2. The user does NOT have the alias in their own activated-repo list.
@@ -57,8 +57,8 @@ def try_global_fallback(
 
     Args:
         alias: The repository alias supplied by the caller.  May be ``None``,
-            an empty string, a bare alias (``"evolution"``), or an already-suffixed
-            alias (``"evolution-global"``).
+            an empty string, a bare alias (``"example-repo"``), or an already-suffixed
+            alias (``"example-repo-global"``).
         golden_repo_manager: Live ``GoldenRepoManager`` instance used to query
             global activation status.
 

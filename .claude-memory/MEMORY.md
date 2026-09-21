@@ -24,6 +24,7 @@
 - [feedback_sole_developer_own_all_code.md](feedback_sole_developer_own_all_code.md) - sole developer across sessions — never call code "not ours"
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - no module-level dicts for cross-request state — PayloadCache or shared DB
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - bootstrap/systemd/PATH changes need BOTH installer and auto-updater self-heal
+- [feedback_self_upgrading_deployer_runs_old_code.md](feedback_self_upgrading_deployer_runs_old_code.md) - the auto-updater runs OLD in-memory code on the deploy that installs a deploy-time fix; validate the transitional deploy
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - prefer installing the dependency over install-footprint purity
 - [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - subagents act directly; never spawn nested Task/Agent calls
 - [feedback_subagent_committed_against_explicit_instruction.md](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log; never trust a subagent's self-report on commits

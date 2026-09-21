@@ -71,6 +71,33 @@ impl WalkContext {
 /// context a type declaration's own children (including a nested type's
 /// methods) must see -- its own bare name, the inherited-or-newly-rooted
 /// top-level type, and a reset `enclosing_method`.
+/// P1-A (#1898 code review round 2, epic #1906): records the bare name of
+/// every `type_parameter` under `node`'s own DIRECT `type_parameters`
+/// child (`class Box<T> {}`, `<T extends Svc> void run(T t) {}`), never
+/// descending into a NESTED type/method's own `type_parameters` (those are
+/// visited separately when the walk reaches that nested node). Verified
+/// real grammar shape: a `type_parameter`'s first named child is ALWAYS
+/// its own `type_identifier` (an optional trailing `type_bound` names the
+/// CONSTRAINT type, e.g. `Svc` in `T extends Svc`, never the parameter's
+/// own name) -- `child_by_kind("type_identifier")` unambiguously picks the
+/// parameter name itself. Shared by `dispatch_type_declaration` (class/
+/// interface/record/enum/annotation-type declarations) and
+/// `extract_method_declaration` (methods and constructors) rather than
+/// duplicated at each call site (Rule 4, anti-duplication).
+fn push_type_parameter_names(node: &OwnedNode, index: &mut LocalIndex) {
+    let Some(type_parameters) = node.child_by_kind("type_parameters") else {
+        return;
+    };
+    for param in type_parameters.named_children() {
+        if param.kind != "type_parameter" {
+            continue;
+        }
+        if let Some(name_node) = param.child_by_kind("type_identifier") {
+            index.type_parameter_names.push(name_node.text().to_string());
+        }
+    }
+}
+
 fn dispatch_type_declaration(
     node: &OwnedNode,
     file_id: u32,
@@ -79,6 +106,7 @@ fn dispatch_type_declaration(
     index: &mut LocalIndex,
 ) -> WalkContext {
     extract_type_declaration(node, file_id, next_local, index);
+    push_type_parameter_names(node, index);
     let enclosing_type = node
         .child_by_kind("identifier")
         .map(|n| std::rc::Rc::from(n.text()));
@@ -91,6 +119,37 @@ fn dispatch_type_declaration(
             type_name: type_name.to_string(),
             top_level_type: top_level_type.to_string(),
         });
+    }
+    // #1910 prerequisite 3 (round4-findings.md finding 3): a record's own
+    // COMPONENTS (`record Wrapper(Target handle) {}`) behave as implicit
+    // fields visible throughout every one of the record's own methods,
+    // INCLUDING its compact constructor -- unlike an ordinary method's
+    // formal parameters (`push_parameter_typed_names`, scoped `Local` to
+    // that one method), a record component must be scoped `Field` to the
+    // record's OWN type so every method (and the synthetic scope the
+    // "block reached with no enclosing_method" rule gives a compact
+    // constructor) can see it via `FileTypedNames::lookup`'s field
+    // fallback. Reuses `parameter_name_and_type` verbatim (Rule 4,
+    // anti-duplication) -- a record's `parameters` field is syntactically
+    // just another `formal_parameters` node.
+    if node.kind == "record_declaration" {
+        if let (Some(formal_parameters), Some(type_name)) =
+            (node.child_by_kind("formal_parameters"), &enclosing_type)
+        {
+            for param in formal_parameters.named_children() {
+                if let Some((name, declared_type)) =
+                    super::java_receiver::parameter_name_and_type(param)
+                {
+                    index.typed_names.push(TypedNameRecord {
+                        name,
+                        declared_type,
+                        scope: NameScope::Field {
+                            enclosing_type: type_name.to_string(),
+                        },
+                    });
+                }
+            }
+        }
     }
     WalkContext {
         enclosing_type,
@@ -154,6 +213,143 @@ fn dispatch_node(
             index
                 .typed_names
                 .extend(super::java_receiver::local_variable_typed_names(
+                    node,
+                    ctx.enclosing_method,
+                ));
+            ctx
+        }
+        // P1-B (#1898 code review round 2, epic #1906): these four forms
+        // previously had NO typed-name extraction at all, letting
+        // `receiver::resolve_receiver_type`'s static-type-name fallback
+        // misresolve a same-named identifier into an unrelated in-repo
+        // type -- see each function's own doc comment.
+        "enhanced_for_statement" => {
+            if let Some(record) =
+                super::java_receiver::enhanced_for_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        "resource" => {
+            if let Some(record) =
+                super::java_receiver::resource_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        "catch_formal_parameter" => {
+            if let Some(record) =
+                super::java_receiver::catch_parameter_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // Bug #1898 round 4 (epic #1906): a type-pattern binding
+        // (`o instanceof Svc handle`) previously had NO typed-name
+        // extraction at all -- see `instanceof_pattern_typed_name`'s own
+        // doc comment.
+        "instanceof_expression" => {
+            if let Some(record) =
+                super::java_receiver::instanceof_pattern_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21
+        // switch case pattern binding (`case Target handle ->`) -- written
+        // against the GRAMMAR NODE KIND (`type_pattern`) rather than
+        // "switch case patterns" as a Java feature, so any future context
+        // tree-sitter-java reuses this same production for is covered for
+        // free. See `type_pattern_typed_name`'s own doc comment.
+        "type_pattern" => {
+            if let Some(record) =
+                super::java_receiver::type_pattern_typed_name(node, ctx.enclosing_method)
+            {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3: a Java 21 record-pattern deconstruction
+        // component (`Target handle` inside `Wrapper(Target handle)`),
+        // reachable via `instanceof` OR a switch case pattern, at ANY
+        // nesting depth -- the generic stack walk visits every descendant
+        // regardless of depth, so no per-level recursion is needed here.
+        // See `record_pattern_component_typed_name`'s own doc comment.
+        "record_pattern_component" => {
+            if let Some(record) = super::java_receiver::record_pattern_component_typed_name(
+                node,
+                ctx.enclosing_method,
+            ) {
+                index.typed_names.push(record);
+            }
+            ctx
+        }
+        // #1910 prerequisite 3: an enum's own CONSTANTS (`enum Color { RED
+        // }`) are effectively `public static final` instances of the enum
+        // type itself -- recorded as FIELD-scope typed names on the
+        // enum's own type (`ctx.enclosing_type`, already the enum being
+        // declared by the time its `enum_body` children are walked) so a
+        // bare reference to one never falls through to the open-world
+        // static-type-name fallback and misresolves against an unrelated
+        // in-repo type that coincidentally shares the constant's name.
+        "enum_constant" => {
+            if let (Some(name_node), Some(enclosing_type)) =
+                (node.child_by_kind("identifier"), ctx.enclosing_type.as_deref())
+            {
+                index.typed_names.push(TypedNameRecord {
+                    name: name_node.text().to_string(),
+                    declared_type: enclosing_type.to_string(),
+                    scope: NameScope::Field {
+                        enclosing_type: enclosing_type.to_string(),
+                    },
+                });
+            }
+            ctx
+        }
+        // Bug #1898 round 4 (epic #1906): a static initializer's, an
+        // instance initializer's, or a record compact constructor's body
+        // is a bare `block` node reached while `ctx.enclosing_method` is
+        // STILL `None` (none of those three container nodes sets it --
+        // `dispatch_type_declaration` reset it to `None` for the whole
+        // type's children, and only `method_declaration`/`constructor_
+        // declaration` ever set it back). `local_variable_typed_names`
+        // (and every other per-method typed-name extractor) silently
+        // returned `Vec::new()` for a local declared inside such a block,
+        // making `resolve_receiver_type` fall through to its open-world
+        // fallback substrates and misresolve a same-named identifier into
+        // an unrelated in-repo type -- the exact P1-B shape, just for
+        // THREE binding forms extraction never covered. Allocating a
+        // fresh SYNTHETIC symbol here (no `Declaration` pushed for it,
+        // mirroring `extract_method_declaration`'s own "malformed/
+        // nameless declaration still gets a symbol for its children's
+        // context" fallback) and using it as `enclosing_method` for this
+        // block's children fixes all three uniformly: this single rule
+        // fires exactly once per top-level initializer/compact-ctor body
+        // (a NESTED block within it inherits the now-`Some` enclosing_
+        // method unchanged, so it never re-triggers -- same one-scope-
+        // per-method-body granularity every other block in this extractor
+        // already has). An ORDINARY block inside a real method/constructor
+        // body never reaches this arm at all: `ctx.enclosing_method` is
+        // already `Some` by the time such a block is visited, since
+        // `dispatch_method_declaration` sets it before any of the
+        // method's children (including its own top-level `block`) are
+        // pushed onto the walk stack.
+        "block" if ctx.enclosing_method.is_none() => {
+            let symbol = next_symbol(file_id, next_local);
+            WalkContext {
+                enclosing_type: ctx.enclosing_type.clone(),
+                top_level_type: ctx.top_level_type.clone(),
+                enclosing_method: Some(symbol),
+            }
+        }
+        "lambda_expression" => {
+            index
+                .typed_names
+                .extend(super::java_receiver::lambda_param_typed_names(
                     node,
                     ctx.enclosing_method,
                 ));
@@ -505,7 +701,15 @@ fn extract_imports(root: &OwnedNode, index: &mut LocalIndex) {
         let is_wildcard =
             child.child_by_kind("asterisk").is_some() || child.child_by_kind("*").is_some();
         let is_static = child.child_by_kind("static").is_some();
-        let kind = if is_wildcard {
+        // Issue #1915: a STATIC-ON-DEMAND import (`import static pkg.
+        // Util.*;`) is both wildcard AND static -- it must be classified
+        // as its own `StaticWildcard` kind, checked BEFORE the plain
+        // `is_wildcard` branch, or it silently loses every static-import
+        // reason bit (see `ImportKind::StaticWildcard`'s own doc comment
+        // for the full failure chain this produced).
+        let kind = if is_wildcard && is_static {
+            ImportKind::StaticWildcard
+        } else if is_wildcard {
             ImportKind::Wildcard
         } else if is_static {
             ImportKind::Static
@@ -744,6 +948,7 @@ fn extract_method_declaration(
     index: &mut LocalIndex,
 ) -> SymbolId {
     let symbol = next_symbol(file_id, next_local);
+    push_type_parameter_names(node, index);
     let Some(name_node) = node.child_by_kind("identifier") else {
         return symbol;
     };

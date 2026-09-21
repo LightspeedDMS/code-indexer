@@ -99,10 +99,34 @@ pub struct Declaration {
 }
 
 /// AC2: "imports (ordinary, static, wildcard)".
+///
+/// Issue #1915: `Static` is a SINGLE-MEMBER static import (`import static
+/// pkg.Util.helper;`) and `Wildcard` is an ORDINARY, non-static
+/// package-level wildcard (`import pkg.*;`) -- neither is the right kind
+/// for a STATIC-ON-DEMAND import (`import static pkg.Util.*;`, importing
+/// every static member of `Util`), which needs its own variant. Before
+/// this fix, `extract_imports` (`java.rs`) tested `is_wildcard` before
+/// `is_static` and classified a static-on-demand import as plain
+/// `Wildcard` -- `import_reasons` (`resolve.rs`) then compared its raw
+/// `path` (which still carries the declaring-CLASS segment, e.g.
+/// `"pkg.Util"`) against a candidate's PACKAGE (`"pkg"`), which never
+/// matches, so the import earned ZERO reason bits at all: not `WILDCARD_
+/// IMPORT` (wrong substrate: an ordinary wildcard import's `path` is a
+/// bare package, not `package.Class`) and not `STATIC_IMPORT` either
+/// (the `Static` arm's own name-only heuristic never ran, since the
+/// import was misclassified as `Wildcard`). Combined with a decoy
+/// same-named declaration elsewhere in the repo, this could silently
+/// destroy the real call edge outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportKind {
     Ordinary,
     Static,
+    /// Issue #1915: `import static pkg.Util.*;` -- every static member of
+    /// `Util` is imported. `ImportRecord::path` for this kind is the
+    /// DECLARING CLASS's own dotted path (`"pkg.Util"`), never a bare
+    /// package -- see `import_reasons`'s own doc comment for how this is
+    /// resolved to a `STATIC_IMPORT` reason bit.
+    StaticWildcard,
     Wildcard,
 }
 
@@ -376,6 +400,24 @@ pub struct LocalIndex {
     /// appear here even when some OTHER supertype edge for it WAS recorded
     /// (the two are independent facts).
     pub incomplete_supertypes: Vec<String>,
+    /// P1-A (#1898 code review round 2, epic #1906): bare names of every
+    /// GENERIC TYPE PARAMETER declared anywhere in this file -- the `T` in
+    /// `class Box<T> {}`, `<T extends Svc> void run(T t) {}`, or a
+    /// constructor's own `<T>`. `TypeIndex::is_known_type_parameter_name`
+    /// (bind/families.rs) is the sole consumer: `receiver::
+    /// resolve_receiver_type` must reject a declared-type STRING that
+    /// names a type parameter rather than a real class/interface -- a
+    /// receiver typed `T` (from a formal parameter `T t`) is not a
+    /// concrete type this binder can narrow against, and treating it as
+    /// one fabricates a hard receiver-type filter on a name that never
+    /// denotes an actual declaration anywhere in the repo. Population is
+    /// REPO-WIDE by aggregation in `TypeIndex::build` (a type parameter is
+    /// syntactically local to its own class/method, but the blocking use
+    /// here is deliberately conservative: any name EVER used as a type
+    /// parameter anywhere is never trusted as a receiver type, which can
+    /// only ever make narrowing MORE conservative, never fabricate a
+    /// wrong hard filter).
+    pub type_parameter_names: Vec<String>,
 }
 
 impl LocalIndex {
@@ -449,6 +491,14 @@ mod tests {
     fn local_index_carries_interface_names_defaulting_empty() {
         let index = LocalIndex::new();
         assert!(index.interface_names.is_empty());
+    }
+
+    /// P1-A (#1898 code review round 2, epic #1906): `type_parameter_names`
+    /// defaults empty exactly like every other extraction-output field.
+    #[test]
+    fn local_index_carries_type_parameter_names_defaulting_empty() {
+        let index = LocalIndex::new();
+        assert!(index.type_parameter_names.is_empty());
     }
 
     #[test]

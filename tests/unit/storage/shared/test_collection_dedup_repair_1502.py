@@ -269,8 +269,10 @@ def _assert_hnsw_labels_resolve_to_correct_vectors(
 
 class TestParseUniqueKey:
     def test_parses_simple_project_id(self) -> None:
-        project_id, file_hash, index = parse_unique_key("evolution_sha256:4d2513c2_62")
-        assert project_id == "evolution"
+        project_id, file_hash, index = parse_unique_key(
+            "example-repo_sha256:4d2513c2_62"
+        )
+        assert project_id == "example-repo"
         assert file_hash == "sha256:4d2513c2"
         assert index == 62
 
@@ -664,12 +666,12 @@ class TestRepairFailLoudDedupAmbiguity:
 
 
 class TestRepairGapContinuity:
-    """Claude F1, AMENDED per live-staging E2E on the real evolution repo
+    """Claude F1, AMENDED per live-staging E2E on the real example-repo
     (Bug #1502 follow-up): a genuine LINE GAP between consecutive chunks
     in a file group (exceeding the real-chunker-derived tolerance proven
     above), or two distinct records sharing an identical line range, no
     longer refuses the WHOLE collection. Census across the real
-    evolution-repo collection found 586 of 10,579 file groups (5.5%)
+    example-repo collection found 586 of 10,579 file groups (5.5%)
     carry genuine historical line gaps (chunks silently dropped by the
     pre-fix code) -- whole-collection refusal on ANY such group would
     make migration permanently impossible for that repo, and realistically

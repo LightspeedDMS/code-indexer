@@ -65,8 +65,10 @@ def test_walk_never_stats_anything_inside_a_skipped_directory(
         return real_is_file(self)
 
     with patch.object(Path, "is_file", _tracking_is_file):
-        results, _truncated = _collect_graph_candidate_files(
-            repo_root, [], [], max_files=1000
+        results, _truncated, _with_ext, _without_ext, _langs = (
+            _collect_graph_candidate_files(
+                repo_root, [], [], max_files=1000, extractor_extensions={"java": "Java"}
+            )
         )
 
     for skip_dir in (".git", "node_modules", "target"):

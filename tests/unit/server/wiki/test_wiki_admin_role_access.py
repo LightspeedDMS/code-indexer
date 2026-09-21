@@ -83,7 +83,7 @@ class TestAdminRoleWikiAccess:
         """Reproduces the bug: role=admin, is_admin_user()=False -> should get 200, was 404."""
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "home.md").write_text("# Home")
-            user = _make_real_user("seba.battig", UserRole.ADMIN)
+            user = _make_real_user("jane.doe", UserRole.ADMIN)
             # is_admin_group=False simulates user NOT in admins group
             app = _make_app(user, tmpdir, set(), is_admin_group=False)
             client = TestClient(app)

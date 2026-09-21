@@ -153,7 +153,7 @@ MIGRATION_OWNER_NAME = "fleet_migration"
 #: AC8 approach (a): an explicit, migration-specific TTL that comfortably
 #: exceeds the realistic worst-case migration duration for the largest
 #: fleet repo. Justification: the largest known production golden repo
-#: (the epic's own worked example, "evolution") has on the order of
+#: (the epic's own worked example, "example-repo") has on the order of
 #: millions of chunk files; even at a conservative sustained throughput of
 #: several hundred chunks/sec for the streaming read+write+verify sequence,
 #: a full single-repo consolidation pass is expected to complete in well

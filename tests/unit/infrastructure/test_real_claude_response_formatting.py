@@ -31,20 +31,20 @@ def test_real_claude_response_formatting_issue():
 understand the project's purpose and key components.
 🔍✨ Semantic search: 'project purpose main functionality' --limit 10 (description=Search for project overview and main functionality)
 Let me read the README to understand the project purpose better.
-📖 Reading: /home/jsbattig/Dev/code-indexer/README.md
+📖 Reading: /home/opuser/Dev/code-indexer/README.md
 Now let me search for core algorithms and key components in the codebase:
 🔍✨ Semantic search: 'core algorithms indexing chunking embedding' --limit 15 (description=Search for core algorithms in the codebase)
 Let me search for more specific algorithms and services:
 🔍✨ Semantic search: 'vector search semantic similarity embedding generation git topology' --limit 10 (description=Search for vector search and git
 algorithms)
 Let me read the key algorithm files to understand the core components:
-📖 Reading: /home/jsbattig/Dev/code-indexer/src/code_indexer/indexing/chunker.py
-📖 Reading: /home/jsbattig/Dev/code-indexer/src/code_indexer/services/filesystem.py
+📖 Reading: /home/opuser/Dev/code-indexer/src/code_indexer/indexing/chunker.py
+📖 Reading: /home/opuser/Dev/code-indexer/src/code_indexer/services/filesystem.py
 🔍✨ Semantic search: 'git topology branch aware incremental indexing' --limit 10 (description=Search for git and branch topology algorithms)
-📖 Reading: /home/jsbattig/Dev/code-indexer/src/code_indexer/services/git_topology_service.py
+📖 Reading: /home/opuser/Dev/code-indexer/src/code_indexer/services/git_topology_service.py
 Now let me search for embedding generation and file watching algorithms:
 🔍✨ Semantic search: 'file watcher real time monitoring debouncing' --limit 8 (description=Search for file watching algorithms)
-📖 Reading: /home/jsbattig/Dev/code-indexer/src/code_indexer/services/git_aware_watch_handler.py
+📖 Reading: /home/opuser/Dev/code-indexer/src/code_indexer/services/git_aware_watch_handler.py
 Now let me search for smart indexing logic:
 🔍✨ Semantic search: 'smart indexing progressive metadata resumable' --limit 8 (description=Search for smart indexing algorithms)
 Based on my comprehensive analysis of the code-indexer codebase, I can now provide a detailed overview of what this project is about and identify the top 5
@@ -54,7 +54,7 @@ core algorithms.
 
 ### **What is This Project About?**
 
-**Code-Indexer** is an AI-powered semantic code search tool (/home/jsbattig/Dev/code-indexer/README.md) that transforms how developers search and understand codebases. Unlike traditional text-based search, it uses advanced AI embeddings to understand the
+**Code-Indexer** is an AI-powered semantic code search tool (/home/opuser/Dev/code-indexer/README.md) that transforms how developers search and understand codebases. Unlike traditional text-based search, it uses advanced AI embeddings to understand the
 **meaning** and **context** of code, enabling semantic queries like "authentication logic" or "error handling patterns."
 
 **Key Project Purpose:**
@@ -67,7 +67,7 @@ core algorithms.
 ## 🧠 **Top 5 Core Algorithms at the Heart of This Codebase**
 
 ### **1. Intelligent Text Chunking Algorithm**
-**Location:** TextChunker class (/home/jsbattig/Dev/code-indexer/src/code_indexer/indexing/chunker.py)
+**Location:** TextChunker class (/home/opuser/Dev/code-indexer/src/code_indexer/indexing/chunker.py)
 
 **What it does:**
 - **Language-Aware Splitting**: Uses regex patterns specific to each programming language (Python, JavaScript, C++, etc.) to break code at semantic
@@ -87,7 +87,7 @@ boundaries
 ```
 
 ### **2. Git Topology-Aware Branch Analysis Algorithm**
-**Location:** GitTopologyService class (/home/jsbattig/Dev/code-indexer/src/code_indexer/services/git_topology_service.py)
+**Location:** GitTopologyService class (/home/opuser/Dev/code-indexer/src/code_indexer/services/git_topology_service.py)
 
 **What it does:**
 - **O(δ) Complexity Optimization**: Only processes files that actually changed between branches, not the entire codebase
@@ -107,7 +107,7 @@ def analyze_branch_change(self, old_branch: str, new_branch: str) -> BranchChang
 ```
 
 ### **3. Vector Search with Model-Aware Filtering Algorithm**
-**Location:** FilesystemClient class (/home/jsbattig/Dev/code-indexer/src/code_indexer/services/filesystem.py)
+**Location:** FilesystemClient class (/home/opuser/Dev/code-indexer/src/code_indexer/services/filesystem.py)
 
 **What it does:**
 - **Cosine Similarity Search**: Uses high-dimensional vector space for semantic code matching
@@ -127,7 +127,7 @@ def search_with_model_filter(self, query_vector: List, embedding_model: str):
 ```
 
 ### **4. Real-Time File Monitoring with Debounced Processing Algorithm**
-**Location:** GitAwareWatchHandler class (/home/jsbattig/Dev/code-indexer/src/code_indexer/services/git_aware_watch_handler.py)
+**Location:** GitAwareWatchHandler class (/home/opuser/Dev/code-indexer/src/code_indexer/services/git_aware_watch_handler.py)
 
 **What it does:**
 - **Multi-Threaded Architecture**: Separates file system monitoring, change batching, and index updates
@@ -149,7 +149,7 @@ def _process_changes_loop(self):
 ```
 
 ### **5. Progressive Metadata with Smart Resume Algorithm**
-**Location:** ProgressiveMetadata class (/home/jsbattig/Dev/code-indexer/src/code_indexer/services/progressive_metadata.py) and SmartIndexer class (/home/jsbattig/Dev/code-indexer/src/code_indexer/services/smart_indexer.py)
+**Location:** ProgressiveMetadata class (/home/opuser/Dev/code-indexer/src/code_indexer/services/progressive_metadata.py) and SmartIndexer class (/home/opuser/Dev/code-indexer/src/code_indexer/services/smart_indexer.py)
 
 **What it does:**
 - **Continuous Progress Saving**: Saves metadata after every file processed, not just at the end

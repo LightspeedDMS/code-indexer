@@ -70,7 +70,7 @@ class TestActivateRepositoryAccessGuard:
         Reproduces: activate_repository('humanize-global', user_alias='humanize-test')
         -> "Access denied: repository 'humanize-test' is not accessible"
         """
-        user = _make_user("Seba.Battig@lightspeeddms.com")
+        user = _make_user("Jane.Doe@example.com")
         # User has access to 'humanize' (bare name of 'humanize-global')
         access_service = _make_access_service(
             is_admin=False,

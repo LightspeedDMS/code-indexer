@@ -142,10 +142,12 @@ fn exception_swallowers_are_ranked_by_real_fan_in_via_the_real_pipeline() {
     // real cached signature rather than blindly trusted.
     let swallow_a_symbol = make_symbol_id(file_id(swallower_a_file), 1);
     let swallow_a_dense = graph.dense_id_for(swallow_a_symbol).expect("swallowA must be interned");
-    assert_eq!(graph.signature_for(swallow_a_dense), Some("swallowA(0 params)"));
+    // Bug #1904: the cached signature now carries its declaring type and
+    // real (here, empty) parameter types instead of arity-only text.
+    assert_eq!(graph.signature_for(swallow_a_dense), Some("SwallowerA.swallowA()"));
     let swallow_b_symbol = make_symbol_id(file_id(swallower_b_file), 1);
     let swallow_b_dense = graph.dense_id_for(swallow_b_symbol).expect("swallowB must be interned");
-    assert_eq!(graph.signature_for(swallow_b_dense), Some("swallowB(0 params)"));
+    assert_eq!(graph.signature_for(swallow_b_dense), Some("SwallowerB.swallowB()"));
 
     assert_eq!(graph.callers_of(swallow_a_dense).len(), 3, "fixture sanity: swallowA must have exactly 3 real callers");
     assert_eq!(graph.callers_of(swallow_b_dense).len(), 1, "fixture sanity: swallowB must have exactly 1 real caller");
