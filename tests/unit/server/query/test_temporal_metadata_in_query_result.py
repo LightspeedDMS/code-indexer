@@ -432,7 +432,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "commit_hash": "0b7b331",
                 "commit_date": "2025-05-28",
                 "author_name": "Ryan Pearson",
-                "author_email": "ryan.pearson@lightspeeddms.com",
+                "author_email": "ryan.pearson@example.com",
                 "commit_message": "EVO-45522 Making changes to the PartsTransferPanel Layout.",
                 "diff_type": "modified",
             },
@@ -514,10 +514,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result_dict["metadata"]["commit_hash"] == "0b7b331"
             assert result_dict["metadata"]["commit_date"] == "2025-05-28"
             assert result_dict["metadata"]["author_name"] == "Ryan Pearson"
-            assert (
-                result_dict["metadata"]["author_email"]
-                == "ryan.pearson@lightspeeddms.com"
-            )
+            assert result_dict["metadata"]["author_email"] == "ryan.pearson@example.com"
             assert (
                 result_dict["metadata"]["commit_message"]
                 == "EVO-45522 Making changes to the PartsTransferPanel Layout."

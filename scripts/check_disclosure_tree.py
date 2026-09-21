@@ -55,6 +55,26 @@ BANNED_PATTERNS: List[Tuple[str, str, bool]] = [
     # across 33 tracked files (source, tests, shell scripts, reports,
     # CHANGELOG). Scrubbed to the neutral placeholder "opuser" throughout.
     ("operator-username", "jsbattig", False),
+    # Bug #1918: operator's real surname leaked (full name, dotted/underscored/
+    # concatenated email-local-part and directory-name variants all contain
+    # this substring) across ~20 further tracked files. Scrubbed to neutral
+    # placeholder identities ("LightspeedDMS" for attribution prose, "Jane
+    # Doe"/"jane.doe" for test fixtures) throughout.
+    ("operator-full-name", "battig", False),
+    # Bug #1918: real corporate email domain, leaked wherever a personal
+    # email address on this domain was used as a test/doc fixture (including
+    # a THIRD-PARTY name paired with this domain, not just the operator's own
+    # address). Scrubbed to the neutral "example.com" domain throughout,
+    # except the two genuinely-necessary real contact points (project
+    # maintainer email in CODE_OF_CONDUCT.md and package author email in
+    # pyproject.toml) which are allowlisted below with a documented reason.
+    ("operator-email-domain", "lightspeeddms.com", False),
+    # Bug #1918: real DDNS hostname leaked in deployment scripts, docstring
+    # examples, and test fixtures across 6 tracked files. Scrubbed to the
+    # neutral "cidx.example.com" placeholder throughout -- none of the
+    # occurrences were a genuine runtime default (the real default is
+    # http://localhost:8000; every hit was illustrative doc/test text).
+    ("operator-ddns-hostname", "linner.ddns.net", False),
 ]
 
 # ---------------------------------------------------------------------------
@@ -68,6 +88,42 @@ BANNED_PATTERNS: List[Tuple[str, str, bool]] = [
 # ---------------------------------------------------------------------------
 ALLOWLIST: Dict[str, Set[str]] = {
     "operator-username": {
+        # This script necessarily names the literal it searches for.
+        _SELF_PATH,
+    },
+    "operator-full-name": {
+        # This script necessarily names the literal it searches for.
+        _SELF_PATH,
+        # CODE_OF_CONDUCT.md: the project maintainer's real reporting contact.
+        # Genuinely needed -- a Code of Conduct report channel must be a real,
+        # monitored address; a scrubbed placeholder would silently break the
+        # ability of a real reporter to reach a real human (Bug #1918).
+        "CODE_OF_CONDUCT.md:11",
+        # pyproject.toml: the PyPI package author contact metadata. Same
+        # reasoning -- this is real, currently-necessary contact metadata,
+        # not an accidental leak, so it is documented here rather than
+        # scrubbed to a non-functional value.
+        "pyproject.toml:10",
+        # --- Intentional authorship attribution (NOT a leak) ---------------
+        # A real person's name naming their OWN copyright/authorship of their
+        # OWN work is the intended use of that name, not an accidental
+        # disclosure. Rewriting a copyright holder is a legal assertion this
+        # script has no authority to make; rewriting __author__ or a
+        # changelog's own "Contributors" credit line is the same category of
+        # mistake. These are documented exemptions, not scrubbed occurrences.
+        "LICENSE:3",
+        "src/code_indexer/__init__.py:10",
+        "CHANGELOG.md:9648",
+        "CHANGELOG.md:10019",
+        "CHANGELOG.md:10500",
+    },
+    "operator-email-domain": {
+        # This script necessarily names the literal it searches for.
+        _SELF_PATH,
+        "CODE_OF_CONDUCT.md:11",
+        "pyproject.toml:10",
+    },
+    "operator-ddns-hostname": {
         # This script necessarily names the literal it searches for.
         _SELF_PATH,
     },

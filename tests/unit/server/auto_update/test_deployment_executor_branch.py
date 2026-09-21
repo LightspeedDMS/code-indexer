@@ -102,7 +102,7 @@ class TestRunOnceIntegration:
             # Mock environment variables
             def env_side_effect(key, default=None):
                 if key == "CIDX_SERVER_REPO_PATH":
-                    return "/home/sebabattig/cidx-server"
+                    return "/home/opuser/cidx-server"
                 elif key == "CIDX_AUTO_UPDATE_BRANCH":
                     return "development"
                 return default
@@ -119,7 +119,7 @@ class TestRunOnceIntegration:
 
             # Now verify DeploymentExecutor would receive it
             executor = DeploymentExecutor(
-                repo_path=Path("/home/sebabattig/cidx-server"),
+                repo_path=Path("/home/opuser/cidx-server"),
                 branch=branch,
                 service_name="cidx-server",
             )

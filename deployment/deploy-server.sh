@@ -56,7 +56,7 @@ show_usage() {
     echo ""
     echo "  Production with OAuth:"
     echo "    sudo $0 --voyage-key pa-xxx --anthropic-key sk-ant-xxx --user opuser \\"
-    echo "      --working-dir /home/opuser/code-indexer --issuer-url https://linner.ddns.net:8383"
+    echo "      --working-dir /home/opuser/code-indexer --issuer-url https://cidx.example.com:8383"
     exit 1
 }
 

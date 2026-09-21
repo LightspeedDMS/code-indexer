@@ -442,7 +442,7 @@ class CowDaemonBackend:
         The daemon's own server-side validation requires namespace/name
         values to contain only alphanumeric characters, hyphens, and
         underscores. Real cluster usernames are email addresses (e.g.
-        ``Seba.Battig@lightspeeddms.com``), so any character outside that
+        ``Jane.Doe@example.com``), so any character outside that
         allowed set -- not just dots -- must be replaced, or the daemon
         rejects the request with HTTP 400 VALIDATION_ERROR (Issue #1465).
         Every disallowed character maps to a single underscore.
@@ -568,7 +568,7 @@ class CowDaemonBackend:
         unaffected by the extra ``.versioned`` path segment.
 
         Sanitizes namespace and name (dots->underscores) so aliases containing
-        dots (e.g. ``langfuse_Claude_Code_seba.battig_...``) pass daemon
+        dots (e.g. ``langfuse_Claude_Code_jane.doe_...``) pass daemon
         validation. Returns the canonical CIDX mount-point path.
         """
         sanitized_namespace = self._sanitize_identifier(namespace)

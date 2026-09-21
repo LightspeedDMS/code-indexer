@@ -41,7 +41,7 @@ WHY THIS WORKS:
 
 IF YOU THINK SOMETHING IS BROKEN:
 ----------------------------------
-1. Test with: curl https://linner.ddns.net:8383/.well-known/oauth-authorization-server
+1. Test with: curl https://cidx.example.com:8383/.well-known/oauth-authorization-server
 2. Should return OAuth metadata JSON with issuer, endpoints, etc.
 3. If working, DO NOT CHANGE ANYTHING
 4. If broken, check server logs first, don't modify code blindly

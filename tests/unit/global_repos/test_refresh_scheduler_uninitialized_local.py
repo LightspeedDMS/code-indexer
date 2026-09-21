@@ -199,7 +199,7 @@ class TestUninitializedLocalRepoSkippedGracefully:
         langfuse_{User}_{email}-global repos must be skipped gracefully when
         their source dir has no .code-indexer/.
         """
-        alias_name = "langfuse_Claude_Code_seba.battig_lightspeeddms.com-global"
+        alias_name = "langfuse_Claude_Code_jane.doe_example.com-global"
         repo_name = alias_name.replace("-global", "")
         source_dir = golden_repos_dir / repo_name
         source_dir.mkdir(parents=True)
@@ -207,7 +207,7 @@ class TestUninitializedLocalRepoSkippedGracefully:
 
         repo_info = {
             "alias_name": alias_name,
-            "repo_url": "local://langfuse_Claude_Code_seba.battig_lightspeeddms.com",
+            "repo_url": "local://langfuse_Claude_Code_jane.doe_example.com",
             "enable_temporal": False,
             "enable_scip": False,
         }

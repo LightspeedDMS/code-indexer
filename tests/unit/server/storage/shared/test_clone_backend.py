@@ -1255,9 +1255,9 @@ class TestCowDaemonBackendSanitizeIdentifier:
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
         result = CowDaemonBackend._sanitize_identifier(
-            "langfuse_Claude_Code_seba.battig_lightspeeddms.com-global"
+            "langfuse_Claude_Code_jane.doe_example.com-global"
         )
-        assert result == "langfuse_Claude_Code_seba_battig_lightspeeddms_com-global"
+        assert result == "langfuse_Claude_Code_jane_doe_example_com-global"
 
     def test_sanitize_leaves_safe_chars_untouched(self):
         """_sanitize_identifier does not change alphanumeric, hyphen, or underscore."""
@@ -1277,16 +1277,16 @@ class TestCowDaemonBackendSanitizeIdentifier:
         """Issue #1465: _sanitize_identifier must strip '@' from email usernames.
 
         Real cluster usernames are email addresses (e.g.
-        'Seba.Battig@lightspeeddms.com'). The daemon rejects namespace/name
+        'Jane.Doe@example.com'). The daemon rejects namespace/name
         values containing '@' with HTTP 400 VALIDATION_ERROR. Prior to the
         fix, _sanitize_identifier only replaced '.', leaving '@' intact and
         breaking activation fleet-wide for every email-style username.
         """
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
-        result = CowDaemonBackend._sanitize_identifier("Seba.Battig@lightspeeddms.com")
+        result = CowDaemonBackend._sanitize_identifier("Jane.Doe@example.com")
         assert "@" not in result
-        assert result == "Seba_Battig_lightspeeddms_com"
+        assert result == "Jane_Doe_example_com"
 
     def test_sanitize_replaces_plus_sign(self):
         """_sanitize_identifier strips '+' (valid in email plus-addressing)."""
@@ -1298,7 +1298,7 @@ class TestCowDaemonBackendSanitizeIdentifier:
     @pytest.mark.parametrize(
         "alias",
         [
-            "Seba.Battig@lightspeeddms.com",
+            "Jane.Doe@example.com",
             "seba+test@example.com",
             "user name@example.com",
             "user@sub.example.co.uk",
@@ -1392,11 +1392,11 @@ class TestCowDaemonBackendCreateCloneAtPath:
         with patch.dict(sys.modules, {"requests": mock_req}):
             backend.create_clone_at_path(
                 "/mnt/nfs/cidx/src/repo",
-                "/mnt/nfs/cidx/seba.battig/myclone",
+                "/mnt/nfs/cidx/jane.doe/myclone",
             )
 
         body = mock_req.post.call_args[1]["json"]
-        assert body["namespace"] == "seba_battig"
+        assert body["namespace"] == "jane_doe"
 
     def test_create_clone_at_path_sanitizes_name_from_dest_path(self):
         """create_clone_at_path derives name from dest_path basename, sanitized."""
@@ -1504,9 +1504,9 @@ class TestCowDaemonBackendTranslateFromDaemonPath:
         """Daemon absolute path /home/opuser/cow-storage/ns/name -> /mnt/cow-storage/ns/name."""
         backend = self._make_backend_with_translation()
         result = backend._translate_from_daemon_path(
-            "/home/opuser/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+            "/home/opuser/cow-storage/langfuse_Claude_Code_jane_doe/v_123"
         )
-        assert result == "/mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+        assert result == "/mnt/cow-storage/langfuse_Claude_Code_jane_doe/v_123"
 
     def test_translate_from_daemon_path_handles_path_without_leading_slash(self):
         """Daemon returns path without leading slash (e.g. 'home/opuser/cow-storage/ns/name')."""
