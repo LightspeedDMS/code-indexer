@@ -5,6 +5,45 @@
 //! receiver-type substrate (level 6, `LocalIndex::typed_names`) are
 //! explicitly OUT of scope -- this extractor never populates `typed_names`.
 //!
+//! **Bug #1920 -- the missing receiver-type substrate costs EVIDENCE, not
+//! an EDGE, for an ordinary qualified call.** Every `g.helper(x)`
+//! (instance-qualified, a variable receiver) and `Type.helper(x)`
+//! (type-qualified) call is extracted IDENTICALLY below: both reach
+//! `extract_call_expression` -> `call_expression_callee`, which builds an
+//! `InvocationSite{callee_name: "helper", receiver: ReceiverExpr::
+//! Identifier(text), ..}` off the SAME `navigation_expression` shape
+//! regardless of whether `text` happens to name a declared type or a local
+//! variable -- the extractor never branches on that distinction. At bind
+//! time, `resolve_identifier_receiver` (`bind::receiver`) resolves an
+//! Identifier receiver Kotlin has no `typed_names` evidence for to
+//! `ReceiverEvidence::None` (an instance variable, e.g. `g`) or
+//! `ReceiverEvidence::Advisory` (a bare identifier that IS itself a known
+//! in-repo type name, e.g. `JavaUtil`) -- but `apply_receiver_type_
+//! narrowing` (`bind::narrowing`) is PERMANENTLY tag-only (epic #1906,
+//! seven review rounds, see `docs/xray-architecture.md`'s
+//! candidate-admission section): it can set `RECEIVER_TYPE_MATCH` on a
+//! match, but it NEVER deletes a candidate on an empty or non-matching one,
+//! under either evidence tier. So the two forms differ only in whether the
+//! bound edge later carries `RECEIVER_TYPE_MATCH` (confidence ranking) --
+//! candidate SET membership, and therefore `is_definitely_dead_code`, is
+//! receiver-shape-agnostic by construction. Verified end-to-end via
+//! `build_repo_graph` (not the extractor in isolation) across 15+
+//! configurations in `bug_1920_kotlin_instance_qualified_calls.rs`:
+//! top-level and in-class callers, Java and Kotlin targets, same/
+//! different-package decoys, a constrained `IndexBudget` (which per Bug
+//! #1833 cannot affect `is_definitely_dead_code` either, since
+//! `ReferencedBits` marks from the pre-truncation candidate list), a
+//! budget-truncated (`index_is_complete: false`) repo, wildcard imports,
+//! and the `?.`/`!!` receiver forms -- an instance-qualified call to a
+//! genuinely reachable target is never reported definitely dead in any of
+//! them. The one live gap this investigation DID confirm is
+//! receiver-agnostic, not specific to this call form: a `private` target
+//! called from a DIFFERENT top-level Kotlin type is excluded by
+//! `apply_private_visibility_filter` (D2, `bind::narrowing`) regardless of
+//! whether the call is instance- or type-qualified -- that is a binder
+//! concern outside this extractor's scope, tracked separately rather than
+//! adjusted here.
+//!
 //! Node-kind names below were verified against the REAL
 //! tree-sitter-kotlin-ng 1.1.0 grammar output (dumped from real parsed
 //! sample files covering top-level/member/extension functions, classes,
