@@ -496,7 +496,7 @@ class TestResumePathReanchoring:
     ``ProgressiveMetadata.set_files_to_index`` as ABSOLUTE strings carrying the
     NFS *mount* prefix (e.g. ``/mnt/cow-storage/golden-repos/<repo>/...``).
     On resume the current ``config.codebase_dir`` is the daemon-LOCAL prefix
-    (e.g. ``/home/jsbattig/cow-storage/golden-repos/<repo>``). The old code
+    (e.g. ``/home/opuser/cow-storage/golden-repos/<repo>``). The old code
     used the stored absolute path verbatim, so
     ``file_path.relative_to(config.codebase_dir)`` raised
     ``ValueError: ... is not in the subpath of ...`` ->
@@ -512,7 +512,7 @@ class TestResumePathReanchoring:
         returned path lives under the daemon-local codebase_dir.
         """
         repo_leaf = "langfuse_Claude_Code"
-        codebase_dir = Path(f"/home/jsbattig/cow-storage/golden-repos/{repo_leaf}")
+        codebase_dir = Path(f"/home/opuser/cow-storage/golden-repos/{repo_leaf}")
         stored_path = f"/mnt/cow-storage/golden-repos/{repo_leaf}/trace.json"
 
         reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
@@ -524,7 +524,7 @@ class TestResumePathReanchoring:
     def test_reanchors_nested_file_with_correct_relative_subpath(self) -> None:
         """A nested file under the stale prefix re-anchors with full subpath."""
         repo_leaf = "langfuse_Claude_Code"
-        codebase_dir = Path(f"/home/jsbattig/cow-storage/golden-repos/{repo_leaf}")
+        codebase_dir = Path(f"/home/opuser/cow-storage/golden-repos/{repo_leaf}")
         stored_path = f"/mnt/cow-storage/golden-repos/{repo_leaf}/sub/dir/deep.json"
 
         reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
@@ -533,7 +533,7 @@ class TestResumePathReanchoring:
 
     def test_relative_stored_path_joins_to_codebase_dir(self) -> None:
         """A stored RELATIVE path joins to codebase_dir (legacy behavior kept)."""
-        codebase_dir = Path("/home/jsbattig/cow-storage/golden-repos/repo")
+        codebase_dir = Path("/home/opuser/cow-storage/golden-repos/repo")
 
         reanchored = SmartIndexer._reanchor_resume_path("sub/x.py", codebase_dir)
 
@@ -555,7 +555,7 @@ class TestResumePathReanchoring:
         with the current codebase_dir, it is returned unchanged so the
         downstream ``.exists()`` filter (and, if it survives, a genuine
         relative_to error) still surfaces -- never fabricate a wrong mapping."""
-        codebase_dir = Path("/home/jsbattig/cow-storage/golden-repos/repo")
+        codebase_dir = Path("/home/opuser/cow-storage/golden-repos/repo")
         stored_path = "/completely/unrelated/elsewhere/file.py"
 
         reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)

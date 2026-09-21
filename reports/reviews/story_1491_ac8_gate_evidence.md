@@ -7,7 +7,7 @@ output, re-verified against a control checkout.
 
 Branch: `worktree-agent-a567d4b89649f92cc`
 Worktree: `.claude/worktrees/agent-a567d4b89649f92cc`
-Control checkout for comparison: `/home/jsbattig/Dev/code-indexer` @ `38a59d2a`
+Control checkout for comparison: `/home/opuser/Dev/code-indexer` @ `38a59d2a`
 
 ## server-fast-automation.sh
 

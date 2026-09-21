@@ -6,14 +6,14 @@
 # Usage:
 #   ./scripts/cluster-join.sh \
 #     --postgres-url "postgresql://user:pass@host/db" \
-#     --ontap-endpoint "100.99.60.248" \
+#     --ontap-endpoint "203.0.113.10" \
 #     --ontap-export "/" \
 #     --ontap-mount "/mnt/fsx" \
 #     --ontap-admin-user "fsxadmin" \
 #     --ontap-admin-password "password" \
-#     --ontap-svm "sebaV2" \
-#     --ontap-parent-volume "seba_vol1" \
-#     --nfs-data-lif "100.99.60.204"
+#     --ontap-svm "svm1" \
+#     --ontap-parent-volume "vol1" \
+#     --nfs-data-lif "203.0.113.11"
 #
 # Optional flags:
 #   --dry-run           Show what would be done without doing it
@@ -104,8 +104,8 @@ Required:
   --ontap-export PATH         NFS export path on the ONTAP volume (e.g. "/")
   --ontap-mount PATH          Local mount point (e.g. "/mnt/fsx")
   --ontap-admin-user USER     ONTAP admin username (e.g. "fsxadmin")
-  --ontap-svm NAME            ONTAP SVM name (e.g. "sebaV2")
-  --ontap-parent-volume VOL   ONTAP parent volume name (e.g. "seba_vol1")
+  --ontap-svm NAME            ONTAP SVM name (e.g. "svm1")
+  --ontap-parent-volume VOL   ONTAP parent volume name (e.g. "vol1")
   --nfs-data-lif IP           NFS data LIF IP address
 
 Optional:

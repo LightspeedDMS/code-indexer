@@ -213,6 +213,73 @@ _XRAY_CACHE_DIR_NAME = "xray-cache"
 # .rs, candidate-file-list .txt), kept distinct from the compile cache above.
 _XRAY_TMP_DIR_NAME = "xray-tmp"
 
+# Bug #1909: bounds how many per-file `--refine` findings get merged into a
+# single analyze_graph response. The AC2 narrowing (see
+# _narrow_refine_symbols_to_driver_matched_files below) already keeps the
+# refine file SET small (only files a symbol in GraphResult.refine actually
+# belongs to), but a single evaluator `fn refine` callback can still emit
+# more than one finding per file -- this stays a real ceiling rather than
+# trusting narrowing alone to bound response size.
+_REFINE_FINDINGS_MAX = 500
+
+
+def _refine_symbol_file_id(symbol_id: int) -> int:
+    """Extracts the 32-bit file-id half of a `SymbolId` (Bug #1909) --
+    mirrors Rust's `identity::SymbolId = (file_id << 32) | local_index`
+    encoding and `graph::refine::refine_set_file_ids`'s identical `>> 32`
+    shift exactly. A pure bit shift, never a graph lookup.
+    """
+    return (symbol_id >> 32) & 0xFFFFFFFF
+
+
+def _repo_relative_file_id(repo_relative_path: str) -> int:
+    """Reproduces Rust's `identity::file_id(repo_relative_path)` EXACTLY
+    (Bug #1909): the first 4 bytes of SHA-256(repo_relative_path), read as
+    a big-endian u32 (`rust/xray-core/src/graph/identity.rs`). This is a
+    PURE function of the path string alone -- the same guarantee the Rust
+    doc comment states ("no file list, index, or counter") -- so
+    recomputing it here for the SAME repo-relative path strings Python
+    already sent to `--build-graph`/`--analyze-graph` via `--files-from`
+    always agrees with the id the Rust side originally assigned. This is
+    the only way Python can map a `SymbolId`'s file-id half back to one of
+    those candidate paths without a second Rust round trip.
+    """
+    import hashlib  # noqa: PLC0415 — stdlib, lazy import mirrors module convention
+
+    digest = hashlib.sha256(repo_relative_path.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], byteorder="big")
+
+
+def _narrow_refine_symbols_to_driver_matched_files(
+    refine_symbols: List[int],
+    candidate_file_paths: List[str],
+) -> List[str]:
+    """Bug #1909 (AC2): intersects the file ids referenced by
+    `refine_symbols` (`GraphResult.refine`, the RefineSet `analyze_graph`
+    returned) with `candidate_file_paths` (the SAME driver-matched file
+    list already sent to `--build-graph`/`--analyze-graph` via
+    `--files-from`) -- mirrors
+    `graph::refine::narrow_refine_set_to_driver_matched`'s contract, which
+    the `--refine` CLI subcommand itself never calls (it takes an
+    already-narrowed `--files-from` list as given), so this Python-side
+    narrowing is what actually makes AC2 real: a 2-file RefineSet must
+    never re-parse the whole repo.
+
+    A symbol whose file id matches no candidate path (should not happen
+    against a graph built from that exact candidate set, but never
+    assumed) is silently excluded rather than raising a lookup error.
+
+    Returns a SORTED, deduplicated list of repo-relative paths. Bounded:
+    O(len(refine_symbols) + len(candidate_file_paths)) (Rule 14).
+    """
+    needed_file_ids = {_refine_symbol_file_id(sym) for sym in refine_symbols}
+    matched = {
+        path
+        for path in candidate_file_paths
+        if _repo_relative_file_id(path) in needed_file_ids
+    }
+    return sorted(matched)
+
 
 class SharedIdentityCache:
     """Bounded, thread-safe LRU mapping evaluator source text to its
@@ -1559,6 +1626,152 @@ class RustNativeBackend:
             )
         return output, None
 
+    def _run_refine_step(
+        self,
+        graph_out: Path,
+        so_path: str,
+        facts_out: Path,
+        repo_root: str,
+        files_to_refine: List[str],
+        deadline: float,
+    ) -> Dict[str, Any]:
+        """Bug #1909: runs `xray-cli --refine` over `files_to_refine`
+        (already AC2-narrowed by the caller via
+        `_narrow_refine_symbols_to_driver_matched_files`) and maps its
+        `ChildReport<RefineBatchResult>` onto this module's own
+        `refine_status`/`refine_findings` contract.
+
+        Every terminal outcome DEGRADES the overall analyze_graph result
+        honestly (Rule 13) -- this never raises and never turns a real
+        analyze_graph success into a failure: refine is OPTIONAL (ADR-001),
+        so a subprocess-level failure, a non-`ran_ok` CLI status (including
+        the common `absent` case, "the compiled artifact does not export
+        xray_refine"), or an already-exhausted deadline all report a
+        distinct `refine_status` and an empty `refine_findings`, never an
+        exception the caller has to catch.
+        """
+        remaining = self._remaining_seconds(deadline)
+        if remaining <= 0:
+            return {"refine_status": "skipped_timeout", "refine_findings": []}
+
+        tmp_dir = _get_xray_tmp_dir()
+        files_tmp: Optional[Any] = None
+        try:
+            files_tmp = _write_temp_file(
+                "\n".join(files_to_refine), ".txt", "xray_refine_files_", tmp_dir
+            )
+            args = [
+                "--refine",
+                "--graph-in",
+                str(graph_out),
+                "--dylib",
+                so_path,
+                "--repo-root",
+                repo_root,
+                "--files-from",
+                files_tmp.name,
+                "--facts-in",
+                str(facts_out),
+            ]
+            output, error = self._run_graph_subcommand(args, int(remaining) + 1)
+        finally:
+            _safe_unlink_graph_temp_path(
+                files_tmp.name if files_tmp is not None else None
+            )
+
+        if error is not None:
+            return {
+                "refine_status": "error",
+                "refine_error": _sanitize_error_message(error),
+                "refine_findings": [],
+            }
+
+        status = output.get("status")
+        if status == "absent":
+            return {"refine_status": "absent", "refine_findings": []}
+        if status != "ran_ok":
+            return {
+                "refine_status": "error",
+                "refine_error": _sanitize_error_message(
+                    f"--refine reported status={status}"
+                ),
+                "refine_findings": [],
+            }
+
+        raw_result = output.get("result")
+        files_out = raw_result.get("files", []) if isinstance(raw_result, dict) else []
+        findings: List[Dict[str, Any]] = []
+        truncated = False
+        for file_outcome in files_out:
+            if not isinstance(file_outcome, dict):
+                continue
+            for finding in file_outcome.get("findings", []) or []:
+                if len(findings) >= _REFINE_FINDINGS_MAX:
+                    truncated = True
+                    break
+                findings.append(finding)
+            if truncated:
+                break
+
+        refine_result: Dict[str, Any] = {
+            "refine_status": "ran",
+            "refine_findings": findings,
+            "refine_files_examined": len(files_out),
+        }
+        if truncated:
+            refine_result["refine_findings_truncated"] = True
+        return refine_result
+
+    def _maybe_run_refine(
+        self,
+        analysis_result: Dict[str, Any],
+        refine: bool,
+        file_paths: List[str],
+        graph_out: Path,
+        so_path: str,
+        facts_out: Path,
+        repo_root: str,
+        deadline: float,
+    ) -> Dict[str, Any]:
+        """Bug #1909: the SOLE gate deciding whether xray-cli's already-built
+        `--refine` phase runs at all -- the fix for S3's refine phase being
+        fully built in Rust with zero callers anywhere under
+        `src/code_indexer/`.
+
+        Deliberately opt-in AND cost-guarded, per two independent
+        conditions (both required, checked in order so each has its own
+        honest `refine_status`):
+          1. `refine=False` (the default) never invokes the second
+             subprocess at all -- a caller must explicitly ask for a
+             second per-file traversal, since it re-opens the
+             `timeout_seconds` budget and costs real time at fleet scale.
+          2. `refine=True` but the evaluator's `analyze_graph` flagged
+             NOTHING (`GraphResult.refine` empty) also never invokes it --
+             running refine over zero files is pure waste.
+        Only reached once `analysis_result` reflects a REAL analyze_graph
+        success (`ok=True`) -- a prior compile/build/analyze failure
+        already returned via `_graph_error_result` before this is ever
+        called.
+        """
+        if not refine:
+            return {"refine_status": "not_requested", "refine_findings": []}
+        if not analysis_result.get("ok"):
+            return {"refine_status": "skipped_analysis_failed", "refine_findings": []}
+        refine_symbols = analysis_result.get("refine") or []
+        if not refine_symbols:
+            return {"refine_status": "skipped_empty_refine_set", "refine_findings": []}
+        files_to_refine = _narrow_refine_symbols_to_driver_matched_files(
+            refine_symbols, file_paths
+        )
+        if not files_to_refine:
+            return {
+                "refine_status": "skipped_no_matching_files",
+                "refine_findings": [],
+            }
+        return self._run_refine_step(
+            graph_out, so_path, facts_out, repo_root, files_to_refine, deadline
+        )
+
     def _compile_build_and_analyze(
         self,
         rust_code: str,
@@ -1568,6 +1781,9 @@ class RustNativeBackend:
         graph_out: Path,
         facts_out: Path,
         deadline: float,
+        *,
+        refine: bool = False,
+        file_paths: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Compiles `rust_code` ONCE via `_compile_for_graph_mode`, then
         drives `_run_build_graph_step` -> `_run_analyze_graph_step` ->
@@ -1576,6 +1792,12 @@ class RustNativeBackend:
         (Optional -> non-Optional), never a suppression: each one directly
         follows the `is not None` check on the sibling error-result value
         that guarantees it.
+
+        Bug #1909: once the base result is assembled, `_maybe_run_refine`
+        decides -- and, when it decides to, runs -- the optional third
+        `--refine` phase, merging its outcome into the SAME response dict
+        (new `refine_status`/`refine_findings` keys only, existing keys
+        untouched -- the response envelope stays backward compatible).
         """
         so_path, compile_info, compile_error = self._compile_for_graph_mode(
             rust_code, eval_path, self._remaining_seconds(deadline)
@@ -1599,9 +1821,22 @@ class RustNativeBackend:
             return analyze_error_result
         assert analyze_output is not None
 
-        return self._build_graph_analysis_result(
+        result = self._build_graph_analysis_result(
             analyze_output, build_status, build_result, compile_info
         )
+        result.update(
+            self._maybe_run_refine(
+                result,
+                refine,
+                file_paths or [],
+                graph_out,
+                so_path,
+                facts_out,
+                repo_root,
+                deadline,
+            )
+        )
+        return result
 
     def run_graph_analysis(
         self,
@@ -1610,6 +1845,7 @@ class RustNativeBackend:
         repo_root: str,
         file_paths: List[str],
         timeout_seconds: int = 60,
+        refine: bool = False,
     ) -> Dict[str, Any]:
         """Story #1811 (S5, AC2): compile the evaluator ONCE (reusing the
         existing compile/cache machinery, Bug #1784), then --build-graph ->
@@ -1617,6 +1853,10 @@ class RustNativeBackend:
         `_graph_error_result`; the temp-file+subprocess flow is wrapped in
         `except OSError` (mirrors `_invoke_xray_cli` above) -- the MCP front
         door is the final backstop for anything truly unexpected (Bug #1612).
+
+        Bug #1909: `refine=True` additionally invokes S3's `--refine` phase
+        (see `_maybe_run_refine`) when analyze_graph's `GraphResult.refine`
+        came back non-empty -- opt-in, never the default.
         """
         if timeout_seconds <= 0 or not repo_root or not file_paths:
             return _graph_error_result(
@@ -1650,6 +1890,8 @@ class RustNativeBackend:
                 graph_out,
                 facts_out,
                 deadline,
+                refine=refine,
+                file_paths=file_paths,
             )
         except OSError as exc:
             msg = f"xray-cli graph analysis could not be executed: {exc}"

@@ -15,7 +15,7 @@ built its "live set" from the stored ``folder_path`` values
 and preserved an on-disk dir only if ``str(on_disk_path) in live_folders``.
 
 On a foreign-seeded / topology-changed cluster, the stored ``folder_path``
-(e.g. ``/home/jsbattig/...``) never equals the on-disk node-local dir (e.g.
+(e.g. ``/home/opuser/...``) never equals the on-disk node-local dir (e.g.
 ``/opt/code-indexer/.cidx-server/research/<id>``) -- so a LIVE, non-expired
 UUID session's workspace would be treated as an orphan and ``rmtree``'d once
 it aged past ``research_session_retention_days`` (default 7). ``default`` is

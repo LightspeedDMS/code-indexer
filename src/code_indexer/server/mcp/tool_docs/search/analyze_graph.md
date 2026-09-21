@@ -38,10 +38,14 @@ inputSchema:
       default: []
     timeout_seconds:
       type: integer
-      description: 'Wall-clock timeout in seconds for the WHOLE pipeline (repo-alias resolution, file collection, evaluator compile, --build-graph, --analyze-graph). Range 10..600. Default 120.'
+      description: 'Wall-clock timeout in seconds for the WHOLE pipeline (repo-alias resolution, file collection, evaluator compile, --build-graph, --analyze-graph, and --refine when refine=true). Range 10..600. Default 120.'
       minimum: 10
       maximum: 600
       default: 120
+    refine:
+      type: boolean
+      description: 'Bug #1909. Opt-in: when true AND your analyze_graph populated a non-empty GraphResult.refine, runs S3''s --refine phase as a THIRD subprocess -- a real per-file AST pass over exactly the files a flagged symbol belongs to (never the whole repo), with FULL access to both the file''s OwnedNode and the whole GraphHandle/FactsHandle simultaneously, which analyze_graph alone cannot provide (it never receives file source). Use this when a finding needs source-level detail (the actual method body, a specific line, an AST-derived risk signal) that dense ids and cached signatures cannot carry. Deliberately NOT the default: it re-opens the timeout_seconds budget (a genuine second traversal, on top of build+analyze) and costs real time at fleet scale, so it only runs when you explicitly ask AND there is something to refine -- refine=true against an evaluator that never populates GraphResult.refine spawns nothing. See refine_status/refine_findings below for the response shape, and fn refine in the two-function contract section for how to write one.'
+      default: false
     await_seconds:
       type: number
       description: 'Reserved for future async job-polling parity with xray_search. Currently accepted but INERT: analyze_graph always runs synchronously to completion or until timeout_seconds -- it never returns a bare {job_id}. Do not rely on this parameter changing behavior yet.'
@@ -58,7 +62,7 @@ outputSchema:
       description: 'True when the graph pipeline completed without an error. This includes status="ran_ok" and the server-derived status="no_supported_files" (no candidate file reached a supported-language extractor, AND none had a genuine parse error -- see "no_supported_files status" below for the exact two-condition rule). False for every error path (validation, missing repo, build failure, timeout, internal error) -- check `error` for the reason.'
     error:
       type: object
-      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (invalid_params, auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, xray_evaluator_validation_failed, xray_cell_queue_timeout, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch). One rejection applies only when you pass SEVERAL repositories and is refused up front before any repository is touched: `repo_count_cap_exceeded` (more repositories than the server''s omni cap allows). Two more error codes are multi-repo-ONLY but are NEVER a top-level rejection -- each surfaces per-repository inside that repository''s own `errors[]` entry. Every `errors[]` entry carries a non-empty `message`, but `error` itself is NOT always a string code: for a real compile/build/analyze failure it is the SAME `{error_type, error_message}` OBJECT the pipeline-level shape above uses, and `message` is synthesized from it when the underlying failure carries no top-level message of its own -- always check `error`''s type before treating it as a bare code string. The two multi-repo-only codes: `multi_repo_deadline_exceeded` (this repository was never started because a BETWEEN-REPOSITORY ADMISSION GATE observed the request''s elapsed wall clock already at or past the server''s 600s threshold before this repository''s turn came up -- earlier repositories'' real results are preserved; split the request into smaller batches and retry the remainder. This is an admission gate, not a hard ceiling on total request time: the repository that was ALREADY RUNNING when the gate last passed is not itself time-bounded by this threshold and can still take substantially longer) and `multi_repo_pipeline_exception` (an unhandled error was raised while analyzing this specific repository; other repositories in the same request are unaffected; the message never includes server-internal detail such as filesystem paths). Note `timeout_seconds` is PER REPOSITORY, not shared across them.'
+      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (invalid_params, auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, refine_invalid, xray_evaluator_validation_failed, xray_cell_queue_timeout, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch). One rejection applies only when you pass SEVERAL repositories and is refused up front before any repository is touched: `repo_count_cap_exceeded` (more repositories than the server''s omni cap allows). Two more error codes are multi-repo-ONLY but are NEVER a top-level rejection -- each surfaces per-repository inside that repository''s own `errors[]` entry. Every `errors[]` entry carries a non-empty `message`, but `error` itself is NOT always a string code: for a real compile/build/analyze failure it is the SAME `{error_type, error_message}` OBJECT the pipeline-level shape above uses, and `message` is synthesized from it when the underlying failure carries no top-level message of its own -- always check `error`''s type before treating it as a bare code string. The two multi-repo-only codes: `multi_repo_deadline_exceeded` (this repository was never started because a BETWEEN-REPOSITORY ADMISSION GATE observed the request''s elapsed wall clock already at or past the server''s 600s threshold before this repository''s turn came up -- earlier repositories'' real results are preserved; split the request into smaller batches and retry the remainder. This is an admission gate, not a hard ceiling on total request time: the repository that was ALREADY RUNNING when the gate last passed is not itself time-bounded by this threshold and can still take substantially longer) and `multi_repo_pipeline_exception` (an unhandled error was raised while analyzing this specific repository; other repositories in the same request are unaffected; the message never includes server-internal detail such as filesystem paths). Note `timeout_seconds` is PER REPOSITORY, not shared across them.'
     status:
       type: string
       description: 'The real --analyze-graph ChildReport status, OR the server-derived "no_supported_files": "ran_ok" (your analyze_graph executed), "no_supported_files" (ok=true, but no candidate file reached a supported-language extractor AND none had a genuine parse error -- see "no_supported_files status" below for the exact two-condition rule; a candidate set with even ONE genuine parse error keeps "ran_ok" regardless of how many other files were unsupported-language), "absent" (evaluator does not export analyze_graph -- should not happen given evaluator_code validation), "load_failed" (dylib failed to load), "graph_invalid" (the built graph file was corrupt), "panicked" (your analyze_graph panicked -- caught, never crashes the server).'
@@ -69,9 +73,26 @@ outputSchema:
         type: object
     refine:
       type: array
-      description: 'SymbolIds your analyze_graph flagged via GraphResult.refine for a follow-up per-file look (S3''s refine phase). Currently informational only -- this tool does not yet invoke --refine automatically.'
+      description: 'SymbolIds your analyze_graph flagged via GraphResult.refine for a follow-up per-file look (S3''s refine phase). Always populated (or empty) regardless of the refine request parameter -- this is analyze_graph''s own output, not the refine PASS''s output (see refine_findings for that). Pass refine: true to actually run the follow-up pass over these symbols'' files.'
       items:
         type: integer
+    refine_status:
+      type: string
+      description: 'Bug #1909. Whether/how the opt-in --refine phase ran: "not_requested" (the refine request parameter was false/omitted -- the default), "skipped_empty_refine_set" (refine: true was passed but GraphResult.refine was empty -- nothing to refine, so no subprocess ran), "skipped_no_matching_files" (refine''s flagged symbols resolved to no file in the candidate set -- should not happen against a graph built from that same set, but reported honestly rather than silently), "skipped_analysis_failed" (analyze_graph itself did not succeed, so refine was never attempted), "skipped_timeout" (the request''s timeout_seconds budget was already exhausted by build+analyze, so refine was skipped rather than started with no time left), "absent" (the compiled evaluator does not export fn refine -- refine is OPTIONAL per ADR-001, this is not an error), "ran" (--refine executed; check refine_findings), "error" (a real --refine failure -- see refine_error; the primary analyze_graph result above is unaffected and still reflects ok=true).'
+    refine_findings:
+      type: array
+      description: 'Bug #1909. Present only when refine_status is "ran": the flattened per-file findings your fn refine callback returned, each {pattern, file, line, snippet} (mirrors xray_search''s own finding shape) -- file is the repo-relative path fn refine actually ran against. Empty (but refine_status still "ran") is a legitimate outcome: your refine callback simply found nothing in the narrowed file set. Capped at 500 entries total; see refine_findings_truncated.'
+      items:
+        type: object
+    refine_files_examined:
+      type: integer
+      description: 'Bug #1909. Present only when refine_status is "ran": the number of DISTINCT files --refine actually re-parsed -- the AC2-narrowed intersection of (files a flagged GraphResult.refine symbol belongs to) with (the same driver-matched candidate file set --build-graph/--analyze-graph already used), never the whole repository.'
+    refine_findings_truncated:
+      type: boolean
+      description: 'Bug #1909. Present and true only when refine_findings was capped at 500 entries -- more real findings existed than were returned inline.'
+    refine_error:
+      type: string
+      description: 'Bug #1909. Present only when refine_status is "error": a sanitized description of why the --refine subprocess itself failed (never a raw exception or a server-internal path). The primary analyze_graph result is unaffected either way -- a refine failure degrades gracefully rather than failing the whole request.'
     fact_graph_complete:
       type: boolean
       description: 'THE honesty signal this tool exists to provide. True only when the graph build hit NO degradation (no truncation, no parse errors, no extractor/collector panics, no read errors, no index-budget trip, no unsupported-language files). False means the graph is INCOMPLETE -- an empty findings[] in that case means "the index was too incomplete to trust a negative", NOT "nothing was found". Always check this before treating an empty findings[] as a clean bill of health, especially for dead-code-style analyses (see "Directional asymmetry" below). NOTE: since the graph extractor currently supports JAVA ONLY, this will be false for any repo containing non-Java candidate files -- see files_with_unsupported_language under degradation. When false, check completeness_reasons for the specific named cause(s) (one or more of repo_index_incomplete, index_budget_exceeded, resolution_ambiguous) instead of inferring a reason from the degradation counters alone -- a build can be degraded by more than one cause at once, and completeness_reasons lists every one that applied.'
@@ -270,6 +291,30 @@ pub struct ReduceFinding {
 | `facts.for_symbol(symbol_id)` | `(u64) -> Vec<UserFact>` | Facts your `collect_facts` attributed to this symbol's enclosing declaration. |
 | `facts.for_custom(name)` | `(&str) -> Vec<UserFact>` | Facts attributed to a `custom_key` (non-symbol key) instead. |
 
+## Optional third function: fn refine (Bug #1909, S3's refine phase)
+
+`analyze_graph` never sees file source -- it only has `GraphHandle`/`FactsHandle`, never an `OwnedNode`, so it structurally cannot read a method body, cite an AST-derived risk signal, or point at a specific line. `fn refine` closes that gap: define it alongside `collect_facts`/`analyze_graph`, push symbols worth a follow-up per-file look onto `result.refine` inside `analyze_graph`, then pass `refine: true` on the request. `refine` is OPTIONAL (unlike the other two) -- an evaluator with only `collect_facts`/`analyze_graph` is still a valid graph-mode evaluator; omitting `fn refine` while passing `refine: true` reports `refine_status: "absent"`, never an error.
+
+```rust
+// OPTIONAL: runs once per file in the narrowed refine set (the files a
+// symbol in GraphResult.refine belongs to, intersected with the files
+// already indexed -- never the whole repo). Has BOTH the file's real
+// OwnedNode (so you can walk the AST, check for a catch block, read a
+// literal, etc.) AND the same GraphHandle/FactsHandle analyze_graph used,
+// simultaneously -- the only callback with both at once.
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {
+    Vec::new()
+}
+```
+
+```rust
+pub struct FileContext {
+    pub file: String,  // this file's repo-relative path
+}
+```
+
+`EvalFinding` is the SAME shape `xray_search` evaluators return: `{pattern, line, snippet}` -- `refine_findings[]` in the response adds `file` (from `FileContext.file`) to each one. See `refine`/`refine_status`/`refine_findings`/`refine_files_examined` above for the full request/response contract, including the two cost guards (opt-in, and skipped when `GraphResult.refine` is empty).
+
 ## AnalysisCompleteness: the honesty contract
 
 The whole point of this tool is that a caller can tell "no findings" apart from "the index was too incomplete to trust a negative". **Always check `fact_graph_complete` and `degradation` before treating an empty `findings[]` as a clean result** -- especially for dead-code-style analyses. **`is_definitely_dead_code` does NOT gate itself on completeness** -- it returns `Some(true)` on a degraded graph exactly as it would on a complete one, so an evaluator that only checks `== Some(true)` WILL emit false positives when the graph is incomplete. The completeness check is yours to apply: read `fact_graph_complete` and `degradation` yourself, and surface `fact_graph_complete=false` to the human rather than presenting either an empty list as "verified clean" or a populated list as "verified dead".
@@ -395,7 +440,7 @@ Only `"receiver-resolved"` is worth acting on unreviewed, and it is rarer than i
 
 ## Execution model
 
-This tool runs SYNCHRONOUSLY within `timeout_seconds` (off the server's event loop) -- it does not yet submit a `BackgroundJobManager` job the way `xray_search` does, so `await_seconds` is accepted but currently inert. A future story may add full async job-polling parity; for now, plan for `timeout_seconds` (max 600s) to cover the whole pipeline: repo resolution, file collection, evaluator compile, `--build-graph`, and `--analyze-graph`.
+This tool runs SYNCHRONOUSLY within `timeout_seconds` (off the server's event loop) -- it does not yet submit a `BackgroundJobManager` job the way `xray_search` does, so `await_seconds` is accepted but currently inert. A future story may add full async job-polling parity; for now, plan for `timeout_seconds` (max 600s) to cover the whole pipeline: repo resolution, file collection, evaluator compile, `--build-graph`, `--analyze-graph`, and -- only when `refine: true` AND `GraphResult.refine` came back non-empty -- a THIRD subprocess, `--refine`, inside the SAME budget (its own deadline is whatever remains of `timeout_seconds` after the first two phases, never additional time). A `refine` request that would otherwise exceed the budget reports `refine_status: "skipped_timeout"` rather than extending the deadline -- the primary `findings`/`fact_graph_complete` result is unaffected either way.
 
 ## Related
 

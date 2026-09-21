@@ -8,7 +8,9 @@ validate inputs, pre-flight check the evaluator, resolve the repository
 alias, collect candidate files, and delegate to
 `RustNativeBackend.run_graph_analysis` (Story #1811 AC2), which itself
 drives `xray-cli --compile-only` -> `--build-graph` -> `--analyze-graph`
-(Story #1811 AC1).
+(Story #1811 AC1) and, opt-in via the `refine` request parameter, ->
+`--refine` (Bug #1909 -- S3 #1792 built the refine phase in Rust but it had
+NO caller anywhere under `src/code_indexer/` until this fix).
 
 Execution model (deliberate simplification vs `xray_search`): the handler
 runs SYNCHRONOUSLY within `timeout_seconds`, off the event loop via
@@ -430,10 +432,33 @@ def _parse_timeout_seconds(timeout_raw: Any) -> Tuple[int, Optional[Dict[str, An
     return max(_TIMEOUT_MIN, min(_TIMEOUT_MAX, int(timeout_raw))), None
 
 
+def _parse_refine_flag(refine_raw: Any) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Bug #1909: validates the new opt-in `refine` request parameter.
+
+    Must be a real boolean (never a truthy string/int -- `bool` is itself
+    a subtype of `int` in Python, so `isinstance(refine_raw, bool)` must be
+    checked BEFORE any numeric check ever could accept it). Defaults to
+    `False` when omitted -- `--refine` is opt-in, never the default,
+    mirroring `_parse_timeout_seconds`'s fail-fast validation convention.
+    """
+    if not isinstance(refine_raw, bool):
+        return False, {
+            "error": "refine_invalid",
+            "message": f"refine must be a boolean, got {refine_raw!r}",
+        }
+    return refine_raw, None
+
+
 def _parse_analyze_graph_request(
     params: Any,
 ) -> Tuple[
-    Union[str, List[str]], str, List[str], List[str], int, Optional[Dict[str, Any]]
+    Union[str, List[str]],
+    str,
+    List[str],
+    List[str],
+    int,
+    bool,
+    Optional[Dict[str, Any]],
 ]:
     """Parses and validates `params` for `handle_analyze_graph` -- factored
     out to keep that handler itself short. Returns either the 5 real
@@ -465,6 +490,7 @@ def _parse_analyze_graph_request(
             [],
             [],
             0,
+            False,
             {
                 "error": "invalid_params",
                 "message": "params must be an object",
@@ -492,6 +518,7 @@ def _parse_analyze_graph_request(
             [],
             [],
             0,
+            False,
             {
                 "error": "invalid_params",
                 "message": (
@@ -508,6 +535,7 @@ def _parse_analyze_graph_request(
             [],
             [],
             0,
+            False,
             {
                 "error": "evaluator_code_required",
                 "message": "Either evaluator_code or pattern_name must be provided",
@@ -524,6 +552,7 @@ def _parse_analyze_graph_request(
             [],
             [],
             0,
+            False,
             {
                 "error": "repository_alias_required",
                 "message": "repository_alias must be a non-empty string, or a "
@@ -535,18 +564,22 @@ def _parse_analyze_graph_request(
         params.get("include_patterns"), "include_patterns"
     )
     if err is not None:
-        return "", "", [], [], 0, err
+        return "", "", [], [], 0, False, err
     exclude_patterns, err = _validate_glob_patterns(
         params.get("exclude_patterns"), "exclude_patterns"
     )
     if err is not None:
-        return "", "", [], [], 0, err
+        return "", "", [], [], 0, False, err
 
     timeout_seconds, err = _parse_timeout_seconds(
         params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS)
     )
     if err is not None:
-        return "", "", [], [], 0, err
+        return "", "", [], [], 0, False, err
+
+    refine, err = _parse_refine_flag(params.get("refine", False))
+    if err is not None:
+        return "", "", [], [], 0, False, err
 
     assert include_patterns is not None  # guaranteed by _validate_glob_patterns
     assert exclude_patterns is not None
@@ -556,6 +589,7 @@ def _parse_analyze_graph_request(
         include_patterns,
         exclude_patterns,
         timeout_seconds,
+        refine,
         None,
     )
 
@@ -566,11 +600,17 @@ async def _run_analyze_graph_pipeline(
     include_patterns: List[str],
     exclude_patterns: List[str],
     timeout_seconds: int,
+    refine: bool = False,
 ) -> Dict[str, Any]:
     """Validates the evaluator, resolves the repo, collects candidate
     files, and delegates to `RustNativeBackend.run_graph_analysis` -- ALL
     off the event loop via `anyio.to_thread.run_sync`. Returns the raw (not
     yet `_mcp_response`-wrapped) result dict.
+
+    Bug #1909: `refine` is forwarded UNCHANGED to `run_graph_analysis` --
+    the opt-in gate deciding whether S3's `--refine` phase runs lives
+    entirely there (`RustNativeBackend._maybe_run_refine`), never
+    re-implemented here.
     """
     pre_validation = validate_rust_evaluator(evaluator_code)
     if not pre_validation.ok:
@@ -637,6 +677,7 @@ async def _run_analyze_graph_pipeline(
                 repo_root=str(repo_path),
                 file_paths=file_paths,
                 timeout_seconds=timeout_seconds,
+                refine=refine,
             )
         finally:
             if slot and limiter is not None:
@@ -932,6 +973,7 @@ async def _run_multi_repo_analyze_graph(
     include_patterns: List[str],
     exclude_patterns: List[str],
     timeout_seconds: int,
+    refine: bool = False,
 ) -> Dict[str, Any]:
     """Issue #1902 (Epic #1906 P9): runs the existing single-repo
     `_run_analyze_graph_pipeline` once PER alias, sequentially, and returns
@@ -1061,6 +1103,7 @@ async def _run_multi_repo_analyze_graph(
                 include_patterns,
                 exclude_patterns,
                 timeout_seconds,
+                refine,
             )
         except Exception as exc:  # noqa: BLE001 -- per-alias guard, Bug #1913
             # An unhandled exception from a single alias (e.g. a
@@ -1168,6 +1211,8 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         exclude_patterns_invalid         -- not a list of strings, or a
                                              malformed glob.
         timeout_seconds_invalid          -- not a finite number.
+        refine_invalid                   -- refine (Bug #1909) is present but not a
+                                             boolean.
         mutually_exclusive_params        -- evaluator_code and pattern_name
                                              were supplied together.
         pattern_mode_mismatch             -- stored pattern is not graph mode.
@@ -1205,6 +1250,7 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         include_patterns,
         exclude_patterns,
         timeout_seconds,
+        refine,
         error,
     ) = _parse_analyze_graph_request(params)
     if error is not None:
@@ -1258,11 +1304,17 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
             include_patterns,
             exclude_patterns,
             timeout_seconds,
+            refine,
         )
         return _mcp_response(multi_result)
 
     result = await _run_analyze_graph_pipeline(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine,
     )
     # H7 (consolidated review, Issue #1811/Bug #1812): route through the
     # same PayloadCache truncation every other xray result gets -- a

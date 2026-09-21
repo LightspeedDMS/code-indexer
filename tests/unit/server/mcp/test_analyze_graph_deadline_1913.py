@@ -207,7 +207,12 @@ async def test_deadline_crossed_mid_loop_yields_partial_results_and_deadline_err
         return clock["t"]
 
     async def _pipeline_side_effect(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine=False,
     ):
         assert repo_alias == "repo-a", (
             "only the first alias should ever reach the pipeline in this "
@@ -285,7 +290,12 @@ async def test_per_alias_exception_recorded_in_errors_earlier_results_survive() 
     handler = _import_handler()
 
     async def _pipeline_side_effect(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine=False,
     ):
         if repo_alias == "repo-a":
             return dict(CANNED_OK)
@@ -339,7 +349,12 @@ async def test_per_alias_exception_server_path_is_never_leaked_to_caller() -> No
     leaking_path = "/home/serviceaccount/srv/example-internal-repo"
 
     async def _pipeline_side_effect(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine=False,
     ):
         raise FileNotFoundError(
             f"[Errno 2] No such file or directory: '{leaking_path}'"
@@ -381,7 +396,12 @@ async def test_per_alias_bare_exception_still_yields_nonempty_message_with_type_
     handler = _import_handler()
 
     async def _pipeline_side_effect(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine=False,
     ):
         raise RuntimeError()
 
@@ -425,7 +445,12 @@ async def test_real_graph_error_result_shape_gets_synthesized_message() -> None:
     assert "message" not in real_failure  # the real shape has no top-level message
 
     async def _pipeline_side_effect(
-        evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds
+        evaluator_code,
+        repo_alias,
+        include_patterns,
+        exclude_patterns,
+        timeout_seconds,
+        refine=False,
     ):
         if repo_alias == "repo-a":
             return dict(CANNED_OK)

@@ -941,11 +941,11 @@ test_fstab_entry_not_duplicated() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
-        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '192.168.60.23:/home/jsbattig/cow-storage' "${fstab_file}")"
+    line_count="$(grep -cF '192.168.60.23:/home/opuser/cow-storage' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     [[ "${line_count}" -eq 1 ]]
@@ -965,10 +965,10 @@ test_fstab_entry_includes_nolock() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    entry_line="$(grep -F '192.168.60.23:/home/jsbattig/cow-storage' "${fstab_file}")"
+    entry_line="$(grep -F '192.168.60.23:/home/opuser/cow-storage' "${fstab_file}")"
     fstype="$(echo "${entry_line}" | awk '{print $3}')"
     rm -rf "${tmpdir}"
 
@@ -1006,11 +1006,11 @@ test_fstab_bind_entry_not_duplicated() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '/home/jsbattig/cow-storage  /mnt/cow-storage' "${fstab_file}")"
+    line_count="$(grep -cF '/home/opuser/cow-storage  /mnt/cow-storage' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     [[ "${line_count}" -eq 1 ]]
@@ -1027,10 +1027,10 @@ test_fstab_bind_entry_no_false_match_on_mount_point_substring() {
     run_sourced "
         DRY_RUN=false
         add_fstab_bind_entry '/srv/other-source' '/mnt/cow-storage-2' '${fstab_file}'
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '/home/jsbattig/cow-storage  /mnt/cow-storage ' "${fstab_file}")"
+    line_count="$(grep -cF '/home/opuser/cow-storage  /mnt/cow-storage ' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     # Regression guard for L1: an unanchored substring dedup on mount_point
@@ -1146,7 +1146,7 @@ test_cow_daemon_dry_run_end_to_end() {
         --cow-daemon-url "http://192.168.60.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
         --nfs-server "192.168.60.23" \
-        --nfs-export "/home/jsbattig/cow-storage" \
+        --nfs-export "/home/opuser/cow-storage" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     rm -rf "${tmpdir}"
 
@@ -1170,7 +1170,7 @@ test_cow_local_bind_uses_bind_mount() {
         --cow-daemon-url "http://192.168.60.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
         --cow-local-bind \
-        --nfs-export "/home/jsbattig/cow-storage" \
+        --nfs-export "/home/opuser/cow-storage" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     rm -rf "${tmpdir}"
 

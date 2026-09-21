@@ -478,7 +478,7 @@ class CowDaemonBackend:
         #
         # On the CoW daemon host (e.g. cluster node 23), the same logical
         # filesystem is reached via daemon_storage_path directly
-        # (/home/jsbattig/cow-storage/...) — the symlink resolves there
+        # (/home/opuser/cow-storage/...) — the symlink resolves there
         # because the local layout points to the source rather than the
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
@@ -517,8 +517,8 @@ class CowDaemonBackend:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
 
         The daemon job response contains clone_path as the daemon-local absolute path
-        (e.g. ``home/jsbattig/cow-storage/ns/name`` without leading slash, or
-        ``/home/jsbattig/cow-storage/ns/name`` with leading slash).
+        (e.g. ``home/opuser/cow-storage/ns/name`` without leading slash, or
+        ``/home/opuser/cow-storage/ns/name`` with leading slash).
 
         When daemon_storage_path is configured we strip it and replace with mount_point.
         When daemon_storage_path is empty the clone_path is already relative (``ns/name``)

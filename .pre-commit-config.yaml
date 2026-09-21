@@ -15,6 +15,17 @@ repos:
         always_run: false
         files: ^skills/
 
+      # Bug #1916: tree-wide disclosure scan (git-tracked tree, not a diff).
+      # A per-diff review scan cannot see a pre-existing leak and can miss
+      # anything added to a change AFTER reviewers already scanned it — this
+      # runs at COMMIT time, over the whole tracked tree, every commit.
+      - id: disclosure-scan
+        name: Bug #1916 disclosure scan (tree-wide)
+        entry: python3 scripts/check_disclosure_tree.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Ruff - Fast Python linter (replaces flake8, isort, etc.)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.1

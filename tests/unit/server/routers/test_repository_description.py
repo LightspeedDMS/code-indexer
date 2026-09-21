@@ -55,7 +55,7 @@ def temp_golden_repos_dir():
 SAMPLE_CIDX_META_WITH_FRONTMATTER = """\
 ---
 name: code-indexer-python
-url: https://github.com/jsbattig/code-indexer.git
+url: https://github.com/example-org/code-indexer.git
 technologies:
   - Python
   - FastAPI

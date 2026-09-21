@@ -2037,7 +2037,7 @@ class SmartIndexer(HighThroughputProcessor):
         same logical directory is reachable under TWO different absolute
         prefixes -- the NFS *mount* path (e.g.
         ``/mnt/cow-storage/golden-repos/<repo>``) and the daemon-LOCAL path
-        (e.g. ``/home/jsbattig/cow-storage/golden-repos/<repo>``). If the
+        (e.g. ``/home/opuser/cow-storage/golden-repos/<repo>``). If the
         prior run stored the mount prefix but the current run's
         ``codebase_dir`` is the daemon-local prefix (or vice versa), using the
         stored path verbatim makes ``file_path.relative_to(codebase_dir)``
