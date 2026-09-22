@@ -99,10 +99,19 @@ pub fn process_parsed_file(
     fact_collector: &dyn FactCollector,
     has_syntax_error: bool,
 ) -> FusedFileResult {
-    let (index, extraction_status) = match extractor_for_language(ext) {
+    let (mut index, extraction_status) = match extractor_for_language(ext) {
         ExtractorLookup::Supported(extractor) => run_extraction(&root, file_id, extractor.as_ref()),
         ExtractorLookup::Unsupported => (None, ExtractionStatus::LanguageNotSupported),
     };
+    // #1922: copies the ALREADY-COMPUTED `has_syntax_error` flag onto the
+    // extracted `LocalIndex` itself -- this is the ONE place downstream
+    // of `scanner::parse_file_with_error_flag` that has both the flag and
+    // the index it belongs to, so every consumer of `LocalIndex`
+    // (`FileForBind.index`, and therefore the binder) can read it
+    // directly without `FileForBind` itself needing a new field.
+    if let Some(built_index) = &mut index {
+        built_index.has_syntax_error = has_syntax_error;
+    }
 
     let (facts, collect_facts_status) = match &index {
         Some(built_index) => run_collect_facts(&root, file, built_index, fact_collector),

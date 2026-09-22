@@ -4,7 +4,7 @@
 //! done for `bind/resolve.rs` -> `bind/resolve_tests.rs`.
 
 use super::*;
-use crate::graph::extract::local_index::ArgShape;
+use crate::graph::extract::local_index::{ArgShape, Visibility};
 use std::path::Path;
 
 fn extract_source(source: &str) -> LocalIndex {
@@ -628,5 +628,37 @@ fn extracts_enum_constants_as_field_scope_typed_names() {
         NameScope::Field {
             enclosing_type: "Color".to_string()
         }
+    );
+}
+
+/// #1922: a lambda parameter bound in a STATIC field initializer has NO
+/// enclosing method at all, so it is absent from `typed_names` entirely
+/// -- `all_local_binding_names` is the flat, context-independent
+/// substrate that still records it.
+#[test]
+fn all_local_binding_names_records_a_lambda_parameter_bound_in_a_field_initializer() {
+    let index = extract_source(
+        "import java.util.function.Consumer;\nclass First {\n    static final Consumer<String> C = Svc -> Svc.trim();\n}\n",
+    );
+    assert!(
+        index
+            .all_local_binding_names
+            .iter()
+            .any(|n| n == "Svc"),
+        "the lambda parameter Svc, bound in a static field initializer, must be recorded"
+    );
+}
+
+/// #1922: a record's own component list shares the IDENTICAL
+/// `formal_parameters` -> `formal_parameter` grammar shape a method's
+/// parameters use, but a component is a FIELD (an implicit accessor),
+/// never a local/parameter binding -- `all_local_binding_names` must
+/// never record it.
+#[test]
+fn all_local_binding_names_excludes_a_records_own_component_list() {
+    let index = extract_source("record Point(int Svc, int y) {}\n");
+    assert!(
+        !index.all_local_binding_names.iter().any(|n| n == "Svc"),
+        "a record component is a field, never a local/parameter binding"
     );
 }

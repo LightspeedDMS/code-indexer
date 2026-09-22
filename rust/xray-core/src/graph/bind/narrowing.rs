@@ -384,6 +384,68 @@ pub(super) fn apply_receiver_type_narrowing(
     // empty match or not -- see this function's own doc comment above.
 }
 
+/// #1922 (supersedes #1893): a TYPE-QUALIFIED call/method-reference
+/// (`Type.m(x)`, `Type::m`) is structurally different from every other
+/// receiver-evidence path this module narrows on -- its qualifier is not
+/// an INFERRED local-variable/field type (the substrate #1898/#1910
+/// proved unsafe to hard-narrow on), it is the literal bare identifier
+/// the source itself wrote as the call's qualifier. `receiver_is_type_
+/// qualifier` (computed by `receiver::is_definite_type_qualifier`,
+/// `mod.rs`, JAVA files only) is `true` only when that identifier (a)
+/// follows Java's class-naming convention (starts uppercase), (b)
+/// carries no local/parameter/field evidence ANYWHERE this binder can
+/// see, and (c) is not explicitly named by a static import anywhere in
+/// this file. A `helper.m()` lowercase qualifier is untouched, exactly
+/// as #1922's acceptance criteria require.
+///
+/// **Why "no positive match" is never treated as proof of absence.**
+/// This binder's own extraction is incomplete in ways that have nothing
+/// to do with the call site -- an interface constant field, a Kotlin
+/// companion `@JvmStatic` member attributed to a different enclosing-type
+/// string than its outer class, a Kotlin top-level function's synthetic
+/// `FileKt` facade name never recorded as a type, and (tracked
+/// separately, deliberately NOT solved here) a genuinely external
+/// qualifier that happens to share a bare method name with an unrelated
+/// in-repo declaration. Every one of these can produce EITHER
+/// `receiver_type: None` OR a real `receiver_type` with an empty tagged
+/// subset -- treating either as "the qualifier proves the real target
+/// isn't any of these" would silently drop genuine edges, or flip a live
+/// private method to a false dead verdict end-to-end (`Some(true)`,
+/// `callers: 0`) on real, compilable source.
+///
+/// **This function's rule, singular:** hard-narrow ONLY when `receiver_
+/// type` POSITIVELY resolves to a declared in-repo type (never on
+/// `None`) AND at least one candidate already carries `RECEIVER_TYPE_
+/// MATCH` (set by `apply_receiver_type_narrowing`, which must run
+/// immediately before this pass) -- in that one case alone, `retain` to
+/// exactly that non-empty subset; every other combination is a no-op,
+/// falling through to this file's existing permanently-tag-only
+/// doctrine. There is no hard-empty path in this function at all: a
+/// `None` qualifier or an empty tagged subset both leave `candidates`
+/// completely untouched, so completeness (`narrowed_to_zero`/`fact_
+/// graph_complete`) is never affected by this pass either.
+/// `has_incomplete_supertype_evidence` needs no independent check here:
+/// `apply_receiver_type_narrowing` already skips tagging ENTIRELY when
+/// the resolved type's own supertype evidence is incomplete, so the
+/// tagged subset is trivially empty in that case too, and this pass
+/// already treats an empty subset as a no-op.
+pub(super) fn apply_type_qualifier_narrowing(
+    candidates: &mut Vec<(DeclInfo, u16)>,
+    receiver_is_type_qualifier: bool,
+    receiver_type: Option<&str>,
+) {
+    if !receiver_is_type_qualifier || receiver_type.is_none() {
+        return;
+    }
+    let has_positive_match = candidates
+        .iter()
+        .any(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH != 0);
+    if !has_positive_match {
+        return;
+    }
+    candidates.retain(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH != 0);
+}
+
 /// AC3 (Story #1806, S2b): "unqualified calls resolve against the
 /// enclosing class and its supertypes first". `same_class_context` is
 /// `Some(enclosing_type)` ONLY when the caller (`super::resolve_site`)

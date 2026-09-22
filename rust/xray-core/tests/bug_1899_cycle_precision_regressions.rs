@@ -25,14 +25,19 @@
 //! `wrong_arity_three_node_component_no_longer_forms_a_cycle_after_1898`
 //! asserts ed65c3a8's win: NO multi-node component survives.
 //!
-//! `same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_for_1910`
-//! is an ACCEPTED-REGRESSION PIN, not an aspiration: it asserts the false
-//! 3-node component IS STILL PRESENT today. #1910 owns making
-//! receiver-type narrowing able to delete a statically-qualified call's
-//! out-of-type candidates again. When #1910 lands, THIS TEST WILL START
-//! FAILING (the false component will disappear); at that point delete
-//! this test (or flip its assertion and rename it), do not "fix" it by
-//! loosening the assertion.
+//! `same_arity_statically_qualified_calls_no_longer_fabricate_a_false_cycle_after_1922`
+//! (formerly `..._still_fabricate_a_false_cycle_pinned_for_1910`, an
+//! ACCEPTED-REGRESSION PIN) is INVERTED per its own documented
+//! instructions ("when #1910 lands ... delete this test (or flip its
+//! assertion and rename it), do not loosen it"): #1910's own inferred-
+//! local-type approach was closed without shipping; #1922 instead
+//! delivers the SAME statically-qualified-call capability through a
+//! narrower, provably-safe mechanism (`narrowing::apply_type_qualifier_
+//! narrowing`, gated on the qualifier being a literal type-shaped
+//! identifier with zero local-variable-scope analysis). The false 3-node
+//! component this fixture reproduced is now GONE: each `ParserX.parse`'s
+//! `TimeUtil.parse(input)` call binds exclusively to `TimeUtil.parse`,
+//! never to a same-arity sibling.
 //!
 //! `same_arity_overload_self_loop_is_unaffected_by_1898` reproduces the
 //! shipped template's 20-self-loop-singleton shape: a generated-accessor-
@@ -238,15 +243,15 @@ fn write_same_arity_magnet_fixture(dir: &Path) {
     }
 }
 
-/// THIS IS AN ACCEPTED-REGRESSION PIN, NOT AN ASPIRATION. #1910's AC2
-/// ("`TimeUtil.parse(x)`-shaped statically-qualified calls bind only
-/// within the qualified type or its recorded supertypes") is what fixes
-/// this. When #1910 lands, this fixture's false 3-node component will
-/// disappear and THIS TEST WILL FAIL -- that failure is the intended
-/// signal that #1910 shipped; at that point delete or invert this test,
-/// do not loosen it.
+/// INVERTED by #1922 (formerly an ACCEPTED-REGRESSION PIN naming #1910,
+/// which was closed without shipping -- see this file's module doc):
+/// `TimeUtil.parse(x)`-shaped statically-qualified calls now bind ONLY
+/// within the qualified type, so the false 3-node SCC this fixture used
+/// to fabricate must no longer exist -- `ParserA.parse` must land in a
+/// SINGLETON component (or one that excludes both siblings), never one
+/// containing `ParserB.parse`/`ParserC.parse`.
 #[test]
-fn same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_for_1910() {
+fn same_arity_statically_qualified_calls_no_longer_fabricate_a_false_cycle_after_1922() {
     let dir = TempDir::new().unwrap();
     write_same_arity_magnet_fixture(dir.path());
     let files = ["TimeUtil.java", "ParserA.java", "ParserB.java", "ParserC.java"];
@@ -263,18 +268,10 @@ fn same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_fo
         .expect("ParserA.parse must be in some component");
 
     assert!(
-        component.contains(&b) && component.contains(&c),
-        "ACCEPTED REGRESSION (pinned for #1910): every same-arity \
-         `parse(1 params)` call site still binds to every sibling's \
-         `parse`, fabricating ParserA/B/C.parse into one false SCC: \
-         {component:?}. If this just failed, #1910 landed -- delete or \
-         invert this test, do not loosen it."
-    );
-    assert_eq!(
-        component.len(),
-        3,
-        "the false component's size must stay pinned at exactly the 3 \
-         sibling parsers (TimeUtil.parse is a leaf and must never join)"
+        !component.contains(&b) && !component.contains(&c),
+        "#1922: each ParserX.parse's TimeUtil.parse(input) call must bind exclusively to \
+         TimeUtil.parse -- ParserA.parse must never share a component with ParserB.parse/ \
+         ParserC.parse again, got {component:?}"
     );
 }
 

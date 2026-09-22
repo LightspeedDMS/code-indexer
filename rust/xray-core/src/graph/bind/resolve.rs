@@ -14,7 +14,7 @@ use super::narrowing::{
     apply_arity_narrowing, apply_import_context_narrowing, apply_inheritance_family_expansion,
     apply_overload_shape_narrowing, apply_private_visibility_filter,
     apply_receiver_type_narrowing, apply_same_class_or_super_narrowing,
-    apply_super_class_narrowing, param_count_matches_arity,
+    apply_super_class_narrowing, apply_type_qualifier_narrowing, param_count_matches_arity,
 };
 use super::scope::FileScope;
 use super::REF_KIND_INVOCATION;
@@ -336,6 +336,7 @@ pub(crate) fn resolve_reference(
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
     index_is_complete: bool,
+    receiver_is_type_qualifier: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
     if pool.is_empty() {
@@ -371,6 +372,16 @@ pub(crate) fn resolve_reference(
     apply_arity_narrowing(&mut with_reasons, arg_count);
     apply_overload_shape_narrowing(&mut with_reasons, arg_shapes);
     apply_receiver_type_narrowing(&mut with_reasons, receiver_type, type_index);
+    // #1922: MUST run immediately after `apply_receiver_type_narrowing`
+    // (consumes the `RECEIVER_TYPE_MATCH` tag it just set) and before
+    // `apply_import_context_narrowing` (which otherwise wrongly discards
+    // a qualifier-confirmed candidate that happens to carry no same-file/
+    // same-package/import evidence, letting an unrelated same-file/
+    // same-package decoy -- often the caller's own self-loop -- win
+    // instead; see a static-facade shape, `class A { static R m(X x) {
+    // return B.m(x); } }` alongside `class B { static R m(X x) {...} }`,
+    // called from inside `A` itself).
+    apply_type_qualifier_narrowing(&mut with_reasons, receiver_is_type_qualifier, receiver_type);
     apply_same_class_or_super_narrowing(&mut with_reasons, same_class_context, type_index);
     apply_super_class_narrowing(&mut with_reasons, super_class_context, type_index);
     apply_import_context_narrowing(&mut with_reasons);
@@ -405,3 +416,11 @@ mod tests;
 #[cfg(test)]
 #[path = "resolve_tests_family.rs"]
 mod tests_family;
+
+#[cfg(test)]
+#[path = "resolve_tests_type_qualifier.rs"]
+mod tests_type_qualifier;
+
+#[cfg(test)]
+#[path = "resolve_tests_unique_shortcut.rs"]
+mod tests_unique_shortcut;

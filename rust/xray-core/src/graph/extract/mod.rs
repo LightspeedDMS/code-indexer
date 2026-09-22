@@ -15,7 +15,9 @@
 //! worse than an explicit, observable "not yet supported" signal.
 
 pub mod java;
+mod java_fields;
 mod java_invocations;
+mod java_methods;
 mod java_receiver;
 mod java_type_names;
 pub mod kotlin;

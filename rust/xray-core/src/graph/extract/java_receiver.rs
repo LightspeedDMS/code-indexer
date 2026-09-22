@@ -472,6 +472,136 @@ pub(super) fn lambda_param_typed_names(
     }
 }
 
+/// #1922: `collect_all_local_binding_names`'s own per-node-kind dispatch,
+/// split out to stay under the function-length budget. Each arm mirrors
+/// its `X_typed_name(s)` sibling's own verified grammar shape but reads
+/// ONLY the name, never a declared type or scope.
+fn push_binding_names_for(node: &OwnedNode, names: &mut Vec<String>) {
+    match node.kind.as_str() {
+        "formal_parameter" | "spread_parameter" => {
+            if let Some((name, _)) = parameter_name_and_type(node) {
+                names.push(name);
+            }
+        }
+        "local_variable_declaration" => names.extend(
+            node.children
+                .iter()
+                .filter(|c| c.kind == "variable_declarator")
+                .filter_map(|d| d.child_by_kind("identifier"))
+                .map(|n| n.text().to_string()),
+        ),
+        "catch_formal_parameter" | "enhanced_for_statement" => {
+            if let Some(name) = node.child_by_kind("identifier") {
+                names.push(name.text().to_string());
+            }
+        }
+        "resource" => {
+            // Mirrors `resource_typed_name`'s own "existing variable"
+            // resource form discrimination (Java 9+ `try
+            // (alreadyDeclaredVar) { ... }` introduces no new binding).
+            if node.named_children().len() >= 2 {
+                if let Some(name) = node.child_by_kind("identifier") {
+                    names.push(name.text().to_string());
+                }
+            }
+        }
+        "instanceof_expression" => {
+            // Mirrors `instanceof_pattern_typed_name`'s own shape: a
+            // bound pattern variable is always the LAST named child, an
+            // `identifier`, only when present at all.
+            let named = node.named_children();
+            if named.len() >= 3 && named[named.len() - 1].kind == "identifier" {
+                names.push(named[named.len() - 1].text().to_string());
+            }
+        }
+        "type_pattern" => {
+            let named = node.named_children();
+            if named.len() == 2 && named[1].kind == "identifier" {
+                names.push(named[1].text().to_string());
+            }
+        }
+        "record_pattern_component" => {
+            let named = node.named_children();
+            if named.len() == 2 && named[1].kind == "identifier" && named[1].text() != "_" {
+                names.push(named[1].text().to_string());
+            }
+        }
+        "lambda_expression" => push_lambda_param_names(node, names),
+        _ => {}
+    }
+}
+
+/// A lambda's UNTYPED parameter forms (a bare identifier with no parens,
+/// or multiple comma-separated untyped identifiers) need separate
+/// handling: neither produces a `formal_parameter` node at all, unlike
+/// the explicitly-typed `(Worker Svc) -> ...` form, which the
+/// `formal_parameter` arm above already covers (the grammar nests it
+/// inside the SAME `formal_parameters` -> `formal_parameter` shape a
+/// method's own parameters use).
+fn push_lambda_param_names(node: &OwnedNode, names: &mut Vec<String>) {
+    let Some(parameters) = node.named_children().into_iter().next() else {
+        return;
+    };
+    match parameters.kind.as_str() {
+        "identifier" => names.push(parameters.text().to_string()),
+        "inferred_parameters" => names.extend(
+            parameters
+                .named_children()
+                .into_iter()
+                .filter(|c| c.kind == "identifier")
+                .map(|c| c.text().to_string()),
+        ),
+        _ => {}
+    }
+}
+
+/// #1922: every NAME this file binds as a local, parameter, or pattern
+/// variable, regardless of whether the binding has an enclosing method --
+/// a lambda parameter in a field initializer, an enum constant's
+/// argument list, or a switch-expression pattern in a field initializer
+/// are all still genuine Java local bindings, even though `NameScope::
+/// Local` cannot represent them (it requires a real enclosing METHOD
+/// `SymbolId`, and none of those contexts ever sets one). Sole consumer:
+/// `receiver::FileTypedNames::has_any_local_binding`'s flat, context-
+/// independent existence check. Extracts NAMES ONLY -- never a declared
+/// type, never a scope -- and performs NO scope/flow resolution (this is
+/// existence, not visibility; #1919 does not apply).
+///
+/// ONE explicit-stack pre-order walk over the WHOLE tree (mirroring
+/// `OwnedNode::descendants_of_kind`'s own bounded-stack pattern, Rule 14:
+/// total pushes equal the file's finite node count), matching each
+/// node's kind inline via `push_binding_names_for` -- never N separate
+/// per-kind tree walks.
+///
+/// A `record_declaration`'s own component list (`record Point(int x, int
+/// y) {}`) shares the IDENTICAL `formal_parameters` -> `formal_parameter`
+/// grammar shape a method's parameters use (this extractor's own record-
+/// component extraction elsewhere already relies on that), but a
+/// component is a FIELD (an implicit accessor), never a local/parameter
+/// binding -- so this walk explicitly skips pushing a `record_
+/// declaration`'s own DIRECT `formal_parameters` child onto the stack
+/// (everything else about the record -- its body's methods, nested
+/// types, and any lambdas/locals genuinely declared inside them -- is
+/// still pushed and walked normally).
+pub(super) fn collect_all_local_binding_names(root: &OwnedNode) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut stack: Vec<&OwnedNode> = root.children.iter().rev().collect();
+    while let Some(node) = stack.pop() {
+        push_binding_names_for(node, &mut names);
+        if node.kind == "record_declaration" {
+            stack.extend(
+                node.children
+                    .iter()
+                    .filter(|c| c.kind != "formal_parameters")
+                    .rev(),
+            );
+        } else {
+            stack.extend(node.children.iter().rev());
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

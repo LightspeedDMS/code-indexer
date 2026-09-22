@@ -418,6 +418,37 @@ pub struct LocalIndex {
     /// only ever make narrowing MORE conservative, never fabricate a
     /// wrong hard filter).
     pub type_parameter_names: Vec<String>,
+    /// #1922: bare names of EVERY local variable, parameter, or pattern
+    /// binding declared ANYWHERE in this file, regardless of whether it
+    /// has an enclosing method -- a lambda parameter in a field
+    /// initializer, an enum constant's argument list, or a switch-
+    /// expression pattern in a field initializer are all still genuine
+    /// Java local bindings, but `typed_names`'s `NameScope::Local`
+    /// requires a real enclosing METHOD `SymbolId`, which none of those
+    /// contexts ever sets, so those bindings are absent from
+    /// `typed_names` entirely (not merely mis-scoped). Sole consumer:
+    /// `receiver::FileTypedNames::has_any_local_binding`'s flat,
+    /// context-independent existence check. Deliberately name-only:
+    /// never a declared type, never a scope, never a resolution of which
+    /// specific declaration shadows which at a given point (#1919 does
+    /// not apply -- this is existence, not visibility).
+    pub all_local_binding_names: Vec<String>,
+    /// #1922: true when this file's tree-sitter tree carried a syntax
+    /// error (`fused::process_parsed_file`'s own `has_syntax_error`
+    /// parameter, tree-sitter's native `Node::has_error()` computed once
+    /// at parse time -- `false` for every `LocalIndex` built any other
+    /// way, e.g. `LocalIndex::new()`/`Default` in a unit test). A node
+    /// inside an ERROR subtree is silently absent from every extraction
+    /// pass in this module (never visited, never recorded) -- so a
+    /// binding this binder's hard-narrowing guards depend on can be
+    /// invisible for a reason that has nothing to do with which context
+    /// it was declared in (`all_local_binding_names`'s own fix for a
+    /// binding with no enclosing method does not help here: the binding
+    /// was never parsed into a node at all).
+    /// Sole consumer: `receiver::file_is_safe_for_type_qualifier_
+    /// narrowing`, which disables hard-narrowing for the WHOLE file when
+    /// this is `true`, never re-deriving it via a second AST walk.
+    pub has_syntax_error: bool,
 }
 
 impl LocalIndex {

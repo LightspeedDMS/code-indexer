@@ -26,16 +26,29 @@
 //! **#1898 SCOPE SPLIT (epic #1906, round-4 review, `.analysis/
 //! 1898-review-rounds/round4-findings.md`)**: `apply_receiver_type_
 //! narrowing` is now TAG-ONLY -- it never removes a candidate, empty
-//! match or not, Positive evidence or Advisory. This retires the AC3
+//! match or not, Positive evidence or Advisory. This retired the AC3
 //! "binds ONLY within the qualified type" guarantee this file originally
-//! proved (`ac3_statically_qualified_call_binds_only_within_the_qualified_
-//! type`, renamed below) -- exclusive receiver-type binding moves to a
-//! follow-up issue named in `docs/xray-architecture.md`'s
-//! candidate-admission section. The arity-based tests in this file
+//! proved, deferring exclusive receiver-type binding to a follow-up issue
+//! named in `docs/xray-architecture.md`'s candidate-admission section.
+//! The arity-based tests in this file
 //! (`ac2_unique_wrong_arity_external_receiver_call_yields_zero_callees`
 //! and the P1-1/P1-2 same-class-or-super shapes) are UNCHANGED --
 //! `apply_arity_narrowing` was never implicated in any of the four
 //! review rounds.
+//!
+//! **#1922 (that follow-up landed)**: a genuinely TYPE-QUALIFIED call/
+//! method-reference (`Type.m(x)`, `Type::m`) now DOES hard-narrow, via a
+//! narrower, NEW mechanism (`narrowing::apply_type_qualifier_narrowing`,
+//! gated on `receiver::is_definite_type_qualifier`) -- not by reversing
+//! `apply_receiver_type_narrowing`'s TAG-ONLY doctrine, which stays
+//! permanently soft for the INSTANCE-receiver case #1898/#1910 proved
+//! unsafe to hard-narrow (inferred local-variable/field types, subject to
+//! `(enclosing_method, name)` scope-key collisions). The two are
+//! orthogonal: #1922's qualifier is the literal bare identifier the
+//! source itself wrote, never an inferred type. `ac3_statically_
+//! qualified_call_keeps_the_qualified_types_target_but_no_longer_
+//! excludes_noise` below is UPDATED (not superseded) to assert the new,
+//! correct exclusive-binding outcome.
 
 use std::path::Path;
 use xray_core::graph::bind::{bind, FileForBind};
@@ -372,21 +385,20 @@ class Something {
     );
 }
 
-/// P1-4 / AC3's own repro (#1898): `TimeUtil.parse("a")` is a statically
-/// QUALIFIED call on `TimeUtil`, a type this repo's graph knows about and
-/// which declares its OWN 1-param `parse` method. Two unrelated classes
-/// (`ParserA`/`ParserB`) also declare a same-named, same-arity `parse` --
-/// the exact shape from #1898's own bug report (`TimeUtil.parse(x)`
-/// fanning out to 165 unrelated `parse` callees repo-wide). RE-SCOPED by
-/// the #1898 scope split (see this file's module doc): the call USED to
-/// bind ONLY within `TimeUtil` under the old hard-narrow contract; that
-/// exclusion is retired (receiver-type narrowing is tag-only now), so
-/// `TimeUtil.parse` keeps its real edge but `ParserA.parse`/`ParserB.parse`
-/// ALSO survive as accepted noise, pending the receiver-type
-/// hard-narrowing follow-up issue named in `docs/xray-architecture.md`'s
-/// candidate-admission section.
+/// AC3's own repro (#1898), UPDATED by #1922 (the deferred
+/// follow-up): `TimeUtil.parse("a")` is a statically QUALIFIED call on
+/// `TimeUtil`, a type this repo's graph knows about and which declares
+/// its OWN 1-param `parse` method. Two unrelated classes (`ParserA`/
+/// `ParserB`) also declare a same-named, same-arity `parse` -- the exact
+/// shape from #1898's own bug report (`TimeUtil.parse(x)` fanning out to
+/// 165 unrelated `parse` callees repo-wide) and from #1922's own static-
+/// facade repro (a caller binding to itself instead of the qualified
+/// type it explicitly delegates to). `apply_type_qualifier_narrowing`
+/// (#1922) now hard-narrows this exact shape: `TimeUtil.parse` keeps its
+/// real edge, and `ParserA.parse`/`ParserB.parse` are correctly EXCLUDED
+/// -- no longer accepted noise.
 #[test]
-fn ac3_statically_qualified_call_keeps_the_qualified_types_target_but_no_longer_excludes_noise() {
+fn ac3_statically_qualified_call_binds_only_within_the_qualified_type() {
     let dir = tempfile::tempdir().unwrap();
     write_java(
         dir.path(),
@@ -430,16 +442,14 @@ fn ac3_statically_qualified_call_keeps_the_qualified_types_target_but_no_longer_
         .expect("TimeUtil.parse must be interned");
     assert!(
         callees.contains(&time_util_dense),
-        "TimeUtil.parse(\"a\") must always keep its real edge to TimeUtil.parse, even though \
-         exclusive narrowing to the qualified type is deferred to the #1898 receiver-type \
-         follow-up issue"
+        "TimeUtil.parse(\"a\") must keep its real edge to TimeUtil.parse"
     );
     assert_eq!(
         callees.len(),
-        3,
-        "accepted regression (#1898 scope split): receiver-type narrowing is tag-only now, so \
-         ParserA.parse/ParserB.parse are accepted noise alongside TimeUtil.parse until the \
-         follow-up issue lands hard receiver-type narrowing -- got {} callee(s)",
+        1,
+        "#1922: a statically-qualified call must bind EXCLUSIVELY within the qualified type -- \
+         ParserA.parse/ParserB.parse must no longer survive as accepted noise -- got {} \
+         callee(s)",
         callees.len()
     );
 }
