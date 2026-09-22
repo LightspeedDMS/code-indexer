@@ -126,6 +126,78 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     }
 }
 
+/// Bug #1929 item 4: `run_compile`'s call to `preamble_line_count()`
+/// (later superseded by the structural bounds
+/// `assemble::assemble_with_epilogue` computes and returns directly
+/// alongside the assembled source, see the rework item 2 notes on
+/// `assemble.rs`) was MODE-UNAWARE -- it always counted
+/// ONLY the legacy `PREAMBLE`
+/// (`assemble.rs`), never the 6 `GRAPH_PREAMBLE_EXTRA_*` blocks
+/// `assemble_graph_evaluator_source` ALSO prepends ahead of user code in
+/// graph mode. A type error on the user's OWN line 1 must therefore
+/// report line 1, exactly like legacy mode already does (Bug #1827) --
+/// never an inflated line number that only accounts for the (much
+/// shorter) legacy preamble's length. Reproduces the live report: a
+/// user's line 1 shown as `evaluator.rs:198`.
+#[test]
+fn compile_evaluator_remaps_a_graph_mode_error_to_the_users_own_line_number() {
+    let dir = TempDir::new().unwrap();
+    // Line 1 of the USER's own code references an undefined type --
+    // genuine safe Rust (passes the sandbox validator), so this reaches
+    // a REAL rustc compile and a REAL "cannot find type" error whose
+    // arrow points at exactly the user's line 1.
+    let user_code = "fn collect_facts(node: &ThisTypeDoesNotExist, file: &str) -> Vec<UserFact> {\n    Vec::new()\n}\nfn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n    GraphResult::default()\n}\n";
+    assert_eq!(
+        detect_evaluator_mode(user_code).unwrap(),
+        EvaluatorMode::Graph,
+        "test fixture assumption broken: this source must classify as Graph mode"
+    );
+
+    let result = compile_evaluator(user_code, dir.path());
+    let err = result.expect_err("referencing an undefined type must fail a real rustc compile");
+    assert_eq!(
+        err.kind,
+        CompileErrorKind::Compile,
+        "a genuine rustc type-resolution error is a Compile-kind failure"
+    );
+    assert!(
+        err.details.iter().any(|d| d.trim_start().starts_with("--> ") && d.contains(":1:")),
+        "the error must be remapped to the user's OWN line 1 (where `ThisTypeDoesNotExist` is \
+         referenced), not an inflated line number reflecting only the legacy preamble's length: \
+         got {:?}",
+        err.details
+    );
+}
+
+/// Bug #1929 item 4 (legacy-mode regression guard, real gap found while
+/// fixing the reported graph-mode gap): the identical off-by-one
+/// `preamble_line_count` corrected above existed for LEGACY mode too --
+/// `PREAMBLE` (like the graph preamble) ends with a trailing newline,
+/// which the pre-fix `preamble_text.lines().count() + 1` formula never
+/// accounted for. Nothing end-to-end had previously proven legacy mode's
+/// ABSOLUTE line-number correctness (Bug #1827's own tests exercise
+/// `adjust_error_lines` directly with a hand-picked `preamble_lines`,
+/// never derive it from the real `PREAMBLE` text) -- this closes that
+/// gap for legacy mode as a side effect of the shared fix.
+#[test]
+fn compile_evaluator_remaps_a_legacy_mode_error_to_the_users_own_line_number() {
+    let dir = TempDir::new().unwrap();
+    let user_code = "fn evaluate_node(node: &ThisTypeDoesNotExist) -> Vec<EvalFinding> {\n    Vec::new()\n}\n";
+    assert_eq!(
+        detect_evaluator_mode(user_code).unwrap(),
+        EvaluatorMode::Legacy,
+        "test fixture assumption broken: this source must classify as Legacy mode"
+    );
+
+    let result = compile_evaluator(user_code, dir.path());
+    let err = result.expect_err("referencing an undefined type must fail a real rustc compile");
+    assert!(
+        err.details.iter().any(|d| d.trim_start().starts_with("--> ") && d.contains(":1:")),
+        "the error must be remapped to the user's OWN line 1: got {:?}",
+        err.details
+    );
+}
+
 #[test]
 fn test_compile_cache_hit() {
     let dir = TempDir::new().unwrap();

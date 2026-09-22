@@ -135,6 +135,7 @@ fn method_decl(name: &str, file_id: u32, local: u32) -> Declaration {
         param_count: Some(0),
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 

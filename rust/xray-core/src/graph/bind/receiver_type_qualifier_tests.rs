@@ -228,6 +228,7 @@ fn fqn_name_index(package: &str, type_name: &str) -> RepoNameIndex {
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
     index.declarations.push(Declaration {
         kind: DK::Type,
@@ -237,6 +238,7 @@ fn fqn_name_index(package: &str, type_name: &str) -> RepoNameIndex {
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
     RepoNameIndex::build(&[FileForBind {
         file_id: 1,

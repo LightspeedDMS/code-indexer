@@ -35,6 +35,7 @@ pub(super) fn method_decl(
         param_count,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -50,6 +51,7 @@ pub(super) fn package_decl(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -204,6 +206,7 @@ fn varargs_method_decl(
         param_count: Some(param_count),
         param_types: Vec::new(),
         is_varargs: true,
+        vararg_index: None,
     }
 }
 
@@ -342,6 +345,7 @@ fn method_decl_with_types(
         param_count: Some(param_types.len()),
         param_types,
         is_varargs: false,
+        vararg_index: None,
     }
 }
 

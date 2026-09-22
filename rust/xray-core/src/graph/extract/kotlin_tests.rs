@@ -46,6 +46,37 @@ fn extracts_a_class_declaration_as_a_type() {
     assert_eq!(index.signatures.get(&decl.symbol).unwrap(), "class Greeter");
 }
 
+/// Bug #1929 item 3: an anonymous object-literal type (`object : Base()
+/// { ... }`) must synthesize a name a human can chase -- the enclosing
+/// type's real name plus the object literal's own REAL source line --
+/// never the previous opaque `<anon:{file_id}:{byte}>`, mirroring
+/// `JavaExtractor`'s identical fix for an anonymous/enum-body class.
+/// Braces deliberately span separate lines (idiomatic formatting) to
+/// avoid the documented, unrelated Bug #1937 same-line parse-recovery
+/// defect in the pinned tree-sitter-kotlin-ng grammar.
+#[test]
+fn anonymous_object_literal_synthesized_name_carries_the_enclosing_type_and_a_real_line() {
+    let index = extract_source(
+        "class Outer {\n    fun make() {\n        val x = object : Runnable {\n            override fun run() {}\n        }\n    }\n}\n",
+    );
+    let anon = index
+        .declarations
+        .iter()
+        .find(|d| d.kind == DeclarationKind::Type && d.name.contains("$<anon@L"))
+        .expect("the object literal must produce a synthesized anonymous Type declaration");
+    assert!(
+        anon.name.starts_with("Outer$<anon@L3:"),
+        "anon name must start with the enclosing type's real name and its own real source \
+         line (3, where `object : Runnable {{` begins): got {}",
+        anon.name
+    );
+    assert!(
+        !anon.name.contains("<anon:"),
+        "the old opaque `<anon:file_id:byte>` shape must be gone: got {}",
+        anon.name
+    );
+}
+
 #[test]
 fn extracts_an_interface_declaration_and_records_it_as_an_interface_name() {
     let index = extract_source("interface Marker {\n    fun run()\n}\n");

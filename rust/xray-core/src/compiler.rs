@@ -37,7 +37,7 @@ pub use types::{CompileError, CompileErrorKind, CompileResult};
 
 pub use assemble::{
     assemble_evaluator_source, cache_identity_info, cache_identity_info_from_source,
-    cache_identity_info_graph, compute_cache_identity, detect_evaluator_mode, preamble_line_count,
+    cache_identity_info_graph, compute_cache_identity, detect_evaluator_mode,
     CacheIdentityInfo, EvaluatorMode, XRAY_ABI_VERSION,
 };
 
@@ -59,7 +59,10 @@ pub(crate) use graph_preamble::{
     GRAPH_PREAMBLE_EXTRA_5, GRAPH_PREAMBLE_EXTRA_6,
 };
 #[cfg(test)]
-pub(crate) use assemble::{assemble_graph_evaluator_source, sha256_hex, ABI_VERSION_PLACEHOLDER};
+pub(crate) use assemble::{
+    assemble_evaluator_source_with_preamble_and_bounds, assemble_graph_evaluator_source,
+    assemble_graph_evaluator_source_and_bounds, sha256_hex, ABI_VERSION_PLACEHOLDER,
+};
 #[cfg(test)]
 pub(crate) use rustc_driver::{evaluator_rustc_command, run_rustc_with_timeout};
 #[cfg(test)]

@@ -101,6 +101,10 @@ pub(super) fn extract_method_declaration(
     let (param_types, is_varargs) = formal_parameters
         .map(extract_param_types_and_varargs)
         .unwrap_or_default();
+    // Bug #1929 rework (Codex P2): Java's varargs parameter is ALWAYS
+    // the LAST formal parameter (JLS 8.4.1) -- unlike Kotlin, there is
+    // no position ambiguity to resolve here.
+    let vararg_index = is_varargs.then(|| param_types.len().saturating_sub(1));
     index
         .signatures
         .insert(symbol, format!("{name}({param_count} params)"));
@@ -116,6 +120,7 @@ pub(super) fn extract_method_declaration(
         param_count: Some(param_count),
         param_types,
         is_varargs,
+        vararg_index,
     });
 
     record_method_declaration_metadata(node, symbol, enclosing_type, formal_parameters, index);

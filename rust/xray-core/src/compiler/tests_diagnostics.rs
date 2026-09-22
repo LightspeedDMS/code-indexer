@@ -10,21 +10,40 @@ use tempfile::TempDir;
 
 #[test]
 fn test_adjust_error_lines() {
-    // Preamble is 10 lines; original error at line 15 should adjust to line 5
+    // Preamble is 10 lines, user code spans up to line 30; original
+    // error at line 15 falls inside that span and should adjust to 5.
     let stderr = "error[E0425]: cannot find value\n  --> /tmp/abc.rs:15:5\n  |";
-    let adjusted = adjust_error_lines(stderr, 10);
+    let adjusted = adjust_error_lines(stderr, 10, 30);
     let joined = adjusted.join("\n");
     assert!(joined.contains(":5:"), "line 15 - 10 preamble = line 5: got {}", joined);
     assert!(!joined.contains(":15:"), "original line 15 should be replaced");
 }
 
+/// Bug #1929 rework item 2 (Codex P2): this test used to be named
+/// `test_adjust_error_lines_no_overflow` and asserted `adjust_error_lines`
+/// SATURATES a preamble-origin location to line 0 -- pinning the exact
+/// bug this fix removes. A diagnostic at line 3, with the user-code span
+/// starting only after line 100, is genuinely PREAMBLE-origin (generated
+/// support code, never anything the user wrote) -- it must keep its REAL
+/// original line number (never a fabricated 0) and must be CLEARLY
+/// labelled so it can never be mistaken for user code.
 #[test]
-fn test_adjust_error_lines_no_overflow() {
-    // Preamble larger than line number → saturate at 0 (not panic)
+fn test_adjust_error_lines_leaves_a_preamble_origin_location_unchanged_and_labelled() {
     let stderr = "  --> /tmp/abc.rs:3:1";
-    let adjusted = adjust_error_lines(stderr, 100);
+    let adjusted = adjust_error_lines(stderr, 100, 200);
     let joined = adjusted.join("\n");
-    assert!(joined.contains(":0:"), "saturate_sub must produce 0: got {}", joined);
+    assert!(
+        joined.contains(":3:"),
+        "a preamble-origin line (3, outside the 100..=200 user-code span) must keep its REAL \
+         original line number, never be zeroed: got {}",
+        joined
+    );
+    assert!(
+        joined.contains("evaluator support code"),
+        "a preamble-origin location must be clearly labelled, never silently presented as if it \
+         were user code: got {}",
+        joined
+    );
 }
 
 /// Bug #1827 (defect 2): a synthetic rustc-shaped diagnostic block --
@@ -38,7 +57,7 @@ fn test_adjust_error_lines_adjusts_gutter_line_to_match_arrow() {
         |\n\
         223 |     let x: i32 = \"not an integer\";\n    \
         |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `i32`, found `&str`\n";
-    let adjusted = adjust_error_lines(stderr, 100);
+    let adjusted = adjust_error_lines(stderr, 100, 300);
 
     assert!(
         adjusted.iter().any(|l| l.contains(":123:18")),
@@ -59,6 +78,46 @@ fn test_adjust_error_lines_adjusts_gutter_line_to_match_arrow() {
         !adjusted.iter().any(|l| l.trim_start().starts_with("223 |")),
         "raw gutter line 223 must not survive: got {:?}",
         adjusted
+    );
+}
+
+/// Bug #1929 rework item 2 (Codex P2, the mirror-image case): a
+/// diagnostic located AFTER the user-code span is EPILOGUE-origin --
+/// generated support code the user never wrote. Before this fix, a
+/// blind `saturating_sub` could still produce a SMALL POSITIVE number
+/// here (e.g. an epilogue line only slightly past the user code's own
+/// end), which LOOKS exactly like a plausible real user line but is
+/// entirely fabricated -- strictly worse than the preamble case's
+/// obvious `:0:`, since nothing about the output signals it is wrong.
+/// The fix must leave it with its REAL original line number and the
+/// same clear label.
+#[test]
+fn test_adjust_error_lines_leaves_an_epilogue_origin_location_unchanged_and_labelled() {
+    // User code spans lines 11..=15 (preamble 10 lines); the diagnostic
+    // at line 20 is past the end of user code -- epilogue-origin. A
+    // pre-fix blind subtraction (20 - 10 = 10) would produce "10",
+    // which LOOKS like a plausible line inside a 15-line user file but
+    // is completely fabricated.
+    let stderr = "  --> /tmp/abc.rs:20:1";
+    let adjusted = adjust_error_lines(stderr, 10, 15);
+    let joined = adjusted.join("\n");
+    assert!(
+        joined.contains(":20:"),
+        "an epilogue-origin line (20, past the user-code span ending at 15) must keep its REAL \
+         original line number, never be silently rewritten to the fabricated-but-plausible 10: \
+         got {}",
+        joined
+    );
+    assert!(
+        !joined.contains(":10:"),
+        "must never fabricate the plausible-but-wrong line 10: got {}",
+        joined
+    );
+    assert!(
+        joined.contains("evaluator support code"),
+        "an epilogue-origin location must be clearly labelled, never silently presented as if it \
+         were user code: got {}",
+        joined
     );
 }
 
@@ -171,7 +230,7 @@ fn test_compile_type_mismatch_arrow_and_gutter_line_numbers_agree() {
 fn test_adjust_gutter_line_accepts_tilde_plus_minus_and_pipe_bars() {
     for marker in ['|', '~', '+', '-'] {
         let line = format!("223 {}     replacement text", marker);
-        let adjusted = adjust_gutter_line(&line, 100).unwrap_or_else(|| {
+        let adjusted = adjust_gutter_line(&line, 100, 300).unwrap_or_else(|| {
             panic!("marker '{}' must be recognized as a gutter row", marker)
         });
         assert!(
@@ -279,10 +338,12 @@ fn assert_plus_minus_pair_within_range(
 /// fails to compile through the REAL compile_evaluator pipeline, and
 /// rustc's own help: blocks render TWO distinct `+`/`-` shapes,
 /// verified live against the pinned toolchain:
-///  1. "perhaps you want to import it" suggests inserting
-///     `use std::fmt::Write;` at absolute line 1 (the very top of the
-///     assembled PREAMBLE+user source) via a lone `+` row -- since
-///     PREAMBLE alone is ~100 lines, this MUST saturate to 0.
+///  1. "perhaps you want to import it" suggests inserting `use std::fmt::
+///     Write;` near the very top of the assembled PREAMBLE+user source
+///     via a lone `+` row -- genuinely PREAMBLE-origin (Bug #1929 rework
+///     item 2), so it must be left at its REAL raw line number, never
+///     rewritten into the user's own range (nor the old, now-incorrect
+///     "saturates to 0" behavior).
 ///  2. "there is a method `write_char` with a similar name" renders a
 ///     full-line REPLACE as a `-` row (old content) paired with a
 ///     NONZERO `+` row (new content) sharing the SAME real user
@@ -301,11 +362,19 @@ fn test_compile_missing_trait_method_help_rows_use_plus_and_minus_and_are_adjust
     );
     let err = result.unwrap_err();
 
+    // Bug #1929 rework item 2: the import-suggestion `+` row is genuinely
+    // preamble-origin -- derive the REAL preamble boundary the same way
+    // production code does (the structural bounds `assemble_evaluator_
+    // source_with_preamble_and_bounds` returns) rather than hardcoding
+    // the specific raw line number rustc happens to choose today.
+    let (_assembled, (preamble_lines, _user_code_end)) =
+        assemble_evaluator_source_with_preamble_and_bounds(PREAMBLE, user_code);
     let plus_rows = find_numbered_rows_with_marker(&err.details, '+');
     assert!(
-        plus_rows.contains(&0),
-        "expected a '+' row for the suggested import, adjusted to 0 \
-         (absolute line 1, PREAMBLE >> 1 line): {:?}",
+        plus_rows.iter().any(|&n| n <= preamble_lines),
+        "expected a '+' row for the suggested import whose RAW line number falls INSIDE the \
+         preamble (<= {preamble_lines}) -- genuinely preamble-origin, so it must be left at its \
+         real original line number, never silently rewritten into the user's own range: {:?}",
         err.details
     );
 
@@ -361,5 +430,84 @@ fn test_compile_evaluator_source_containing_arrow_token_is_not_corrupted_and_gut
          (H-2 -- the row must never be routed into the arrow branch \
          just because it CONTAINS '--> ' text): {:?}",
         user_code_line_count, err.details
+    );
+}
+
+/// Bug #1929 rework item 2 (Codex P2), REAL GRAPH-MODE epilogue-origin
+/// evidence: `collect_facts`'s own FIRST parameter type is deliberately
+/// wrong (`i32` instead of the epilogue's own `&OwnedNode`) -- legal
+/// syntax on its own (any parameter type compiles as a standalone
+/// item), so the ONLY place the mismatch can surface is the call site
+/// `GRAPH_EPILOGUE` itself emits (`collect_facts(node, file)` inside
+/// `xray_collect_facts`) -- a genuine EPILOGUE-origin diagnostic, never
+/// a user-code line. Proves the fix against the REAL graph-mode
+/// assembled source, not a synthetic stderr string.
+#[test]
+fn test_compile_graph_mode_collect_facts_signature_mismatch_reports_an_epilogue_origin_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    let user_code = "fn collect_facts(node: i32, file: &str) -> Vec<UserFact> {\n    let _ = (node, file);\n    Vec::new()\n}\nfn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n    let _ = (g, facts);\n    GraphResult::default()\n}\n";
+    assert_eq!(
+        detect_evaluator_mode(user_code).unwrap(),
+        EvaluatorMode::Graph,
+        "test fixture assumption broken: must still classify as Graph mode despite the \
+         signature mismatch (mode detection only checks function NAMES, never signatures)"
+    );
+
+    let result = compile_evaluator(user_code, dir.path());
+    let err = result.expect_err("a collect_facts signature mismatch must fail to compile");
+
+    let (_assembled, (_preamble_lines, user_code_end)) =
+        assemble_graph_evaluator_source_and_bounds(user_code);
+
+    let arrow_line_number = find_arrow_line_number(&err.details);
+    assert!(
+        arrow_line_number > user_code_end,
+        "the type mismatch is INSIDE the epilogue's own call to collect_facts, past the real \
+         user-code end ({user_code_end}) -- must be reported at its REAL (unremapped) line \
+         number, never rewritten into the user's own 1..={user_code_end} range: got \
+         {arrow_line_number}, details: {:?}",
+        err.details
+    );
+    assert!(
+        err.details.iter().any(|d| d.contains("evaluator support code")),
+        "an epilogue-origin diagnostic must be clearly labelled, never silently presented as if \
+         it were a user-code line: {:?}",
+        err.details
+    );
+}
+
+/// Bug #1929 rework (Codex P2): user code containing an UNINDENTED
+/// comment line that happens to be LITERALLY `// ---- END USER CODE
+/// ----` (the exact marker text `assemble_with_epilogue` inserts --
+/// plausible if a user copy-pastes an example from this very tool's
+/// own documentation) must NEVER corrupt line-bound classification.
+/// Bounds must be computed STRUCTURALLY, from the KNOWN line counts of
+/// the pieces the assembler concatenates, never by re-parsing marker
+/// text out of the finished assembled source -- a marker-search
+/// implementation misclassifies the REAL error (well inside the
+/// user's own code, after the injected lookalike line) as "evaluator
+/// support code".
+#[test]
+fn test_compile_user_code_containing_literal_marker_text_does_not_corrupt_line_bounds() {
+    let dir = TempDir::new().unwrap();
+    let user_code = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n// ---- END USER CODE ----\nVec::new()\n}\nfn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\nlet x: i32 = \"deliberately not an integer\";\nlet _ = (g, facts, x);\nGraphResult::default()\n}\n";
+    let user_code_line_count = user_code.lines().count();
+
+    let result = compile_evaluator(user_code, dir.path());
+    assert!(result.is_err(), "a type mismatch must fail to compile");
+    let err = result.unwrap_err();
+
+    let arrow_line_number = find_arrow_line_number(&err.details);
+    assert!(
+        arrow_line_number >= 1 && arrow_line_number <= user_code_line_count,
+        "the real error must map into the user's own source range (1..={}), never truncated \
+         or misclassified by the injected marker-lookalike comment: {:?}",
+        user_code_line_count, err.details
+    );
+    assert!(
+        !err.details.iter().any(|d| d.contains("evaluator support code")),
+        "a genuine user-code error must never be labelled as evaluator support code just \
+         because an earlier user line happens to match the marker text: {:?}",
+        err.details
     );
 }

@@ -100,6 +100,7 @@ pub(super) fn extract_field_declaration(
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
     }
 }
@@ -150,6 +151,7 @@ pub(super) fn extract_constant_declaration(
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
     }
 }

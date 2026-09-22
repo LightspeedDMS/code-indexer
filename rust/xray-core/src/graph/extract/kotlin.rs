@@ -159,6 +159,32 @@
 //! `?:`/`===`/`!==`/`!!` unmapped. A `private operator fun` reached ONLY
 //! through one of these two remaining forms still under-binds today. Do
 //! not extend the covered list above without also closing one of these.
+//!
+//! **Bug #1937 -- a same-line `object : Type { <function member> }` is a
+//! tree-sitter-kotlin-ng PARSE-RECOVERY defect, not an extractor bug.**
+//! When an object-literal expression's own opening `{`, a function-member
+//! declaration inside it, and its closing `}` all sit on ONE physical
+//! source line (`val o = object : Runnable { override fun run() {} }`,
+//! with or without `override`, with or without a var binding), the
+//! currently-pinned tree-sitter-kotlin-ng 1.1.0 grammar fails to recover:
+//! the WHOLE enclosing scope (getter, setter, `init` block, or plain
+//! function -- confirmed for all four) collapses into a single ERROR node
+//! whose materialized children stop partway through, and everything after
+//! that point is absent from the tree entirely (not even present as raw
+//! ERROR-child tokens) -- there is nothing left for this extractor's walk
+//! to see or emit a `Declaration` for. Writing the SAME object literal
+//! with its own braces on separate lines (idiomatic Kotlin formatting)
+//! parses cleanly with full extraction and correct #1930 synthetic-scope
+//! call attribution -- see `bug_1937_kotlin_object_literal_parse_recovery
+//! .rs` for the full investigation, both broken forms from the original
+//! report, the setter/`init`-block variants, and the control fixture.
+//! `tree.root_node().has_error()` (`scanner::parse_file_with_error_flag`)
+//! is already `true` for every broken variant, and the existing
+//! language-agnostic `has_syntax_error` -> `files_with_parse_errors` ->
+//! `fact_graph_complete = false` pipeline (`repo_index.rs`) already
+//! surfaces this as loud degradation, never silent loss -- confirmed by
+//! that same test file. Do not "fix" this by adding extractor logic: the
+//! data genuinely does not exist in the parse tree.
 
 use super::local_index::{
     ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
@@ -447,6 +473,7 @@ fn extract_package(root: &OwnedNode, file_id: u32, next_local: &mut u32, index: 
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
 }
 
@@ -538,17 +565,18 @@ fn apply_import_aliases(aliases: &HashMap<String, String>, index: &mut LocalInde
 /// object), `"Companion"` for an unnamed companion object (Kotlin's own
 /// real default name -- accessible as `Type.Companion`, and at most one
 /// per enclosing class so this can never collide within one nesting), or
-/// a synthesized `<anon:file:byte>` name for an anonymous object
-/// expression (`object : Base() { ... }`) -- mirrors `JavaExtractor`'s own
-/// F1 anonymous-class naming scheme exactly.
-fn type_declaration_name(node: &OwnedNode, file_id: u32) -> std::rc::Rc<str> {
+/// a synthesized human-chaseable name (Bug #1929 item 3, shared with
+/// `JavaExtractor`'s identical F1 anonymous-class scheme via
+/// `super::synthesize_anon_type_name`) for an anonymous object expression
+/// (`object : Base() { ... }`).
+fn type_declaration_name(node: &OwnedNode, file_id: u32, enclosing_type: Option<&str>) -> std::rc::Rc<str> {
     if let Some(id) = node.child_by_kind("identifier") {
         return std::rc::Rc::from(id.text());
     }
     if node.kind == "companion_object" {
         return std::rc::Rc::from("Companion");
     }
-    std::rc::Rc::from(format!("<anon:{file_id}:{}>", node.start_byte))
+    super::synthesize_anon_type_name(enclosing_type, file_id, node.start_line, node.start_byte)
 }
 
 fn is_interface(node: &OwnedNode) -> bool {
@@ -570,7 +598,7 @@ fn dispatch_type_declaration(
     ctx: &WalkContext,
     index: &mut LocalIndex,
 ) -> WalkContext {
-    let name = type_declaration_name(node, file_id);
+    let name = type_declaration_name(node, file_id, ctx.enclosing_type.as_deref());
     let symbol = next_symbol(file_id, next_local);
     let keyword = type_keyword(node);
     index.signatures.insert(symbol, format!("{keyword} {name}"));
@@ -586,6 +614,7 @@ fn dispatch_type_declaration(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
     push_type_parameter_names(node, index);
 
@@ -712,6 +741,7 @@ fn extract_primary_constructor_properties(
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
     }
 }
@@ -726,33 +756,51 @@ fn count_parameters(params: &OwnedNode) -> usize {
 
 /// Declared parameter type names (in call order, best-effort -- a
 /// parameter whose type could not be read is simply skipped, never
-/// fabricated) and whether ANY parameter carries the `vararg` modifier.
-/// `vararg` is a SIBLING `parameter_modifiers` node immediately preceding
-/// the parameter it modifies (verified real grammar shape), not nested
-/// inside the `parameter` node itself -- and since only the LAST
-/// parameter can legally be vararg in Kotlin, "any vararg modifier
-/// present anywhere in this list" is equivalent to "the last parameter is
-/// variable-arity", the exact property `Declaration::is_varargs` records.
-fn extract_param_types_and_varargs(params: &OwnedNode) -> (Vec<String>, bool) {
+/// fabricated), whether ANY parameter carries the `vararg` modifier, and
+/// -- Bug #1929 rework item 1 (P2 review finding) -- that parameter's
+/// REAL INDEX in `types`. `vararg` is a SIBLING `parameter_modifiers`
+/// node immediately preceding the parameter it modifies (verified real
+/// grammar shape), not nested inside the `parameter` node itself.
+/// UNLIKE Java (JLS 8.4.1: varargs is always the LAST formal parameter),
+/// Kotlin allows exactly ONE `vararg` parameter at ANY position -- every
+/// parameter declared after it must then be passed by NAME at the call
+/// site. This function used to assume "last position" (a false claim a
+/// prior version of this doc comment made), which put the varargs marker
+/// on the wrong parameter for e.g. `fun mid(vararg xs: Int, tail:
+/// String)`. `vararg_index` is only set to a valid position when the
+/// SAME parameter the modifier preceded actually got its type pushed to
+/// `types` (best-effort: an unresolved type still consumes the pending
+/// marker, so it is never misattributed to some LATER, unrelated
+/// parameter).
+fn extract_param_types_and_varargs(params: &OwnedNode) -> (Vec<String>, bool, Option<usize>) {
     let mut types = Vec::new();
     let mut is_varargs = false;
+    let mut vararg_index = None;
+    let mut pending_vararg = false;
     for child in params.named_children() {
         match child.kind.as_str() {
             "parameter_modifiers" => {
                 if child.named_children().iter().any(|m| m.child_by_kind("vararg").is_some()) {
                     is_varargs = true;
+                    pending_vararg = true;
                 }
             }
             "parameter" => {
-                if let Some(user_type) = child.child_by_kind("user_type") {
-                    types.extend(last_identifier_text(user_type));
+                let pushed_type = child.child_by_kind("user_type").and_then(last_identifier_text);
+                if let Some(t) = pushed_type {
+                    if pending_vararg {
+                        vararg_index = Some(types.len());
+                    }
+                    types.push(t);
                 }
+                pending_vararg = false;
             }
             _ => {}
         }
     }
-    (types, is_varargs)
+    (types, is_varargs, vararg_index)
 }
+
 
 /// Reads a function-shaped declaration's own name, parameters, signature,
 /// and visibility, and pushes its `Declaration` (+ `MethodOwnerRecord`
@@ -790,8 +838,11 @@ fn extract_function_declaration(
     let name = name_node.text().to_string();
     let params = node.child_by_kind("function_value_parameters");
     let param_count = params.map(count_parameters).unwrap_or(0);
-    let (param_types, is_varargs) = params.map(extract_param_types_and_varargs).unwrap_or_default();
-    index.signatures.insert(symbol, format!("{name}({param_count} params)"));
+    let (param_types, is_varargs, vararg_index) =
+        params.map(extract_param_types_and_varargs).unwrap_or_default();
+    index
+        .signatures
+        .insert(symbol, format!("{name}({param_count} params)"));
     index.visibilities.insert(symbol, visibility_of_modifiers(node));
     index.declarations.push(Declaration {
         kind: DeclarationKind::Method,
@@ -801,6 +852,7 @@ fn extract_function_declaration(
         param_count: Some(param_count),
         param_types,
         is_varargs,
+        vararg_index,
     });
     if let Some(enclosing_type) = enclosing_type {
         index.method_owners.push(MethodOwnerRecord {
@@ -868,8 +920,11 @@ fn extract_secondary_constructor(
     };
     let params = node.child_by_kind("function_value_parameters");
     let param_count = params.map(count_parameters).unwrap_or(0);
-    let (param_types, is_varargs) = params.map(extract_param_types_and_varargs).unwrap_or_default();
-    index.signatures.insert(symbol, format!("{enclosing_type}({param_count} params)"));
+    let (param_types, is_varargs, vararg_index) =
+        params.map(extract_param_types_and_varargs).unwrap_or_default();
+    index
+        .signatures
+        .insert(symbol, format!("{enclosing_type}({param_count} params)"));
     index.visibilities.insert(symbol, visibility_of_modifiers(node));
     index.declarations.push(Declaration {
         kind: DeclarationKind::Method,
@@ -879,6 +934,7 @@ fn extract_secondary_constructor(
         param_count: Some(param_count),
         param_types,
         is_varargs,
+        vararg_index,
     });
     index.method_owners.push(MethodOwnerRecord {
         method_symbol: symbol,
@@ -1030,6 +1086,7 @@ fn extract_property_declaration(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
 }
 
@@ -1065,6 +1122,7 @@ fn extract_enum_entry(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
 }
 

@@ -11,9 +11,8 @@
 //! a mechanical extraction, not a logic change.
 
 use super::assemble::{
-    assemble_evaluator_source_with_preamble, assemble_graph_evaluator_source,
-    cache_identity_info_from_source, detect_evaluator_mode, preamble_line_count,
-    CacheIdentityInfo, EvaluatorMode,
+    assemble_evaluator_source_with_preamble_and_bounds, assemble_graph_evaluator_source_and_bounds,
+    cache_identity_info_from_source, detect_evaluator_mode, CacheIdentityInfo, EvaluatorMode,
 };
 use super::diagnostics::adjust_error_lines;
 use super::preamble::PREAMBLE;
@@ -69,10 +68,10 @@ pub(crate) fn compile_evaluator_with_preamble(
 /// `preamble` + legacy EPILOGUE; Graph always uses the full
 /// GRAPH_PREAMBLE_EXTRA_* mirror + GRAPH_EPILOGUE (AC8). Mechanical
 /// extraction from `compile_evaluator_impl`'s original match expression.
-fn assemble_for_mode(mode: EvaluatorMode, preamble: &str, user_code: &str) -> String {
+fn assemble_for_mode(mode: EvaluatorMode, preamble: &str, user_code: &str) -> (String, (usize, usize)) {
     match mode {
-        EvaluatorMode::Legacy => assemble_evaluator_source_with_preamble(preamble, user_code),
-        EvaluatorMode::Graph => assemble_graph_evaluator_source(user_code),
+        EvaluatorMode::Legacy => assemble_evaluator_source_with_preamble_and_bounds(preamble, user_code),
+        EvaluatorMode::Graph => assemble_graph_evaluator_source_and_bounds(user_code),
     }
 }
 
@@ -160,7 +159,11 @@ fn prepare_build(
 /// PREAMBLE-shifted line numbers are adjusted back into the user's own
 /// source range before returning the `CompileError`. Returns the elapsed
 /// compile time (ms) on success.
-fn run_compile(build_rs_path: &Path, build_so_path: &Path) -> Result<u128, CompileError> {
+fn run_compile(
+    build_rs_path: &Path,
+    build_so_path: &Path,
+    user_code_bounds: (usize, usize),
+) -> Result<u128, CompileError> {
     let compile_start = Instant::now();
     let rustc_command = evaluator_rustc_command(build_rs_path, build_so_path);
     let (success, _stdout, stderr_bytes) =
@@ -169,8 +172,17 @@ fn run_compile(build_rs_path: &Path, build_so_path: &Path) -> Result<u128, Compi
 
     if !success {
         let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-        let preamble_lines = preamble_line_count();
-        let adjusted = adjust_error_lines(&stderr, preamble_lines);
+        // Bug #1929 rework (Codex P2): `user_code_bounds` is computed
+        // STRUCTURALLY by the assembler itself (`assemble_for_mode`),
+        // never re-derived by parsing the assembled text for marker
+        // strings -- see `assemble_with_epilogue`'s own doc comment for
+        // why that was unsound. `adjust_error_lines` remaps ONLY a
+        // location strictly inside the user-code span -- a preamble- or
+        // epilogue-origin diagnostic is left with its original line
+        // number, clearly labelled as evaluator support code, never
+        // silently rewritten into a plausible-but-wrong "user" line.
+        let (user_code_start_exclusive, user_code_end_inclusive) = user_code_bounds;
+        let adjusted = adjust_error_lines(&stderr, user_code_start_exclusive, user_code_end_inclusive);
         return Err(CompileError {
             message: "Evaluator compilation failed".to_string(),
             details: adjusted,
@@ -263,12 +275,12 @@ fn assemble_and_identify(
     preamble: &str,
     user_code: &str,
     cache_dir: &Path,
-) -> (String, CacheIdentityInfo, PathBuf, PathBuf) {
-    let assembled_source = assemble_for_mode(mode, preamble, user_code);
+) -> (String, (usize, usize), CacheIdentityInfo, PathBuf, PathBuf) {
+    let (assembled_source, bounds) = assemble_for_mode(mode, preamble, user_code);
     let identity_info = cache_identity_info_from_source(&assembled_source);
     let so_path = cache_dir.join(format!("{}.so", identity_info.identity));
     let meta_path = cache_dir.join(format!("{}.meta", identity_info.identity));
-    (assembled_source, identity_info, so_path, meta_path)
+    (assembled_source, bounds, identity_info, so_path, meta_path)
 }
 
 /// Orchestrates the full compile pipeline (Steps 0-8), threading state
@@ -277,7 +289,7 @@ fn assemble_and_identify(
 /// isolated build -> compile -> publish -> metadata -> LRU eviction.
 fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> Result<CompileResult, CompileError> {
     let mode = validate_and_classify(user_code)?;
-    let (assembled_source, identity_info, so_path, meta_path) =
+    let (assembled_source, bounds, identity_info, so_path, meta_path) =
         assemble_and_identify(mode, preamble, user_code, cache_dir);
 
     if let Some(hit) = check_cache_hit(&so_path, &meta_path, &identity_info) {
@@ -290,7 +302,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     let (build_dir, build_rs_path, build_so_path) =
         prepare_build(cache_dir, &identity_info.identity, &assembled_source)?;
 
-    let compile_ms = run_compile(&build_rs_path, &build_so_path)?;
+    let compile_ms = run_compile(&build_rs_path, &build_so_path, bounds)?;
     publish_artifact(&build_so_path, &so_path)?;
     write_cache_metadata_best_effort(&meta_path, &identity_info, compile_ms);
     cache::evict_lru(cache_dir, MAX_CACHE_ENTRIES);

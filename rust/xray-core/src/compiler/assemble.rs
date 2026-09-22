@@ -187,6 +187,20 @@ pub fn assemble_evaluator_source(user_code: &str) -> String {
 /// Production code always goes through the public assemble_evaluator_source
 /// above, which always passes the real PREAMBLE.
 pub(crate) fn assemble_evaluator_source_with_preamble(preamble: &str, user_code: &str) -> String {
+    assemble_evaluator_source_with_preamble_and_bounds(preamble, user_code).0
+}
+
+/// Bug #1929 rework (Codex P2): the bounds-returning counterpart of
+/// `assemble_evaluator_source_with_preamble`, used by the compile
+/// pipeline (`pipeline.rs::run_compile`) to remap rustc diagnostics.
+/// Returns the SAME assembled string plus its exact `(user_code_start_
+/// exclusive, user_code_end_inclusive)` line bounds -- see
+/// `assemble_with_epilogue`'s own doc comment for why these are
+/// computed structurally, never by re-parsing marker text.
+pub(crate) fn assemble_evaluator_source_with_preamble_and_bounds(
+    preamble: &str,
+    user_code: &str,
+) -> (String, (usize, usize)) {
     assemble_with_epilogue(preamble, user_code, EPILOGUE)
 }
 
@@ -194,13 +208,45 @@ pub(crate) fn assemble_evaluator_source_with_preamble(preamble: &str, user_code:
 /// (legacy) and `assemble_graph_evaluator_source` (AC8) build on: resolves
 /// `ABI_VERSION_PLACEHOLDER` in `preamble`, then wraps `user_code` between
 /// `preamble` and the caller-selected `epilogue`.
-fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> String {
+///
+/// Bug #1929 rework (Codex P2): ALSO returns the exact `(user_code_
+/// start_exclusive, user_code_end_inclusive)` line bounds, computed
+/// DIRECTLY from the KNOWN line counts of the pieces this function
+/// concatenates -- rather than searching the ASSEMBLED string for
+/// marker text after the fact. The prior marker-search approach
+/// (`diagnostic_line_bounds`, now removed) was provably unsound: user
+/// code containing a line that happens to equal the literal marker text
+/// (e.g. copy-pasted from this tool's own documentation) could truncate
+/// or spoof the computed span, misclassifying a REAL user-code error as
+/// generated "evaluator support code" (Codex-proven: a marker-lookalike
+/// line at the user's own line 2 collapsed the span to `end=102` with a
+/// genuine error at raw line 104, silently mislabeled). Computing bounds
+/// from the KNOWN input pieces makes this class of injection
+/// structurally impossible: nothing about `user_code`'s CONTENT can
+/// ever change how many lines it itself occupies, so there is also NO
+/// possible "bounds unavailable" case left to fall back from -- unlike
+/// the removed marker-search version, this computation cannot fail.
+///
+/// `user_code_start_exclusive` is measured by constructing the EXACT
+/// prefix (`"{resolved_preamble}\n// ---- USER CODE ----\n"`) this same
+/// function concatenates ahead of `user_code` and counting ITS lines --
+/// never `resolved_preamble.lines().count() + 1`, which silently
+/// under-counts by one whenever `resolved_preamble` itself ends with a
+/// trailing newline (true for both `PREAMBLE` and the graph preamble,
+/// the exact off-by-one Bug #1929 item 4 already root-caused and fixed
+/// once this session: `.lines()` does not report a text's own trailing
+/// newline as a distinct entry, but the explicit `\n` separator here
+/// DOES produce one real extra blank line once the marker follows).
+fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> (String, (usize, usize)) {
     let rustc_version = crate::cache::get_rustc_version();
     let escaped_rustc_version = rustc_version.escape_default().to_string();
     let resolved_preamble = preamble
         .replace(ABI_VERSION_PLACEHOLDER, &XRAY_ABI_VERSION.to_string())
         .replace(RUSTC_VERSION_PLACEHOLDER, &escaped_rustc_version);
-    format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, epilogue)
+    let assembled = format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, epilogue);
+    let user_code_start_exclusive = format!("{resolved_preamble}\n// ---- USER CODE ----\n").lines().count();
+    let user_code_end_inclusive = user_code_start_exclusive + user_code.lines().count();
+    (assembled, (user_code_start_exclusive, user_code_end_inclusive))
 }
 
 /// Story #1787 AC8 / Story #1792 (S3, AC1): assembles a graph-mode
@@ -214,7 +260,32 @@ fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> St
 /// "all-or-none with the graph family" applies to whether the export exists
 /// at all, not to whether this function is invoked.
 pub(crate) fn assemble_graph_evaluator_source(user_code: &str) -> String {
-    let preamble = format!(
+    assemble_graph_evaluator_source_and_bounds(user_code).0
+}
+
+/// Bug #1929 rework (Codex P2): the bounds-returning counterpart of
+/// `assemble_graph_evaluator_source`, used by the compile pipeline
+/// (`pipeline.rs::run_compile`) to remap rustc diagnostics in graph
+/// mode. See `assemble_with_epilogue`'s own doc comment for why the
+/// bounds are computed structurally, never by re-parsing marker text.
+pub(crate) fn assemble_graph_evaluator_source_and_bounds(user_code: &str) -> (String, (usize, usize)) {
+    let epilogue = if has_top_level_fn(user_code, "refine") {
+        format!("{}\n{}", GRAPH_EPILOGUE, GRAPH_REFINE_EPILOGUE)
+    } else {
+        GRAPH_EPILOGUE.to_string()
+    };
+    assemble_with_epilogue(&graph_preamble_text(), user_code, &epilogue)
+}
+
+/// The full graph-mode preamble text (the COMMON `PREAMBLE`, shared with
+/// legacy mode, plus all 6 `GRAPH_PREAMBLE_EXTRA_*` slices) -- factored
+/// out of `assemble_graph_evaluator_source` so `preamble_line_count`
+/// (Bug #1929 item 4) measures the IDENTICAL text that function actually
+/// assembles ahead of user code, rather than a second, independently
+/// maintained copy of this concatenation that could silently drift from
+/// it (Rule 4, anti-duplication).
+fn graph_preamble_text() -> String {
+    format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}",
         PREAMBLE,
         GRAPH_PREAMBLE_EXTRA_1,
@@ -223,19 +294,9 @@ pub(crate) fn assemble_graph_evaluator_source(user_code: &str) -> String {
         GRAPH_PREAMBLE_EXTRA_4,
         GRAPH_PREAMBLE_EXTRA_5,
         GRAPH_PREAMBLE_EXTRA_6,
-    );
-    let epilogue = if has_top_level_fn(user_code, "refine") {
-        format!("{}\n{}", GRAPH_EPILOGUE, GRAPH_REFINE_EPILOGUE)
-    } else {
-        GRAPH_EPILOGUE.to_string()
-    };
-    assemble_with_epilogue(&preamble, user_code, &epilogue)
+    )
 }
 
-/// Number of lines in the preamble (for adjusting rustc error line numbers).
-pub fn preamble_line_count() -> usize {
-    PREAMBLE.lines().count() + 1 // +1 for the "USER CODE" comment
-}
 
 /// Returns true only if `source` contains an actual top-level `fn` named
 /// `name` -- never just the text appearing in a comment or string

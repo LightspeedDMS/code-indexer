@@ -32,10 +32,12 @@ use common::{
 // comment there. It is NOT because an anonymous class body "keeps" the
 // surrounding `enclosing_type`: real extraction's `anonymous_body_
 // context` (java.rs) actually resets `enclosing_type` to a SYNTHESIZED
-// `<anon:file:byte>` name for every anonymous/enum-constant class body
-// (verified directly against real extraction output), so two anonymous
-// `run()`s below are owned by two DIFFERENT, unpredictable synthetic
-// names, not by a shared "Outer". Line order, not owner name, is the
+// `{enclosing}$<anon@L{line}:{file_id}:{byte}>` name (Bug #1929 item 3;
+// human-chaseable, but still per-body-unique) for every anonymous/
+// enum-constant class body (verified directly against real extraction
+// output), so two anonymous `run()`s below are owned by two DIFFERENT,
+// unpredictable synthetic names, not by a shared "Outer". Line order,
+// not owner name, is the
 // only axis this bug is about regardless: the LAST (highest-line) match
 // is the one the old heuristic wrongly credited a later call to.
 

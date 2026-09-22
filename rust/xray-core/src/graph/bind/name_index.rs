@@ -130,6 +130,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         }
     }
 
@@ -174,6 +175,7 @@ mod tests {
             param_count: Some(1),
             param_types: vec!["String".to_string()],
             is_varargs: true,
+            vararg_index: None,
         });
         index.method_owners.push(MethodOwnerRecord {
             method_symbol: make_symbol_id(1, 0),
@@ -190,6 +192,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
 
         let files = vec![FileForBind {
@@ -228,6 +231,7 @@ mod tests {
             param_count: Some(0),
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
         index.method_return_types.push(MethodReturnTypeRecord {
             method_symbol: make_symbol_id(1, 0),
@@ -241,6 +245,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
 
         let files = vec![FileForBind {

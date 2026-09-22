@@ -23,6 +23,7 @@ fn method_decl(
         param_count,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -129,6 +130,7 @@ fn package_decl(file_id: u32, name: &str) -> Declaration {
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -216,6 +218,7 @@ fn overload_discrimination_fixture_files() -> Vec<FileForBind> {
             param_count: Some(1),
             param_types: vec![param_type.to_string()],
             is_varargs: false,
+            vararg_index: None,
         }
     }
 

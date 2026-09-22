@@ -656,8 +656,17 @@ fn anonymous_body_context(
             .map(|t| t.to_string()),
         _ => return None,
     };
-    let anon_name: std::rc::Rc<str> =
-        std::rc::Rc::from(format!("<anon:{file_id}:{}>", node.start_byte));
+    // Bug #1929 item 3: human-chaseable name (enclosing type + real
+    // source line), never the opaque raw `file_id`/byte-offset pair --
+    // see `synthesize_anon_type_name`'s own doc comment for why file_id/
+    // byte are still KEPT after the readable prefix (global uniqueness
+    // in the repo-wide `TypeIndex`).
+    let anon_name: std::rc::Rc<str> = super::synthesize_anon_type_name(
+        parent_context.enclosing_type.as_deref(),
+        file_id,
+        node.start_line,
+        node.start_byte,
+    );
     // N1 (#1873/#1875 second-review rework): a genuinely unparseable
     // anonymous/enum-constant supertype must still get its OWN distinct anon
     // context (never silently fall back to the syntactically-surrounding
@@ -721,6 +730,7 @@ fn extract_package(root: &OwnedNode, file_id: u32, next_local: &mut u32, index: 
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
 }
 
@@ -807,6 +817,7 @@ fn extract_type_declaration(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
     Some(symbol)
 }

@@ -515,6 +515,121 @@ fn attributes_methods_to_their_immediately_enclosing_type_including_nested_class
     );
 }
 
+/// Bug #1929 item 3: an anonymous/enum-body class's method owner must
+/// render as something a human can chase -- the enclosing type's real
+/// name plus the anonymous body's own REAL source line -- never the
+/// previous opaque `<anon:{file_id_hash}:{byte_offset}>` (two large
+/// numbers with zero human meaning, reported live as e.g.
+/// `<anon:918273645:42>.read(...)` against a real-world enum whose every
+/// constant overrides `read()` in its own anonymous body -- exactly this
+/// fixture's shape).
+#[test]
+fn anonymous_enum_constant_body_method_owner_renders_the_enclosing_type_and_a_real_line() {
+    let index = extract_source(
+        "enum LexerState {\n    Data {\n        void read() {}\n    };\n}\n",
+    );
+    let read_decl = index.declaration_named("read").unwrap();
+    let owner = index
+        .method_owners
+        .iter()
+        .find(|o| o.method_symbol == read_decl.symbol)
+        .map(|o| o.enclosing_type.clone())
+        .expect("anonymous enum-constant body method must still carry an owner record");
+    assert!(
+        owner.starts_with("LexerState$<anon@L2:"),
+        "owner must start with the enclosing type's real name and the anon body's own real \
+         source line (2, where `Data {{` begins): got {owner}"
+    );
+    assert!(
+        !owner.contains("<anon:"),
+        "the old opaque `<anon:hash:byte>` shape must be gone: got {owner}"
+    );
+}
+
+/// Bug #1929 rework item 5: two anonymous bodies on the SAME source
+/// line (`new Object() { void run() {} }; new Object() { void run()
+/// {} };`, differing only by byte offset) must synthesize DISTINCT
+/// names -- a collision here would silently merge two unrelated
+/// anonymous types' supertype evidence in the repo-wide `TypeIndex`
+/// (`graph::bind::families::supertypes_of`). Java never pushes a real
+/// `Declaration` for an anonymous body itself (only Kotlin's `object_
+/// literal` does; see `anonymous_body_context`'s own doc comment), so
+/// this observes the marker via `method_owners`' `enclosing_type` on
+/// each anon body's own `run` method -- the same observation point
+/// `anonymous_enum_constant_body_method_owner_renders_the_enclosing_
+/// type_and_a_real_line` above already uses.
+#[test]
+fn two_anonymous_bodies_on_the_same_source_line_synthesize_distinct_names() {
+    let index = extract_source(
+        "class Outer {\n    void m() {\n        Object x = new Object() { void run() {} }; Object y = new Object() { void run() {} };\n    }\n}\n",
+    );
+    let run_decls: Vec<&Declaration> = index
+        .declarations
+        .iter()
+        .filter(|d| d.kind == DeclarationKind::Method && d.name == "run")
+        .collect();
+    assert_eq!(
+        run_decls.len(),
+        2,
+        "fixture sanity: two anonymous bodies' `run` methods must both extract: got {} \
+         declarations",
+        run_decls.len()
+    );
+    let owner_of = |symbol: SymbolId| {
+        index
+            .method_owners
+            .iter()
+            .find(|o| o.method_symbol == symbol)
+            .map(|o| o.enclosing_type.clone())
+            .expect("each anonymous body's method must carry an owner record")
+    };
+    let owner_a = owner_of(run_decls[0].symbol);
+    let owner_b = owner_of(run_decls[1].symbol);
+    assert_ne!(
+        owner_a, owner_b,
+        "two anonymous bodies on the SAME line must synthesize DISTINCT owner names (the byte \
+         offset must disambiguate them): got {owner_a:?} vs {owner_b:?}"
+    );
+}
+
+/// Bug #1929 rework item 5: the SAME source (same line number) parsed
+/// under two DIFFERENT `file_id`s must synthesize DISTINCT anon names --
+/// the whole point of keeping `file_id` in the marker after the
+/// human-readable prefix (global uniqueness across the whole analysed
+/// repo, never just "unique within one file").
+#[test]
+fn the_same_line_number_in_two_different_files_synthesizes_distinct_anon_names() {
+    let source = "class Outer {\n    void m() {\n        Object x = new Object() { void run() {} };\n    }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Sample.java");
+    std::fs::write(&path, source).unwrap();
+    let root = crate::scanner::parse_file(&path).unwrap();
+
+    let index_a = JavaExtractor.extract(&root, 1);
+    let index_b = JavaExtractor.extract(&root, 2);
+
+    let owner_of_run = |index: &LocalIndex| -> String {
+        let run_decl = index
+            .declarations
+            .iter()
+            .find(|d| d.kind == DeclarationKind::Method && d.name == "run")
+            .expect("anonymous body's run method must be extracted");
+        index
+            .method_owners
+            .iter()
+            .find(|o| o.method_symbol == run_decl.symbol)
+            .map(|o| o.enclosing_type.clone())
+            .expect("anonymous body's method must carry an owner record")
+    };
+    let owner_a = owner_of_run(&index_a);
+    let owner_b = owner_of_run(&index_b);
+    assert_ne!(
+        owner_a, owner_b,
+        "the SAME line number extracted under two different file_ids must synthesize DISTINCT \
+         anon owner names (file_id must disambiguate across files): got {owner_a:?} vs {owner_b:?}"
+    );
+}
+
 #[test]
 fn symbol_ids_carry_the_given_file_id() {
     let index = extract_source("class First {}\n");

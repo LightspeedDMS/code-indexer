@@ -91,11 +91,23 @@ pub struct Declaration {
     /// never a resolved/qualified type) -- used for candidate-set
     /// REDUCTION beyond arity, never exact overload resolution.
     pub param_types: Vec<String>,
-    /// AC2: true when this method's LAST formal parameter is
-    /// variable-arity (`Foo... x`). A varargs method accepts any call
-    /// arg_count >= `param_count - 1`, which the AC4 Level-1 arity
-    /// narrowing's plain equality check would otherwise wrongly exclude.
+    /// AC2: true when this method has a variable-arity formal parameter
+    /// (`Foo... x` in Java, always the LAST parameter per JLS 8.4.1; `
+    /// vararg x: Foo` in Kotlin, legal at ANY position -- see
+    /// `vararg_index` below for exactly where). A varargs method accepts
+    /// any call arg_count >= `param_count - 1`, which the AC4 Level-1
+    /// arity narrowing's plain equality check would otherwise wrongly
+    /// exclude.
     pub is_varargs: bool,
+    /// Bug #1929 rework (Codex P2, closes #1939): the REAL index of the
+    /// variadic parameter within `param_types`, when `is_varargs` is
+    /// true -- `None` when `is_varargs` is false, or when the extractor
+    /// could not determine the exact position (never fabricated).
+    /// Needed because Kotlin's `vararg` parameter can sit at ANY
+    /// position, unlike Java's always-last rule -- `signature_for`'s
+    /// varargs rendering (`budget_bind::format_param_types`) uses this
+    /// directly instead of assuming the last `param_types` entry.
+    pub vararg_index: Option<usize>,
 }
 
 /// AC2: "imports (ordinary, static, wildcard)".
@@ -815,6 +827,7 @@ mod tests {
             param_count: Some(1),
             param_types: vec!["String".to_string()],
             is_varargs: false,
+            vararg_index: None,
         };
         assert_eq!(decl.param_types, vec!["String".to_string()]);
         assert!(!decl.is_varargs);
@@ -892,6 +905,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
         assert_eq!(index.declaration_named("Foo").unwrap().name, "Foo");
     }
