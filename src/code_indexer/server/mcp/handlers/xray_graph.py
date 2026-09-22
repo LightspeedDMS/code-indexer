@@ -48,15 +48,62 @@ from ._utils import (
     _parse_and_collapse_repo_alias,
     cap_breach_response,
 )
+from . import xray_truncation
 from .xray import (
     _get_xray_cell_limiter,
+    _lazy_singleton_app_or_none,
     _pattern_scope_alias,
     _resolve_evaluator_code_off_loop,
     _resolve_repo_path,
-    _truncate_graph_result,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_graph_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to findings[]/refine[].
+
+    Bug #1928: moved out of xray.py -- shared mechanics now live in
+    xray_truncation.truncate_result_fields(), which owns its own
+    `payload_cache is None -> return a bounded, cache_unavailable=True
+    result` guard (Bug #1928 P3). Both call sites below invoke this via
+    `anyio.to_thread.run_sync` (this function's own
+    `payload_cache.store_batch_with_keys()` call is synchronous DB I/O
+    and CPU-bound JSON serialization -- both handlers that call this are
+    `async def` and run directly on the event loop, so calling this
+    inline would block it for the duration of the pack/store for a large
+    result).
+
+    Bug #1928 round 3 (P1): a page-set write failure (whole-entry pages
+    + the pages-v1 manifest, one atomic batch) raises PageSetStoreError
+    -- caught here and surfaced as an explicit error, never a
+    cache_handle pointing at data that was not durably written.
+    """
+    # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
+    # _utils.app_module.app.state attribute chain, which would otherwise
+    # permanently construct the process-wide app singleton as a side effect
+    # of merely reading it (see that helper's own docstring in xray.py).
+    payload_cache = getattr(
+        getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
+    )
+    try:
+        return xray_truncation.truncate_result_fields(
+            result, payload_cache, ["findings", "refine"]
+        )
+    except xray_truncation.PageSetStoreError as exc:
+        logger.error("analyze_graph truncation: page-set store failed: %s", exc)
+        # Bug #1928 final round (Opus P4.6): preserve the non-truncated
+        # metadata (fact_graph_complete, ok, degradation, cached,
+        # compile_ms, ...) the analysis already produced -- only
+        # findings/refine are genuinely undeliverable (the write failed).
+        base_metadata = getattr(exc, "base_metadata", {})
+        return {
+            **base_metadata,
+            "success": False,
+            "error": "cache_store_failed",
+            "message": f"Failed to store the truncated result in cache: {exc}",
+        }
+
 
 _DEFAULT_TIMEOUT_SECONDS = 120
 _TIMEOUT_MIN = 10
@@ -1055,11 +1102,16 @@ async def _run_multi_repo_analyze_graph(
         holds -- a caller can use that as a completeness check.
       - "results": {alias: <that alias's own, individually PayloadCache-
         truncated, single-repo analyze_graph result>} -- only for aliases
-        that resolved and ran.
+        that resolved, ran, AND were successfully truncated/cached.
       - "errors": [{**_bound_repo_error_payload(error_dict),
         "repository_alias": alias}] for aliases that failed (unknown alias,
         no candidate files, a real compile error, an unhandled pipeline
-        exception, ...) or were never started because the elapsed deadline
+        exception, a per-repo PayloadCache page-set write failure
+        surfaced by `_truncate_graph_result` as {"success": False,
+        "error": "cache_store_failed", ...} -- Bug #1928 final round,
+        Opus P3.2 -- never left in results[alias] where the top-level
+        "ok" flag would stay True, ...) or were never started because
+        the elapsed deadline
         had already been reached (`{"error": "multi_repo_deadline_
         exceeded", "message": <ceiling + remediation text>,
         "repository_alias": alias}`) -- never silently dropped, and never
@@ -1148,7 +1200,30 @@ async def _run_multi_repo_analyze_graph(
                 {**_bound_repo_error_payload(repo_result), "repository_alias": alias}
             )
         else:
-            results[alias] = _truncate_graph_result(repo_result)
+            # Bug #1928 P2: this handler is `async def` and runs directly
+            # on the event loop -- truncation now does real synchronous
+            # DB I/O (PayloadCache.store_batch()/store()) plus JSON
+            # serialization, which must never block the loop.
+            truncated = await anyio.to_thread.run_sync(
+                _truncate_graph_result, repo_result
+            )
+            # Bug #1928 final round (Opus P3.2): _truncate_graph_result can
+            # itself fail (a page-set write failure surfaced as
+            # {"success": False, "error": "cache_store_failed", ...}) --
+            # that must be routed into errors[] like any other per-repo
+            # failure, never land in results[alias] with the top-level
+            # "ok" flag staying True (computed as len(errors) == 0). Its
+            # shape already has a truthy "error" key, matching what
+            # _bound_repo_error_payload expects.
+            if truncated.get("success") is False:
+                errors.append(
+                    {
+                        **_bound_repo_error_payload(truncated),
+                        "repository_alias": alias,
+                    }
+                )
+            else:
+                results[alias] = truncated
     return {
         "ok": len(errors) == 0,
         "mode": "multi_repo",
@@ -1320,7 +1395,11 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     # same PayloadCache truncation every other xray result gets -- a
     # whole-repo graph analysis's findings[]/refine[] can be strictly
     # larger than a single-file search's matches[]/evaluation_errors[].
-    return _mcp_response(_truncate_graph_result(result))
+    # Bug #1928 P2: offloaded via anyio.to_thread.run_sync -- see
+    # _truncate_graph_result's own docstring for why (real DB I/O +
+    # serialization must never block this async handler's event loop).
+    truncated = await anyio.to_thread.run_sync(_truncate_graph_result, result)
+    return _mcp_response(truncated)
 
 
 def _register(registry: Dict[str, Any]) -> None:

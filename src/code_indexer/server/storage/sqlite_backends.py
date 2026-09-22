@@ -5892,6 +5892,22 @@ class PayloadCacheSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def store_batch_strict(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Bug #1928 (round 3, P1): identical write to store_batch() above,
+        but the Protocol contract requires PROPAGATING any failure. This
+        backend's store_batch() already propagates (execute_atomic rolls
+        back and re-raises on any error), so this simply delegates to it.
+        Exists so the PayloadCacheBackend Protocol offers ONE
+        consistently-named "never swallows" method across both backends
+        -- only PayloadCachePostgresBackend needed distinct logic (its
+        store_batch() catches the failure and only warning-logs it).
+        """
+        self.store_batch(entries, node_id=node_id)
+
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.
 

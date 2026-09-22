@@ -28,7 +28,7 @@ from code_indexer.server.services.query_admission_gate import (
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
-from . import _utils
+from . import _utils, xray_truncation
 from ._utils import _mcp_response, _parse_and_collapse_repo_alias
 
 logger = logging.getLogger(__name__)
@@ -2001,6 +2001,33 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
+def _validate_pv1_page(raw_page: Any) -> Any:
+    """Bug #1928 final round (Codex P1 / Opus P3.3): strict page
+    validation for pages-v1 (xray-pv1-*) handles ONLY. Accepts a real
+    int or a decimal-digit string (e.g. "2", coerced to int -- ordinary
+    numeric-string parsing, not clamping); rejects 0, negative values,
+    floats, and bools (bool is an int subclass in Python) outright, with
+    NO clamping/coercion of an otherwise-invalid value.
+
+    Uses `str.isdecimal()` rather than `str.isdigit()`: isdigit() also
+    accepts non-decimal digit characters (e.g. superscript "²")
+    that int() cannot parse and would raise ValueError on.
+
+    Returns the validated int page, or a `str` error message on failure.
+    """
+    if isinstance(raw_page, bool):
+        return f"page must be an integer >= 1, got {raw_page!r}"
+    if isinstance(raw_page, int):
+        candidate = raw_page
+    elif isinstance(raw_page, str) and raw_page.isdecimal():
+        candidate = int(raw_page)
+    else:
+        return f"page must be an integer >= 1, got {raw_page!r}"
+    if candidate < 1:
+        return f"page must be an integer >= 1, got {raw_page!r}"
+    return candidate
+
+
 def handle_cidx_fetch_cached_payload(
     params: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -2023,6 +2050,15 @@ def handle_cidx_fetch_cached_payload(
     Error codes:
         auth_required   — unauthenticated or missing query_repos.
         missing_handle  — cache_handle parameter not provided.
+        invalid_page    — page is not a real int >= 1, or a valid
+                           decimal-digit string (Bug #1928 final round,
+                           Codex P1: strict, no-clamp validation applies
+                           ONLY to pages-v1/xray-pv1-* handles -- a
+                           legacy handle keeps its pre-#1928 lenient
+                           max(1, int(page or 1)) coercion instead).
+        malformed_cache_entry — cache_handle carries the pages-v1 prefix
+                           but its stored content fails strict validation
+                           (Bug #1928 round 3, P2).
         cache_expired   — handle not found or expired.
         cache_unavailable — PayloadCache not configured.
     """
@@ -2030,8 +2066,14 @@ def handle_cidx_fetch_cached_payload(
         return _mcp_response({"error": "auth_required"})
 
     cache_handle: str = params.get("cache_handle", "")
-    page: int = max(1, int(params.get("page", 1) or 1))
+    raw_page = params.get("page", 1)
+    if raw_page is None:
+        raw_page = 1
 
+    # Bug #1928 (Codex, post-final-round): HEAD's missing-handle check must
+    # run BEFORE any `.startswith()` call -- a falsy, non-string
+    # cache_handle (None, False, 0, [], ...) is a legal value the caller
+    # can pass, and `.startswith()` on any of those raises AttributeError.
     if not cache_handle:
         return _mcp_response(
             {
@@ -2040,6 +2082,26 @@ def handle_cidx_fetch_cached_payload(
                 "message": "cache_handle parameter is required",
             }
         )
+
+    # isinstance-guarded so a TRUTHY non-string value (e.g. an int or a
+    # non-empty list) never reaches .startswith() either -- it simply
+    # isn't a pv1 handle, and falls through to the legacy path exactly as
+    # HEAD did (HEAD never isinstance-checked cache_handle at all).
+    if isinstance(cache_handle, str) and cache_handle.startswith(
+        xray_truncation._PAGES_V1_HANDLE_PREFIX
+    ):
+        validated = _validate_pv1_page(raw_page)
+        if isinstance(validated, str):
+            return _mcp_response(
+                {"success": False, "error": "invalid_page", "message": validated}
+            )
+        page: int = validated
+    else:
+        # Bug #1928 final round (Codex P1): legacy (non pages-v1) handles
+        # keep their EXACT pre-#1928 lenient coercion -- strict, no-clamp
+        # validation is a pages-v1-only contract, out of scope for every
+        # other cache consumer.
+        page = max(1, int(raw_page or 1))
 
     # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
     # _utils.app_module.app.state attribute chain, which would otherwise
@@ -2058,16 +2120,8 @@ def handle_cidx_fetch_cached_payload(
         )
 
     try:
-        result = payload_cache.retrieve(cache_handle, page=page - 1)
-        return _mcp_response(
-            {
-                "success": True,
-                "content": result.content,
-                "page": result.page + 1,
-                "total_pages": result.total_pages,
-                "has_more": result.has_more,
-            }
-        )
+        result = xray_truncation.fetch_cached_page(payload_cache, cache_handle, page)
+        return _mcp_response({"success": True, **result})
     except Exception as exc:  # noqa: BLE001
         from code_indexer.server.cache.payload_cache import CacheNotFoundError as _CNF
 
@@ -2080,83 +2134,46 @@ def handle_cidx_fetch_cached_payload(
                     "cache_handle": cache_handle,
                 }
             )
+        if isinstance(exc, xray_truncation.MalformedManifestError):
+            logger.error(
+                "cidx_fetch_cached_payload: malformed pages-v1 manifest for %s: %s",
+                cache_handle,
+                exc,
+            )
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "malformed_cache_entry",
+                    "message": str(exc),
+                    "cache_handle": cache_handle,
+                }
+            )
         logger.warning("cidx_fetch_cached_payload error for %s: %s", cache_handle, exc)
         return _mcp_response({"success": False, "error": str(exc)})
 
 
-_TRUNCATION_INLINE_LIMIT = 3
-
-# R2-7 (Codex re-review): _TRUNCATION_INLINE_LIMIT bounds the OUTER
-# findings/refine (or matches/evaluation_errors) array to 3 entries, but a
-# SINGLE retained entry can itself be huge -- analyze_graph's
-# ReduceFinding carries an `involved` array plus a parallel `signatures`
-# array of full declaration lines, and any entry can carry an oversized
-# `message`/text field. These bound what's INSIDE each of the 3 inlined
-# entries, not just how many entries there are.
-_NESTED_FIELD_LIST_LIMIT = 5
-_NESTED_FIELD_STRING_LIMIT = 500
+# Bug #1928: truncation logic lives in xray_truncation.py (shared by
+# xray.py/xray_graph.py/xray_batch.py) -- this is a thin wrapper that does
+# this module's own app-state payload_cache lookup and delegates. See
+# xray_truncation.py's module docstring for the full contract (whole,
+# unmodified entries per cache page; each page its own PayloadCache row;
+# inline budget = payload_max_fetch_size_chars; inline_entry_truncated).
 
 
-def _cap_nested_fields(entry: Any) -> Any:
-    """Cap unbounded nested list/string fields within a single inline
-    preview entry (e.g. a ReduceFinding's `involved`/`signatures` arrays
-    or a long `message`) before it goes into the response.
+def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to matches[]/evaluation_errors[].
 
-    Deliberately generic (not hardcoded to specific field names) so it
-    applies safely to both matches/evaluation_errors and findings/refine
-    shapes: a single entry can be arbitrarily large even after the OUTER
-    array is capped to _TRUNCATION_INLINE_LIMIT, if that one entry alone
-    carries a big nested collection or string. Non-dict entries (e.g. the
-    plain-int `refine` list) are returned unchanged.
+    See xray_truncation.truncate_result_fields() for the shared
+    mechanics -- INCLUDING its own `payload_cache is None -> return a
+    bounded, cache_unavailable=True result` guard (Bug #1928 P3), so a
+    missing/unconfigured payload_cache here is handled by the shared
+    function's own guard.
+
+    Bug #1928 round 3 (P1): a page-set write failure (whole-entry pages
+    + the pages-v1 manifest, one atomic batch) raises PageSetStoreError
+    -- caught here and surfaced as an explicit error, never a
+    cache_handle pointing at data that was not durably written.
     """
-    if not isinstance(entry, dict):
-        return entry
-    capped: Dict[str, Any] = {}
-    for key, value in entry.items():
-        if isinstance(value, list):
-            capped[key] = value[:_NESTED_FIELD_LIST_LIMIT]
-        elif isinstance(value, str) and len(value) > _NESTED_FIELD_STRING_LIMIT:
-            capped[key] = value[:_NESTED_FIELD_STRING_LIMIT] + "... [truncated]"
-        else:
-            capped[key] = value
-    return capped
-
-
-def _truncate_large_array_fields(
-    result: Dict[str, Any], field_a: str, field_b: str, preview_key: str
-) -> Dict[str, Any]:
-    """Apply PayloadCache truncation to two large array fields of an
-    X-Ray-family result. Shared core behind both `_truncate_xray_result`
-    (matches/evaluation_errors) and `_truncate_graph_result`
-    (findings/refine, H7 -- Issue #1811/Bug #1812) -- the truncation
-    mechanics are identical, only which two fields hold the large arrays
-    differs.
-
-    Serialises `field_a`[] and `field_b`[] as a single JSON blob and
-    delegates to PayloadCache.truncate_result(). When the combined payload
-    exceeds payload_preview_size_chars (default 2000 chars) the full blob is
-    stored in the cache and the response carries:
-      - cache_handle: str           — use GET /api/cache/{handle} for full data
-      - has_more: True
-      - total_size: int             — full payload byte size
-      - {preview_key}               — first N chars of the JSON
-      - {field_a}[]: first 3 entries, nested fields capped (R2-7) — inline
-        quick-scan subset
-      - {field_b}[]: first 3 entries, nested fields capped (R2-7) — inline
-        quick-scan subset
-      - truncated: True
-
-    When the payload is small (fits within preview_size_chars) the full
-    field_a/field_b arrays are returned inline:
-      - cache_handle: None
-      - has_more: False
-      - truncated: False
-
-    When PayloadCache is unavailable (not configured in app.state) the
-    original result dict is returned unchanged.
-    """
-    import json
-
     # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
     # _utils.app_module.app.state attribute chain, which would otherwise
     # permanently construct the process-wide app singleton as a side effect
@@ -2164,74 +2181,22 @@ def _truncate_large_array_fields(
     payload_cache = getattr(
         getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
     )
-    if payload_cache is None:
-        return result
-
-    large_payload = json.dumps(
-        {
-            field_a: result.get(field_a, []),
-            field_b: result.get(field_b, []),
-        }
-    )
-
-    truncation = payload_cache.truncate_result(large_payload)
-
-    # Build base dict: preserve all top-level fields except field_a/field_b
-    truncated_result = {k: v for k, v in result.items() if k not in (field_a, field_b)}
-
-    if truncation.get("has_more"):
-        truncated_result[preview_key] = truncation["preview"]
-        truncated_result["cache_handle"] = truncation["cache_handle"]
-        truncated_result["has_more"] = True
-        truncated_result["total_size"] = truncation["total_size"]
-        # R2-7: cap each RETAINED entry's own nested fields too -- the
-        # outer slice alone doesn't stop one huge entry from reaching the
-        # inline response unbounded.
-        truncated_result[field_a] = [
-            _cap_nested_fields(entry)
-            for entry in result.get(field_a, [])[:_TRUNCATION_INLINE_LIMIT]
-        ]
-        truncated_result[field_b] = [
-            _cap_nested_fields(entry)
-            for entry in result.get(field_b, [])[:_TRUNCATION_INLINE_LIMIT]
-        ]
-        truncated_result["truncated"] = True
-        truncated_result["fetch_tool_hint"] = (
-            f"Result truncated to first {_TRUNCATION_INLINE_LIMIT} entries; "
-            f"full result available at cache_handle "
-            f"'{truncation['cache_handle']}' — fetch via the "
-            f"`cidx_fetch_cached_payload` MCP tool with that handle."
+    try:
+        return xray_truncation.truncate_result_fields(
+            result, payload_cache, ["matches", "evaluation_errors"]
         )
-    else:
-        truncated_result[field_a] = result.get(field_a, [])
-        truncated_result[field_b] = result.get(field_b, [])
-        truncated_result["cache_handle"] = None
-        truncated_result["has_more"] = False
-        truncated_result["truncated"] = False
-
-    return truncated_result
-
-
-def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply PayloadCache truncation to matches[]/evaluation_errors[] --
-    see `_truncate_large_array_fields` for the shared mechanics."""
-    return _truncate_large_array_fields(
-        result, "matches", "evaluation_errors", "matches_and_errors_preview"
-    )
-
-
-def _truncate_graph_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """H7 (consolidated review, Issue #1811/Bug #1812): apply the SAME
-    PayloadCache truncation `_truncate_xray_result` gives xray_search/
-    xray_explore to `analyze_graph`'s findings[]/refine[] -- a whole-repo
-    graph analysis produces strictly MORE output than a single-file
-    search (each ReduceFinding carries `involved` plus a parallel
-    `signatures` array of full declaration lines), so a dead-code sweep
-    over a large repo can be a multi-megabyte MCP response without this.
-    See `_truncate_large_array_fields` for the shared mechanics."""
-    return _truncate_large_array_fields(
-        result, "findings", "refine", "findings_and_refine_preview"
-    )
+    except xray_truncation.PageSetStoreError as exc:
+        logger.error("xray_search truncation: page-set store failed: %s", exc)
+        # Bug #1928 final round (Opus P4.6): preserve the non-truncated
+        # metadata the search already produced -- only matches/
+        # evaluation_errors are genuinely undeliverable (the write failed).
+        base_metadata = getattr(exc, "base_metadata", {})
+        return {
+            **base_metadata,
+            "success": False,
+            "error": "cache_store_failed",
+            "message": f"Failed to store the truncated result in cache: {exc}",
+        }
 
 
 def handle_cancel_job(params: Dict[str, Any], user: User) -> Dict[str, Any]:

@@ -50,6 +50,13 @@ def _xray_single_repo_env(
     mock_exec = MagicMock()
     mock_app = MagicMock()
     mock_app.background_job_manager = mock_bjm
+    # Bug #1928: _truncate_large_array_fields now compares
+    # payload_cache.config.preview_size_chars directly (no longer hidden
+    # behind a mocked-away PayloadCache.truncate_result() call) -- these
+    # tests don't exercise truncation, so make PayloadCache explicitly
+    # unavailable (documented "return result unchanged" contract) rather
+    # than leaving app.app.state.payload_cache as an unconfigured MagicMock.
+    mock_app.app.state.payload_cache = None
     mock_app.activated_repo_manager = None
     mock_app.golden_repo_manager = None
 

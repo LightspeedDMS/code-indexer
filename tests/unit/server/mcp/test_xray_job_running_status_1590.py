@@ -62,6 +62,13 @@ def _xray_single_repo_env(
     mock_app.activated_repo_manager = None
     mock_app.golden_repo_manager = None
     mock_app.app.state.xray_cell_limiter = xray_cell_limiter
+    # Bug #1928: _truncate_large_array_fields now compares
+    # payload_cache.config.preview_size_chars directly (no longer hidden
+    # behind a mocked-away PayloadCache.truncate_result() call) -- these
+    # tests are about job status transitions, not truncation, so make
+    # PayloadCache explicitly unavailable rather than leaving it as an
+    # unconfigured MagicMock.
+    mock_app.app.state.payload_cache = None
 
     if resolved_future is None:
         resolved_future = asyncio.Future()

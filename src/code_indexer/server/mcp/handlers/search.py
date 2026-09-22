@@ -2381,6 +2381,25 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
             }
         )
 
+    # Bug #1928 P3 (Opus): a pages-v1-prefixed handle is an xray manifest,
+    # not ordinary content -- routing it through fetch_cached_page here
+    # would corrupt pagination (1-indexed vs this tool's 0-indexed
+    # convention) or leak internals, so reject it with a clear message.
+    from code_indexer.server.mcp.handlers import xray_truncation
+
+    if handle.startswith(xray_truncation._PAGES_V1_HANDLE_PREFIX):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "wrong_tool_for_handle",
+                "message": (
+                    "This handle is an xray truncated-result manifest -- "
+                    "fetch it via the `cidx_fetch_cached_payload` MCP tool "
+                    "(1-indexed page parameter), not get_cached_content."
+                ),
+            }
+        )
+
     payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
     if payload_cache is None:
         return _mcp_response(

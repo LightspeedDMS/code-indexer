@@ -1213,6 +1213,33 @@ class PayloadCacheBackend(Protocol):
         """
         ...
 
+    def store_batch_strict(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE atomic transaction,
+        PROPAGATING any write failure instead of swallowing it.
+
+        Bug #1928 (round 3, P1): identical one-transaction/one-timestamp
+        semantics to store_batch() above, but a write failure here MUST
+        raise -- never be caught, warning-logged, and silently dropped.
+        Used for page-set writes (e.g. xray_truncation's whole-entry
+        pages + pages-v1 manifest, all sharing one timestamp/expiry) where
+        the caller needs to know the write genuinely failed rather than
+        receive a handle pointing at data that was never durably written.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+            node_id: Optional cluster node identifier (NULL in standalone).
+
+        Raises:
+            Whatever the underlying connection/transaction raises on
+            failure (backend-specific -- e.g. psycopg errors for
+            PostgreSQL, sqlite3 errors for SQLite).
+        """
+        ...
+
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.
 
