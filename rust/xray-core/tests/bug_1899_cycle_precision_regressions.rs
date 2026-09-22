@@ -39,15 +39,18 @@
 //! `TimeUtil.parse(input)` call binds exclusively to `TimeUtil.parse`,
 //! never to a same-arity sibling.
 //!
-//! `same_arity_overload_self_loop_is_unaffected_by_1898` reproduces the
-//! shipped template's 20-self-loop-singleton shape: a generated-accessor-
-//! style setter that a human reading the source can see cannot recurse,
-//! but which the heuristic binder still self-loops because it cannot
-//! discriminate two SAME-ARITY overloads of the same name by parameter
-//! TYPE. Arity narrowing only discriminates by argument COUNT, so this
-//! shape is untouched by ed65c3a8 -- the test measures that, it does not
-//! assume it (see the accompanying report for the A/B evidence across the
-//! pre-ed65c3a8 tree).
+//! `same_arity_overload_self_loop_is_unaffected_by_1898_or_1923`
+//! reproduces the shipped `find-reference-cycles.rs` template's
+//! 20-self-loop-singleton shape: a generated-accessor-style setter that
+//! a human reading the source can see cannot recurse, which the
+//! heuristic binder still self-loops on because it cannot discriminate
+//! two SAME-ARITY overloads of the same name by parameter TYPE. Arity
+//! narrowing only discriminates by argument COUNT, so this shape is
+//! untouched by ed65c3a8. Named-type (identifier/`this`) argument
+//! evidence is TAG-ONLY: the argument passed (`wrapped`, a bare
+//! identifier local) resolves a real declared type (`WrapperId`), but
+//! that resolution only ever decides `OVERLOAD_ARG_TYPE_MATCH` tagging,
+//! never candidate-set exclusion, so the self-loop remains.
 //!
 //! Out of scope, deliberately NOT implemented here: #1899's third AC
 //! ("mark an edge whose candidate window had more than one surviving
@@ -283,66 +286,66 @@ fn same_arity_statically_qualified_calls_no_longer_fabricate_a_false_cycle_after
 /// Reproduces the shipped `find-reference-cycles.rs` template's
 /// self-loop-singleton shape: a generated-accessor-style setter that a
 /// human reading the source can see CANNOT recurse (it delegates to a
-/// differently-typed overload of the same name, the standard JAXB/VO
-/// String -> wrapper-type coercion pattern), yet the heuristic binder
-/// reports a self-loop because it cannot discriminate two SAME-ARITY
-/// (both 1 param) overloads of `setBodID` by parameter TYPE. The argument
-/// passed (`wrapped`, a bare identifier local) carries no
-/// `Cast`/`Constructor` shape, so `apply_overload_shape_narrowing`'s
-/// named-type preference -- the one mechanism that COULD discriminate
-/// this case -- never activates either.
+/// differently-typed overload of the same name, a standard String ->
+/// wrapper-type coercion pattern). The heuristic binder reports a
+/// self-loop anyway because it cannot discriminate two SAME-ARITY (both
+/// 1 param) overloads of `setWrapperId` by parameter TYPE: the argument
+/// passed (`wrapped`, a bare identifier local) resolves a real declared
+/// type (`WrapperId`, from its `WrapperId wrapped = ...;` local
+/// declaration in the SAME method) as genuine "typed local already
+/// recorded" evidence under #1923 -- but that evidence is TAG-ONLY (see
+/// this file's module doc), so it can never exclude `setWrapperId(
+/// String)` from the candidate set, and the self-loop remains.
 fn write_self_loop_fixture(dir: &Path) {
     write_java(
         dir,
         "GeneratedValueObject.java",
         r#"package p;
 public class GeneratedValueObject {
-    private BodID bodID;
-    public void setBodID(String value) {
-        BodID wrapped = createWrapper(value);
-        setBodID(wrapped);
+    private WrapperId wrapperId;
+    public void setWrapperId(String value) {
+        WrapperId wrapped = createWrapper(value);
+        setWrapperId(wrapped);
     }
-    private void setBodID(BodID value) {
-        this.bodID = value;
+    private void setWrapperId(WrapperId value) {
+        this.wrapperId = value;
     }
-    private BodID createWrapper(String value) {
+    private WrapperId createWrapper(String value) {
         return null;
     }
 }
 "#,
     );
-    write_java(dir, "BodID.java", "package p;\npublic class BodID {\n}\n");
+    write_java(dir, "WrapperId.java", "package p;\npublic class WrapperId {\n}\n");
 }
 
-/// This shape is untouched by ed65c3a8: `apply_arity_narrowing` only
-/// changes behaviour when arity evidence RULES OUT a candidate (zero
-/// matches). Both `setBodID(String)` and `setBodID(BodID)` genuinely
-/// match this call's arity (1), so the pre- and post-#1898 arity pass
-/// produce the IDENTICAL retained set here -- the fix's changed code path
-/// is never exercised. See the accompanying report for the A/B
-/// measurement across the pre-ed65c3a8 tree confirming this shape's
-/// self-loop count is unchanged.
+/// `apply_arity_narrowing` only changes behaviour when arity evidence
+/// rules out a candidate; both overloads genuinely match this call's
+/// arity (1). Named-type (identifier/`this`) argument evidence is
+/// TAG-ONLY, so it likewise never removes a candidate --
+/// `setWrapperId(String)` still shows a self-loop via the same-arity
+/// overload magnet.
 #[test]
-fn same_arity_overload_self_loop_is_unaffected_by_1898() {
+fn same_arity_overload_self_loop_is_unaffected_by_1898_or_1923() {
     let dir = TempDir::new().unwrap();
     write_self_loop_fixture(dir.path());
-    let graph = build_graph_over(dir.path(), &["GeneratedValueObject.java", "BodID.java"]);
+    let graph = build_graph_over(dir.path(), &["GeneratedValueObject.java", "WrapperId.java"]);
 
     let index = extract_index(dir.path(), "GeneratedValueObject.java");
     let public_setter = index
         .declarations
         .iter()
-        .find(|d| d.name == "setBodID" && d.param_types.first().map(String::as_str) == Some("String"))
-        .expect("fixture bug: no setBodID(String) declaration")
+        .find(|d| d.name == "setWrapperId" && d.param_types.first().map(String::as_str) == Some("String"))
+        .expect("fixture bug: no setWrapperId(String) declaration")
         .symbol;
-    let dense = graph.dense_id_for(public_setter).expect("setBodID(String) must be interned");
+    let dense = graph.dense_id_for(public_setter).expect("setWrapperId(String) must be interned");
 
     assert!(
         graph.callees_of(dense).contains(&dense),
-        "reproduction failed: setBodID(String) must show a self-loop via \
+        "reproduction failed: setWrapperId(String) must show a self-loop via \
          the same-arity overload magnet -- the exact \
          `possible_candidate_cycle self_loop=true` shape the shipped \
-         template reports for the production JAXB/VO accessors"
+         template reports for a genuine same-arity accessor overload"
     );
     assert_eq!(
         component_size_containing(&graph, dense),

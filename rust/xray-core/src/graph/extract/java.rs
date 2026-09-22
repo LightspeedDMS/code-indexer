@@ -15,7 +15,8 @@
 //! creation), not guessed.
 
 use super::java_type_names::{
-    base_name_of_type_node, base_type_name, is_plausible_java_identifier, last_named_child_of_kind,
+    append_c_style_dimensions, base_name_of_type_node, base_type_name, is_plausible_java_identifier,
+    last_named_child_of_kind,
     type_names_in_type_list,
 };
 use super::local_index::{
@@ -968,12 +969,20 @@ pub(super) fn extract_annotations_from_modifiers(
 /// `@NonNull int x`) is skipped explicitly rather than assumed absent, so
 /// the type is "the first named child that isn't `modifiers`", never a
 /// fixed position.
+///
+/// Bug #1923 rework: also appends any C-STYLE dimensions the DECLARATOR
+/// itself carries (`void t(String a[])`, where the type field stays a
+/// plain `String` and the array-ness lives on `formal_parameter`'s own
+/// `dimensions` field per `_variable_declarator_id`'s grammar) -- a
+/// no-op for `spread_parameter`, whose own `dimensions` (if any) would
+/// live on a NESTED `variable_declarator`, never on `param_node` itself.
 pub(super) fn formal_parameter_type_name(param_node: &OwnedNode) -> Option<String> {
     let type_node = param_node
         .named_children()
         .into_iter()
         .find(|c| c.kind != "modifiers")?;
-    Some(base_name_of_type_node(type_node))
+    let base = base_name_of_type_node(type_node);
+    Some(append_c_style_dimensions(base, param_node))
 }
 
 #[cfg(test)]

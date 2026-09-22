@@ -328,6 +328,7 @@ pub(crate) fn resolve_reference(
     ref_scope: &FileScope,
     arg_count: Option<usize>,
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+    arg_known_types: &[Option<String>],
     name_index: &RepoNameIndex,
     type_index: &super::families::TypeIndex,
     receiver_type: Option<&str>,
@@ -370,7 +371,7 @@ pub(crate) fn resolve_reference(
         .collect();
     apply_private_visibility_filter(&mut with_reasons, caller_top_level, type_index);
     apply_arity_narrowing(&mut with_reasons, arg_count);
-    apply_overload_shape_narrowing(&mut with_reasons, arg_shapes);
+    apply_overload_shape_narrowing(&mut with_reasons, arg_shapes, arg_known_types, type_index);
     apply_receiver_type_narrowing(&mut with_reasons, receiver_type, type_index);
     // #1922: MUST run immediately after `apply_receiver_type_narrowing`
     // (consumes the `RECEIVER_TYPE_MATCH` tag it just set) and before

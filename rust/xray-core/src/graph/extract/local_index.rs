@@ -186,10 +186,32 @@ pub enum ArgShape {
     /// A method reference (`Foo::bar`) argument -- same scope note as
     /// `Lambda` above.
     MethodReference,
-    /// Any other argument shape (bare identifier, field access, further
-    /// method call, ...): carries no discriminating evidence at this
-    /// position, so it is always treated as consistent with any declared
-    /// parameter type during shape narrowing.
+    /// Bug #1923 (reworked to TAG-ONLY): a bare identifier argument
+    /// (`foo` in `bar(foo)`) -- carries the identifier's own text. Its
+    /// declared TYPE is NOT known at extraction time (that requires the
+    /// per-file typed-name substrate `receiver::FileTypedNames` builds
+    /// at BIND time, from records scattered across the whole file); the
+    /// BINDER resolves it there, restricted to POSITIVE evidence only
+    /// (never the open-world Advisory fallback, which is a guess) --
+    /// see `receiver::resolve_argument_identifier_type`. That resolved
+    /// type is consumed ONLY to decide whether `OVERLOAD_ARG_TYPE_MATCH`
+    /// is TAGGED on a candidate -- it NEVER removes a candidate from the
+    /// pool, mirroring `apply_receiver_type_narrowing`'s own permanently
+    /// tag-only contract for the analogous receiver-type case.
+    Identifier(String),
+    /// Bug #1923: `this` used DIRECTLY as a call argument (not as a
+    /// receiver) -- e.g. `Selector.select(cssQuery, this)`. Resolved at
+    /// bind time to the call's own enclosing type -- the same
+    /// definitional, always-POSITIVE evidence
+    /// `receiver::resolve_receiver_type` already assigns
+    /// `ReceiverExpr::None`/`SelfOrSuper` (never a guess, so this never
+    /// goes through `resolve_argument_identifier_type`'s lookup at all;
+    /// it is looked up directly from the call site's own `enclosing_type`).
+    SelfReference,
+    /// Any other argument shape (field access, further method call,
+    /// lambda-captured expression, ...): carries no discriminating
+    /// evidence at this position, so it is always treated as consistent
+    /// with any declared parameter type during shape narrowing.
     Other,
 }
 

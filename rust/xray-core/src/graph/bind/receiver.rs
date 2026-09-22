@@ -653,6 +653,40 @@ fn resolve_identifier_receiver(
     }
 }
 
+/// Bug #1923 (AC2, reworked to TAG-ONLY -- see the doc comment on
+/// `apply_overload_shape_narrowing` in `narrowing.rs`): resolves a
+/// bare-identifier CALL ARGUMENT's declared type, consumed ONLY to
+/// decide whether `OVERLOAD_ARG_TYPE_MATCH` is TAGGED -- this result
+/// NEVER drives a candidate-set exclusion, mirroring the permanently-
+/// tag-only contract `apply_receiver_type_narrowing` already documents
+/// for the analogous receiver-type case. Reuses `resolve_identifier_receiver`'s
+/// exact lookup (Rule 4, anti-duplication) rather than a second copy of
+/// the same local/parameter/field substrate -- an argument identifier
+/// and a receiver identifier are looked up identically (same per-file
+/// `FileTypedNames`, same enclosing-method/enclosing-type scoping). The
+/// result is narrowed to `ReceiverEvidence::Positive` ONLY: a genuine
+/// `TypedNameRecord` hit (a real local/parameter/field declaration in
+/// THIS file). `Advisory` (either open-world fallback --
+/// `unambiguous_field_type`/`is_known_type_name`, both cross-file or
+/// name-coincidence guesses) and `Ambiguous`/`Missing` (folded to `None`
+/// by `resolve_identifier_receiver` already) all return `None` here --
+/// this is about TAG ACCURACY, not about gating a deletion that no
+/// longer happens: an Advisory guess must not even mislabel a candidate
+/// as compatible/incompatible, since the tag is presented to callers as
+/// "not provably incompatible" evidence, never a raw guess.
+pub(crate) fn resolve_argument_identifier_type(
+    name: &str,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    typed_names: &FileTypedNames,
+    type_index: &TypeIndex,
+) -> Option<String> {
+    match resolve_identifier_receiver(name, enclosing_type, enclosing_method, typed_names, type_index) {
+        ReceiverEvidence::Positive(declared_type) => Some(declared_type),
+        ReceiverEvidence::Advisory(_) | ReceiverEvidence::None => None,
+    }
+}
+
 /// Resolves the BASE (non-chained) receiver -- `current`, after every
 /// `Chained` wrapping has already been peeled off by the caller -- to its
 /// evidence-tiered type, with no chain-following of its own. Split out of

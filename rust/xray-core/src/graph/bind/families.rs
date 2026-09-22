@@ -416,6 +416,7 @@ mod tests {
             enclosing_type: Some(enclosing_type.to_string()),
             param_types: Vec::new(),
             is_varargs: false,
+            language: "java".to_string(),
             return_type: None,
             visibility: Visibility::Unknown,
         }

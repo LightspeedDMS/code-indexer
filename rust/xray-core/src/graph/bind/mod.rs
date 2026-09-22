@@ -39,7 +39,7 @@ pub use admission::{
 
 use crate::graph::budget::IndexBudget;
 use crate::graph::csr::CodeGraph;
-use crate::graph::extract::local_index::LocalIndex;
+use crate::graph::extract::local_index::{ArgShape, LocalIndex};
 use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
 use depth::{
@@ -92,7 +92,8 @@ fn resolve_site(
     file: &FileForBind,
     scope: &scope::FileScope,
     arg_count: Option<usize>,
-    arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+    arg_shapes: &[ArgShape],
+    arg_known_types: &[Option<String>],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     receiver_type: Option<&str>,
@@ -110,6 +111,7 @@ fn resolve_site(
         scope,
         arg_count,
         arg_shapes,
+        arg_known_types,
         name_index,
         type_index,
         receiver_type,
@@ -422,6 +424,40 @@ fn resolve_all_references(
                 .enclosing_type
                 .as_deref()
                 .and_then(|type_name| type_index.top_level_of(type_name));
+            // Bug #1923 (AC2): resolves the KNOWN declared type of every
+            // `ArgShape::Identifier`/`SelfReference` argument at this call
+            // site, one entry per `site.arg_shapes` -- `None` for every
+            // other shape (no evidence this pass can resolve at all).
+            // `receiver::resolve_argument_identifier_type` restricts
+            // itself to POSITIVE evidence only (see its own doc comment),
+            // and `SelfReference`'s type is definitionally the call's own
+            // `enclosing_type`, exactly like `ReceiverExpr::None`/
+            // `SelfOrSuper` already resolve for a receiver.
+            let arg_known_types: Vec<Option<String>> = site
+                .arg_shapes
+                .iter()
+                .map(|shape| match shape {
+                    ArgShape::Identifier(name) => receiver::resolve_argument_identifier_type(
+                        name,
+                        site.enclosing_type.as_deref(),
+                        site.enclosing_method,
+                        &typed_names,
+                        type_index,
+                    ),
+                    ArgShape::SelfReference => site.enclosing_type.clone(),
+                    // Bug #1923 (P1): a Cast/Constructor shape
+                    // already carries its own known type name directly
+                    // from extraction -- no bind-time lookup needed, and
+                    // (unlike Identifier) no positive-vs-advisory
+                    // evidence tier to choose between. Feeding it through
+                    // the SAME tag-only mechanism as Identifier/`this`
+                    // keeps a named-type cast's evidence out of any
+                    // bare-name EXCLUSION path entirely, while still
+                    // letting it earn the tag.
+                    ArgShape::Cast(t) | ArgShape::Constructor(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect();
             let r = resolve_site(
                 &site.callee_name,
                 REF_KIND_INVOCATION,
@@ -430,6 +466,7 @@ fn resolve_all_references(
                 &scope,
                 site.arg_count,
                 &site.arg_shapes,
+                &arg_known_types,
                 name_index,
                 type_index,
                 receiver_type.as_deref(),
@@ -463,6 +500,7 @@ fn resolve_all_references(
                 &scope,
                 None,
                 &[],
+                &[],
                 name_index,
                 type_index,
                 None,
@@ -495,6 +533,7 @@ fn resolve_all_references(
                 file,
                 &scope,
                 None,
+                &[],
                 &[],
                 name_index,
                 type_index,

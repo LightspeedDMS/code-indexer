@@ -25,6 +25,13 @@ fn cast_target_type_name(cast_node: &OwnedNode) -> Option<String> {
 
 /// The coarse shape of one invocation argument. Unknown shapes deliberately
 /// retain no narrowing evidence rather than fabricating a type name.
+///
+/// Bug #1923: `"identifier"` and `"this"` now carry their own shapes
+/// (`ArgShape::Identifier`/`ArgShape::SelfReference`) instead of falling
+/// into `Other` -- their declared TYPE is resolved later, at BIND time
+/// (see `bind::receiver::resolve_argument_identifier_type`), since it
+/// requires the per-file typed-name substrate this single-node,
+/// extraction-time function has no access to.
 fn arg_shape_for(arg_node: &OwnedNode) -> ArgShape {
     match arg_node.kind.as_str() {
         "string_literal" => ArgShape::StringLiteral,
@@ -44,6 +51,8 @@ fn arg_shape_for(arg_node: &OwnedNode) -> ArgShape {
             .unwrap_or(ArgShape::Other),
         "lambda_expression" => ArgShape::Lambda,
         "method_reference" => ArgShape::MethodReference,
+        "identifier" => ArgShape::Identifier(arg_node.text().to_string()),
+        "this" => ArgShape::SelfReference,
         _ => ArgShape::Other,
     }
 }

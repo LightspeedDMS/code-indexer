@@ -106,31 +106,18 @@ fn declared_type_at(decl: &DeclInfo, position: usize) -> Option<&str> {
 /// unlike a named class/interface type (open-world: this repo's
 /// heuristic inheritance index can never prove "these two named types are
 /// definitely unrelated"). `Cast`/`Constructor`/`Lambda`/`MethodReference`/
-/// `Other` therefore never report incompatibility here -- see
-/// `apply_overload_shape_narrowing`'s named-type PREFERENCE step for how
-/// those contribute positive (not exclusionary) evidence instead.
+/// `Other` therefore never report incompatibility here -- `Cast`/
+/// `Constructor` evidence only ever feeds `OVERLOAD_ARG_TYPE_MATCH`
+/// tagging via `candidate_has_named_type_mismatch`, never candidate-set
+/// exclusion.
 fn literal_shape_is_incompatible(
     shape: &crate::graph::extract::local_index::ArgShape,
     declared_type: &str,
 ) -> bool {
     use crate::graph::extract::local_index::ArgShape;
-    let is_numeric = matches!(
-        declared_type,
-        "int"
-            | "long"
-            | "double"
-            | "float"
-            | "short"
-            | "byte"
-            | "Integer"
-            | "Long"
-            | "Double"
-            | "Float"
-            | "Short"
-            | "Byte"
-    );
-    let is_boolean = matches!(declared_type, "boolean" | "Boolean");
-    let is_char = matches!(declared_type, "char" | "Character");
+    let is_numeric = NUMERIC_TYPE_NAMES.contains(&declared_type);
+    let is_boolean = BOOLEAN_TYPE_NAMES.contains(&declared_type);
+    let is_char = CHAR_TYPE_NAMES.contains(&declared_type);
     let is_primitive = matches!(
         declared_type,
         "int" | "long" | "double" | "float" | "short" | "byte" | "boolean" | "char"
@@ -142,16 +129,200 @@ fn literal_shape_is_incompatible(
         ArgShape::NullLiteral => is_primitive,
         ArgShape::Cast(_)
         | ArgShape::Constructor(_)
+        | ArgShape::Identifier(_)
+        | ArgShape::SelfReference
         | ArgShape::Lambda
         | ArgShape::MethodReference
         | ArgShape::Other => false,
     }
 }
 
+/// Bug #1923: the closed, exhaustively-enumerable set of Java value-type
+/// NAMES (String, primitives, boxed wrappers) whose full compatibility
+/// rules this crate CAN prove -- unlike an arbitrary class/interface name
+/// (open-world). Shared by `literal_shape_is_incompatible` above (kept
+/// byte-for-byte its pre-#1923 semantics -- a pure constant-reuse
+/// refactor) and the named-type functions below.
+const NUMERIC_TYPE_NAMES: &[&str] = &[
+    "int", "long", "double", "float", "short", "byte", "Integer", "Long", "Double", "Float",
+    "Short", "Byte",
+];
+const BOOLEAN_TYPE_NAMES: &[&str] = &["boolean", "Boolean"];
+const CHAR_TYPE_NAMES: &[&str] = &["char", "Character"];
+
+fn is_closed_world_value_type(type_name: &str) -> bool {
+    type_name == "String"
+        || NUMERIC_TYPE_NAMES.contains(&type_name)
+        || BOOLEAN_TYPE_NAMES.contains(&type_name)
+        || CHAR_TYPE_NAMES.contains(&type_name)
+}
+
+/// Bug #1923: is closed-world `arg_type` assignable to `param_type`?
+/// Exact match; `Object`/`Serializable`/`Comparable` (every value type
+/// here implements both, or does once autoboxed); `Number` (numeric
+/// wrappers only); `String -> CharSequence`; same-family boxing/widening
+/// (every numeric pair mutually compatible -- an over-approximation of
+/// real widening that can only under-report a mismatch, never fabricate
+/// one); `char`/`Character` ALSO widen to any numeric target (JLS
+/// 5.1.2/5.1.8 -- `char` widens directly, `Character` via unboxing then
+/// widening under loose invocation context), one-way only: a numeric arg
+/// does NOT implicitly narrow to `char`.
+fn closed_world_value_type_compatible(arg_type: &str, param_type: &str) -> bool {
+    if arg_type == param_type || matches!(param_type, "Object" | "Serializable" | "Comparable") {
+        return true;
+    }
+    if arg_type == "String" {
+        return matches!(param_type, "CharSequence" | "Constable" | "ConstantDesc");
+    }
+    if NUMERIC_TYPE_NAMES.contains(&arg_type) {
+        return NUMERIC_TYPE_NAMES.contains(&param_type)
+            || matches!(param_type, "Number" | "Constable" | "ConstantDesc");
+    }
+    if BOOLEAN_TYPE_NAMES.contains(&arg_type) {
+        return BOOLEAN_TYPE_NAMES.contains(&param_type) || matches!(param_type, "Constable" | "ConstantDesc");
+    }
+    if CHAR_TYPE_NAMES.contains(&arg_type) {
+        return CHAR_TYPE_NAMES.contains(&param_type)
+            || NUMERIC_TYPE_NAMES.contains(&param_type)
+            || matches!(param_type, "Constable" | "ConstantDesc");
+    }
+    false
+}
+
+/// Bug #1923: is `arg_type` (a resolved, KNOWN argument type -- from
+/// `ArgShape::Identifier`/`SelfReference`/`Cast`/`Constructor`) DEFINITELY
+/// incompatible with `param_type`? TAG-ONLY (see `apply_overload_shape_
+/// narrowing`'s doc comment): the sole consumer never lets this remove a
+/// candidate, only withhold `OVERLOAD_ARG_TYPE_MATCH` -- so an over-eager
+/// "compatible" costs precision, never soundness. Covers exact match,
+/// `Object`, a generic type PARAMETER `param_type` (or the element of an
+/// array-of-type-parameter -- a type variable binds to anything), arrays
+/// by CLOSED-WORLD element type under Java's array-covariance rules
+/// (`array_element_compatible` below), varargs (`T...` accepts both `T`
+/// and `T[]`), and the closed-world value-type rules above.
+///
+/// Deliberately does NOT consult this repo's own recorded supertype
+/// chain for two named CLASS/INTERFACE types: `TypeIndex::supertypes_of`/
+/// `is_known_type_name` are BARE-NAME keyed throughout this whole binder,
+/// so a repo type sharing its bare name with an unrelated EXTERNAL type
+/// is indistinguishable from the genuine article, and a bare-name
+/// "match" between two differently-packaged types is equally
+/// indistinguishable from a genuine one. It also models NO implicit JDK
+/// supertype this extractor's own inheritance recording cannot see
+/// (`Enum`/`Record` for an enum/record, `Collection` for `List`, etc.) --
+/// extraction records only explicit `extends`/`implements` clauses. So
+/// for any two named types that are neither the same name nor a
+/// closed-world value type, this always returns `false` -- "when in
+/// doubt, tag it" is this bare-name substrate's only sound default for
+/// TAG accuracy, mirroring "unknown never counts as a mismatch" for the
+/// separate, exclusion-driving literal-shape check.
+/// The eight Java primitive KEYWORD names (never their boxed wrapper
+/// counterparts) -- used only by `array_element_compatible` below, where
+/// primitive-vs-wrapper distinction matters in a way it does not for
+/// ordinary scalar compatibility (a primitive-element array is invariant;
+/// a wrapper-element array is a genuine, covariant reference array).
+const PRIMITIVE_KEYWORD_NAMES: &[&str] =
+    &["int", "long", "double", "float", "short", "byte", "boolean", "char"];
+
+/// Bug #1923 (P2): the CLOSED-WORLD scalar base of `type_name` after
+/// stripping every `[]` array dimension (any depth), or `None` when that
+/// base is not a value type this crate can reason about (an open-world
+/// class/interface name, at any array depth). Gates array-covariance
+/// incompatibility determination below: reasoning about array element
+/// compatibility is only sound when the fully-stripped base element type
+/// is a known closed-world value type.
+fn closed_world_array_base(type_name: &str) -> Option<&str> {
+    let base = type_name.trim_end_matches("[]");
+    is_closed_world_value_type(base).then_some(base)
+}
+
+/// Bug #1923 (P2): is `arg_element` (this argument array's element type,
+/// possibly itself a further array for a multi-dimensional array) assignable
+/// to `param_element` (the parameter array's element type) under Java's
+/// ARRAY COVARIANCE rules, which are STRICTER than ordinary scalar
+/// assignability. Strips exactly ONE array dimension per recursive step,
+/// comparing a multi-dimensional array level-by-level rather than
+/// collapsing every dimension to the deepest scalar name at once (an
+/// `int[]` element one level down from `int[][]` is itself a REFERENCE
+/// type -- assignable to `Object`/`Serializable`/`Cloneable` one level up,
+/// even though bare `int` is invariant). A PRIMITIVE-element array
+/// (`int[]`, `char[]`, ...) is INVARIANT at its innermost level: `int[]`
+/// is compatible with `int[]` alone, never `long[]`/`Integer[]`/`Object[]`
+/// -- the scalar widening/boxing rules `closed_world_value_type_compatible`
+/// applies do NOT extend to a primitive array's own element type. A
+/// REFERENCE-element array (`String[]`, a boxed-wrapper array like
+/// `Integer[]`) genuinely IS covariant and follows the ordinary
+/// closed-world compatibility rules at its innermost level (`Integer[]`
+/// is compatible with `Number[]`/`Object[]`).
+fn array_element_compatible(arg_element: &str, param_element: &str) -> bool {
+    match (arg_element.strip_suffix("[]"), param_element.strip_suffix("[]")) {
+        (Some(arg_inner), Some(param_inner)) => array_element_compatible(arg_inner, param_inner),
+        (Some(_), None) => matches!(param_element, "Object" | "Serializable" | "Cloneable"),
+        (None, Some(_)) => false,
+        (None, None) => {
+            if PRIMITIVE_KEYWORD_NAMES.contains(&arg_element) || PRIMITIVE_KEYWORD_NAMES.contains(&param_element) {
+                arg_element == param_element
+            } else {
+                closed_world_value_type_compatible(arg_element, param_element)
+            }
+        }
+    }
+}
+
+fn named_type_is_definitely_incompatible(
+    arg_type: &str,
+    param_type: &str,
+    is_varargs_tail: bool,
+    type_index: &super::families::TypeIndex,
+) -> bool {
+    let param_type = if is_varargs_tail {
+        param_type.trim_end_matches("...")
+    } else {
+        param_type
+    };
+    if arg_type == param_type
+        || param_type == "Object"
+        || type_index.is_known_type_parameter_name(param_type)
+    {
+        return false;
+    }
+    let arg_is_array = arg_type.ends_with("[]");
+    if is_varargs_tail && arg_is_array {
+        let arg_element = arg_type.strip_suffix("[]").unwrap_or(arg_type);
+        return closed_world_array_base(arg_element).is_some()
+            && !array_element_compatible(arg_element, param_type);
+    }
+    if param_type.ends_with("[]") {
+        let param_base = param_type.trim_end_matches("[]");
+        if type_index.is_known_type_parameter_name(param_base) {
+            return false;
+        }
+        if arg_is_array {
+            let param_element = param_type.strip_suffix("[]").unwrap_or(param_type);
+            let arg_element = arg_type.strip_suffix("[]").unwrap_or(arg_type);
+            return closed_world_array_base(arg_element).is_some()
+                && !array_element_compatible(arg_element, param_element);
+        }
+        return true;
+    }
+    if arg_is_array {
+        return !matches!(param_type, "Serializable" | "Cloneable");
+    }
+    if is_closed_world_value_type(arg_type) {
+        return !closed_world_value_type_compatible(arg_type, param_type);
+    }
+    false
+}
+
 /// AC2: true when ANY call-site argument position hits a DEFINITE
 /// literal-shape mismatch against `decl`'s declared parameter type at
 /// that position (positions with no declared-type evidence, or a
-/// non-discriminating shape, never count).
+/// non-discriminating shape, never count). Bug #1923 rework: reverted to
+/// this EXACT pre-#1923 literal-only shape and signature -- the sole
+/// driver of `apply_overload_shape_narrowing`'s candidate-set EXCLUSION,
+/// byte-identical to HEAD. Named-type evidence never reaches this
+/// function at all; see `candidate_has_named_type_mismatch` below for
+/// its TAG-ONLY counterpart.
 fn candidate_has_definite_mismatch(
     decl: &DeclInfo,
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
@@ -161,51 +332,91 @@ fn candidate_has_definite_mismatch(
     })
 }
 
-/// AC2: how many argument positions carry a `Cast`/`Constructor` shape
-/// whose named type EXACTLY equals `decl`'s declared type at that
-/// position -- positive, open-world-safe evidence (see
-/// `literal_shape_is_incompatible`'s docs on why a NAME MISMATCH here is
-/// never treated as exclusionary).
-fn named_type_match_count(
+/// Bug #1923 rework: true when ANY call-site argument position carries
+/// resolved NAMED-TYPE evidence (`arg_known_types[i]`, only ever
+/// populated for `ArgShape::Identifier`/`SelfReference` with POSITIVE
+/// bind-time evidence) proven incompatible with `decl`'s declared
+/// parameter type there, per `named_type_is_definitely_incompatible`.
+/// TAG-ONLY: `apply_overload_shape_narrowing`'s final tagging loop is
+/// its sole consumer, never the candidate-set exclusion step above.
+fn candidate_has_named_type_mismatch(
     decl: &DeclInfo,
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
-) -> usize {
-    use crate::graph::extract::local_index::ArgShape;
-    arg_shapes
-        .iter()
-        .enumerate()
-        .filter(|(i, shape)| {
-            let target = match shape {
-                ArgShape::Cast(t) | ArgShape::Constructor(t) => Some(t.as_str()),
-                _ => None,
-            };
-            target.is_some() && declared_type_at(decl, *i) == target
-        })
-        .count()
+    arg_known_types: &[Option<String>],
+    type_index: &super::families::TypeIndex,
+) -> bool {
+    // Bug #1923 (P2): a non-Java callee declaration records its
+    // OWN language's type vocabulary (Kotlin's `Int`/`Any`/... never
+    // equal Java's `int`/`Object`), which this closed-world rule has no
+    // way to recognise as equivalent -- skipping entirely for a non-Java
+    // callee keeps today's (pre-#1923) tagging behaviour for it, rather
+    // than risking a false mismatch on every cross-language call.
+    if decl.language != "java" {
+        return false;
+    }
+    arg_shapes.iter().enumerate().any(|(i, _)| {
+        let Some(declared_type) = declared_type_at(decl, i) else {
+            return false;
+        };
+        let Some(arg_type) = arg_known_types.get(i).and_then(|t| t.as_deref()) else {
+            return false;
+        };
+        let is_varargs_tail = decl.is_varargs && i + 1 >= decl.param_types.len();
+        named_type_is_definitely_incompatible(arg_type, declared_type, is_varargs_tail, type_index)
+    })
 }
 
 /// AC2 (Story #1793, S4) Level 4 "overload discrimination": candidate-set
-/// REDUCTION beyond arity, never exact resolution. Two independent
-/// passes, each following the SAME "narrow only if safe" pattern as
-/// `apply_import_context_narrowing` (never empty the set, never a no-op
-/// "narrow" to the same set already there) -- deliberately DIFFERENT from
-/// `apply_arity_narrowing` since #1898: literal-shape/named-type evidence
-/// is a weaker, open-world heuristic (see `literal_shape_is_incompatible`'s
-/// doc comment), so an empty match here stays a genuine "inconclusive",
-/// never treated as proof of an external target the way a hard arity
-/// mismatch is:
-/// (1) exclude candidates with a definite literal-shape mismatch;
-/// (2) among survivors, prefer the highest cast/constructor named-type
-/// match count. `OVERLOAD_ARG_TYPE_MATCH` is marked on every surviving
-/// candidate that carried genuine `param_types` evidence to check against
-/// -- never on a candidate with no such evidence at all.
+/// REDUCTION beyond arity, never exact resolution. Follows the SAME
+/// "narrow only if safe" pattern as `apply_import_context_narrowing`
+/// (never empty the set, never a no-op "narrow" to the same set already
+/// there) -- deliberately DIFFERENT from `apply_arity_narrowing` since
+/// #1898: literal-shape evidence is a weaker, open-world heuristic (see
+/// `literal_shape_is_incompatible`'s doc comment), so an empty match here
+/// stays a genuine "inconclusive", never treated as proof of an external
+/// target the way a hard arity mismatch is. Candidate-set EXCLUSION is
+/// driven solely by a definite literal-shape mismatch.
+/// `OVERLOAD_ARG_TYPE_MATCH` is marked on every surviving candidate whose
+/// declared shape is not provably incompatible with the call's argument
+/// evidence (Cast/Constructor named types included, TAG-ONLY -- see
+/// `candidate_has_named_type_mismatch` below): it can only WITHHOLD the
+/// tag from a candidate that already survived the literal-only exclusion
+/// step above, never remove the candidate itself, and never re-rank
+/// exact bare-name matches against each other -- a named class/interface
+/// match can be a false positive across packages (`com.a.Node` and
+/// `com.b.Node` both normalize to bare "Node"), so no evidence derived
+/// from a bare-name comparison drives exclusion here, only tagging.
 pub(super) fn apply_overload_shape_narrowing(
     candidates: &mut Vec<(DeclInfo, u16)>,
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+    arg_known_types: &[Option<String>],
+    type_index: &super::families::TypeIndex,
 ) {
     if arg_shapes.is_empty() {
+        // Bug #1923 (P2): a zero-argument call still has REAL
+        // arity evidence -- a varargs-only or truly zero-parameter
+        // candidate genuinely accepts it, and that must still earn
+        // `OVERLOAD_ARG_TYPE_MATCH`. A genuinely zero-parameter method has
+        // an empty `param_types` by construction (there are no parameters
+        // to record), so requiring non-empty `param_types` here would
+        // wrongly withhold the tag from the exact candidates arity already
+        // proves accept this call.
+        for (decl, bits) in candidates.iter_mut() {
+            if param_count_matches_arity(decl, 0) {
+                *bits |= reasons::OVERLOAD_ARG_TYPE_MATCH;
+            }
+        }
         return;
     }
+    // Bug #1923 rework: candidate-set EXCLUSION is driven ONLY by the
+    // literal-shape check, byte-for-byte the pre-#1923 mechanism --
+    // named-type (identifier/`this`/Cast/Constructor) evidence is
+    // TAG-ONLY (see the final loop below) and must NEVER remove a
+    // candidate here: it is resolved via bare-name lookups this binder
+    // cannot prove immune to an external shadowing collision (see
+    // `named_type_is_definitely_incompatible`'s own doc comment), so
+    // treating it as exclusionary risks the exact false-dead-code class
+    // epic #1786 declared structurally impossible.
     let surviving: Vec<usize> = candidates
         .iter()
         .enumerate()
@@ -213,34 +424,18 @@ pub(super) fn apply_overload_shape_narrowing(
         .map(|(i, _)| i)
         .collect();
     if !surviving.is_empty() && surviving.len() < candidates.len() {
-        *candidates = surviving
-            .into_iter()
-            .map(|i| candidates[i].clone())
-            .collect();
+        *candidates = surviving.into_iter().map(|i| candidates[i].clone()).collect();
     }
 
-    let max_score = candidates
-        .iter()
-        .map(|(d, _)| named_type_match_count(d, arg_shapes))
-        .max()
-        .unwrap_or(0);
-    if max_score > 0 {
-        let preferred: Vec<usize> = candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, (d, _))| named_type_match_count(d, arg_shapes) == max_score)
-            .map(|(i, _)| i)
-            .collect();
-        if preferred.len() < candidates.len() {
-            *candidates = preferred
-                .into_iter()
-                .map(|i| candidates[i].clone())
-                .collect();
-        }
-    }
-
+    // Bug #1923: OVERLOAD_ARG_TYPE_MATCH additionally requires that no
+    // NAMED-TYPE (identifier/`this`/Cast/Constructor) argument is provably
+    // incompatible -- a TAG-ONLY check (see above): it can only WITHHOLD
+    // the tag from a candidate that already survived the literal-only
+    // exclusion step, never remove the candidate itself.
     for (decl, bits) in candidates.iter_mut() {
-        if !decl.param_types.is_empty() {
+        if !decl.param_types.is_empty()
+            && !candidate_has_named_type_mismatch(decl, arg_shapes, arg_known_types, type_index)
+        {
             *bits |= reasons::OVERLOAD_ARG_TYPE_MATCH;
         }
     }

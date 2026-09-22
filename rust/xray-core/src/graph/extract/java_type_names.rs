@@ -1,6 +1,6 @@
-//! Shared Java type-name resolution helpers, split out of `java.rs` (N1/N3,
-//! #1873/#1875 second-review rework) to keep both files under the project's
-//! 1000-line-per-file limit. These are the ONLY functions in the extractor
+//! Shared Java type-name resolution helpers, split out of `java.rs` (N1/N3)
+//! to keep both files under the project's 1000-line-per-file limit. These
+//! are the ONLY functions in the extractor
 //! that turn a raw tree-sitter TYPE node (or a container holding one) into
 //! its simple, generic-stripped, qualification-stripped base name -- every
 //! call site that needs "the type name a node stands for" (superclass
@@ -140,12 +140,11 @@ pub(super) fn base_type_name(container: &OwnedNode) -> Option<String> {
 /// `resolve_type_node_base_name` applies unchanged -- handling bare/generic
 /// `type_identifier` entries, a qualified `scoped_type_identifier` entry
 /// (e.g. `implements Outer.Iface`), and an annotated entry. Returns the
-/// names alongside whether ANY entry could not be resolved -- N1
-/// (#1873/#1875 second-review rework): an unparseable entry means the
-/// caller's declared supertype set is INCOMPLETE, not merely "fewer
-/// entries than the syntactic count" -- callers must record that
-/// incompleteness rather than silently treating the parsed subset as the
-/// whole truth.
+/// names alongside whether ANY entry could not be resolved: an
+/// unparseable entry means the caller's declared supertype set is
+/// INCOMPLETE, not merely "fewer entries than the syntactic count" --
+/// callers must record that incompleteness rather than silently treating
+/// the parsed subset as the whole truth.
 pub(super) fn type_names_in_type_list(type_list: &OwnedNode) -> (Vec<String>, bool) {
     let mut names = Vec::new();
     let mut incomplete = false;
@@ -164,12 +163,78 @@ pub(super) fn type_names_in_type_list(type_list: &OwnedNode) -> (Vec<String>, bo
 /// resolved candidate failed the identifier-shape backstop) -- callers
 /// (`formal_parameter_type_name`, an ordinary bare constructor-reference
 /// target like `Widget::new`) require a guaranteed `String`, and a
-/// primitive/array-type node (which has no children to search) is
-/// genuinely fine returned as its own literal text. N3 (#1873/#1875
-/// second-review rework): this also resolves a qualified
-/// constructor-reference target's `field_access` shape (`Outer.Inner::new`)
-/// to its LAST segment, previously returned verbatim (`"Outer.Inner"`,
-/// which can never match any declared type name).
+/// primitive type node (which has no children to search) is genuinely
+/// fine returned as its own literal text. This also resolves a
+/// qualified constructor-reference target's `field_access` shape
+/// (`Outer.Inner::new`) to its LAST segment (`"Outer.Inner"` verbatim can
+/// never match any declared type name).
+///
+/// Bug #1923 rework: `array_type` (`String[]`, `java.lang.String[]`,
+/// `T[]`) is now resolved structurally via `array_type_base_name` rather
+/// than falling back to raw text -- the old raw-text fallback meant a
+/// QUALIFIED element type (`java.lang.String[]`) never normalized to the
+/// SAME string a plain `String[]` produces, so an otherwise-identical
+/// argument/parameter pair silently failed to match by exact-string
+/// comparison. `array_type` is intercepted here, BEFORE delegating to
+/// `resolve_type_node_base_name`, because that function's own identifier-
+/// shape backstop (`is_plausible_java_identifier`) would reject an
+/// array-suffixed result -- correctly so for every OTHER call site of
+/// `resolve_type_node_base_name` (supertype/type-reference resolution,
+/// none of which is ever legitimately array-shaped in Java).
 pub(super) fn base_name_of_type_node(type_node: &OwnedNode) -> String {
+    if type_node.kind == "array_type" {
+        if let Some(name) = array_type_base_name(type_node) {
+            return name;
+        }
+    }
     resolve_type_node_base_name(type_node).unwrap_or_else(|| type_node.text().to_string())
+}
+
+/// Bug #1923 rework: resolves an `array_type` node's own base name --
+/// verified real tree-sitter-java 0.23.5 grammar shape: `array_type:
+/// field('element', $._unannotated_type) + field('dimensions',
+/// $.dimensions)`, i.e. exactly two named children, the ELEMENT type
+/// (itself possibly ANOTHER `array_type` for nested arrays) and a
+/// `dimensions` node whose own text is a literal `[]` repeated once per
+/// dimension. Recurses through `base_name_of_type_node` itself for the
+/// element (never `resolve_type_node_base_name` directly), so a
+/// qualified (`java.lang.String`), generic (`List<String>`), or
+/// type-variable (`T`) element resolves IDENTICALLY to its non-array
+/// form before `"[]"` is appended. The grammar's `dimensions` field is
+/// NOT optional on `array_type` (unlike the declarator shape
+/// `append_c_style_dimensions` handles below) -- a well-formed parse
+/// always has it, so a missing/empty one here means malformed/error-
+/// recovery source, and this returns `None` (falling through to the
+/// raw-text fallback above) rather than fabricate a dimension count.
+fn array_type_base_name(type_node: &OwnedNode) -> Option<String> {
+    let element = type_node.named_children().into_iter().next()?;
+    let dims_node = type_node.child_by_kind("dimensions")?;
+    let dims = dims_node.text().matches('[').count();
+    if dims == 0 {
+        return None;
+    }
+    Some(format!("{}{}", base_name_of_type_node(element), "[]".repeat(dims)))
+}
+
+/// Bug #1923 rework: appends C-STYLE array dimensions to an already-
+/// resolved `base` type name -- the SEPARATE grammar shape from
+/// `array_type` above, where the array-ness is NOT part of the type node
+/// at all but a `dimensions` field on the DECLARATOR itself (verified
+/// real grammar: `_variable_declarator_id: field('name', ...) +
+/// field('dimensions', optional($.dimensions))`, embedded directly into
+/// BOTH `variable_declarator` (locals/fields, e.g. `String xs[];`) and
+/// `formal_parameter` (callee params, e.g. `void t(String a[])`), so
+/// `declarator_like_node` is either of those two node kinds). A no-op
+/// (`base` returned unchanged) when no such `dimensions` child exists,
+/// OR when it carries zero bracket pairs (malformed source) -- never a
+/// fabricated dimension count.
+pub(super) fn append_c_style_dimensions(base: String, declarator_like_node: &OwnedNode) -> String {
+    let Some(dims_node) = declarator_like_node.child_by_kind("dimensions") else {
+        return base;
+    };
+    let count = dims_node.text().matches('[').count();
+    if count == 0 {
+        return base;
+    }
+    format!("{base}{}", "[]".repeat(count))
 }

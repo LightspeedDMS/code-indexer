@@ -160,7 +160,7 @@ pub(super) fn parameter_name_and_type(param_node: &OwnedNode) -> Option<(String,
 /// `scope`. Empty (never a guessed type) when the declared type could not
 /// be determined.
 fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<TypedNameRecord> {
-    let Some(declared_type) = node
+    let Some(base_type) = node
         .named_children()
         .into_iter()
         .find(|c| c.kind != "modifiers" && c.kind != "variable_declarator")
@@ -168,14 +168,23 @@ fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<Typed
     else {
         return Vec::new();
     };
+    // Bug #1923 rework: C-style dimensions live on the DECLARATOR, not
+    // the shared type node -- `int a[], b;` declares an array `a` and a
+    // scalar `b` from the SAME statement, so each declarator's own
+    // `dimensions` child (if any) must be read individually via
+    // `append_c_style_dimensions`, never a single `base_type` reused
+    // verbatim for every comma-separated declarator.
     node.children
         .iter()
         .filter(|c| c.kind == "variable_declarator")
-        .filter_map(|d| d.child_by_kind("identifier"))
-        .map(|name_node| TypedNameRecord {
-            name: name_node.text().to_string(),
-            declared_type: declared_type.clone(),
-            scope: scope.clone(),
+        .filter_map(|d| {
+            let name_node = d.child_by_kind("identifier")?;
+            let declared_type = super::java_type_names::append_c_style_dimensions(base_type.clone(), d);
+            Some(TypedNameRecord {
+                name: name_node.text().to_string(),
+                declared_type,
+                scope: scope.clone(),
+            })
         })
         .collect()
 }

@@ -218,23 +218,17 @@ class Child extends Base {
     );
 }
 
-/// Mission REQUIRED-ordering step 4: `Target(int)` and `Target(String)`
-/// are both arity-1, so `apply_arity_narrowing` alone cannot discriminate
-/// between them. `this(value)` passes a bare identifier (a constructor
-/// parameter) whose REAL static type is `String` -- real javac resolves
-/// this call unambiguously to `Target(String)` alone, verified compiling
-/// clean under real javac 17.0.19 with zero errors. But `arg_shape_for`
-/// (java.rs) only recognises literal/cast/constructor/lambda/method-
-/// reference node kinds; a bare `identifier` argument carries no
-/// recognised shape at all and is walked into `ArgShape::Other`, which
-/// `literal_shape_is_incompatible` (resolve.rs) never treats as
-/// exclusionary. So our extractor -- unlike real javac -- has no
-/// evidence to exclude `Target(int)`, and per the dead-code contract's
-/// under-report-never-over-report rule, it must NOT falsely exclude it:
-/// both overloads must stay referenced even though real Java resolves to
-/// only one of them.
+/// `Target(int)` and `Target(String)` are both arity-1, so
+/// `apply_arity_narrowing` alone cannot discriminate between them.
+/// `this(value)` passes a bare identifier naming a constructor
+/// PARAMETER whose declared type is `String`. Named-type (identifier/
+/// `this`) argument evidence is TAG-ONLY: it decides whether
+/// `OVERLOAD_ARG_TYPE_MATCH` is set, but never excludes a candidate --
+/// so `Target(int)` stays referenced, while `OVERLOAD_ARG_TYPE_MATCH`
+/// is tagged on `Target(String)` alone (a `String` argument is
+/// closed-world provably not assignable to an `int` parameter).
 #[test]
-fn ambiguous_same_arity_constructor_call_keeps_both_overloads_live() {
+fn same_arity_constructor_call_keeps_both_overloads_live_and_tags_only_the_compatible_one() {
     let source = r#"
 class Target {
     private Target(int a) {}
@@ -252,30 +246,60 @@ class Target {
         3,
         "fixture must contain exactly three Target constructors"
     );
-    let two_arg_constructor: Vec<_> = constructors
-        .iter()
-        .copied()
-        .filter(|symbol| {
-            index
-                .declarations
-                .iter()
-                .any(|d| d.symbol == *symbol && d.param_count == Some(2))
-        })
-        .collect();
+    let find_by_params = |param_types: &[&str]| {
+        let wanted: Vec<String> = param_types.iter().map(|s| s.to_string()).collect();
+        constructors
+            .iter()
+            .copied()
+            .find(|symbol| {
+                index.declarations.iter().any(|d| d.symbol == *symbol && d.param_types == wanted)
+            })
+            .unwrap_or_else(|| panic!("fixture bug: no Target{param_types:?} declaration"))
+    };
+    let int_constructor = find_by_params(&["int"]);
+    let string_constructor = find_by_params(&["String"]);
+    let caller_constructor = find_by_params(&["Object", "String"]);
     let graph = bind_single_file(index);
-    for symbol in &constructors {
-        if two_arg_constructor.contains(symbol) {
-            continue; // the calling constructor itself; not under test here
-        }
-        let dense = graph
-            .dense_id_for(*symbol)
-            .expect("constructor must be interned");
+
+    let int_dense = graph.dense_id_for(int_constructor).expect("Target(int) must be interned");
+    let string_dense = graph
+        .dense_id_for(string_constructor)
+        .expect("Target(String) must be interned");
+    let caller_dense = graph
+        .dense_id_for(caller_constructor)
+        .expect("Target(Object, String) must be interned");
+
+    // Liveness: named-type evidence is tag-only and must never exclude a
+    // candidate, so Target(int) stays referenced even though it is
+    // provably the wrong overload.
+    assert_eq!(
+        graph.is_definitely_dead_code(int_dense),
+        Some(false),
+        "Target(int) must never be reported definitely dead -- named-type evidence is tag-only"
+    );
+    assert_eq!(
+        graph.is_definitely_dead_code(string_dense),
+        Some(false),
+        "Target(String) must be reached by this(value)"
+    );
+
+    // Tag accuracy: only Target(String) may carry OVERLOAD_ARG_TYPE_MATCH.
+    use xray_core::graph::reasons::OVERLOAD_ARG_TYPE_MATCH;
+    let int_bits = graph.edge_evidence(caller_dense, int_dense);
+    let string_bits = graph
+        .edge_evidence(caller_dense, string_dense)
+        .expect("Target(Object, String) -> Target(String) edge must exist");
+    assert_ne!(
+        string_bits & OVERLOAD_ARG_TYPE_MATCH,
+        0,
+        "Target(String) must carry OVERLOAD_ARG_TYPE_MATCH: the argument matches exactly"
+    );
+    if let Some(bits) = int_bits {
         assert_eq!(
-            graph.is_definitely_dead_code(dense),
-            Some(false),
-            "this(value) with a non-literal argument must never falsely exclude either same-arity \
-             overload, even though real javac resolves the call unambiguously via static typing \
-             our extractor does not perform"
+            bits & OVERLOAD_ARG_TYPE_MATCH,
+            0,
+            "Target(int) must never carry OVERLOAD_ARG_TYPE_MATCH: \
+             a String argument is closed-world provably not assignable to int"
         );
     }
 }
