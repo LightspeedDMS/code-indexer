@@ -108,6 +108,47 @@ def simple_job() -> Dict[str, Any]:
     return {"status": "ok"}
 
 
+_TERMINAL_JOB_STATUSES = frozenset(
+    {"completed", "completed_partial", "failed", "cancelled"}
+)
+
+
+def _wait_for_job_terminal(
+    manager: BackgroundJobManager, job_id: str, timeout: float = 10.0
+) -> str:
+    """Poll the job's REAL completion signal (JobTracker/SQLite) until it
+    reaches a terminal status, instead of a fixed sleep (Bug #1933).
+
+    A fixed sleep races the background worker thread under load: on a busy
+    host the worker may not have finished by the time the sleep returns,
+    making the test flaky. Polling the job's actual persisted status (which
+    `_job_tracker.get_job()` reads from memory, falling back to SQLite once
+    the worker thread's completion callback has persisted it) is a real
+    signal, not a guess about timing.
+
+    Fails loudly with a clear message if the job never reaches a terminal
+    status within `timeout` seconds -- that indicates a genuinely wedged
+    worker, not something a longer/shorter sleep would paper over.
+    """
+    assert manager._job_tracker is not None, (
+        "_wait_for_job_terminal requires a manager wired with a JobTracker "
+        "(see _make_manager in this file)"
+    )
+    deadline = time.monotonic() + timeout
+    last_status = None
+    while time.monotonic() < deadline:
+        tracked = manager._job_tracker.get_job(job_id)
+        if tracked is not None:
+            last_status = tracked.status
+            if tracked.status in _TERMINAL_JOB_STATUSES:
+                return tracked.status
+        time.sleep(0.01)
+    raise AssertionError(
+        f"Job {job_id} did not reach a terminal status within {timeout}s "
+        f"(last observed status: {last_status!r}) -- worker thread appears wedged"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test class: atomic dedup for repo-scoped submit_job
 # ---------------------------------------------------------------------------
@@ -358,8 +399,10 @@ class TestSubmitJobAtomicDedup:
             is_admin=True,
             repo_alias="my-repo-global",
         )
-        # Wait for the first job to complete
-        time.sleep(0.5)
+        # Wait for the first job's REAL completion signal (Bug #1933) --
+        # no fixed sleep, which flakes under load when the worker hasn't
+        # finished yet.
+        _wait_for_job_terminal(self.manager, job_id_1)
 
         # Second submit must succeed (not raise DuplicateJobError)
         job_id_2 = self.manager.submit_job(

@@ -10,6 +10,8 @@ This file covers:
 TDD: These tests are written FIRST, before implementation.
 """
 
+import os
+
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.routing import APIRoute
@@ -528,17 +530,35 @@ class TestDelayedRestartMechanism:
 
         When _delayed_restart is called in systemd environment
         Then it detects systemd by checking INVOCATION_ID env var
+
+        Bug #1933: this used to mock `os.environ.get` globally and assert
+        the LAST call's args (`assert_called_with`). `os.environ.get` is a
+        single process-wide object -- under load, other threads (e.g. other
+        in-flight background jobs) calling `os.environ.get` for unrelated
+        keys during this test's patch window interleaved with the call under
+        test, making the "last call" assertion flake. Fixed by patching only
+        the ONE environment variable the code under test reads
+        (`patch.dict`, restored automatically, never touches other keys) and
+        asserting on the resulting real, observable behavior -- the systemd
+        branch writes the restart signal file and never calls os.execv --
+        rather than on mock call order.
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import code_indexer.server.web.routes as routes_module
 
         with patch("time.sleep"):
-            with patch("os.environ.get") as mock_env:
-                mock_env.return_value = "some-invocation-id"  # Systemd
-                with patch("subprocess.run") as _mock_subprocess:
+            with patch("os.execv") as mock_execv:
+                with patch.dict(os.environ, {"INVOCATION_ID": "some-invocation-id"}):
                     _delayed_restart(delay=2)
 
-        # Should check for INVOCATION_ID
-        mock_env.assert_called_with("INVOCATION_ID")
+        # Detected systemd via the real INVOCATION_ID env var and took the
+        # systemd branch: wrote the restart signal file, never re-exec'd.
+        signal_path = routes_module.RESTART_SIGNAL_PATH
+        assert signal_path.exists(), (
+            "systemd branch not taken -- INVOCATION_ID was not detected "
+            f"(signal file missing at {signal_path})"
+        )
+        mock_execv.assert_not_called()
 
     def test_systemd_mode_writes_signal_file(self):
         """
