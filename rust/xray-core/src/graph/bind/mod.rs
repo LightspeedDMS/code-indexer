@@ -50,7 +50,7 @@ use depth::{
 };
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
-use resolve::{resolve_reference, target_kind_for_ref};
+use resolve::{enclosing_symbol_for_site, resolve_reference, target_kind_for_ref};
 use scope::build_file_scope;
 
 pub use budget_bind::{bind_with_budget, bind_with_budget_and_completeness};
@@ -107,6 +107,7 @@ fn resolve_site(
     receiver_is_direct_parameter: bool,
     receiver_type_is_qualified_non_java_lang: bool,
     file_has_unresolved_external_supertype: bool,
+    site_enclosing_method: Option<SymbolId>,
 ) -> PendingReference {
     let candidates = resolve_reference(
         name,
@@ -130,7 +131,7 @@ fn resolve_site(
         file_has_unresolved_external_supertype,
     );
     PendingReference {
-        from: enclosing_symbol(&file.index, file.file_id, line),
+        from: enclosing_symbol_for_site(&file.index, file.file_id, line, site_enclosing_method),
         file: file.file_id,
         line: line as u32,
         kind: ref_kind,
@@ -527,6 +528,7 @@ fn resolve_all_references(
                 receiver_is_direct_parameter,
                 receiver_type_is_qualified_non_java_lang,
                 file_has_unresolved_external_supertype,
+                site.enclosing_method,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
@@ -564,6 +566,7 @@ fn resolve_all_references(
                 false,
                 false,
                 false,
+                site.enclosing_method,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
@@ -601,6 +604,7 @@ fn resolve_all_references(
                 false,
                 false,
                 false,
+                site.enclosing_method,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);

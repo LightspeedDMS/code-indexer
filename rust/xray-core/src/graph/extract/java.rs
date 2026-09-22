@@ -16,14 +16,12 @@
 
 use super::java_annotations::extract_annotations_from_modifiers;
 use super::java_type_names::{
-    append_c_style_dimensions, base_name_of_type_node, base_type_name, is_plausible_java_identifier,
-    last_named_child_of_kind,
-    type_names_in_type_list,
+    append_c_style_dimensions, base_name_of_type_node, base_type_name, type_names_in_type_list,
 };
 use super::local_index::{
     ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
-    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, NameScope, TypeNestingRecord,
-    TypeReferenceRecord, TypedNameRecord,
+    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, NameScope,
+    SyntheticScopeRecord, TypeNestingRecord, TypedNameRecord,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
@@ -383,6 +381,14 @@ fn dispatch_node(
         // pushed onto the walk stack.
         "block" if ctx.enclosing_method.is_none() => {
             let symbol = next_symbol(file_id, next_local);
+            // Issue #1930 items 1/3: records this scope's lexically
+            // enclosing type (and start line, the narrow fallback) -- see
+            // `LocalIndex::synthetic_scopes`'s own doc comment.
+            index.synthetic_scopes.push(SyntheticScopeRecord {
+                symbol,
+                start_line: node.start_line,
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
+            });
             WalkContext {
                 enclosing_type: ctx.enclosing_type.clone(),
                 top_level_type: ctx.top_level_type.clone(),
@@ -427,7 +433,7 @@ fn dispatch_node(
             ctx
         }
         "type_identifier" => {
-            super::java_invocations::extract_type_reference(node, index);
+            super::java_invocations::extract_type_reference(node, ctx.enclosing_method, index);
             ctx
         }
         "method_reference" => {
@@ -440,55 +446,15 @@ fn dispatch_node(
             ctx
         }
         "marker_annotation" | "annotation" => {
-            extract_annotation_usage_reference(node, index);
+            super::java_invocations::extract_annotation_usage_reference(
+                node,
+                ctx.enclosing_method,
+                index,
+            );
             ctx
         }
         _ => ctx,
     }
-}
-
-/// N2 (#1873/#1875 second-review rework): using an annotation (`@Marker`,
-/// `@Marker(...)`, or a qualified `@Outer.Marker`) is a real reference to
-/// the annotation TYPE's own declaration -- F6 made
-/// `annotation_type_declaration` dispatch as a type declaration (so
-/// `@interface` types get a symbol), but nothing emitted the matching
-/// reference edge, so a created symbol with no possible inbound edge was
-/// automatically reported dead. Grammar (`marker_annotation`/`annotation`):
-/// `field('name', $._name)` is always either a bare `identifier` or a
-/// qualified `scoped_identifier`.
-///
-/// N1 (#1873/#1875 third-review rework): the qualified case used to be
-/// resolved via a raw-text split (`last_dot_segment`), which captures any
-/// whitespace/line-break/comment token that legally sits between the dot
-/// and the final identifier (e.g. `@Outer. Marker`) as part of the
-/// "name" -- garbage that can never match the real declaration. Fixed by
-/// taking the qualified name's LAST named `identifier` child structurally
-/// (`last_named_child_of_kind`), the same fix applied to
-/// `java_type_names::resolve_type_node_base_name`'s qualified-type arms,
-/// validated by the same `is_plausible_java_identifier` backstop. Fires on
-/// EVERY annotation usage in the file (including ones with no in-repo
-/// declaration, e.g. `@Override`), which is harmless: an unresolvable type
-/// reference simply resolves to an empty candidate pool downstream, a
-/// no-op.
-fn extract_annotation_usage_reference(node: &OwnedNode, index: &mut LocalIndex) {
-    let Some(name_node) = node
-        .named_children()
-        .into_iter()
-        .find(|c| c.kind == "identifier" || c.kind == "scoped_identifier")
-    else {
-        return;
-    };
-    let type_name = match name_node.kind.as_str() {
-        "scoped_identifier" => last_named_child_of_kind(name_node, "identifier"),
-        _ => Some(name_node.text().to_string()),
-    };
-    let Some(type_name) = type_name.filter(|name| is_plausible_java_identifier(name)) else {
-        return;
-    };
-    index.type_references.push(TypeReferenceRecord {
-        type_name,
-        line: node.start_line,
-    });
 }
 
 /// Issue #1873: a `method_reference` (`this::name`, `Type::name`,
@@ -538,6 +504,7 @@ fn push_constructor_reference(
     index.constructions.push(ConstructionSite {
         type_name: type_name.clone(),
         line: node.start_line,
+        enclosing_method,
     });
     index.invocations.push(InvocationSite {
         callee_name: type_name,

@@ -80,6 +80,21 @@ pub fn declaration_symbol(index: &LocalIndex, name: &str) -> SymbolId {
         .symbol
 }
 
+/// A named TYPE's own `DeclarationKind::Type` declaration symbol --
+/// `declaration_symbol_owned_by` only resolves METHOD-kind declarations
+/// (via `MethodOwnerRecord` ownership), so a fixture that needs a type's
+/// OWN symbol (e.g. to assert a synthetic scope's call is attributed to
+/// its lexically enclosing type, Issue #1930) needs this instead.
+pub fn type_declaration_symbol(index: &LocalIndex, name: &str) -> SymbolId {
+    use xray_core::graph::extract::local_index::DeclarationKind;
+    index
+        .declarations
+        .iter()
+        .find(|d| d.name == name && d.kind == DeclarationKind::Type)
+        .unwrap_or_else(|| panic!("fixture bug: no {name:?} type declaration in this file"))
+        .symbol
+}
+
 pub fn build_graph_over(dir: &Path, relative_paths: &[&str]) -> CodeGraph {
     let options = RepoIndexOptions {
         budget: IndexBudget::unlimited(),
@@ -89,6 +104,23 @@ pub fn build_graph_over(dir: &Path, relative_paths: &[&str]) -> CodeGraph {
     let result = build_repo_graph(dir, &paths, &options, &NoOpCollector)
         .expect("no file_id collision in this fixture");
     result.graph
+}
+
+/// Finds every declaration in `index` named `name`, sorted by ascending
+/// source line -- for a fixture that deliberately declares TWO (or more)
+/// same-named declarations `declaration_symbol_owned_by`'s owner-name
+/// disambiguation cannot tell apart (e.g. two anonymous classes both
+/// owned by the SAME enclosing type, since an anonymous class body never
+/// resets `enclosing_type` to anything the fixture can predict at
+/// write-time; or an object literal's overridden method sharing its bare
+/// name with the interface method it overrides). Line order is the axis
+/// Issue #1930's whole defect class is about: the LAST (highest-line)
+/// match is the one a nearest-preceding-declaration line heuristic would
+/// wrongly credit a later call to.
+pub fn declaration_symbols_by_line(index: &LocalIndex, name: &str) -> Vec<SymbolId> {
+    let mut matches: Vec<_> = index.declarations.iter().filter(|d| d.name == name).collect();
+    matches.sort_by_key(|d| d.line);
+    matches.into_iter().map(|d| d.symbol).collect()
 }
 
 pub fn dead_and_caller_count(graph: &CodeGraph, symbol: SymbolId) -> (Option<bool>, usize) {

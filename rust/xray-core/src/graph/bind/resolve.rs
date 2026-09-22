@@ -434,6 +434,108 @@ pub(crate) fn enclosing_symbol(index: &LocalIndex, file_id: u32, line: usize) ->
         .unwrap_or_else(|| make_symbol_id(file_id, u32::MAX))
 }
 
+/// Issue #1930: `enclosing_symbol`'s line heuristic mis-attributes a call
+/// that textually follows an anonymous/local class's own method body --
+/// the nearest PRECEDING declaration by line is that inner method, never
+/// the real enclosing method the call is actually written inside. For an
+/// invocation/method-reference/construction/type-reference site,
+/// `java.rs`'s/`kotlin.rs`'s stack-based `WalkContext` already tracks the
+/// TRUE enclosing method through the AST walk itself -- this prefers
+/// that recorded symbol over the heuristic whenever it is trustworthy,
+/// and falls back to `enclosing_symbol` only for a site that never
+/// carries one at all (a field initializer, or a class-level type
+/// reference/construction).
+///
+/// "Trustworthy" means `site_enclosing_method` names a symbol with a real
+/// `Declaration` in `index.declarations` -- NOT merely `Some(_)`. Both
+/// extractors also assign a SYNTHETIC `enclosing_method` symbol to a
+/// static/instance initializer block, a record compact constructor body
+/// (Java), or a getter/setter/`init` block (Kotlin), purely so
+/// LOCAL-BINDING resolution (`typed_names`) has somewhere to scope to --
+/// see `java.rs`'s `"block" if ctx.enclosing_method.is_none()` arm and
+/// `kotlin.rs`'s `"getter" | "setter" | "anonymous_initializer"` arm,
+/// both of which allocate a fresh symbol with NO matching `Declaration`
+/// pushed anywhere. Trusting that symbol here would attribute the call to
+/// a caller with no name in the graph.
+///
+/// For such a synthetic scope, `index.synthetic_scopes` (Issue #1930
+/// rework, items 1/3) records the symbol of the TYPE lexically enclosing
+/// it -- attribution goes STRAIGHT there, no declaration search at all.
+/// An earlier line-heuristic-based version of this fix evaluated the
+/// ordinary heuristic at the scope's own START line instead of at the
+/// call's line, which fixes the narrow case where the offending
+/// declaration sits INSIDE the scope itself, but real fixtures still
+/// reach PAST the scope's own boundary that way -- an EARLIER nested
+/// type's own method, or a PREVIOUS sibling initializer's anonymous
+/// class -- e.g. `static class Inner { void im() {} } static {
+/// afterInnerClass(); }` wrongly credited `afterInnerClass()` to `Inner.
+/// im()`, which has nothing to do with this static block. Attributing
+/// directly to the enclosing type closes every such case by
+/// construction: with no search, nothing else CAN win. The line
+/// heuristic survives only as the documented fallback
+/// `SyntheticScopeRecord::enclosing_type_symbol`'s own doc comment names
+/// -- one narrow, Java-only case where that symbol is genuinely unknown
+/// (an initializer block inside an ANONYMOUS class's own body).
+///
+/// A `site_enclosing_method` that is `Some` but names neither a real
+/// `Declaration` nor a recorded synthetic scope is structurally
+/// impossible: every `enclosing_method` either extractor ever emits comes
+/// from exactly one of those two paths (`dispatch_method_declaration`/
+/// `extract_method_declaration`, or a synthetic-block arm) -- INCLUDING
+/// the parse-recovery symbol a malformed/nameless declaration allocates
+/// (`extract_method_declaration`/`extract_function_declaration`/
+/// `extract_secondary_constructor`'s own doc comments), which is now
+/// also registered as a synthetic scope carrying its real enclosing
+/// type, never left unregistered. "Structurally impossible" is not
+/// "provably impossible" across two independent extractors and every
+/// future change to either, though, so this never fails silently: a
+/// debug build panics via `debug_assert!` (never a release-mode panic --
+/// Rule 2, anti-fallback, bars a stricter-than-
+/// release failure mode outside `#[cfg(debug_assertions)]`), and every
+/// build (debug or release) logs loudly before falling back to the
+/// ordinary heuristic at the call's own line, the least-wrong answer
+/// available once this branch is reached at all.
+///
+/// A site with no `enclosing_method` at all (`None`: a field initializer,
+/// or a class-level type reference/construction) falls straight through
+/// to the same heuristic at the call's line -- exactly the field/
+/// initializer attribution this heuristic was originally written to
+/// serve, left unchanged.
+pub(crate) fn enclosing_symbol_for_site(
+    index: &LocalIndex,
+    file_id: u32,
+    line: usize,
+    site_enclosing_method: Option<SymbolId>,
+) -> SymbolId {
+    if let Some(symbol) = site_enclosing_method {
+        if index.declarations.iter().any(|d| d.symbol == symbol) {
+            return symbol;
+        }
+        if let Some(scope) = index
+            .synthetic_scopes
+            .iter()
+            .find(|record| record.symbol == symbol)
+        {
+            return scope
+                .enclosing_type_symbol
+                .unwrap_or_else(|| enclosing_symbol(index, file_id, scope.start_line));
+        }
+        debug_assert!(
+            false,
+            "enclosing_symbol_for_site: site_enclosing_method {symbol:?} in file {file_id} \
+             matches neither a Declaration nor a recorded synthetic scope -- this should be \
+             structurally impossible (see this function's own doc comment); falling back to \
+             the line heuristic at line {line}"
+        );
+        eprintln!(
+            "xray: warning: enclosing_symbol_for_site: site_enclosing_method {symbol:?} in \
+             file {file_id} matches neither a Declaration nor a recorded synthetic scope -- \
+             falling back to the line heuristic at line {line}"
+        );
+    }
+    enclosing_symbol(index, file_id, line)
+}
+
 #[cfg(test)]
 #[path = "resolve_tests.rs"]
 mod tests;

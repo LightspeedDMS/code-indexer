@@ -11,9 +11,18 @@
 //! callback that writes its own unbounded loop OUTSIDE these ops.
 //!
 //! All ops read the "call graph" direction off `Reference.from` -- the
-//! DENSE id of the symbol the reference site is textually INSIDE (see
-//! `crate::graph::bind::resolve::enclosing_symbol`) -- and each
-//! `Reference`'s candidate window as its (possibly ambiguous) targets.
+//! DENSE id of the symbol the reference site is textually INSIDE. Issue
+//! #1930: this is the extractor's own real, AST-walk-tracked enclosing
+//! method when one is known and trustworthy (see
+//! `crate::graph::bind::resolve::enclosing_symbol_for_site`), falling
+//! back to a nearest-preceding-declaration-by-line heuristic
+//! (`crate::graph::bind::resolve::enclosing_symbol`) only for a site
+//! with no such method (a field initializer, a class-level type
+//! reference) or one whose `enclosing_method` is a synthetic scope
+//! symbol with no real `Declaration` (a static/instance initializer
+//! block, a record compact constructor, a Kotlin getter/setter/`init`
+//! block) -- and each `Reference`'s candidate window as its (possibly
+//! ambiguous) targets.
 //! `callees_of(x)` therefore means "every candidate target of every
 //! reference written inside x"; `callers_of(y)` means "every symbol whose
 //! own reference proposed y as a candidate", regardless of whether that

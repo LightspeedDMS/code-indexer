@@ -163,7 +163,7 @@
 use super::local_index::{
     ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
     InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord,
-    ReceiverExpr, TypeNestingRecord, TypeReferenceRecord, Visibility,
+    ReceiverExpr, SyntheticScopeRecord, TypeNestingRecord, TypeReferenceRecord, Visibility,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
@@ -177,11 +177,22 @@ pub struct KotlinExtractor;
 /// a type declaration resets `enclosing_method` to `None` for its own
 /// children; a function/constructor/accessor keeps `enclosing_type` but
 /// sets `enclosing_method` to ITS OWN symbol.
+///
+/// `enclosing_type_symbol` (Issue #1930 rework, item 1): the CURRENT
+/// enclosing type's own interned symbol -- set by `dispatch_type_
+/// declaration` for EVERY type kind this match handles, including an
+/// `object_literal` (Kotlin gives every type a real `Declaration`+symbol,
+/// unlike Java's anonymous classes, which get neither -- see `java.rs`'s
+/// `WalkContext::enclosing_type_symbol` and its own doc comment on why
+/// that one case stays `None`). Sole consumer: `LocalIndex::synthetic_
+/// scopes`, recorded when a `"getter" | "setter" | "anonymous_
+/// initializer"` scope is allocated.
 #[derive(Clone)]
 struct WalkContext {
     enclosing_type: Option<std::rc::Rc<str>>,
     top_level_type: Option<std::rc::Rc<str>>,
     enclosing_method: Option<SymbolId>,
+    enclosing_type_symbol: Option<SymbolId>,
 }
 
 impl WalkContext {
@@ -190,6 +201,7 @@ impl WalkContext {
             enclosing_type: None,
             top_level_type: None,
             enclosing_method: None,
+            enclosing_type_symbol: None,
         }
     }
 }
@@ -269,10 +281,20 @@ fn dispatch_node(
         // the three ever gets its own `Declaration` pushed.
         "getter" | "setter" | "anonymous_initializer" => {
             let symbol = next_symbol(file_id, next_local);
+            // Issue #1930 (rework, items 1/3): records this scope's
+            // lexically enclosing type (and start line, the narrow
+            // fallback) -- see `LocalIndex::synthetic_scopes`'s own doc
+            // comment.
+            index.synthetic_scopes.push(SyntheticScopeRecord {
+                symbol,
+                start_line: node.start_line,
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
+            });
             WalkContext {
                 enclosing_type: ctx.enclosing_type.clone(),
                 top_level_type: ctx.top_level_type.clone(),
                 enclosing_method: Some(symbol),
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
             }
         }
         "property_declaration" => {
@@ -396,7 +418,7 @@ fn dispatch_node(
         // types) already consumed -- harmless double-coverage, exactly
         // mirroring `JavaExtractor`'s own `"type_identifier"` dispatch arm.
         "user_type" => {
-            extract_type_reference(node, index);
+            extract_type_reference(node, ctx.enclosing_method, index);
             ctx
         }
         _ => ctx,
@@ -580,6 +602,7 @@ fn dispatch_type_declaration(
         enclosing_type: Some(name),
         top_level_type: Some(top_level_type),
         enclosing_method: None,
+        enclosing_type_symbol: Some(symbol),
     }
 }
 
@@ -747,11 +770,21 @@ fn extract_function_declaration(
     file_id: u32,
     next_local: &mut u32,
     enclosing_type: Option<&str>,
+    enclosing_type_symbol: Option<SymbolId>,
     index: &mut LocalIndex,
 ) -> SymbolId {
     let symbol = next_symbol(file_id, next_local);
     push_type_parameter_names(node, index);
     let Some(name_node) = node.child_by_kind("identifier") else {
+        // Issue #1930: registers this parse-recovery symbol as a
+        // synthetic scope carrying its real enclosing type -- mirrors
+        // `JavaExtractor::extract_method_declaration`'s identical fix;
+        // see its own doc comment.
+        index.synthetic_scopes.push(SyntheticScopeRecord {
+            symbol,
+            start_line: node.start_line,
+            enclosing_type_symbol,
+        });
         return symbol;
     };
     let name = name_node.text().to_string();
@@ -785,12 +818,19 @@ fn dispatch_function_declaration(
     ctx: &WalkContext,
     index: &mut LocalIndex,
 ) -> WalkContext {
-    let symbol =
-        extract_function_declaration(node, file_id, next_local, ctx.enclosing_type.as_deref(), index);
+    let symbol = extract_function_declaration(
+        node,
+        file_id,
+        next_local,
+        ctx.enclosing_type.as_deref(),
+        ctx.enclosing_type_symbol,
+        index,
+    );
     WalkContext {
         enclosing_type: ctx.enclosing_type.clone(),
         top_level_type: ctx.top_level_type.clone(),
         enclosing_method: Some(symbol),
+        enclosing_type_symbol: ctx.enclosing_type_symbol,
     }
 }
 
@@ -801,15 +841,29 @@ fn dispatch_function_declaration(
 /// declaration`. A constructor with no known enclosing type (malformed
 /// input) still gets a symbol for its children's context, but no
 /// `Declaration` is pushed -- never fabricated.
+///
+/// Issue #1930: that symbol is registered as a
+/// `SyntheticScopeRecord` too, exactly like `extract_function_
+/// declaration`'s own fix -- `enclosing_type_symbol` is `None` here in
+/// the SAME case `enclosing_type` (the bare name) is `None`, so `bind::
+/// resolve::enclosing_symbol_for_site` falls back to the ordinary line
+/// heuristic for it, a DOCUMENTED, EXPECTED path rather than the
+/// debug-only "should be impossible" one this used to reach.
 fn extract_secondary_constructor(
     node: &OwnedNode,
     file_id: u32,
     next_local: &mut u32,
     enclosing_type: Option<&str>,
+    enclosing_type_symbol: Option<SymbolId>,
     index: &mut LocalIndex,
 ) -> SymbolId {
     let symbol = next_symbol(file_id, next_local);
     let Some(enclosing_type) = enclosing_type else {
+        index.synthetic_scopes.push(SyntheticScopeRecord {
+            symbol,
+            start_line: node.start_line,
+            enclosing_type_symbol,
+        });
         return symbol;
     };
     let params = node.child_by_kind("function_value_parameters");
@@ -845,12 +899,14 @@ fn dispatch_secondary_constructor(
         file_id,
         next_local,
         ctx.enclosing_type.as_deref(),
+        ctx.enclosing_type_symbol,
         index,
     );
     WalkContext {
         enclosing_type: ctx.enclosing_type.clone(),
         top_level_type: ctx.top_level_type.clone(),
         enclosing_method: Some(symbol),
+        enclosing_type_symbol: ctx.enclosing_type_symbol,
     }
 }
 
@@ -1141,6 +1197,7 @@ fn push_invocation_and_maybe_construction(
         index.constructions.push(ConstructionSite {
             type_name: callee_name.clone(),
             line,
+            enclosing_method,
         });
     }
     index.invocations.push(InvocationSite {
@@ -1617,11 +1674,16 @@ fn last_identifier_text(node: &OwnedNode) -> Option<String> {
         .map(|c| c.text().to_string())
 }
 
-fn extract_type_reference(node: &OwnedNode, index: &mut LocalIndex) {
+fn extract_type_reference(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
     if let Some(name) = last_identifier_text(node) {
         index.type_references.push(TypeReferenceRecord {
             type_name: name,
             line: node.start_line,
+            enclosing_method,
         });
     }
 }

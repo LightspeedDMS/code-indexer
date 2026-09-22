@@ -12,7 +12,7 @@ use super::java::{formal_parameter_type_name, next_symbol, push_type_parameter_n
 use super::java_annotations::{extract_annotations_from_modifiers, push_method_source_invocations};
 use super::local_index::{
     Declaration, DeclarationKind, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord,
-    NameScope, TypedNameRecord, Visibility,
+    NameScope, SyntheticScopeRecord, TypedNameRecord, Visibility,
 };
 use crate::graph::identity::SymbolId;
 use crate::owned_node::OwnedNode;
@@ -47,6 +47,13 @@ fn extract_param_types_and_varargs(formal_parameters: &OwnedNode) -> (Vec<String
 /// `Declaration` is pushed for it (never fabricated), but the symbol
 /// counter itself stays deterministic and every child still has SOME
 /// enclosing-method handle.
+///
+/// Issue #1930: that handle is registered as a
+/// `SyntheticScopeRecord` (same mechanism a static/instance initializer
+/// block uses) carrying `enclosing_type_symbol`, so `bind::resolve::
+/// enclosing_symbol_for_site` attributes a call inside this malformed
+/// method to its REAL enclosing type -- never the debug-only "should be
+/// impossible" fallback branch, which this exact shape used to reach.
 pub(super) fn extract_method_declaration(
     node: &OwnedNode,
     file_id: u32,
@@ -58,6 +65,11 @@ pub(super) fn extract_method_declaration(
     let symbol = next_symbol(file_id, next_local);
     push_type_parameter_names(node, index);
     let Some(name_node) = node.child_by_kind("identifier") else {
+        index.synthetic_scopes.push(SyntheticScopeRecord {
+            symbol,
+            start_line: node.start_line,
+            enclosing_type_symbol,
+        });
         return symbol;
     };
     let name = name_node.text().to_string();

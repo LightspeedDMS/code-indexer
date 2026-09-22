@@ -4,7 +4,9 @@
 //! dispatches to. Keeping receiver and argument-shape extraction beside the
 //! `InvocationSite` writes prevents those three call forms from drifting.
 
-use super::java_type_names::{base_name_of_type_node, base_type_name};
+use super::java_type_names::{
+    base_name_of_type_node, base_type_name, is_plausible_java_identifier, last_named_child_of_kind,
+};
 use super::local_index::{
     ArgShape, ConstructionSite, InheritanceKind, InvocationSite, LocalIndex, ReceiverExpr,
     TypeReferenceRecord,
@@ -118,6 +120,7 @@ pub(super) fn extract_construction(
     index.constructions.push(ConstructionSite {
         type_name: type_name.clone(),
         line: node.start_line,
+        enclosing_method,
     });
     index.invocations.push(InvocationSite {
         callee_name: type_name,
@@ -175,9 +178,69 @@ pub(super) fn extract_explicit_constructor_invocation(
     });
 }
 
-pub(super) fn extract_type_reference(node: &OwnedNode, index: &mut LocalIndex) {
+pub(super) fn extract_type_reference(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
     index.type_references.push(TypeReferenceRecord {
         type_name: node.text().to_string(),
         line: node.start_line,
+        enclosing_method,
+    });
+}
+
+/// N2 (#1873/#1875 second rework): using an annotation (`@Marker`,
+/// `@Marker(...)`, or a qualified `@Outer.Marker`) is a real reference to
+/// the annotation TYPE's own declaration -- F6 made
+/// `annotation_type_declaration` dispatch as a type declaration (so
+/// `@interface` types get a symbol), but nothing emitted the matching
+/// reference edge, so a created symbol with no possible inbound edge was
+/// automatically reported dead. Grammar (`marker_annotation`/`annotation`):
+/// `field('name', $._name)` is always either a bare `identifier` or a
+/// qualified `scoped_identifier`.
+///
+/// N1 (#1873/#1875 third rework): the qualified case used to be
+/// resolved via a raw-text split (`last_dot_segment`), which captures any
+/// whitespace/line-break/comment token that legally sits between the dot
+/// and the final identifier (e.g. `@Outer. Marker`) as part of the
+/// "name" -- garbage that can never match the real declaration. Fixed by
+/// taking the qualified name's LAST named `identifier` child structurally
+/// (`last_named_child_of_kind`), the same fix applied to
+/// `java_type_names::resolve_type_node_base_name`'s qualified-type arms,
+/// validated by the same `is_plausible_java_identifier` backstop. Fires on
+/// EVERY annotation usage in the file (including ones with no in-repo
+/// declaration, e.g. `@Override`), which is harmless: an unresolvable type
+/// reference simply resolves to an empty candidate pool downstream, a
+/// no-op.
+///
+/// Moved here from `java.rs` (Issue #1930 rework, item 4 -- Anti-File-
+/// Bloat) verbatim: it owns exactly the same "invocation/construction/
+/// type-reference extraction detail java's single tree walk dispatches
+/// to" this module's own doc comment describes, so it belongs beside its
+/// three siblings rather than in `java.rs` itself.
+pub(super) fn extract_annotation_usage_reference(
+    node: &OwnedNode,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let Some(name_node) = node
+        .named_children()
+        .into_iter()
+        .find(|c| c.kind == "identifier" || c.kind == "scoped_identifier")
+    else {
+        return;
+    };
+    let type_name = match name_node.kind.as_str() {
+        "scoped_identifier" => last_named_child_of_kind(name_node, "identifier"),
+        _ => Some(name_node.text().to_string()),
+    };
+    let Some(type_name) = type_name.filter(|name| is_plausible_java_identifier(name)) else {
+        return;
+    };
+    index.type_references.push(TypeReferenceRecord {
+        type_name,
+        line: node.start_line,
+        enclosing_method,
     });
 }

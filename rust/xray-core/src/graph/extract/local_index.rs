@@ -299,6 +299,16 @@ pub struct InvocationSite {
 pub struct TypeReferenceRecord {
     pub type_name: String,
     pub line: usize,
+    /// Issue #1930 (rework, item 2): the symbol of the method immediately
+    /// enclosing this type reference, threaded through the same
+    /// `WalkContext`/`ctx.enclosing_method` stack `InvocationSite::
+    /// enclosing_method` already uses -- `None` when the reference sits
+    /// outside any method body (a field initializer, or a type mention at
+    /// class level, e.g. a supertype/implements clause). `bind::resolve::
+    /// enclosing_symbol_for_site` prefers this over the nearest-
+    /// preceding-declaration line heuristic for `PendingReference::from`
+    /// attribution, exactly like it already does for `InvocationSite`.
+    pub enclosing_method: Option<SymbolId>,
 }
 
 /// AC2: "construction sites".
@@ -306,6 +316,13 @@ pub struct TypeReferenceRecord {
 pub struct ConstructionSite {
     pub type_name: String,
     pub line: usize,
+    /// Issue #1930 (rework, item 2): same field, same rationale, as
+    /// `TypeReferenceRecord::enclosing_method` immediately above -- a
+    /// construction site's OWN sibling `InvocationSite` (pushed at the
+    /// same extraction site, see `extract_construction`/
+    /// `push_constructor_reference`) already carries this value, so this
+    /// is never a fresh lookup, only a second field fed the same value.
+    pub enclosing_method: Option<SymbolId>,
 }
 
 /// AC1 (Story #1793, S4): links one method-shaped declaration's `symbol` to
@@ -577,6 +594,58 @@ pub struct LocalIndex {
     /// invoked reference is invisible to `callers_of`/`callees_of`/
     /// reachability queries -- never a real, walkable graph edge.
     pub method_source_edges: Vec<SymbolId>,
+    /// Issue #1930: one record per SYNTHETIC `enclosing_method` symbol
+    /// one of the two extractors allocates for local-binding resolution
+    /// ONLY, without ever pushing a matching `Declaration` for it -- a
+    /// static/instance initializer or record compact constructor body
+    /// (`java.rs`'s `"block" if ctx.enclosing_method.is_none()` arm), a
+    /// Kotlin getter/setter/`init` block (`kotlin.rs`'s `"getter" |
+    /// "setter" | "anonymous_initializer"` arm), or a malformed/nameless
+    /// declaration's own parse-recovery symbol (`extract_method_
+    /// declaration`/`extract_function_declaration`/`extract_secondary_
+    /// constructor`, which allocate a symbol BEFORE their name lookup can
+    /// fail). `bind::resolve::enclosing_symbol_for_site` attributes a
+    /// call/construction/type reference made in such a scope DIRECTLY to
+    /// `SyntheticScopeRecord::enclosing_type_symbol` when it is known --
+    /// no search over `declarations` at all, so nothing else CAN win. A
+    /// NEARBY-declaration line heuristic, even one anchored at the
+    /// scope's own start line, still reaches past the scope's true
+    /// boundary into an EARLIER nested type's method or a PREVIOUS
+    /// sibling initializer's own anonymous class -- e.g. `static class
+    /// Inner { void im() {} } static { afterInnerClass(); }` wrongly
+    /// credited `afterInnerClass()` to `Inner.im()`, the nearest
+    /// declaration by line, which has nothing to do with the static
+    /// block at all. The line heuristic
+    /// survives ONLY as the documented fallback `enclosing_type_symbol`'s
+    /// own doc comment names -- one narrow, currently Java-only case
+    /// where the enclosing type symbol is genuinely unknown.
+    pub synthetic_scopes: Vec<SyntheticScopeRecord>,
+}
+
+/// Issue #1930 (rework, items 1/3): see `LocalIndex::synthetic_scopes`'s
+/// own doc comment for the full rationale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyntheticScopeRecord {
+    pub symbol: SymbolId,
+    pub start_line: usize,
+    /// The symbol of the TYPE lexically enclosing this synthetic scope --
+    /// `ctx.enclosing_type_symbol` at the moment the scope's synthetic
+    /// symbol was allocated. Almost always `Some`: every Java static/
+    /// instance initializer and record compact constructor lives inside a
+    /// real, non-anonymous type, and Kotlin's `dispatch_type_declaration`
+    /// sets this for every type INCLUDING an `object_literal` (unlike
+    /// Java, which never gives an anonymous class body its own symbol).
+    /// `None` in exactly one reachable Java case: an initializer block
+    /// written directly inside an ANONYMOUS class's own body (`new
+    /// Runnable() { { instanceInit(); } public void run() {} }`) --
+    /// `anonymous_body_context` (java.rs) deliberately gives such a body
+    /// no type symbol of its own (no real `Declaration` exists for it
+    /// either). `enclosing_symbol_for_site` falls back to the ordinary
+    /// nearest-preceding-declaration line heuristic, evaluated at
+    /// `start_line`, ONLY in that one case -- ever attributing a call
+    /// there to a non-existent enclosing type is not an option, and no
+    /// other synthetic scope in either extractor can reach this fallback.
+    pub enclosing_type_symbol: Option<SymbolId>,
 }
 
 /// Bug #1926 (final round): one `@MethodSource` annotation's not-yet-
