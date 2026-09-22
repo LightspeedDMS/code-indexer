@@ -261,6 +261,29 @@ pub enum ReceiverExpr {
     /// this slice does not attempt to type -- never fabricated evidence
     /// (Rule 2, anti-fallback).
     Other,
+    /// #1931: a DOTTED qualifier chain (`Outer.Inner`, `com.example.
+    /// Target`) captured as ordered, bare-name SEGMENTS, structurally, at
+    /// extraction time -- e.g. `["Outer", "Inner"]` for `Outer.Inner.m()`,
+    /// `["com", "example", "Target"]` for `com.example.Target.m()`. Built
+    /// only from a real `field_access` chain whose innermost base is a
+    /// plain `identifier` (never `this`/`super`, and never anything this
+    /// extractor cannot structurally walk) -- see
+    /// `super::java_receiver::build_receiver_expr`'s own doc comment for
+    /// the exact grammar shapes handled and the bounded-depth cap shared
+    /// with `Chained`. `segments` is never empty by construction and its
+    /// LAST element is the qualifier's own final identifier segment (the
+    /// immediate receiver of the call).
+    ///
+    /// Whether this positively resolves to an in-repo type (a nested type
+    /// or a fully-qualified package+type) is a BIND-TIME question this
+    /// extractor has no repo-wide knowledge to answer -- see
+    /// `bind::receiver::resolve_dotted_qualifier_type`, the sole
+    /// resolver. A chain that turns out to be an ordinary field access
+    /// (`obj.field.m()`, `Outer.FIELD.m()`) is captured identically at
+    /// extraction time; it is the BINDER's positive-resolution guards
+    /// (never this variant's mere presence) that keep such a chain
+    /// exactly as tag-only as it was before this fix.
+    DottedQualifier(Vec<String>),
 }
 
 /// AC2: "invocation sites".
@@ -341,8 +364,17 @@ pub struct MethodOwnerRecord {
 
 /// Java private-access domain for one declared type. `type_name` remains a
 /// bare name because the extractor's existing owner/inheritance substrate is
-/// bare-name based; consumers must treat an ambiguous mapping as unknown,
-/// never as grounds to remove an edge.
+/// bare-name based; a consumer that collapses these records down to "THE
+/// single unambiguous top-level owner of this bare name" (e.g. `TypeIndex::
+/// top_level_of`) must treat an ambiguous mapping as unknown, never as
+/// grounds to remove an edge. #1931's `TypeIndex::is_nested_type_of` is a
+/// DIFFERENT kind of consumer and this warning does not apply to it the same
+/// way: it never collapses these records at all, keeping the FULL,
+/// un-narrowed multiset of every `(type_name, top_level_type)` pair ever
+/// recorded and answering only "was THIS SPECIFIC pair ever recorded" --
+/// unambiguous by construction, since a specific tuple's membership is never
+/// itself an ambiguous fact even when the bare name `type_name` maps to
+/// several different `top_level_type`s across the repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeNestingRecord {
     pub type_name: String,

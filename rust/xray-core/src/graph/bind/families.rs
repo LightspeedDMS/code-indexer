@@ -100,6 +100,31 @@ pub(crate) struct TypeIndex {
     /// AC4 Level 5 unique-name shortcut's admission gate, which still
     /// consults Positive receiver-type evidence.
     type_parameter_names: HashSet<String>,
+    /// #1931: the FULL, un-collapsed set of `(type_name, top_level_type)`
+    /// nesting edges every file's own `LocalIndex::type_nesting` recorded
+    /// -- deliberately NOT the same substrate as `top_levels` above (which
+    /// discards BOTH sides of an ambiguous bare name once two DIFFERENT
+    /// top-level owners are seen). A dotted qualifier's own `(Outer,
+    /// Inner)` pair is a genuine, independent fact regardless of whether
+    /// `Inner` is ALSO nested under some unrelated `OuterB` elsewhere in
+    /// the repo -- membership in this set proves exactly that pair, never
+    /// "the" single unambiguous owner of a bare name. Keyed by `type_name`
+    /// -> the set of every `top_level_type` it was ever seen nested under,
+    /// rather than a flat `HashSet<(String, String)>` of pairs, so
+    /// `is_nested_type_of` can probe with borrowed `&str` (`HashSet<
+    /// String>::contains::<str>` via `Borrow`) instead of allocating two
+    /// fresh `String`s per call. Sole consumer: `is_nested_type_of`, the
+    /// substrate `receiver::resolve_dotted_qualifier_type`'s nested-type
+    /// resolution rule uses.
+    nesting_pairs: HashMap<String, HashSet<String>>,
+    /// #1931 round 4 (Codex P2, perf): PRECOMPUTED answer of
+    /// `has_unresolved_external_supertype_transitively` for every known
+    /// repo type, filled ONCE in `build()` -- see `compute_unresolved_
+    /// external_supertype_transitively_map`'s own doc for the algorithm.
+    /// Absent from this map (any name not in `known_type_names`) means
+    /// `false`, matching the un-memoized BFS's own behaviour for a name
+    /// it can never make progress from (no recorded ancestor evidence).
+    unresolved_external_supertype_transitively: HashMap<String, bool>,
 }
 
 impl TypeIndex {
@@ -132,9 +157,14 @@ impl TypeIndex {
         let mut top_levels = HashMap::new();
         let mut ambiguous_top_levels = HashSet::new();
         let mut known_type_names: HashSet<String> = HashSet::new();
+        let mut nesting_pairs: HashMap<String, HashSet<String>> = HashMap::new();
         for file in files {
             for nesting in &file.index.type_nesting {
                 known_type_names.insert(nesting.type_name.clone());
+                nesting_pairs
+                    .entry(nesting.type_name.clone())
+                    .or_default()
+                    .insert(nesting.top_level_type.clone());
                 if ambiguous_top_levels.contains(&nesting.type_name) {
                     continue;
                 }
@@ -193,7 +223,7 @@ impl TypeIndex {
                 type_parameter_names.insert(name.clone());
             }
         }
-        TypeIndex {
+        let mut type_index = TypeIndex {
             direct_children,
             direct_parents,
             interface_names,
@@ -203,12 +233,30 @@ impl TypeIndex {
             field_types,
             known_type_names,
             type_parameter_names,
-        }
+            nesting_pairs,
+            unresolved_external_supertype_transitively: HashMap::new(),
+        };
+        type_index.unresolved_external_supertype_transitively =
+            type_index.compute_unresolved_external_supertype_transitively_map();
+        type_index
     }
 
     /// True when `type_name` is a known interface anywhere in the repo.
     pub(crate) fn is_interface(&self, type_name: &str) -> bool {
         self.interface_names.contains(type_name)
+    }
+
+    /// #1931: true when the repo recorded a REAL nesting edge proving
+    /// `type_name` is declared nested inside `top_level_type`'s own
+    /// top-level private-access domain -- see `nesting_pairs`'s own doc
+    /// comment for why this is membership in the FULL set rather than
+    /// `top_level_of`'s single-unambiguous-owner lookup. Sole consumer:
+    /// `receiver::resolve_dotted_qualifier_type`'s two-segment
+    /// (`Outer.Inner`) resolution rule.
+    pub(crate) fn is_nested_type_of(&self, type_name: &str, top_level_type: &str) -> bool {
+        self.nesting_pairs
+            .get(type_name)
+            .is_some_and(|top_level_types| top_level_types.contains(top_level_type))
     }
 
     /// P1-4 (#1898 code review, AC3): true when `name` is the bare name of
@@ -286,6 +334,101 @@ impl TypeIndex {
         self.direct_parents
             .get(type_name)
             .is_some_and(|parents| parents.iter().any(|parent| !self.is_known_type_name(parent)))
+    }
+
+    /// #1931 rework (Codex P1, third round; memoized in round 4, Codex
+    /// P2): TRANSITIVE counterpart to `has_unresolved_external_
+    /// supertype` above -- true when ANY ancestor at ANY depth (not
+    /// merely the DIRECT parent) is itself unresolved (incomplete
+    /// supertype evidence, or a supertype whose own bare name is not a
+    /// repo-declared type). The direct-only predicate above is
+    /// INSUFFICIENT as `resolve_dotted_qualifier_type`'s own guard: an
+    /// INDEXED parent with an EXTERNAL GRANDPARENT (`Outer extends
+    /// IndexedBase extends ExternalBase`, where only `ExternalBase` sits
+    /// outside the analysed set) passes the direct-only check trivially
+    /// (`Outer`'s own direct parent, `IndexedBase`, IS a known repo type)
+    /// while an inherited field on the unindexed GRANDPARENT stays
+    /// completely invisible -- exactly the shape Codex reproduced end to
+    /// end (`Outer.Inner.m()` where `ExternalBase` declares a shadowing
+    /// field `Inner`, and `Outer`'s own file records no `extends`/
+    /// `implements` clause at all, so the whole-file #1922 guard does not
+    /// save it either).
+    ///
+    /// O(1) lookup into `unresolved_external_supertype_transitively`,
+    /// precomputed ONCE per `build()` by `compute_unresolved_external_
+    /// supertype_transitively_map` below -- see that method's doc for the
+    /// algorithm. A name absent from the map (never a known repo type)
+    /// answers `false`, matching what the original un-memoized BFS
+    /// answered for such a name (it could never find any recorded
+    /// ancestor evidence to walk).
+    ///
+    /// Deliberately a SEPARATE predicate from `has_unresolved_external_
+    /// supertype` above, never a modification of it: that direct-only
+    /// check has its own existing consumer (`receiver_mismatch`'s #1924
+    /// `RECEIVER_TYPE_MISMATCH` tagging), whose own four-condition
+    /// soundness argument was reviewed and proven specifically against
+    /// DIRECT parents -- widening it to transitive ancestry is a
+    /// DIFFERENT, unreviewed change this fix does not make. Sole
+    /// consumer: `receiver_type_qualifier::resolve_dotted_qualifier_
+    /// type`'s own per-segment guard.
+    pub(crate) fn has_unresolved_external_supertype_transitively(&self, type_name: &str) -> bool {
+        self.unresolved_external_supertype_transitively
+            .get(type_name)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// #1931 round 4 (Codex P2, perf): builds the map `has_unresolved_
+    /// external_supertype_transitively` looks up, computing every known
+    /// type's answer with ONE multi-source BFS instead of one full
+    /// ancestor-walking BFS PER queried segment.
+    ///
+    /// Restates the original per-type ancestor walk as reachability:
+    /// `has_unresolved_external_supertype_transitively(t)` was true iff
+    /// SOME ancestor `a` of `t` (`t` itself, or anywhere up its `direct_
+    /// parents` chain) had `has_unresolved_external_supertype(a)` true.
+    /// Equivalently: `t` is reachable, via `direct_children` edges (the
+    /// subtype direction), from the SEED SET of types that are
+    /// directly-unresolved on their own (`has_unresolved_external_
+    /// supertype`) -- badness on a supertype propagates DOWN to every
+    /// type that transitively extends/implements it. This is a single
+    /// multi-source BFS: seed every directly-unresolved known type as
+    /// `true`, then flood that `true` outward through `direct_children`.
+    ///
+    /// Cycle-safe, bounded BFS (Rule 14) -- the identical termination
+    /// argument `implementors_of`/`supertypes_of` already document: each
+    /// type is enqueued at most once (the `result.insert` guard below
+    /// returns `false`/is skipped on a repeat), so a diamond or an
+    /// outright cyclic inheritance edge set both still terminate, bounded
+    /// by the repo's own finite count of known type names. Every known
+    /// type not reached by the flood is explicitly recorded `false` (not
+    /// merely absent), so lookups never need to distinguish "known and
+    /// resolved" from "never computed".
+    fn compute_unresolved_external_supertype_transitively_map(&self) -> HashMap<String, bool> {
+        let mut result: HashMap<String, bool> = HashMap::new();
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        for name in &self.known_type_names {
+            if self.has_unresolved_external_supertype(name) {
+                result.insert(name.clone(), true);
+                queue.push_back(name.clone());
+            }
+        }
+        while let Some(current) = queue.pop_front() {
+            let Some(children) = self.direct_children.get(&current) else {
+                continue;
+            };
+            for child in children {
+                if result.get(child).copied().unwrap_or(false) {
+                    continue;
+                }
+                result.insert(child.clone(), true);
+                queue.push_back(child.clone());
+            }
+        }
+        for name in &self.known_type_names {
+            result.entry(name.clone()).or_insert(false);
+        }
+        result
     }
 
     /// AC1 "engine query": every type that directly or transitively
@@ -421,432 +564,9 @@ impl TypeIndex {
 pub(crate) const MAX_FAMILY_SIZE: usize = 64;
 
 #[cfg(test)]
-mod tests {
-    use super::super::name_index::DeclInfo;
-    use super::*;
-    use crate::graph::extract::local_index::{
-        DeclarationKind, InheritanceKind, InheritanceRecord, LocalIndex, TypeNestingRecord,
-        Visibility,
-    };
-    use crate::graph::identity::make_symbol_id;
+#[path = "families_tests.rs"]
+mod tests;
 
-    fn method_decl_info(file_id: u32, local: u32, enclosing_type: &str) -> DeclInfo {
-        DeclInfo {
-            symbol: make_symbol_id(file_id, local),
-            file_id,
-            package: None,
-            kind: DeclarationKind::Method,
-            param_count: Some(0),
-            enclosing_type: Some(enclosing_type.to_string()),
-            param_types: Vec::new(),
-            is_varargs: false,
-            language: "java".to_string(),
-            return_type: None,
-            visibility: Visibility::Unknown,
-        }
-    }
-
-    fn edge(subtype: &str, supertype: &str, kind: InheritanceKind) -> InheritanceRecord {
-        InheritanceRecord {
-            kind,
-            subtype_name: subtype.to_string(),
-            supertype_name: supertype.to_string(),
-            line: 1,
-        }
-    }
-
-    /// AC1: `overrides_of` filters an EXISTING same-named-method pool down
-    /// to declarations whose enclosing type is a known implementor --
-    /// excluding both the interface's own declaration and any unrelated
-    /// same-named method in a type with no inheritance relation at all.
-    #[test]
-    fn overrides_of_filters_the_pool_to_known_implementors_only() {
-        const SHARED_FILE_ID: u32 = 1;
-        // Three distinct `DeclInfo`s (distinct `local` symbol indices),
-        // all named "save" by fixture convention, in three different
-        // enclosing types: the interface itself, its real implementor,
-        // and an unrelated type with NO inheritance relation to "Repo".
-        const REPO_METHOD_LOCAL: u32 = 0;
-        const IMPL_METHOD_LOCAL: u32 = 1;
-        const UNRELATED_METHOD_LOCAL: u32 = 2;
-
-        let files = vec![file_with(
-            SHARED_FILE_ID,
-            vec![edge("Impl", "Repo", InheritanceKind::Implements)],
-            vec!["Repo".to_string()],
-        )];
-        let index = TypeIndex::build(&files);
-
-        let pool = vec![
-            method_decl_info(SHARED_FILE_ID, REPO_METHOD_LOCAL, "Repo"),
-            method_decl_info(SHARED_FILE_ID, IMPL_METHOD_LOCAL, "Impl"),
-            method_decl_info(SHARED_FILE_ID, UNRELATED_METHOD_LOCAL, "UnrelatedType"),
-        ];
-        let (overrides, truncated) = index.overrides_of("Repo", &pool);
-        assert_eq!(overrides.len(), 1);
-        assert_eq!(overrides[0].enclosing_type.as_deref(), Some("Impl"));
-        assert!(
-            !truncated,
-            "a family well under the cap must never report truncation"
-        );
-    }
-
-    /// Shared fixture for the `MAX_FAMILY_SIZE` boundary tests below:
-    /// `count` distinct types, each implementing interface `"Repo"` and
-    /// each contributing exactly one same-named pool entry, so the pool's
-    /// match count against `"Repo"` is exactly `count`.
-    fn single_interface_family_fixture(count: usize) -> (TypeIndex, Vec<DeclInfo>) {
-        const SHARED_FILE_ID: u32 = 1;
-        let implementor_names: Vec<String> = (0..count).map(|i| format!("Impl{i}")).collect();
-        let edges: Vec<InheritanceRecord> = implementor_names
-            .iter()
-            .map(|name| edge(name, "Repo", InheritanceKind::Implements))
-            .collect();
-        let files = vec![file_with(SHARED_FILE_ID, edges, vec!["Repo".to_string()])];
-        let index = TypeIndex::build(&files);
-        let pool: Vec<DeclInfo> = implementor_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| method_decl_info(SHARED_FILE_ID, i as u32, name))
-            .collect();
-        (index, pool)
-    }
-
-    /// Memory-safety amendment (real 21.8GB-RSS incident on Elasticsearch,
-    /// 31,929 files, killed before it exhausted the host -- see the
-    /// story's own remediation notes): `overrides_of` MUST hard-cap its
-    /// result at `MAX_FAMILY_SIZE` and report `truncated = true` whenever
-    /// the true match count exceeds it -- never silently return a
-    /// truncated set indistinguishable from "the family really only has
-    /// this many members" (that would be the confidently-wrong outcome
-    /// AC1 exists to prevent). `MAX_FAMILY_SIZE + 5` distinct implementors
-    /// is the minimal discriminating fixture: strictly more matches than
-    /// the cap allows, so a wrong implementation that never capped at all
-    /// (returning all `MAX_FAMILY_SIZE + 5`) fails this test just as
-    /// loudly as one that capped but forgot to report `truncated`.
-    #[test]
-    fn overrides_of_caps_family_size_and_reports_truncation() {
-        let (index, pool) = single_interface_family_fixture(MAX_FAMILY_SIZE + 5);
-        let (overrides, truncated) = index.overrides_of("Repo", &pool);
-        assert_eq!(
-            overrides.len(),
-            MAX_FAMILY_SIZE,
-            "result must be capped at exactly MAX_FAMILY_SIZE"
-        );
-        assert!(
-            truncated,
-            "exceeding the cap must be reported, never silently swallowed"
-        );
-    }
-
-    /// Companion to the cap test: exactly `MAX_FAMILY_SIZE` matches (not
-    /// one more) must NOT report truncation -- the boundary is "strictly
-    /// more than the cap", not "at or above it".
-    #[test]
-    fn overrides_of_does_not_report_truncation_when_exactly_at_the_cap() {
-        let (index, pool) = single_interface_family_fixture(MAX_FAMILY_SIZE);
-        let (overrides, truncated) = index.overrides_of("Repo", &pool);
-        assert_eq!(overrides.len(), MAX_FAMILY_SIZE);
-        assert!(
-            !truncated,
-            "exactly-at-cap must not be reported as truncated"
-        );
-    }
-
-    fn file_with(
-        file_id: u32,
-        inheritance: Vec<InheritanceRecord>,
-        interface_names: Vec<String>,
-    ) -> FileForBind {
-        let mut index = LocalIndex::new();
-        index.inheritance = inheritance;
-        index.interface_names = interface_names;
-        FileForBind {
-            file_id,
-            language: "java".to_string(),
-            index,
-        }
-    }
-
-    /// AC1: a class that `implements` an interface is a direct
-    /// implementor; a class that `extends` that implementor is a
-    /// TRANSITIVE implementor -- both must be found.
-    #[test]
-    fn implementors_of_finds_direct_and_transitive_implementors() {
-        let files = vec![file_with(
-            1,
-            vec![
-                edge("C", "I", InheritanceKind::Implements),
-                edge("D", "C", InheritanceKind::Extends),
-            ],
-            vec!["I".to_string()],
-        )];
-        let index = TypeIndex::build(&files);
-        let implementors = index.implementors_of("I");
-        assert!(implementors.contains("C"));
-        assert!(implementors.contains("D"));
-        assert_eq!(implementors.len(), 2);
-    }
-
-    /// AC1: a name with NO implementors anywhere in the repo returns an
-    /// EMPTY set, never a fabricated guess.
-    #[test]
-    fn implementors_of_returns_empty_for_a_name_with_no_implementors() {
-        let files = vec![file_with(1, Vec::new(), vec!["Lonely".to_string()])];
-        let index = TypeIndex::build(&files);
-        assert!(index.implementors_of("Lonely").is_empty());
-    }
-
-    /// AC1 + Rule 14 (anti-unbounded-loop): diamond inheritance (two
-    /// sub-interfaces of `I`, both implemented by the SAME class `C`)
-    /// must converge on `C` exactly once, not loop or double-count.
-    #[test]
-    fn implementors_of_converges_on_diamond_inheritance() {
-        let files = vec![file_with(
-            1,
-            vec![
-                edge("J", "I", InheritanceKind::Extends),
-                edge("K", "I", InheritanceKind::Extends),
-                edge("C", "J", InheritanceKind::Implements),
-                edge("C", "K", InheritanceKind::Implements),
-            ],
-            vec!["I".to_string(), "J".to_string(), "K".to_string()],
-        )];
-        let index = TypeIndex::build(&files);
-        let implementors = index.implementors_of("I");
-        assert_eq!(
-            implementors,
-            ["J", "K", "C"].into_iter().map(String::from).collect()
-        );
-    }
-
-    /// AC1 + Rule 14: a malformed/adversarial CYCLIC inheritance edge set
-    /// (never valid real Java, but the binder must not trust its own
-    /// heuristic extraction to always be well-formed) must still
-    /// terminate -- this test itself times out (fails to return) rather
-    /// than failing an assertion if the implementation loops forever.
-    #[test]
-    fn implementors_of_terminates_on_a_cyclic_edge_set() {
-        let files = vec![file_with(
-            1,
-            vec![
-                edge("B", "A", InheritanceKind::Extends),
-                edge("A", "B", InheritanceKind::Extends),
-            ],
-            Vec::new(),
-        )];
-        let index = TypeIndex::build(&files);
-        let implementors = index.implementors_of("A");
-        assert_eq!(implementors, ["B"].into_iter().map(String::from).collect());
-    }
-
-    /// AC1/AC3 (Story #1806, S2b): a class that `implements` an interface
-    /// has that interface as a direct supertype; a class that `extends`
-    /// that implementor has the interface as a TRANSITIVE supertype --
-    /// both must be found. Mirrors `implementors_of_finds_direct_and_
-    /// transitive_implementors` exactly, walking the OPPOSITE direction.
-    #[test]
-    fn supertypes_of_finds_direct_and_transitive_supertypes() {
-        let files = vec![file_with(
-            1,
-            vec![
-                edge("C", "I", InheritanceKind::Implements),
-                edge("D", "C", InheritanceKind::Extends),
-            ],
-            vec!["I".to_string()],
-        )];
-        let index = TypeIndex::build(&files);
-        let supertypes = index.supertypes_of("D");
-        assert!(supertypes.contains("C"));
-        assert!(supertypes.contains("I"));
-        assert_eq!(supertypes.len(), 2);
-    }
-
-    /// AC1/AC3: a type with NO declared supertypes anywhere in the repo
-    /// returns an EMPTY set, never a fabricated guess.
-    #[test]
-    fn supertypes_of_returns_empty_for_a_type_with_no_declared_supertypes() {
-        let files = vec![file_with(1, Vec::new(), vec!["Lonely".to_string()])];
-        let index = TypeIndex::build(&files);
-        assert!(index.supertypes_of("Lonely").is_empty());
-    }
-
-    /// AC1/AC3 + Rule 14: a malformed/adversarial CYCLIC inheritance edge
-    /// set must still terminate -- this test itself times out (fails to
-    /// return) rather than failing an assertion if the implementation
-    /// loops forever.
-    #[test]
-    fn supertypes_of_terminates_on_a_cyclic_edge_set() {
-        let files = vec![file_with(
-            1,
-            vec![
-                edge("B", "A", InheritanceKind::Extends),
-                edge("A", "B", InheritanceKind::Extends),
-            ],
-            Vec::new(),
-        )];
-        let index = TypeIndex::build(&files);
-        let supertypes = index.supertypes_of("B");
-        assert_eq!(supertypes, ["A"].into_iter().map(String::from).collect());
-    }
-
-    #[test]
-    fn is_interface_reports_known_interfaces_and_false_for_unknown_names() {
-        let files = vec![file_with(1, Vec::new(), vec!["Shape".to_string()])];
-        let index = TypeIndex::build(&files);
-        assert!(index.is_interface("Shape"));
-        assert!(!index.is_interface("NotAnInterface"));
-    }
-
-    /// P1-4 (#1898 code review): the substrate AC3's static-type receiver
-    /// resolution needs -- "is this bare identifier the name of a type
-    /// declared ANYWHERE in the repo", built from the SAME `type_nesting`
-    /// records `top_level_of` already reads, so no third parallel index of
-    /// declared type names is introduced. Two SEPARATE files, each
-    /// declaring a DIFFERENT type, prove this is a genuinely repo-wide
-    /// (not single-file) query.
-    #[test]
-    fn is_known_type_name_reports_every_declared_type_and_false_for_unknown_names() {
-        let mut index_a = LocalIndex::new();
-        index_a.type_nesting.push(TypeNestingRecord {
-            type_name: "TimeUtil".to_string(),
-            top_level_type: "TimeUtil".to_string(),
-        });
-        let mut index_b = LocalIndex::new();
-        index_b.type_nesting.push(TypeNestingRecord {
-            type_name: "ParserA".to_string(),
-            top_level_type: "ParserA".to_string(),
-        });
-        let files = vec![
-            FileForBind {
-                file_id: 1,
-                language: "java".to_string(),
-                index: index_a,
-            },
-            FileForBind {
-                file_id: 2,
-                language: "java".to_string(),
-                index: index_b,
-            },
-        ];
-        let type_index = TypeIndex::build(&files);
-        assert!(type_index.is_known_type_name("TimeUtil"));
-        assert!(type_index.is_known_type_name("ParserA"));
-        assert!(!type_index.is_known_type_name("NeverDeclared"));
-    }
-
-    /// P1-B (#1898 code review round 2, epic #1906): `is_known_field_name`
-    /// must see a field declared in ANY file, repo-wide -- the exact
-    /// substrate an inner-class field access or an inherited field (both
-    /// P1-B's own regression fixtures) needs, since the field's OWN
-    /// `field_declaration` may live in a different file from the call
-    /// site that reads it.
-    #[test]
-    fn is_known_field_name_reports_every_declared_field_and_false_for_unknown_names() {
-        use crate::graph::extract::local_index::{NameScope, TypedNameRecord};
-
-        let mut index_a = LocalIndex::new();
-        index_a.typed_names.push(TypedNameRecord {
-            name: "outerField".to_string(),
-            declared_type: "int".to_string(),
-            scope: NameScope::Field {
-                enclosing_type: "Outer".to_string(),
-            },
-        });
-        let mut index_b = LocalIndex::new();
-        index_b.typed_names.push(TypedNameRecord {
-            name: "count".to_string(),
-            declared_type: "int".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: make_symbol_id(2, 0),
-            },
-        });
-        let files = vec![
-            FileForBind {
-                file_id: 1,
-                language: "java".to_string(),
-                index: index_a,
-            },
-            FileForBind {
-                file_id: 2,
-                language: "java".to_string(),
-                index: index_b,
-            },
-        ];
-        let type_index = TypeIndex::build(&files);
-        assert!(type_index.is_known_field_name("outerField"));
-        assert!(
-            !type_index.is_known_field_name("count"),
-            "a LOCAL-scoped typed name must never be reported as a known field"
-        );
-        assert!(!type_index.is_known_field_name("neverDeclared"));
-    }
-
-    /// P1-A (#1898 code review round 2, epic #1906): `is_known_type_
-    /// parameter_name` must see a type parameter declared in ANY file,
-    /// repo-wide -- mirrors `is_known_field_name`'s own repo-wide test
-    /// exactly.
-    #[test]
-    fn is_known_type_parameter_name_reports_every_declared_type_parameter_and_false_for_unknown_names(
-    ) {
-        let mut index_a = LocalIndex::new();
-        index_a.type_parameter_names.push("T".to_string());
-        let index_b = LocalIndex::new();
-        let files = vec![
-            FileForBind {
-                file_id: 1,
-                language: "java".to_string(),
-                index: index_a,
-            },
-            FileForBind {
-                file_id: 2,
-                language: "java".to_string(),
-                index: index_b,
-            },
-        ];
-        let type_index = TypeIndex::build(&files);
-        assert!(type_index.is_known_type_parameter_name("T"));
-        assert!(!type_index.is_known_type_parameter_name("NeverDeclared"));
-    }
-
-    /// P1-B (#1898 code review round 2, epic #1906): `unambiguous_field_
-    /// type` must resolve a field declared in a DIFFERENT file from the
-    /// caller (the "inherited field" P1-B shape) when every record for
-    /// that bare name agrees, and return `None` when two unrelated
-    /// records disagree on the type (never guessed) or the name is
-    /// simply unknown.
-    #[test]
-    fn unambiguous_field_type_resolves_a_field_declared_in_a_different_file_and_returns_none_on_conflict(
-    ) {
-        use crate::graph::extract::local_index::{NameScope, TypedNameRecord};
-
-        let field_file = |id: u32, owner: &str, name: &str, ty: &str| {
-            let mut index = LocalIndex::new();
-            index.typed_names.push(TypedNameRecord {
-                name: name.to_string(),
-                declared_type: ty.to_string(),
-                scope: NameScope::Field {
-                    enclosing_type: owner.to_string(),
-                },
-            });
-            FileForBind { file_id: id, language: "java".to_string(), index }
-        };
-        let files = vec![
-            field_file(1, "Base", "inheritedField", "Svc"),
-            field_file(2, "A", "conflicting", "int"),
-            field_file(3, "B", "conflicting", "String"),
-        ];
-        let type_index = TypeIndex::build(&files);
-        assert_eq!(
-            type_index.unambiguous_field_type("inheritedField"),
-            Some("Svc")
-        );
-        assert_eq!(
-            type_index.unambiguous_field_type("conflicting"),
-            None,
-            "two unrelated fields sharing a bare name but disagreeing on type must never \
-             resolve to either guessed type"
-        );
-        assert_eq!(type_index.unambiguous_field_type("neverDeclared"), None);
-    }
-}
+#[cfg(test)]
+#[path = "families_transitive_supertype_tests.rs"]
+mod transitive_supertype_tests;

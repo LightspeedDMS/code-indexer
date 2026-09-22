@@ -15,7 +15,7 @@
 use super::families::TypeIndex;
 use super::name_index::RepoNameIndex;
 use crate::graph::extract::local_index::{
-    DeclarationKind, ImportKind, ImportRecord, NameScope, ReceiverExpr, TypedNameRecord,
+    DeclarationKind, NameScope, ReceiverExpr, TypedNameRecord,
 };
 use crate::graph::identity::SymbolId;
 use std::collections::HashMap;
@@ -409,188 +409,6 @@ impl ReceiverEvidence {
     }
 }
 
-/// #1922 (supersedes #1893): is `name` DEFINITELY a TYPE-shaped qualifier
-/// -- i.e. this invocation/method-reference's receiver is a bare
-/// identifier that (a) follows Java's class-naming convention (starts
-/// with an uppercase letter -- the same convention-based discriminator
-/// `crate::graph::extract::kotlin::starts_with_uppercase` already trusts
-/// for an analogous constructor-vs-call ambiguity), (b) carries NO
-/// local/parameter/field evidence anywhere THIS FILE's `typed_names`
-/// substrate can see (`typed_names.lookup` returns exactly `LocalLookup::
-/// Missing` -- never `Found`, which means a real local/param/field
-/// shadows the type name and this is an ordinary instance receiver, and
-/// never the unsafe-to-trust `Ambiguous`), (c) is not a known FIELD
-/// name anywhere in the repo (`TypeIndex::is_known_field_name`, the same
-/// repo-wide guard `resolve_identifier_receiver`'s own static-type-name
-/// fallback already trusts, reused rather than duplicated -- Rule 4), and
-/// (d) is not explicitly named by a SINGLE-MEMBER static import anywhere
-/// in this file (`is_statically_imported_member`).
-///
-/// Deliberately NOT the same question `resolve_receiver_type` answers:
-/// that function asks "what type does this identifier resolve to, if
-/// any" (and stays `Advisory` even for a confirmed in-repo type name,
-/// permanently, per #1910's salvage doctrine); this asks "is the call
-/// STRUCTURALLY qualified by a type reference at all", independent of
-/// whether that type turns out to be known in-repo or external. Both
-/// combine in `narrowing::apply_type_qualifier_narrowing`.
-///
-/// #1919 does NOT apply: no local-variable SCOPE analysis is performed
-/// here at all (no per-block/per-branch reasoning, no flow-scoping, no
-/// shadowing/obscuring rules) -- only a per-file exact-key lookup this
-/// binder already performs for an unrelated purpose, plus two closed,
-/// facts this file already computes or is handed (`is_known_field_name`
-/// repo-wide, the file's own static-import list). A lowercase qualifier
-/// (`helper.m()`) fails guard (a) immediately and this function returns
-/// `false`, leaving #1922's fix a no-op for it -- exactly the "keep
-/// today's behaviour" contract the issue requires for variable/field-
-/// shaped qualifiers. This is a CONSERVATIVE (never over-eager) check:
-/// `narrowing::apply_type_qualifier_narrowing` never treats a `false`
-/// result as proof the receiver is NOT a type -- it only ever hard-
-/// narrows when this returns `true` AND the qualifier positively
-/// resolves AND a candidate already matches it, so a false `false` here
-/// costs evidence precision only, never a dropped edge.
-pub(crate) fn is_definite_type_qualifier(
-    name: &str,
-    enclosing_type: Option<&str>,
-    enclosing_method: Option<SymbolId>,
-    typed_names: &FileTypedNames,
-    type_index: &TypeIndex,
-    imports: &[ImportRecord],
-) -> bool {
-    if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
-        return false;
-    }
-    // #1922: a captured local declared in an outer,
-    // lexically-enclosing method is looked up under the WRONG (inner)
-    // enclosing-method key by `lookup` below and reports a FALSE
-    // `Missing` -- see `has_any_local_binding`'s own doc comment for the
-    // full explanation. This wider, file-scoped existence check
-    // MUST run first: it is what keeps `Helper.helper()` (`Helper` a
-    // captured `final Target Helper = ...;` local, read inside an
-    // anonymous `Runnable`) from being wrongly promoted to a type
-    // qualifier just because `lookup`'s narrower key misses it.
-    if typed_names.has_any_local_binding(name) {
-        return false;
-    }
-    if typed_names.lookup(enclosing_method, enclosing_type, name) != LocalLookup::Missing {
-        return false;
-    }
-    if type_index.is_known_field_name(name) {
-        return false;
-    }
-    // #1922: a SINGLE-MEMBER static import (`import static
-    // ext.Holder.CONSTANT;`) explicitly declares, by the import statement
-    // itself, that `name` is a MEMBER (field or method) of an external
-    // class -- never a type -- regardless of whether it also
-    // coincidentally matches an in-repo type's bare name.
-    // `is_known_field_name` cannot see this (it only indexes fields
-    // declared INSIDE this repo); the import list is the substrate that
-    // proves it for an external member.
-    !is_statically_imported_member(name, imports)
-}
-
-/// #1922: true when `name` is imported via a SINGLE-MEMBER static
-/// import (`ImportKind::Static`) anywhere in this file's own import list
-/// -- e.g. `import static ext.Holder.CONSTANT;`. Sole consumer:
-/// `is_definite_type_qualifier`'s guard against treating an externally
-/// static-imported member as a type reference. `ImportKind::
-/// StaticWildcard` (`import static pkg.Util.*;`) is deliberately NOT
-/// consulted HERE: it names no specific member, so there is nothing to
-/// positively match `name` against without guessing -- `has_static_
-/// wildcard_import` below handles that shape separately and more
-/// coarsely, at the WHOLE-FILE level, rather than trying to name-match
-/// against an unknown wildcard target. Bounded loop (Rule 14): iterates
-/// at most `imports.len()` times, finite and fixed by this file's own
-/// already-extracted import list.
-fn is_statically_imported_member(name: &str, imports: &[ImportRecord]) -> bool {
-    imports.iter().any(|import| {
-        import.kind == ImportKind::Static && import.path.rsplit('.').next() == Some(name)
-    })
-}
-
-/// #1922: a static WILDCARD import (`import static x.Holder.*;`) can
-/// bring ANY member of `Holder` -- including an uppercase FIELD -- into
-/// scope without naming it. Unlike a single-member static import, there
-/// is no specific name to check `is_statically_imported_member` against:
-/// the import statement alone proves nothing about any PARTICULAR
-/// identifier, so the only sound response is to disable hard-narrowing
-/// for the WHOLE FILE whenever one is present -- see `file_is_safe_for_
-/// type_qualifier_narrowing`, this function's sole consumer. Bounded
-/// loop (Rule 14): iterates at most `imports.len()` times.
-pub(crate) fn has_static_wildcard_import(imports: &[ImportRecord]) -> bool {
-    imports
-        .iter()
-        .any(|import| import.kind == ImportKind::StaticWildcard)
-}
-
-/// #1922: matching a supertype's name against a repo-wide or file-wide
-/// set of DECLARED type names -- by bare name, cross-file or otherwise --
-/// is never sound evidence for this guard. A file can declare its own
-/// unrelated type sharing the exact bare name of the call's REAL,
-/// externally-qualified supertype (`Sub extends com.example.lib.Base`
-/// where this file ALSO happens to declare its own unrelated `static
-/// class Base {}`), or the real supertype can be reached only through a
-/// sibling nested class's own child, or through an anonymous class body
-/// (`new com.example.lib.Base() { ... }`), or through no import at all
-/// (implicit same-package resolution) -- every one of these can make a
-/// name-based "is this supertype declared somewhere I can see" check
-/// pass while the REAL supertype (the one actually declaring the
-/// shadowing field) stays invisible to this binder.
-///
-/// So this guard asks a strictly SYNTACTIC question instead of a
-/// name-resolution one: does ANY type declared in this file -- including
-/// a nested, local, or anonymous class -- carry ANY explicit `extends`/
-/// `implements` clause at all, or unresolvable supertype evidence?
-/// `LocalIndex::inheritance` records exactly one entry per such clause
-/// (`java.rs`'s own extraction, including the synthetic edge
-/// `anonymous_body_context` pushes for an anonymous class body), and
-/// `LocalIndex::incomplete_supertypes` records a clause the extractor
-/// could not resolve to a name at all -- both are already scoped to
-/// types declared IN THIS FILE by construction (extraction never
-/// attributes a clause to a type declared elsewhere). If either is
-/// non-empty, hard-narrowing is unsafe for the WHOLE file: there is
-/// SOME supertype somewhere in it that could carry an inherited field
-/// shadowing a qualifier, and this binder has no way to rule that out by
-/// name alone.
-///
-/// An enum/record with NO explicit `implements` clause passes trivially
-/// (its implicit `Enum<T>`/`Record` supertype is never recorded as an
-/// inheritance edge at all, since the grammar exposes no `superclass`
-/// node for either -- and neither implicit supertype can ever contribute
-/// an uppercase field visible at a qualifier position); one WITH an
-/// explicit `implements` clause records a real edge and correctly
-/// disables the guard. An ordinary static facade (`class A { static R
-/// m(x) { return B.m(x); } }`, or any class with no `extends`/
-/// `implements` clause at all) also passes trivially and still
-/// hard-narrows.
-pub(crate) fn file_has_no_supertype_evidence(
-    file_index: &crate::graph::extract::local_index::LocalIndex,
-) -> bool {
-    file_index.inheritance.is_empty() && file_index.incomplete_supertypes.is_empty()
-}
-
-/// #1922: true when THIS FILE is safe for type-qualifier hard-narrowing
-/// at all -- three guards ANDed together: no syntax error anywhere in
-/// the file's tree (`LocalIndex::has_syntax_error` -- a node inside a
-/// tree-sitter ERROR subtree is silently absent from EVERY extraction
-/// pass, never visited and never recorded, so a binding this narrowing
-/// depends on can be invisible for a reason no other guard here can see;
-/// checked FIRST, an O(1) field read, never a second AST walk), no
-/// static wildcard import anywhere in the file (`has_static_wildcard_
-/// import`), AND no type declared in the file carries any supertype
-/// evidence at all (`file_has_no_supertype_evidence`). Computed ONCE per
-/// file (`mod.rs`, alongside `FileTypedNames::build`) and reused for
-/// every invocation site in it -- none of the three depend on the
-/// specific call site being resolved.
-pub(crate) fn file_is_safe_for_type_qualifier_narrowing(
-    file_index: &crate::graph::extract::local_index::LocalIndex,
-    imports: &[ImportRecord],
-) -> bool {
-    !file_index.has_syntax_error
-        && !has_static_wildcard_import(imports)
-        && file_has_no_supertype_evidence(file_index)
-}
-
 /// AC1/AC2: resolves `receiver`'s declared type, given the call site's
 /// own context. `enclosing_type`/`enclosing_method` are the CALL SITE's
 /// own context: used both for `ReceiverExpr::None`/`SelfOrSuper` ("this
@@ -766,6 +584,18 @@ fn resolve_receiver_base(
             resolve_identifier_receiver(name, enclosing_type, enclosing_method, typed_names, type_index)
         }
         ReceiverExpr::Other => ReceiverEvidence::None,
+        // #1931: a dotted qualifier reached as the BASE of a `Chained`
+        // wrapper (e.g. `Outer.Inner.build().foo()`) is deliberately OUT
+        // of scope for chain-following -- mirrors the exact same
+        // narrower-than-general-resolution limit `mod.rs`'s own
+        // `receiver_is_type_qualifier` comment already documents for a
+        // bare `Identifier` under a `Chained` wrapper ("a Chained
+        // receiver's own type is inferred via return-type chaining, not a
+        // bare qualifier the source itself wrote"). `resolve_dotted_
+        // qualifier_type` is the sole resolver for a DIRECT dotted
+        // qualifier, called straight from `mod.rs`, never through this
+        // function.
+        ReceiverExpr::DottedQualifier(_) => ReceiverEvidence::None,
         ReceiverExpr::Chained { .. } => {
             unreachable!("the caller strips every Chained layer before calling this")
         }

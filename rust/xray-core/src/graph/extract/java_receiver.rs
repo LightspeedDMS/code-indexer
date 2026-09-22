@@ -99,6 +99,10 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
                     None => break ReceiverExpr::None,
                 }
             }
+            "field_access" => match build_dotted_qualifier_segments(node) {
+                Some(segments) => break ReceiverExpr::DottedQualifier(segments),
+                None => return ReceiverExpr::Other,
+            },
             _ => return ReceiverExpr::Other,
         }
     };
@@ -109,6 +113,58 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
             method_name,
             receiver: Box::new(acc),
         })
+}
+
+/// #1931: walks a `field_access` chain's SEGMENTS -- `Outer.Inner` ->
+/// `["Outer", "Inner"]`, `com.example.Target` -> `["com", "example",
+/// "Target"]` -- structurally, never by splitting raw source text (same
+/// discipline `java_type_names`'s own qualified-name helpers document).
+/// Verified real tree-sitter-java grammar shape: `field_access` has
+/// exactly two named children, `object` and `field`, in that order;
+/// `field` is an `identifier` for an ordinary member/type-name segment,
+/// but can also be the KEYWORD node `this` for a qualified enclosing-
+/// instance reference (`Outer.this`) -- that shape is NOT a dotted type
+/// qualifier at all (it denotes an object reference, not a further type
+/// segment) and this function returns `None` for it, never fabricating a
+/// segment out of a keyword. `object` itself may be a plain `identifier`
+/// (the chain's base) or another `field_access` (one more dotted level) --
+/// any other `object` kind (a method call, `this`, `super`, a
+/// parenthesized/cast expression, ...) means this chain does not denote a
+/// pure dotted name and returns `None`.
+///
+/// Bounded, non-recursive walk (Rule 14, mirroring `build_receiver_expr`
+/// itself): each iteration either terminates (an `identifier` base, or a
+/// disqualifying shape) or descends one `field_access` level, up to
+/// `MAX_RECEIVER_CHAIN_DEPTH` times -- the SAME cap `build_receiver_expr`
+/// already enforces for a chained-call receiver, reused here rather than
+/// a second, independent bound (Rule 4, anti-duplication).
+fn build_dotted_qualifier_segments(start: &OwnedNode) -> Option<Vec<String>> {
+    let mut node = start;
+    let mut segments: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        depth += 1;
+        if depth > MAX_RECEIVER_CHAIN_DEPTH {
+            return None;
+        }
+        match node.kind.as_str() {
+            "identifier" => {
+                segments.push(node.text().to_string());
+                break;
+            }
+            "field_access" => {
+                let named = node.named_children();
+                if named.len() != 2 || named[1].kind != "identifier" {
+                    return None;
+                }
+                segments.push(named[1].text().to_string());
+                node = named[0];
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments)
 }
 
 /// AC2 (Story #1806, S2b): a `method_declaration`'s declared return type
@@ -791,6 +847,62 @@ mod tests {
             None,
             "an underscore-pattern component introduces no binding and must yield no record"
         );
+    }
+
+    /// #1931: a TWO-SEGMENT dotted qualifier (`Outer.Inner.goD()`) must
+    /// capture BOTH segments, in source order, as a `DottedQualifier` --
+    /// never collapsed to `Other` the way HEAD's extraction (which only
+    /// recognises a bare `identifier` object) does. This is the exact
+    /// repro shape from issue #1931: `Outer.Inner.goD` currently reports
+    /// `callers=0` because the receiver never participates in
+    /// type-qualifier binding at all.
+    #[test]
+    fn build_receiver_expr_recognizes_a_two_segment_dotted_qualifier_chain() {
+        let invocation = parse_first_invocation(
+            "class Caller {\n    void run() {\n        Outer.Inner.goD();\n    }\n}\n",
+        );
+        let (object, name) = invocation_object_and_name(&invocation);
+        assert_eq!(name.unwrap().text(), "goD");
+        let receiver = build_receiver_expr(object.expect("Outer.Inner.goD() has an object"));
+        assert_eq!(
+            receiver,
+            ReceiverExpr::DottedQualifier(vec!["Outer".to_string(), "Inner".to_string()])
+        );
+    }
+
+    /// #1931: a fully-qualified THREE-segment chain
+    /// (`com.example.Target.m()`) must capture every segment, in order.
+    #[test]
+    fn build_receiver_expr_recognizes_a_three_segment_dotted_qualifier_chain() {
+        let invocation = parse_first_invocation(
+            "class Caller {\n    void run() {\n        com.example.Target.m();\n    }\n}\n",
+        );
+        let (object, _name) = invocation_object_and_name(&invocation);
+        let receiver = build_receiver_expr(object.expect("com.example.Target.m() has an object"));
+        assert_eq!(
+            receiver,
+            ReceiverExpr::DottedQualifier(vec![
+                "com".to_string(),
+                "example".to_string(),
+                "Target".to_string(),
+            ])
+        );
+    }
+
+    /// #1931: a qualified `Outer.this.foo()` reference is NOT a dotted
+    /// TYPE qualifier at all (`Outer.this` denotes an enclosing-instance
+    /// reference) -- the base of the chain is the `this` keyword, not a
+    /// plain identifier, so this must stay `Other`, never a fabricated
+    /// `DottedQualifier` that would misrepresent an instance reference as
+    /// a type reference.
+    #[test]
+    fn build_receiver_expr_returns_other_for_a_qualified_this_reference() {
+        let invocation = parse_first_invocation(
+            "class Outer {\n    class Inner {\n        void run() {\n            Outer.this.foo();\n        }\n    }\n}\n",
+        );
+        let (object, _name) = invocation_object_and_name(&invocation);
+        let receiver = build_receiver_expr(object.expect("Outer.this.foo() has an object"));
+        assert_eq!(receiver, ReceiverExpr::Other);
     }
 
     /// AC1: `int a, b;` yields TWO `TypedNameRecord`s (one per

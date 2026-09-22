@@ -624,21 +624,44 @@ pub(super) fn apply_receiver_type_narrowing(
 /// the resolved type's own supertype evidence is incomplete, so the
 /// tagged subset is trivially empty in that case too, and this pass
 /// already treats an empty subset as a no-op.
+/// #1931 rework: returns `true` exactly when this pass's `retain` step
+/// FIRED -- i.e. the qualifier POSITIVELY matched (`receiver_is_type_
+/// qualifier` AND a real `receiver_type` AND at least one candidate
+/// already carries `RECEIVER_TYPE_MATCH`) -- `false` for every no-op
+/// branch. Deliberately NOT "did the candidate COUNT shrink": when every
+/// surviving candidate already carried the tag, `retain` removes zero
+/// elements but the pool is EQUALLY qualifier-confirmed as when it
+/// removes some -- the caller's own decision (see below) depends on
+/// "was this pool authoritatively confirmed by the qualifier", not on
+/// whether that confirmation happened to be a no-op removal-wise.
+///
+/// Sole consumer: `resolve_reference`'s own decision to SKIP `apply_
+/// import_context_narrowing` for this reference -- see that call site's
+/// own comment for why a `true` return here must suppress it (the
+/// ordering fix alone, "run type-qualifier narrowing before import-
+/// context narrowing", is insufficient whenever the qualifier's bare
+/// name collides with MORE than one candidate: e.g. two same-bare-name
+/// `Target` types in different packages both earn `RECEIVER_TYPE_MATCH`
+/// and both survive THIS pass, but only the SAME-FILE one then survives
+/// `apply_import_context_narrowing`, silently discarding the real,
+/// fully-qualified, cross-package target even though the call's OWN
+/// qualifier already positively confirmed it).
 pub(super) fn apply_type_qualifier_narrowing(
     candidates: &mut Vec<(DeclInfo, u16)>,
     receiver_is_type_qualifier: bool,
     receiver_type: Option<&str>,
-) {
+) -> bool {
     if !receiver_is_type_qualifier || receiver_type.is_none() {
-        return;
+        return false;
     }
     let has_positive_match = candidates
         .iter()
         .any(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH != 0);
     if !has_positive_match {
-        return;
+        return false;
     }
     candidates.retain(|(_, bits)| bits & reasons::RECEIVER_TYPE_MATCH != 0);
+    true
 }
 
 /// AC3 (Story #1806, S2b): "unqualified calls resolve against the

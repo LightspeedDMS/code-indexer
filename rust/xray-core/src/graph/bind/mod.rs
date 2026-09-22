@@ -30,6 +30,7 @@ mod name_index;
 mod narrowing;
 mod receiver_mismatch;
 mod receiver;
+mod receiver_type_qualifier;
 mod resolve;
 mod scope;
 
@@ -296,7 +297,7 @@ fn resolve_all_references(
             .with_qualified_non_java_lang_parameters(&file.index.qualified_non_java_lang_parameter_types);
         // #1922: computed ONCE per file, not per call site -- neither
         // check depends on which specific invocation is being resolved.
-        // See `receiver::file_is_safe_for_type_qualifier_narrowing`'s own
+        // See `receiver_type_qualifier::file_is_safe_for_type_qualifier_narrowing`'s own
         // doc comment for exactly what this guards against: an invisible
         // inherited field could be declared on ANY supertype anywhere in
         // this file (a same-file type sharing the real supertype's bare
@@ -306,7 +307,7 @@ fn resolve_all_references(
         // extends/implements clause at all, or a static wildcard import
         // that could bring an unnamed field into scope.
         let file_safe_for_type_qualifier_narrowing = file.language == "java"
-            && receiver::file_is_safe_for_type_qualifier_narrowing(&file.index, &scope.imports);
+            && receiver_type_qualifier::file_is_safe_for_type_qualifier_narrowing(&file.index, &scope.imports);
         // #1924 (p24): computed ONCE per file, not per call site -- true
         // when ANY type declared anywhere in this file has an unresolved
         // external supertype, regardless of nesting depth relative to a
@@ -349,6 +350,30 @@ fn resolve_all_references(
                         &typed_names,
                         name_index,
                         type_index,
+                    )
+                }
+                // #1931: a DOTTED qualifier (`Outer.Inner`, `com.example.
+                // Target`) resolved via its own, separate resolver --
+                // `resolve_dotted_qualifier_type` never chain-follows and
+                // needs `name_index` for its fully-qualified rule, unlike
+                // `resolve_receiver_type` above (see that function's own
+                // doc comment for why a `DottedQualifier` reached as a
+                // `Chained` base is deliberately out of scope). This call
+                // is UNCONDITIONAL -- unaffected by `file_safe_for_type_
+                // qualifier_narrowing` below -- exactly mirroring how
+                // `resolve_receiver_type` above also runs regardless of
+                // that flag: the resulting evidence only ever feeds the
+                // TAG-ONLY `RECEIVER_TYPE_MATCH` pipeline (`apply_
+                // receiver_type_narrowing`, never deletes) here; it is
+                // ONLY `receiver_is_type_qualifier` below (the actual
+                // HARD-narrow trigger) that is gated on file safety.
+                crate::graph::extract::local_index::ReceiverExpr::DottedQualifier(segments) => {
+                    receiver_type_qualifier::resolve_dotted_qualifier_type(
+                        segments,
+                        &typed_names,
+                        type_index,
+                        name_index,
+                        &scope.imports,
                     )
                 }
                 crate::graph::extract::local_index::ReceiverExpr::None
@@ -431,7 +456,7 @@ fn resolve_all_references(
             let receiver_is_type_qualifier = if file_safe_for_type_qualifier_narrowing {
                 match &site.receiver {
                     crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => {
-                        receiver::is_definite_type_qualifier(
+                        receiver_type_qualifier::is_definite_type_qualifier(
                             name,
                             site.enclosing_type.as_deref(),
                             site.enclosing_method,
@@ -439,6 +464,18 @@ fn resolve_all_references(
                             type_index,
                             &scope.imports,
                         )
+                    }
+                    // #1931: a dotted qualifier's own resolver already
+                    // embeds every guard `is_definite_type_qualifier`
+                    // enforces (first-segment shadowing, known field,
+                    // static import) as an intrinsic part of proving
+                    // POSITIVE resolution -- there is no separate
+                    // "structurally a type reference but unresolved"
+                    // state to represent here, unlike the bare-identifier
+                    // case, so `is_positive()` alone is the complete
+                    // answer.
+                    crate::graph::extract::local_index::ReceiverExpr::DottedQualifier(_) => {
+                        receiver_evidence.is_positive()
                     }
                     _ => false,
                 }

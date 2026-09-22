@@ -406,10 +406,33 @@ pub(crate) fn resolve_reference(
     // instead; see a static-facade shape, `class A { static R m(X x) {
     // return B.m(x); } }` alongside `class B { static R m(X x) {...} }`,
     // called from inside `A` itself).
-    apply_type_qualifier_narrowing(&mut with_reasons, receiver_is_type_qualifier, receiver_type);
+    //
+    // #1931 rework: the ORDERING fix above is not sufficient on its own
+    // whenever the qualifier's bare name collides with MORE than one
+    // candidate (this binder is bare-name-keyed throughout) -- e.g. two
+    // same-bare-name `Target` types in different packages both earn
+    // `RECEIVER_TYPE_MATCH` and both survive `apply_type_qualifier_
+    // narrowing`, but `apply_import_context_narrowing` would then STILL
+    // get a second, unwanted crack at that ALREADY-confirmed pool and
+    // narrow it AGAIN down to whichever one happens to carry a SAME_FILE/
+    // SAME_PACKAGE/import bit -- silently discarding the real,
+    // fully-qualified, cross-package target even though the call's OWN
+    // qualifier already positively confirmed it (proven end to end by
+    // `bug_1931_all_segments_guard_regressions.rs`'s own `fqn_survives_
+    // a_same_bare_name_decoy_in_the_callers_own_file`). So: whenever
+    // `apply_type_qualifier_narrowing` itself fired (its own `bool`
+    // return), this reference's candidate pool is ALREADY authoritatively
+    // qualifier-confirmed -- import-context heuristics (tuned for
+    // resolving an UNQUALIFIED bare name, not a call the source itself
+    // already spelled out with an explicit type qualifier) must not run
+    // again on top of it.
+    let type_qualifier_confirmed =
+        apply_type_qualifier_narrowing(&mut with_reasons, receiver_is_type_qualifier, receiver_type);
     apply_same_class_or_super_narrowing(&mut with_reasons, same_class_context, type_index);
     apply_super_class_narrowing(&mut with_reasons, super_class_context, type_index);
-    apply_import_context_narrowing(&mut with_reasons);
+    if !type_qualifier_confirmed {
+        apply_import_context_narrowing(&mut with_reasons);
+    }
     apply_inheritance_family_expansion(&mut with_reasons, ref_kind, &full_pool, type_index);
     with_reasons
 }
