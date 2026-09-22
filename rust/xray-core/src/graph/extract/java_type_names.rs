@@ -108,6 +108,40 @@ pub(super) fn resolve_type_node_base_name(type_node: &OwnedNode) -> Option<Strin
     candidate.filter(|name| is_plausible_java_identifier(name))
 }
 
+/// #1924 (p12): the dotted QUALIFIER PREFIX a type node was explicitly
+/// written with -- `"com.lib"` for `com.lib.String`, `None` for a bare
+/// `String`. Resolved structurally: for `scoped_type_identifier`, every
+/// named child BEFORE the LAST `type_identifier` child (the final
+/// segment) already carries its own dots as raw text (a lowercase package
+/// chain parses as one `scoped_identifier` node; a nested-type qualifier
+/// as one nested `scoped_type_identifier` node), so joining those
+/// children's own text by `.` never needs to reconstruct a dot itself --
+/// the SAME "never split raw text" discipline `resolve_type_node_base_
+/// name` documents above, extended to the prefix instead of the final
+/// segment. `generic_type`/`annotated_type` recurse the same way
+/// `resolve_type_node_base_name` does. `None` for a bare `type_identifier`
+/// (never qualified) or any node shape this module does not resolve as a
+/// type at all -- an unresolved shape must never be treated as "proven
+/// unqualified", so callers pair this with `resolve_type_node_base_name`
+/// and treat a `None` name as no evidence either way.
+pub(super) fn qualified_prefix_of_type_node(type_node: &OwnedNode) -> Option<String> {
+    match type_node.kind.as_str() {
+        "scoped_type_identifier" => {
+            let named = type_node.named_children();
+            let last_index = named.iter().rposition(|c| c.kind == "type_identifier")?;
+            let prefix: Vec<String> = named[..last_index].iter().map(|c| c.text().to_string()).collect();
+            if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.join("."))
+            }
+        }
+        "generic_type" => type_node.child_by_kind("scoped_type_identifier").and_then(qualified_prefix_of_type_node),
+        "annotated_type" => type_node.named_children().into_iter().last().and_then(qualified_prefix_of_type_node),
+        _ => None,
+    }
+}
+
 /// Resolves a CONTAINER's (`superclass`, an `object_creation_expression`)
 /// direct child type node to its base name -- searches for the FIRST of
 /// `type_identifier`/`generic_type`/`scoped_type_identifier`/`annotated_type`

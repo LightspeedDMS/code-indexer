@@ -64,6 +64,8 @@ const VISIBILITY_RECORD_MIN_BYTES: usize = 5;
 const KIND_RECORD_MIN_BYTES: usize = 5;
 /// `dense_id`(4) + `file_string_id`(4) + `line`(4).
 const LOCATION_RECORD_MIN_BYTES: usize = 12;
+/// `dense_id`(4).
+const NON_INSTANTIABLE_CONSTRUCTOR_RECORD_MIN_BYTES: usize = 4;
 
 /// Writes `graph` to `path` in the AC7 wire format. Sections, in order:
 /// magic, references, candidates (recomputed from `candidates_for` in
@@ -71,7 +73,14 @@ const LOCATION_RECORD_MIN_BYTES: usize = 12;
 /// original flat arena), interned strings, interned symbols, referenced
 /// bits, per-symbol cached signatures, per-symbol visibility (Story
 /// #1835), per-symbol declaration kind (Bug #1858), per-symbol
-/// DECLARATION location (Bug #1900), completeness byte.
+/// DECLARATION location (Bug #1900), completeness byte, and (Bug #1926,
+/// epic #1906 P2 rework) a TRUE TRAILING, OPTIONAL per-symbol
+/// non-instantiable-constructor section -- unlike every section above,
+/// which is mandatory and positioned BEFORE the completeness byte, this
+/// one is appended AFTER it and its absence is a valid, backward-
+/// compatible file (`read_graph_file` treats "no more bytes" here as an
+/// empty set, never a corruption error), so no MAGIC bump was needed for
+/// this addition.
 pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     let mut w = io::BufWriter::new(std::fs::File::create(path)?);
     w.write_all(MAGIC)?;
@@ -83,6 +92,7 @@ pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     write_kinds(&mut w, graph)?;
     write_locations(&mut w, graph)?;
     w.write_all(&[completeness_to_byte(graph.completeness())])?;
+    write_non_instantiable_constructors(&mut w, graph)?;
     w.flush()
 }
 
@@ -218,6 +228,23 @@ fn write_locations(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
         w.write_all(&id.to_le_bytes())?;
         w.write_all(&file_string_id.to_le_bytes())?;
         w.write_all(&line.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Bug #1926: the true TRAILING, OPTIONAL section
+/// -- see `write_graph_file`'s doc comment for why this lives AFTER the
+/// completeness byte rather than alongside the other mandatory sections.
+fn write_non_instantiable_constructors(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<u32> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if graph.is_non_instantiable_constructor(id) {
+            present.push(id);
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for id in present {
+        w.write_all(&id.to_le_bytes())?;
     }
     Ok(())
 }
@@ -412,6 +439,24 @@ fn read_locations(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, 
     Ok(())
 }
 
+/// Bug #1926: mirrors `read_locations`'s bounds
+/// checking, but for the true trailing, optional section
+/// `write_non_instantiable_constructors` appends AFTER the completeness
+/// byte -- see `read_graph_file`'s own call site for why this is only
+/// ever invoked when the file genuinely carries these bytes.
+fn read_non_instantiable_constructors(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let count = read_count_capped(data, pos, NON_INSTANTIABLE_CONSTRUCTOR_RECORD_MIN_BYTES)?;
+    for _ in 0..count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("non-instantiable-constructor dense_id outside decoded symbol table"));
+        }
+        builder.add_non_instantiable_constructor(dense_id);
+    }
+    Ok(())
+}
+
 fn kind_from_byte(b: u8) -> Option<DeclarationKind> {
     match b {
         0 => Some(DeclarationKind::Type),
@@ -475,6 +520,15 @@ pub fn read_graph_file(path: &Path) -> io::Result<CodeGraph> {
         6 => AnalysisCompleteness::RepoIndexIncomplete,
         other => return Err(invalid(&format!("corrupt completeness byte: {other}"))),
     });
+    // Bug #1926: a TRUE TRAILING, OPTIONAL
+    // section -- a pre-#1926 file simply ends here (`pos == data.len()`),
+    // which is a valid, backward-compatible file (empty set), never a
+    // corruption error. Only a file that genuinely carries these bytes
+    // attempts to decode them (and still validates them like every other
+    // section, so a truncated/corrupt trailing section IS rejected).
+    if pos < data.len() {
+        read_non_instantiable_constructors(data, &mut pos, &mut builder, symbol_count)?;
+    }
     Ok(builder.build())
 }
 
@@ -700,6 +754,202 @@ mod tests {
             reloaded.kind_for(method_dense),
             Some(DeclarationKind::Method),
             "a Method symbol's declaration kind must survive the wire round trip too"
+        );
+    }
+
+    /// Bug #1926: mirrors `visibility_round_trips_through_a_real_file_via_
+    /// mmap` exactly, but for `is_non_instantiable_constructor` -- the
+    /// same `--graph-out`/`--graph-in` parent/child handoff is the ONLY
+    /// place `analyze_graph` ever actually reads a `CodeGraph` from in
+    /// production. Also proves `visibility_of()`/`visibility_for` still
+    /// reports `Private` for the qualifying symbol even after this fact is
+    /// attached and round-tripped -- this is a SEPARATE carried fact,
+    /// never a `Visibility` rewrite.
+    #[test]
+    fn non_instantiable_constructor_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let lone_ctor = builder.intern_symbol(make_symbol_id(5, 0));
+        let ordinary_private = builder.intern_symbol(make_symbol_id(5, 1));
+        builder.add_visibility(lone_ctor, Visibility::Private);
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(lone_ctor, DeclarationKind::Method);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        builder.add_non_instantiable_constructor(lone_ctor);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_non_instantiable_ctor.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let lone_ctor_dense = reloaded.dense_id_for(make_symbol_id(5, 0)).unwrap();
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(5, 1)).unwrap();
+        assert_eq!(
+            reloaded.visibility_for(lone_ctor_dense),
+            Visibility::Private,
+            "the non-instantiable-constructor fact must never rewrite the symbol's OWN declared visibility"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(lone_ctor_dense),
+            None,
+            "a lone non-instantiable constructor must be undecidable after the wire round trip"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private symbol must still be reported dead after the round trip"
+        );
+    }
+
+    /// Bug #1926: the non-instantiable-constructor
+    /// section is a TRUE TRAILING, OPTIONAL addition -- a file written by
+    /// PRE-#1926 code has no such bytes at all. Simulates that exact shape
+    /// by writing a real graph with ZERO qualifying symbols (whose own
+    /// trailing section is therefore exactly the 8-byte empty-count
+    /// prefix and nothing else) and then truncating those 8 bytes off the
+    /// file, reproducing a file that ends immediately after the
+    /// completeness byte -- byte-for-byte what a pre-#1926 writer
+    /// produced. `read_graph_file` must still succeed (no MAGIC bump, no
+    /// corruption error) and report no non-instantiable constructors.
+    #[test]
+    fn graph_file_with_no_trailing_section_at_all_reads_back_as_an_empty_set() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(6, 0));
+        // Bug #1926 (final round, item 4 "new-reader-on-old-file"): an
+        // ORDINARY unreferenced private method, unrelated to the new
+        // trailing section, must round-trip its dead-code verdict
+        // unchanged through a file that never carried this section at all.
+        let ordinary_private = builder.intern_symbol(make_symbol_id(6, 1));
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_old_format.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+
+        let mut bytes = std::fs::read(&path).expect("read back the written file");
+        assert!(bytes.len() >= 8, "the empty trailing section must be exactly the 8-byte count prefix");
+        bytes.truncate(bytes.len() - 8);
+        std::fs::write(&path, &bytes).expect("write the truncated, pre-#1926-shaped file");
+
+        let reloaded = read_graph_file(&path).expect("a file with no trailing section at all must still read successfully");
+        let dense = reloaded.dense_id_for(make_symbol_id(6, 0)).unwrap();
+        assert!(
+            !reloaded.is_non_instantiable_constructor(dense),
+            "a symbol from a pre-#1926-shaped file must never be reported non-instantiable"
+        );
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(6, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private method's dead-code verdict must survive reading a \
+             pre-#1926-shaped file completely unchanged"
+        );
+    }
+
+    /// Bug #1926, test-only: a byte-for-byte mirror of HEAD's (pre-#1926)
+    /// `read_graph_file` -- decodes through the completeness byte and
+    /// STOPS, never attempting to read the trailing non-instantiable-
+    /// constructor section this file may or may not carry. This is what
+    /// lets `old_reader_view_of_a_new_file_...` genuinely exercise "an old
+    /// reader binary given a real new-format file", rather than re-running
+    /// TODAY's reader (which already knows to tolerate a short file) on a
+    /// manually truncated one.
+    fn read_graph_file_pre_1926(path: &Path) -> io::Result<CodeGraph> {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: mmap(2) over a plain, caller-controlled regular file this
+        // process just opened read-only, written once and fully before
+        // this read ever starts.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let data: &[u8] = &mmap;
+        if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
+            return Err(invalid("graph file: bad magic number"));
+        }
+        let mut pos = MAGIC.len();
+
+        let (raw_references, raw_candidates) = read_references_and_candidates(data, &mut pos)?;
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(raw_candidates.len());
+        let symbol_count = read_strings_symbols_and_signatures(data, &mut pos, &mut builder)?;
+
+        for reference in &raw_references {
+            if reference.from as usize >= symbol_count {
+                return Err(invalid("reference.from outside decoded symbol table"));
+            }
+            let start = reference.cand_start as usize;
+            let end = start.checked_add(reference.cand_len as usize).ok_or_else(|| invalid("candidate window overflows"))?;
+            let window = raw_candidates.get(start..end).ok_or_else(|| invalid("candidate window out of bounds"))?;
+            let mut candidates = Vec::with_capacity(window.len());
+            for &(symbol, reasons) in window {
+                if symbol as usize >= symbol_count {
+                    return Err(invalid("candidate symbol outside decoded symbol table"));
+                }
+                candidates.push(Candidate::new(symbol, reasons));
+            }
+            builder.add_reference(reference.from, reference.file, reference.line, reference.kind, &candidates);
+        }
+
+        let completeness_byte = take(data, &mut pos, std::mem::size_of::<u8>())?[0];
+        builder.set_completeness(match completeness_byte {
+            0 => AnalysisCompleteness::Complete,
+            1 => AnalysisCompleteness::FactBudgetExceeded,
+            2 => AnalysisCompleteness::IndexBudgetExceeded,
+            3 => AnalysisCompleteness::DerivationTruncated,
+            4 => AnalysisCompleteness::ResolutionAmbiguous,
+            5 => AnalysisCompleteness::ParseErrorsPresent,
+            6 => AnalysisCompleteness::RepoIndexIncomplete,
+            other => return Err(invalid(&format!("corrupt completeness byte: {other}"))),
+        });
+        // Deliberately STOPS here -- pre-#1926 code has no idea a trailing
+        // section could follow, and never asks `pos < data.len()` at all.
+        Ok(builder.build())
+    }
+
+    /// Bug #1926 (old-reader-on-new-file): a reader built BEFORE this
+    /// section existed, given a file WRITTEN AFTER it, with a REAL
+    /// non-empty trailing section present (never truncated -- the whole
+    /// point is that an old reader ignores bytes it never asks for, not
+    /// that the file happens to be short). `read_graph_file_pre_1926`
+    /// must still succeed on the complete file and preserve the ordinary
+    /// private method's dead-code verdict, proving the format addition is
+    /// genuinely backward compatible for a reader that has no idea it
+    /// exists.
+    #[test]
+    fn old_reader_view_of_a_new_file_still_reads_successfully_and_preserves_ordinary_verdicts() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let ctor = builder.intern_symbol(make_symbol_id(7, 0));
+        builder.add_visibility(ctor, Visibility::Private);
+        builder.add_kind(ctor, DeclarationKind::Method);
+        builder.add_non_instantiable_constructor(ctor);
+        let ordinary_private = builder.intern_symbol(make_symbol_id(7, 1));
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        let graph = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_new_format.bin");
+        write_graph_file(&graph, &path).expect("write must succeed");
+        let bytes = std::fs::read(&path).expect("read back the written file");
+        assert!(
+            bytes.len() > 8,
+            "fixture sanity: the trailing section must carry the real non-instantiable-constructor \
+             entry, not just the empty-count prefix"
+        );
+
+        let reloaded = read_graph_file_pre_1926(&path)
+            .expect("an old reader that has never heard of the trailing section must still read a complete new-format file successfully");
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(7, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private method's dead-code verdict must be preserved when an \
+             old reader silently ignores the trailing section it never reads"
         );
     }
 }

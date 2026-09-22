@@ -88,18 +88,35 @@ pub(super) struct AdjacencyIndex {
     /// exactly as before on both directions -- this field affects ONLY the
     /// two evidence arrays, never edge presence/correctness.
     ///
-    /// `ambiguous_for_edge`/`evidence_for_edge` check this FIRST and return
-    /// `None` immediately when `false`, before ever indexing into
-    /// `ambiguous`/`reasons` -- chosen over a type-level "impossible to
-    /// call" split (e.g. separate `Forward`/`Reverse` marker types) because
-    /// both methods are `pub(super)`, reachable only from `code_graph.rs`,
-    /// which already calls them exclusively on `forward_index`; a
-    /// fail-safe runtime guard gives the same panic-proof guarantee (no
-    /// out-of-bounds read of a shorter-than-`edges` array -- the same
-    /// defect class as the `file_string_id` panic fixed earlier in this
-    /// epic) without a larger, unrequested type redesign of a
-    /// crate-internal module (Rule 9, anti-divergent-creativity).
+    /// `evidence_for_edge`/`filtered_edges_of` check this FIRST and return
+    /// `None`/empty immediately when `false`, before ever indexing into
+    /// `reasons` -- chosen over a type-level "impossible to call" split
+    /// (e.g. separate `Forward`/`Reverse` marker types) because these
+    /// methods are `pub(super)`, reachable only from `code_graph.rs`,
+    /// which already calls the unfiltered pair exclusively on
+    /// `forward_index`; a fail-safe runtime guard gives the same
+    /// panic-proof guarantee (no out-of-bounds read of a
+    /// shorter-than-`edges` array -- the same defect class as the
+    /// `file_string_id` panic fixed earlier in this epic) without a
+    /// larger, unrequested type redesign of a crate-internal module
+    /// (Rule 9, anti-divergent-creativity).
     has_evidence: bool,
+    /// #1924/#1925: SEPARATE from `has_evidence` -- true only when
+    /// `ambiguous` was ALSO populated (the forward index only;
+    /// `build_reverse_with_evidence` populates `reasons` for `filtered_
+    /// edges_of` but has no consumer for `ambiguous` at all, so it is
+    /// left empty). `ambiguous_for_edge` checks THIS flag, never
+    /// `has_evidence`, so it can never index into an empty `ambiguous`
+    /// array on a reasons-only index.
+    has_ambiguous: bool,
+    /// #1924/#1925 (P3): test-only work-count instrumentation, incremented
+    /// by `end - start` (the number of occurrences examined) on every
+    /// `filtered_edges_of` call -- proves the per-query scan is bounded by
+    /// THIS node's own CSR range, never by any OTHER node's (e.g. a
+    /// caller's own forward out-degree). Absent from a non-test build
+    /// entirely (zero size, zero cost).
+    #[cfg(test)]
+    scan_count: std::sync::atomic::AtomicUsize,
 }
 
 impl AdjacencyIndex {
@@ -119,6 +136,78 @@ impl AdjacencyIndex {
         &self.edges[start..end]
     }
 
+    /// #1924/#1925: every edge target for `node` with AT LEAST ONE
+    /// contributing OCCURRENCE whose OWN evidence bits
+    /// (never merged with any other occurrence of the same target) satisfy
+    /// `(bits & required) == required && (bits & forbidden) == 0`.
+    ///
+    /// **Why per-occurrence, not merged-then-masked (the pre-rework bug)**:
+    /// merging every occurrence's bits with OR BEFORE applying the filter
+    /// makes a genuinely evidenced edge indistinguishable from a
+    /// COINCIDENTALLY co-occurring fabricated one. Reproduced end-to-end: a
+    /// caller with a real `helper.equals(x)` call (receiver `Helper`,
+    /// tagging `Helper.equals` with `RECEIVER_TYPE_MATCH`) and a SEPARATE,
+    /// fabricated `text.equals(y)` call in the SAME method (receiver
+    /// `String`, the bare-name/arity fallback ALSO binding to `Helper.
+    /// equals`, tagging `RECEIVER_TYPE_MISMATCH`) contribute TWO occurrences
+    /// of the identical `(caller -> Helper.equals)` pair. Merging them
+    /// (`MATCH | MISMATCH`) and THEN checking `forbidden: MISMATCH` drops
+    /// the edge entirely -- even though the genuine occurrence, evaluated
+    /// on its own, would have satisfied the filter. Checking each
+    /// occurrence's OWN bits independently (this implementation) keeps the
+    /// edge: the real `MATCH`-only occurrence alone qualifies.
+    ///
+    /// A target qualifying via ANY occurrence appears in the result
+    /// EXACTLY ONCE, in FIRST-SEEN CSR order (never a `HashMap`'s
+    /// unspecified iteration order) -- deliberately NOT identical to
+    /// `callees_of`/`callers_of`, which return one entry PER OCCURRENCE
+    /// (duplicates included) in raw CSR order; this method always
+    /// deduplicates by target. `required: 0, forbidden: 0` therefore
+    /// returns the same SET of targets as the unfiltered accessor, just
+    /// deduplicated -- never assume identical `Vec` length or order.
+    ///
+    /// O(out-degree of `node`) -- ONE pass over `node`'s own CSR slice,
+    /// never a per-target `evidence_for_edge` call (which would cost
+    /// O(out-degree^2): see `edge_evidence`'s own doc comment
+    /// (`code_graph.rs`) for the exact pathological shape this avoids, the
+    /// same complexity class Bug #1900 M2 already fixed for `callees_of`/
+    /// `strongly_connected_components`). Empty (never a panic or a
+    /// fabricated edge) when `!has_evidence` or `node` is out of range,
+    /// mirroring `edges_of`'s own fail-safe shape.
+    /// #1924/#1925 (P3): test-only accessor for `scan_count` -- see that
+    /// field's own doc comment.
+    #[cfg(test)]
+    pub(super) fn scan_count(&self) -> usize {
+        self.scan_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn filtered_edges_of(&self, node: u32, required: u16, forbidden: u16) -> Vec<u32> {
+        if !self.has_evidence {
+            return Vec::new();
+        }
+        let node_usize = node as usize;
+        if node_usize + 1 >= self.offsets.len() {
+            return Vec::new();
+        }
+        let start = self.offsets[node_usize] as usize;
+        let end = self.offsets[node_usize + 1] as usize;
+        #[cfg(test)]
+        self.scan_count.fetch_add(end - start, std::sync::atomic::Ordering::SeqCst);
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        for i in start..end {
+            let bits = self.reasons[i];
+            if bits & required != required || bits & forbidden != 0 {
+                continue;
+            }
+            let target = self.edges[i];
+            if seen.insert(target) {
+                ordered.push(target);
+            }
+        }
+        ordered
+    }
+
     /// Bug #1900: whether the `(node -> target)` edge is backed by AT LEAST
     /// ONE contributing reference whose candidate window held exactly one
     /// surviving candidate (`Some(false)` -- unambiguous, real single-target
@@ -128,7 +217,7 @@ impl AdjacencyIndex {
     /// only `node`'s own CSR slice, exactly like `edges_of`, never the
     /// whole edge arena.
     pub(super) fn ambiguous_for_edge(&self, node: u32, target: u32) -> Option<bool> {
-        if !self.has_evidence {
+        if !self.has_ambiguous {
             return None;
         }
         let node_usize = node as usize;
@@ -185,12 +274,12 @@ impl AdjacencyIndex {
 
     /// Builds the FORWARD index (callees): keyed by each `Reference.from`,
     /// targeting every one of that reference's candidates' `symbol()`.
-    /// `needs_evidence: true` -- this is the ONLY direction
-    /// `edge_reason`/`edge_evidence` ever query, so `ambiguous`/`reasons`
-    /// are populated.
+    /// `needs_evidence: true, needs_ambiguous: true` -- this is the ONLY
+    /// direction `edge_reason`/`edge_evidence` ever query, so both
+    /// `ambiguous`/`reasons` are populated.
     pub(super) fn build_forward(symbol_count: usize, references: &[Reference], candidates: &[Candidate]) -> Self {
         let pairs = edge_pairs(references, candidates);
-        build_from_edges(symbol_count, &pairs, true)
+        build_from_edges(symbol_count, &pairs, true, true)
     }
 
     /// Builds the REVERSE index (callers): keyed by each candidate's
@@ -199,18 +288,45 @@ impl AdjacencyIndex {
     /// (key, value) into (value, key) before the shared CSR construction
     /// pass, rather than duplicating the reference/candidate traversal.
     ///
-    /// `needs_evidence: false` (review round 3, coordinator-authorized):
-    /// nothing ever queries edge tier/evidence on the REVERSE direction, so
-    /// `ambiguous`/`reasons` are left as empty `Vec`s -- see
-    /// `AdjacencyIndex::has_evidence`'s doc comment for the ~30.6 MB/analyze
-    /// child this avoids at repo-B's out-edge scale. `edges`/`offsets`
-    /// (what `callers_of` reads) are completely unaffected.
+    /// `needs_evidence: false`: nothing ever queries edge tier/evidence on
+    /// the plain REVERSE direction, so `ambiguous`/`reasons` are left as
+    /// empty `Vec`s -- see `AdjacencyIndex::has_evidence`'s doc comment for
+    /// the ~30.6 MB/analyze child this avoids at repo-B's out-edge scale.
+    /// `edges`/`offsets` (what `callers_of` reads) are completely
+    /// unaffected.
     pub(super) fn build_reverse(symbol_count: usize, references: &[Reference], candidates: &[Candidate]) -> Self {
+        Self::build_reverse_impl(symbol_count, references, candidates, false)
+    }
+
+    /// #1924/#1925: a SECOND reverse-index constructor that DOES populate
+    /// per-occurrence REASONS evidence (never `ambiguous`, which has no
+    /// consumer on this direction at all) -- see `CodeGraph::callers_of_
+    /// filtered`'s doc comment for why this exists and why it is built
+    /// LAZILY (via a `OnceLock`), only for a `CodeGraph` that actually
+    /// calls a filtered CALLERS-direction primitive, rather than
+    /// unconditionally like `build_reverse`. The ~30.6 MB/analyze-child
+    /// cost `has_evidence`'s own doc comment measured for the
+    /// unconditional case is real, but this way it is paid ONLY when the
+    /// capability is actually used, and only for the ONE array
+    /// `filtered_edges_of` reads. This constructor makes `callers_of_
+    /// filtered`/`reachable_to_filtered` O(in-degree) per query after a
+    /// one-time O(V+E) build, instead of the O(in-degree x avg caller
+    /// out-degree) cost of deriving filtered callers by scanning each
+    /// caller's own forward slice per reverse occurrence.
+    pub(super) fn build_reverse_with_evidence(symbol_count: usize, references: &[Reference], candidates: &[Candidate]) -> Self {
+        Self::build_reverse_impl(symbol_count, references, candidates, true)
+    }
+
+    /// `needs_evidence` gates ONLY `reasons` (what `filtered_edges_of`/
+    /// `evidence_for_edge` read) -- `ambiguous` is always `needs_ambiguous:
+    /// false` here, since NEITHER reverse-index constructor has a consumer
+    /// for it (see `build_reverse_with_evidence`'s own doc comment).
+    fn build_reverse_impl(symbol_count: usize, references: &[Reference], candidates: &[Candidate], needs_evidence: bool) -> Self {
         let pairs: Vec<EdgePair> = edge_pairs(references, candidates)
             .into_iter()
             .map(|(from, to, ambiguous, reasons)| (to, from, ambiguous, reasons))
             .collect();
-        build_from_edges(symbol_count, &pairs, false)
+        build_from_edges(symbol_count, &pairs, needs_evidence, false)
     }
 }
 
@@ -249,19 +365,21 @@ fn edge_pairs(references: &[Reference], candidates: &[Candidate]) -> Vec<EdgePai
 /// Standard two-pass counting-sort CSR construction from a flat list of
 /// `(key, value, ambiguous, reasons)` edges: pass 1 counts each key's
 /// out-degree to compute prefix-sum offsets, pass 2 scatters each edge (and,
-/// when `needs_evidence` is true, its `ambiguous` flag and `reasons`
-/// bitmask, Bug #1900) into its slot via a per-key write cursor (a copy of
-/// `offsets`, incremented as each edge is placed). O(V+E) time.
+/// selectively, its `ambiguous` flag and/or `reasons` bitmask, Bug #1900)
+/// into its slot via a per-key write cursor (a copy of `offsets`,
+/// incremented as each edge is placed). O(V+E) time.
 ///
-/// Review round 3 (coordinator-authorized): `needs_evidence` gates whether
-/// `ambiguous`/`reasons` are allocated and populated AT ALL -- `false`
-/// (the reverse-index caller) leaves both as empty `Vec`s, allocating
-/// exactly three `Vec` buffers (`offsets`, its `cursor` copy, `edges`)
-/// instead of five; `true` (the forward-index caller) allocates all five,
-/// exactly as before. `edges`/`offsets` construction is IDENTICAL either
-/// way -- `needs_evidence` never affects edge presence or `callers_of`/
-/// `callees_of` correctness, only whether the two evidence arrays exist.
-fn build_from_edges(symbol_count: usize, pairs: &[EdgePair], needs_evidence: bool) -> AdjacencyIndex {
+/// `needs_reasons` and `needs_ambiguous` are INDEPENDENT: each array is
+/// allocated and populated only when its own flag is true, so a caller
+/// that needs `reasons` (e.g. `filtered_edges_of`) but never reads
+/// `ambiguous` pays for exactly one extra `Vec`, not two. `false, false`
+/// (the plain reverse-index caller) allocates exactly three `Vec` buffers
+/// (`offsets`, its `cursor` copy, `edges`) instead of five; `true, true`
+/// (the forward-index caller) allocates all five, exactly as before.
+/// `edges`/`offsets` construction is IDENTICAL regardless of either flag
+/// -- neither ever affects edge presence or `callers_of`/`callees_of`
+/// correctness, only whether the two evidence arrays exist.
+fn build_from_edges(symbol_count: usize, pairs: &[EdgePair], needs_reasons: bool, needs_ambiguous: bool) -> AdjacencyIndex {
     // Defensive: real binder-produced graphs always keep every
     // Reference.from/Candidate.symbol() strictly below symbol_count (both
     // are interned dense ids from the SAME SymbolTable that produced
@@ -284,18 +402,29 @@ fn build_from_edges(symbol_count: usize, pairs: &[EdgePair], needs_evidence: boo
     }
     let mut cursor = offsets.clone();
     let mut edges = vec![0u32; pairs.len()];
-    let mut ambiguous = if needs_evidence { vec![false; pairs.len()] } else { Vec::new() };
-    let mut reasons = if needs_evidence { vec![0u16; pairs.len()] } else { Vec::new() };
+    let mut ambiguous = if needs_ambiguous { vec![false; pairs.len()] } else { Vec::new() };
+    let mut reasons = if needs_reasons { vec![0u16; pairs.len()] } else { Vec::new() };
     for &(key, value, edge_ambiguous, edge_reasons) in pairs {
         let slot = cursor[key as usize] as usize;
         edges[slot] = value;
-        if needs_evidence {
+        if needs_ambiguous {
             ambiguous[slot] = edge_ambiguous;
+        }
+        if needs_reasons {
             reasons[slot] = edge_reasons;
         }
         cursor[key as usize] += 1;
     }
-    AdjacencyIndex { offsets, edges, ambiguous, reasons, has_evidence: needs_evidence }
+    AdjacencyIndex {
+        offsets,
+        edges,
+        ambiguous,
+        reasons,
+        has_evidence: needs_reasons,
+        has_ambiguous: needs_ambiguous,
+        #[cfg(test)]
+        scan_count: std::sync::atomic::AtomicUsize::new(0),
+    }
 }
 
 #[cfg(test)]
@@ -505,6 +634,165 @@ mod tests {
         assert!(index.edges_of(0).is_empty());
         assert!(index.edges_of(1).is_empty());
         assert!(index.edges_of(2).is_empty());
+    }
+
+    /// #1924/#1925 rework: `filtered_edges_of` checks EACH occurrence's OWN
+    /// evidence bits independently (never merged across occurrences of the
+    /// same target) -- this fixture's B is reached by two occurrences
+    /// (`SAME_PACKAGE` alone, then `RECEIVER_TYPE_MATCH` alone); the SECOND
+    /// occurrence alone already satisfies `required=RECEIVER_TYPE_MATCH,
+    /// forbidden=RECEIVER_TYPE_MISMATCH`, so B qualifies. C's single
+    /// occurrence carries BOTH bits together and is excluded. Done in ONE
+    /// pass over the node's own CSR slice -- see this method's own doc
+    /// comment for why calling `evidence_for_edge` once per target here
+    /// would reintroduce the exact O(out-degree^2) shape Bug #1900 M2
+    /// already fixed for `callees_of`.
+    #[test]
+    fn filtered_edges_of_checks_each_occurrence_independently_and_filters_by_required_and_forbidden_bits() {
+        use crate::graph::reasons;
+
+        let candidates = vec![
+            // A -> B: two SEPARATE occurrences, checked independently --
+            // the first alone would not satisfy the filter below.
+            Candidate::new(1, reasons::SAME_PACKAGE),
+            Candidate::new(1, reasons::RECEIVER_TYPE_MATCH),
+            // A -> C: one occurrence, carries the MISMATCH bit.
+            Candidate::new(2, reasons::RECEIVER_TYPE_MATCH | reasons::RECEIVER_TYPE_MISMATCH),
+        ];
+        let references = vec![
+            Reference { from: 0, file: 1, line: 1, kind: 0, cand_start: 0, cand_len: 1 },
+            Reference { from: 0, file: 1, line: 2, kind: 0, cand_start: 1, cand_len: 1 },
+            Reference { from: 0, file: 1, line: 3, kind: 0, cand_start: 2, cand_len: 1 },
+        ];
+        let index = AdjacencyIndex::build_forward(3, &references, &candidates);
+
+        // required RECEIVER_TYPE_MATCH, forbidden RECEIVER_TYPE_MISMATCH:
+        // B qualifies (its SECOND occurrence, checked on its own, carries
+        // RECEIVER_TYPE_MATCH and nothing else); C is excluded (its one
+        // occurrence carries the forbidden bit).
+        let mut filtered = index.filtered_edges_of(0, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH);
+        filtered.sort_unstable();
+        assert_eq!(filtered, vec![1], "B must survive (one occurrence carries RECEIVER_TYPE_MATCH alone); C must be excluded");
+
+        // No filter at all (0, 0) must return every distinct target.
+        let mut unfiltered = index.filtered_edges_of(0, 0, 0);
+        unfiltered.sort_unstable();
+        assert_eq!(unfiltered, vec![1, 2], "an empty required/forbidden mask must exclude nothing");
+
+        // Reverse index has no evidence -- must return empty, never panic
+        // or fabricate a result from unpopulated data.
+        let reverse = AdjacencyIndex::build_reverse(3, &references, &candidates);
+        assert!(reverse.filtered_edges_of(1, 0, 0).is_empty(), "reverse index has no evidence -- must return empty");
+
+        // Out-of-range node must return empty, never panic.
+        assert!(index.filtered_edges_of(999, 0, 0).is_empty());
+    }
+
+    /// #1924/#1925: the central discriminating test for per-occurrence
+    /// filtering. `caller` targets `target` via TWO SEPARATE occurrences:
+    /// one GENUINE (`RECEIVER_TYPE_MATCH` alone, as if from a real
+    /// `Helper`-typed receiver) and one FABRICATED (`RECEIVER_TYPE_
+    /// MISMATCH` alone, as if from an unrelated `String`-typed receiver's
+    /// bare-name/arity fallback). `required=RECEIVER_TYPE_MATCH,
+    /// forbidden=RECEIVER_TYPE_MISMATCH` must still find `target`: the
+    /// genuine occurrence alone satisfies the filter. A merge-then-mask
+    /// implementation would compute `MATCH | MISMATCH` for this pair and
+    /// wrongly drop it.
+    #[test]
+    fn filtered_edges_of_applies_the_filter_per_occurrence_not_merged_across_them() {
+        use crate::graph::reasons;
+
+        let candidates = vec![
+            // Occurrence 1: genuine, MATCH only.
+            Candidate::new(1, reasons::RECEIVER_TYPE_MATCH),
+            // Occurrence 2: fabricated, MISMATCH only (no MATCH at all).
+            Candidate::new(1, reasons::RECEIVER_TYPE_MISMATCH),
+        ];
+        let references = vec![
+            Reference { from: 0, file: 1, line: 1, kind: 0, cand_start: 0, cand_len: 1 },
+            Reference { from: 0, file: 1, line: 2, kind: 0, cand_start: 1, cand_len: 1 },
+        ];
+        let index = AdjacencyIndex::build_forward(2, &references, &candidates);
+
+        let filtered = index.filtered_edges_of(0, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH);
+        assert_eq!(
+            filtered,
+            vec![1],
+            "the genuine MATCH-only occurrence must keep this edge, even though a SEPARATE \
+             fabricated occurrence of the same (from, to) pair carries the forbidden bit"
+        );
+
+        // Sanity: edge_evidence (unfiltered, merge-across-occurrences by
+        // design) DOES report both bits together -- confirming the fixture
+        // genuinely exercises the merge-vs-per-occurrence distinction.
+        assert_eq!(
+            index.evidence_for_edge(0, 1),
+            Some(reasons::RECEIVER_TYPE_MATCH | reasons::RECEIVER_TYPE_MISMATCH),
+            "fixture sanity: edge_evidence's OWN merge-across-occurrences contract is unchanged"
+        );
+    }
+
+    /// #1924/#1925: `build_reverse_with_evidence` must populate `reasons`
+    /// (unlike `build_reverse`) -- NOT `ambiguous`, which has no consumer
+    /// on this direction at all (see the sibling `leaves_ambiguous_
+    /// unpopulated` test below) -- while `edges`/`offsets` (edge presence)
+    /// stay byte-for-byte identical to the evidence-free `build_reverse`.
+    #[test]
+    fn build_reverse_with_evidence_populates_evidence_while_edges_stay_identical_to_build_reverse() {
+        use crate::graph::reasons;
+
+        let (references, candidates) = sample_graph();
+        let plain = AdjacencyIndex::build_reverse(4, &references, &candidates);
+        let with_evidence = AdjacencyIndex::build_reverse_with_evidence(4, &references, &candidates);
+
+        assert_eq!(plain.edges, with_evidence.edges, "edge presence must be identical regardless of needs_evidence");
+        assert_eq!(plain.offsets, with_evidence.offsets);
+
+        assert_eq!(
+            plain.evidence_for_edge(1, 0),
+            None,
+            "the plain reverse index must still report no evidence at all (fail-safe)"
+        );
+        assert_eq!(
+            with_evidence.evidence_for_edge(1, 0),
+            Some(0),
+            "the evidence-populated reverse index must report the real (possibly empty) bits, not None"
+        );
+
+        // filtered_edges_of must also work on this direction now.
+        let filtered = with_evidence.filtered_edges_of(3, 0, 0);
+        let mut filtered = filtered;
+        filtered.sort_unstable();
+        assert_eq!(filtered, vec![0, 1], "both A and B must still be found as callers of D via the filtered accessor");
+        let _ = reasons::SAME_FILE; // keep the import meaningful if unused elsewhere
+    }
+
+    /// #1924/#1925: `build_reverse_with_evidence` populates `reasons` (what
+    /// `evidence_for_edge`/`filtered_edges_of` read) but has no consumer
+    /// for `ambiguous` at all, so it stays unpopulated -- `ambiguous_for_
+    /// edge` must report `None` on this index (via the `has_ambiguous`
+    /// flag), never index into the empty array, while `evidence_for_edge`
+    /// and `filtered_edges_of` both keep working on the SAME index.
+    #[test]
+    fn build_reverse_with_evidence_leaves_ambiguous_unpopulated_while_reasons_still_works() {
+        let (references, candidates) = sample_graph();
+        let with_evidence = AdjacencyIndex::build_reverse_with_evidence(4, &references, &candidates);
+
+        assert_eq!(
+            with_evidence.ambiguous_for_edge(1, 0),
+            None,
+            "ambiguous was never populated on this index -- must report None, never index into an empty Vec"
+        );
+        assert_eq!(
+            with_evidence.evidence_for_edge(1, 0),
+            Some(0),
+            "reasons WAS populated on this same index -- evidence_for_edge must still work"
+        );
+        let filtered = with_evidence.filtered_edges_of(3, 0, 0);
+        let mut filtered = filtered;
+        filtered.sort_unstable();
+        assert_eq!(filtered, vec![0, 1], "filtered_edges_of must also still find both A and B as callers of D");
+        assert!(with_evidence.ambiguous.is_empty(), "the ambiguous array itself must stay empty -- no wasted allocation");
     }
 
     /// Bug #1900 (review round 3, coordinator-authorized): MEASURED (not

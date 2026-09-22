@@ -119,8 +119,22 @@ pub(super) fn intern_declarations_and_attach_signatures(
             .iter()
             .map(|owner| (owner.method_symbol, owner.enclosing_type.as_str()))
             .collect();
+        // Bug #1926: built ONCE per file, same rationale as `owners_by_
+        // symbol` above.
+        let non_instantiable: std::collections::HashSet<SymbolId> =
+            file.index.non_instantiable_constructors.iter().copied().collect();
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
+            // Bug #1926: a SEPARATE analytical fact from `visibility`
+            // (never folded into it) -- see `CodeGraphBuilder`'s own field
+            // doc comment for why. Sparse (like `visibilities`/`kinds`),
+            // but the ATTACH ITSELF is unconditional w.r.t. budget
+            // pressure -- this runs before the `exceeded` early return
+            // below, so a qualifying symbol is never dropped under
+            // pressure.
+            if non_instantiable.contains(&declaration.symbol) {
+                builder.add_non_instantiable_constructor(dense);
+            }
             // Story #1835: visibility is ANALYTICAL data `is_definitely_
             // dead_code` depends on directly, not presentation-only like
             // `signatures` -- it MUST survive budget pressure, so this
@@ -161,6 +175,29 @@ pub(super) fn intern_declarations_and_attach_signatures(
                 let widened = widen_method_signature(declaration, owner).unwrap_or_else(|| signature.clone());
                 builder.add_signature(dense, widened);
             }
+        }
+        // Bug #1926 (final round): each target here was already resolved
+        // at extraction time DIRECTLY against its own annotated method's
+        // owning type (`java_methods::resolve_method_source_edges`) --
+        // marking it referenced here bypasses `resolve_reference`/
+        // `RepoNameIndex` entirely, so no outer-class, sibling-nested-
+        // class, or other-file same-named decoy can ever be considered.
+        // Every symbol here is already a real declaration in THIS file
+        // (interned by the loop above), so `intern_symbol` here is a
+        // pure dense-id lookup, never a fresh allocation.
+        //
+        // SCOPE: `mark_referenced` only ever sets the target's AC6
+        // referenced-bit (`ReferencedBits`) -- it never adds a `Reference`/
+        // `Candidate` to the CSR arena. This is enough to suppress the
+        // target's OWN `is_definitely_dead_code` verdict (`Some(true)` ->
+        // `Some(false)`), but the reflection-invoked reference this
+        // represents is INVISIBLE to `callers_of`/`callees_of`/
+        // `reachable_to`/`reachable_from` and any other query that walks
+        // real graph edges -- a `@MethodSource` provider never appears as
+        // a "caller" of the annotated test method or vice versa.
+        for &target in &file.index.method_source_edges {
+            let dense = builder.intern_symbol(target);
+            builder.mark_referenced(dense);
         }
     }
 }

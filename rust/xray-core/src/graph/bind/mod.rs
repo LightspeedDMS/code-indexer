@@ -28,6 +28,7 @@ pub mod depth;
 mod families;
 mod name_index;
 mod narrowing;
+mod receiver_mismatch;
 mod receiver;
 mod resolve;
 mod scope;
@@ -103,6 +104,9 @@ fn resolve_site(
     caller_top_level: Option<&str>,
     index_is_complete: bool,
     receiver_is_type_qualifier: bool,
+    receiver_is_direct_parameter: bool,
+    receiver_type_is_qualified_non_java_lang: bool,
+    file_has_unresolved_external_supertype: bool,
 ) -> PendingReference {
     let candidates = resolve_reference(
         name,
@@ -121,6 +125,9 @@ fn resolve_site(
         caller_top_level,
         index_is_complete,
         receiver_is_type_qualifier,
+        receiver_is_direct_parameter,
+        receiver_type_is_qualified_non_java_lang,
+        file_has_unresolved_external_supertype,
     );
     PendingReference {
         from: enclosing_symbol(&file.index, file.file_id, line),
@@ -283,7 +290,9 @@ fn resolve_all_references(
         // `scope`'s own per-file construction, since every invocation in
         // this file's receiver-type resolution reads from it.
         let typed_names = receiver::FileTypedNames::build(&file.index.typed_names)
-            .with_all_local_binding_names(&file.index.all_local_binding_names);
+            .with_all_local_binding_names(&file.index.all_local_binding_names)
+            .with_parameter_bindings(&file.index.parameter_typed_names)
+            .with_qualified_non_java_lang_parameters(&file.index.qualified_non_java_lang_parameter_types);
         // #1922: computed ONCE per file, not per call site -- neither
         // check depends on which specific invocation is being resolved.
         // See `receiver::file_is_safe_for_type_qualifier_narrowing`'s own
@@ -297,6 +306,15 @@ fn resolve_all_references(
         // that could bring an unnamed field into scope.
         let file_safe_for_type_qualifier_narrowing = file.language == "java"
             && receiver::file_is_safe_for_type_qualifier_narrowing(&file.index, &scope.imports);
+        // #1924 (p24): computed ONCE per file, not per call site -- true
+        // when ANY type declared anywhere in this file has an unresolved
+        // external supertype, regardless of nesting depth relative to a
+        // given call site. See `receiver_mismatch::file_has_unresolved_
+        // external_supertype`'s own doc comment for why this replaced a
+        // narrower per-call-site check that only looked at the immediate
+        // enclosing type and its top-level ancestor.
+        let file_has_unresolved_external_supertype =
+            receiver_mismatch::file_has_unresolved_external_supertype(&file.index.type_nesting, type_index);
         for site in &file.index.invocations {
             // AC1 (Story #1806, S2b): resolves the call's receiver to a
             // declared type, if the evidence exists -- `None` (never a
@@ -341,6 +359,36 @@ fn resolve_all_references(
             };
             let receiver_type = receiver_evidence.type_name().map(|t| t.to_string());
             let receiver_type_is_positive = receiver_evidence.is_positive();
+            // #1924/#1925: true ONLY for a DIRECT (non-chained) `Identifier`
+            // receiver whose `(enclosing_method, name)` is a CONFIRMED
+            // formal parameter -- never a block-scoped local, a field, or a
+            // chained call's derived type. See `LocalIndex::parameter_
+            // typed_names`'s own doc comment for why this is strictly
+            // narrower than "receiver_type_is_positive" alone: a
+            // `TypedNameRecord` lookup hit can be a genuine PARAMETER or an
+            // ordinary LOCAL VARIABLE declared later in the same method,
+            // indistinguishable by `(enclosing_method, name)` key alone
+            // (#1919) -- `RECEIVER_TYPE_MISMATCH` tagging (`bind::receiver_
+            // mismatch`) must see only the former.
+            let receiver_is_direct_parameter = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => site
+                    .enclosing_method
+                    .is_some_and(|enclosing_method| typed_names.is_parameter_binding(enclosing_method, name)),
+                _ => false,
+            };
+            // #1924 (p12): true ONLY for that SAME direct-parameter
+            // receiver, when its declared type was written with an
+            // explicit qualifier other than `java.lang` -- see
+            // `LocalIndex::qualified_non_java_lang_parameter_types`'s own
+            // doc comment. `RECEIVER_TYPE_MISMATCH` tagging must never fire
+            // when this is true: the closed-world assumption behind it
+            // only applies to the REAL `java.lang` type.
+            let receiver_type_is_qualified_non_java_lang = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => site
+                    .enclosing_method
+                    .is_some_and(|enclosing_method| typed_names.is_disqualified_by_type_qualifier(enclosing_method, name)),
+                _ => false,
+            };
             // #1922: is this call DEFINITELY qualified by a type
             // reference -- see `receiver::is_definite_type_qualifier`'s
             // own doc comment for exactly what evidence this does and
@@ -476,6 +524,9 @@ fn resolve_all_references(
                 caller_top_level,
                 index_is_complete,
                 receiver_is_type_qualifier,
+                receiver_is_direct_parameter,
+                receiver_type_is_qualified_non_java_lang,
+                file_has_unresolved_external_supertype,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
@@ -510,6 +561,9 @@ fn resolve_all_references(
                 None,
                 index_is_complete,
                 false,
+                false,
+                false,
+                false,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
@@ -543,6 +597,9 @@ fn resolve_all_references(
                 None,
                 None,
                 index_is_complete,
+                false,
+                false,
+                false,
                 false,
             );
             total_candidates += r.candidates.len();

@@ -136,7 +136,21 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// for any class-level symbol (Type/Package/Field nodes carry no outbound
 /// edges at all). An ABI-12 graph artifact must never be loaded as if it
 /// matched ABI 13.
-pub const XRAY_ABI_VERSION: u64 = 13;
+///
+/// #1924/#1925 (epic #1906) bump this AGAIN, 13 -> 14: `GraphHandle` gains
+/// five new accessor fn-pointer fields -- `callees_of_filtered_fn`,
+/// `callers_of_filtered_fn`, `reachable_from_filtered_fn`, `reachable_to_
+/// filtered_fn`, `strongly_connected_components_filtered_fn` -- the
+/// EVIDENCE-FILTERED counterparts of the existing unfiltered traversal
+/// primitives, gated by `(required_bits, forbidden_bits)` against `graph::
+/// reasons::*`. Also a new `graph::reasons::RECEIVER_TYPE_MISMATCH` bit
+/// (mirrored into `GRAPH_PREAMBLE_EXTRA_6` below) -- see `graph::reasons::
+/// RECEIVER_TYPE_MISMATCH`'s own doc comment for the exact conditions
+/// (the single source of truth for them) and `receiver_mismatch::apply_
+/// receiver_type_mismatch_tagging` for the implementation, which TAGS
+/// ONLY and never deletes from the raw graph. An ABI-13 graph artifact
+/// must never be loaded as if it matched ABI 14.
+pub const XRAY_ABI_VERSION: u64 = 14;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -396,6 +410,11 @@ pub struct GraphHandle<'graph> {
     visibility_of_fn: fn(*const (), u32) -> Visibility,
     edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
     edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
+    callees_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+    callers_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+    reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+    reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+    strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -487,6 +506,26 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
 
     pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
         (self.edge_evidence_fn)(self.ctx, from, to)
+    }
+
+    pub fn callees_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        (self.callees_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+    }
+
+    pub fn callers_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        (self.callers_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+    }
+
+    pub fn reachable_from_filtered(&self, roots: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        (self.reachable_from_filtered_fn)(self.ctx, roots, max_depth, required_bits, forbidden_bits)
+    }
+
+    pub fn reachable_to_filtered(&self, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        (self.reachable_to_filtered_fn)(self.ctx, targets, max_depth, required_bits, forbidden_bits)
+    }
+
+    pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
+        (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
     }
 }
 
@@ -603,6 +642,7 @@ pub const OVERLOAD_ARG_TYPE_MATCH: u16 = 1 << 10;
 pub const FAMILY_TRUNCATED: u16 = 1 << 11;
 pub const RECEIVER_TYPE_MATCH: u16 = 1 << 12;
 pub const SAME_CLASS_OR_SUPER: u16 = 1 << 13;
+pub const RECEIVER_TYPE_MISMATCH: u16 = 1 << 14;
 "#;
 
 /// Story #1787 AC8: dylib exports for a graph-mode evaluator --
@@ -2262,9 +2302,11 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     #[test]
     fn test_graph_handle_accessor_addition_bumps_abi_version() {
         assert_eq!(
-            XRAY_ABI_VERSION, 13,
-            "Bug #1901: adding reachable_to (the CALLERS-direction counterpart of \
-             reachable_from) to GraphHandle requires the ABI-13 bump"
+            XRAY_ABI_VERSION, 14,
+            "#1924/#1925: adding the five evidence-filtered traversal accessors \
+             (callees_of_filtered/callers_of_filtered/reachable_from_filtered/ \
+             reachable_to_filtered/strongly_connected_components_filtered) to \
+             GraphHandle requires the ABI-14 bump"
         );
     }
 

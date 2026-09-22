@@ -409,6 +409,38 @@ pub struct LocalIndex {
     /// AC1 (Story #1806, S2b): one record per local variable, field, or
     /// parameter in this file whose declared type is known.
     pub typed_names: Vec<TypedNameRecord>,
+    /// #1924/#1925: `(enclosing_method_symbol, name)` for every genuine
+    /// formal METHOD or
+    /// CONSTRUCTOR PARAMETER in this file -- NEVER a block-scoped local
+    /// variable, a field, or a record component (`push_parameter_typed_
+    /// names`, `java_methods.rs`, is the sole population site: the ONE
+    /// place this extractor turns a real `formal_parameters` node into a
+    /// `TypedNameRecord`). `typed_names`'s own `NameScope::Local {
+    /// enclosing_method }` cannot tell a parameter apart from an ordinary
+    /// local variable declared later in the SAME method -- both share the
+    /// identical `(enclosing_method, name)` lookup key, which is exactly
+    /// the #1919 "locals are keyed per METHOD, not per BLOCK" gap: a
+    /// block-scoped local that happens to shadow a field (or an outer
+    /// parameter) pollutes that key for the WHOLE method, not just its own
+    /// block. `RECEIVER_TYPE_MISMATCH` tagging (`bind::receiver_mismatch`)
+    /// needs a signal strictly NARROWER than "some Local-scoped binding
+    /// resolved this name" to stay sound; this is that signal. Sole
+    /// consumer: `receiver::FileTypedNames::is_parameter_binding`.
+    pub parameter_typed_names: Vec<(SymbolId, String)>,
+    /// #1924 (p12): `(enclosing_method, name)` pairs for every PARAMETER
+    /// (from `parameter_typed_names` above) whose declared type was
+    /// written with an EXPLICIT QUALIFIER other than `java.lang` --
+    /// `com.lib.String s`, never `String s` or `java.lang.String s`. This
+    /// extractor's type model only ever records a declared type's bare
+    /// simple name (`"String"` for all three of those examples), so a
+    /// qualified reference to a genuinely different, unproven external
+    /// type is otherwise indistinguishable from the real `java.lang`
+    /// type. `RECEIVER_TYPE_MISMATCH` tagging must never trust the
+    /// closed-world assumption for a name recorded here: the qualified
+    /// type's real nature (final or not, its true package or not) is
+    /// invisible to this binder. Sole consumer: `receiver::FileTypedNames
+    /// ::is_disqualified_by_type_qualifier`.
+    pub qualified_non_java_lang_parameter_types: Vec<(SymbolId, String)>,
     /// N1 (#1873/#1875 second-review rework): bare names of every type
     /// declared in this file whose recorded superclass/`implements` type-list
     /// evidence is known to be INCOMPLETE -- a `superclass` node existed
@@ -471,6 +503,105 @@ pub struct LocalIndex {
     /// narrowing`, which disables hard-narrowing for the WHOLE file when
     /// this is `true`, never re-deriving it via a second AST walk.
     pub has_syntax_error: bool,
+    /// Bug #1926 (epic #1906): `(constructor_symbol, owning_type_symbol)`
+    /// for every declaration extracted from a Java `constructor_
+    /// declaration` node (both a constructor and an ordinary method still
+    /// share `DeclarationKind::Method` -- see `MethodOwnerRecord`'s own doc
+    /// comment for why). `owning_type_symbol` is `WalkContext.enclosing_
+    /// type_symbol` at extraction time -- the owning TYPE's own interned
+    /// symbol, deliberately NOT its bare name: two distinct nested classes
+    /// can share a bare name (e.g. two different `Inner` types under two
+    /// different outer classes), and `MethodOwnerRecord.enclosing_type`
+    /// (a `String`) cannot tell them apart, which would wrongly merge
+    /// their constructor counts. `None` only when extraction could not
+    /// determine an enclosing type's own symbol (a malformed declaration
+    /// or a synthetic anonymous/enum-constant body, which Java forbids
+    /// from declaring an explicit constructor anyway). Populated ONLY by
+    /// `java_methods.rs`; every other extractor leaves this empty by
+    /// default, exactly like `interface_names`/`type_parameter_names`
+    /// above. Sole consumer: `java_methods::mark_lone_private_no_arg_
+    /// constructors`, which needs "is this declaration a constructor, and
+    /// which type unambiguously owns it" to find the standard `private
+    /// Foo() {}` non-instantiability idiom -- a fact `Declaration` itself
+    /// cannot answer (it only records `Method` vs. `Type`/`Field`/... and
+    /// never a Method's own more specific shape).
+    pub constructor_owners: Vec<(SymbolId, Option<SymbolId>)>,
+    /// Bug #1926: the FINAL, per-file set of constructor symbols
+    /// `mark_lone_private_no_arg_constructors` determined qualify for the
+    /// standard Java non-instantiable-utility-class idiom (a class's ONLY
+    /// constructor, no-arg, `Private`). This is a SEPARATE carried fact,
+    /// deliberately never a rewrite of the constructor's own recorded
+    /// `Visibility` (which stays truthfully `Private` -- `visibility_of()`
+    /// is documented as "declared visibility", and the SAME value also
+    /// feeds `bind::narrowing::apply_private_visibility_filter`'s
+    /// candidate admission, so silently widening it would leak into an
+    /// unrelated concern). Threaded through `CodeGraphBuilder`/`CodeGraph`
+    /// (`add_non_instantiable_constructor`/`is_non_instantiable_
+    /// constructor`) exactly like `visibilities`/`kinds` already are, and
+    /// consulted directly by `CodeGraph::is_definitely_dead_code`
+    /// alongside (never instead of) the ordinary visibility check.
+    pub non_instantiable_constructors: Vec<SymbolId>,
+    /// Bug #1926: `(method_symbol, owning_type_symbol)` for every Java
+    /// `method_declaration` (mirrors `constructor_owners` exactly, but for
+    /// ordinary methods rather than constructors). Sole consumer:
+    /// `java_methods::resolve_method_source_edges`, which needs "which
+    /// type unambiguously owns this method" to resolve a `@MethodSource`
+    /// reference against the annotated method's OWN owning type only,
+    /// never a bare-name guess that could collide across two distinct
+    /// same-named types.
+    pub method_owner_symbols: Vec<(SymbolId, Option<SymbolId>)>,
+    /// Bug #1926 (final round): one request per `@MethodSource` annotation
+    /// found during the main walk, recorded here rather than resolved
+    /// immediately -- resolution needs the WHOLE file's declarations
+    /// (a sibling method declared later in the same class), which are not
+    /// all known yet mid-walk. `target_names` is already fully normalized
+    /// at extraction time (the JUnit5 same-name default, or the explicit
+    /// string-literal argument(s) with `Class#method` self-qualification
+    /// already applied) -- resolution only needs to look each name up
+    /// against `owner_type_symbol`'s own declared zero-arg methods.
+    pub method_source_requests: Vec<MethodSourceRequest>,
+    /// Bug #1926 (final round): the FINAL set of symbols `resolve_method_
+    /// source_edges` proved are referenced via a `@MethodSource` string --
+    /// each one resolved directly against its own owning type's declared
+    /// methods, NEVER through the generic name-based binder (whose
+    /// same-class-or-super narrowing is permanently soft/tag-only and
+    /// would otherwise let a same-named, same-arity method in an outer
+    /// class, a sibling nested class, or another file in the same package
+    /// fabricate a false edge). Consumed directly by `bind::budget_bind`,
+    /// which marks each one referenced via `CodeGraphBuilder::mark_
+    /// referenced` -- bypassing `resolve_reference`/`RepoNameIndex`
+    /// entirely for these specific, already-resolved targets. `mark_
+    /// referenced` only sets the AC6 referenced-bit (suppresses the
+    /// target's OWN `is_definitely_dead_code` verdict); it never adds a
+    /// `Reference`/`Candidate` to the CSR arena, so this reflection-
+    /// invoked reference is invisible to `callers_of`/`callees_of`/
+    /// reachability queries -- never a real, walkable graph edge.
+    pub method_source_edges: Vec<SymbolId>,
+}
+
+/// Bug #1926 (final round): one `@MethodSource` annotation's not-yet-
+/// resolved request -- see `LocalIndex::method_source_requests`'s own doc
+/// comment for why resolution is deferred to an end-of-file postprocess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodSourceRequest {
+    /// The annotated test method's own symbol -- excluded as a possible
+    /// resolution target (Bug #1926 final round, self-exclusion): JUnit5's
+    /// same-name default always names a DIFFERENT method (a zero-arg
+    /// factory can never share a real Java method signature with a
+    /// parameterized test method of the same name), so a request whose
+    /// only same-name, zero-arg candidate is the annotated method itself
+    /// must resolve to nothing, never a self-edge that would hide a
+    /// genuinely dead annotated method.
+    pub from_method: SymbolId,
+    /// The annotated method's own immediately enclosing type -- resolution
+    /// is scoped to exactly this type's OWN declared methods, never a
+    /// superclass (unmodelled, conservative) or any other class.
+    pub owner_type_symbol: Option<SymbolId>,
+    /// Every already-normalized target name this request names (the
+    /// default name, or one name per resolved explicit string literal --
+    /// empty when every explicit argument was unresolvable, e.g. every
+    /// string named a different class).
+    pub target_names: Vec<String>,
 }
 
 impl LocalIndex {
@@ -528,6 +659,11 @@ mod tests {
         assert!(index.method_return_types.is_empty());
         assert!(index.typed_names.is_empty());
         assert!(index.incomplete_supertypes.is_empty());
+        assert!(index.constructor_owners.is_empty());
+        assert!(index.non_instantiable_constructors.is_empty());
+        assert!(index.method_owner_symbols.is_empty());
+        assert!(index.method_source_requests.is_empty());
+        assert!(index.method_source_edges.is_empty());
     }
 
     /// AC1 (Story #1793, S4): a `Declaration` for a method carries the

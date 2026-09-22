@@ -466,19 +466,37 @@ enum Status {
 /// treated as a regression: update the assertion to `Some(false)`, delete
 /// this test's KNOWN LIMITATION framing, and remove the corresponding
 /// bullet from `docs/xray-architecture.md`.
+///
+/// Bug #1926 addendum: `Base` deliberately declares a SECOND, unrelated
+/// constructor overload (`Base(int)`) purely so this fixture is not ALSO
+/// the class's ONLY constructor -- otherwise Bug #1926's lone-private-
+/// no-arg-constructor non-instantiability exception (a real, independent
+/// fix: `java_methods::suppress_lone_private_no_arg_constructor_dead_
+/// signal`) would suppress the `Some(true)` verdict here for an unrelated
+/// reason, masking the specific implicit-super-call limitation this test
+/// exists to pin. `Base(int)` is never called by anything either, so it
+/// changes nothing else about what this fixture demonstrates.
 #[test]
 fn known_limitation_implicit_super_constructor_not_referenced() {
     let source = r#"
 class Outer {
-    static class Base { private Base() {} }
+    static class Base {
+        private Base() {}
+        private Base(int unused) {}
+    }
     static class Child extends Base { Child() {} }
 }
 "#;
     let index = extract_java(source);
     let constructor = declaration_symbols(&index, "Base")
         .into_iter()
-        .next()
-        .expect("Base constructor must be extracted");
+        .find(|&symbol| {
+            index
+                .declarations
+                .iter()
+                .any(|d| d.symbol == symbol && d.param_count == Some(0))
+        })
+        .expect("Base's no-arg constructor must be extracted");
     let graph = bind_single_file(index);
     let dense = graph
         .dense_id_for(constructor)

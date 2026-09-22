@@ -80,6 +80,9 @@ fn out_of_repo_reference_resolves_to_an_empty_candidate_set() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert!(candidates.is_empty());
 }
@@ -117,6 +120,9 @@ fn ambiguous_same_name_declarations_yield_a_multi_candidate_set_not_a_picked_win
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(candidates.len(), 2);
 }
@@ -152,6 +158,9 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(level0.len(), 2, "level 0 (no arity known) keeps both");
 
@@ -171,6 +180,9 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(narrowed.len(), 1);
@@ -235,6 +247,9 @@ fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         narrowed.len(),
@@ -297,6 +312,9 @@ fn named_type_cast_evidence_is_tag_only_and_never_excludes_an_unrelated_candidat
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(narrowed.len(), 2, "a named-type Cast argument must never exclude either candidate");
@@ -374,6 +392,9 @@ fn literal_shape_excludes_a_candidate_with_a_definitely_incompatible_declared_ty
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         narrowed.len(),
@@ -425,6 +446,9 @@ fn import_context_narrows_further_than_arity_alone() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         arity_only.len(),
@@ -456,6 +480,9 @@ fn import_context_narrows_further_than_arity_alone() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(narrowed.len(), 1);
@@ -501,6 +528,9 @@ fn arity_mismatch_with_no_matching_candidate_yields_zero_not_the_wrong_arity_poo
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert!(
         candidates.is_empty(),
@@ -542,6 +572,9 @@ fn arity_mismatch_one_arg_call_against_zero_param_declarations_yields_zero() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert!(
@@ -588,6 +621,9 @@ fn unknown_arity_still_admits_the_full_candidate_pool() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(
@@ -641,6 +677,9 @@ fn arity_narrowing_retains_a_candidate_with_unknown_param_count_evidence() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(

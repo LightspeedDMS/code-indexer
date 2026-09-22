@@ -194,14 +194,26 @@ impl CodeGraph {
     pub fn strongly_connected_components(&self) -> Vec<Vec<u32>> {
         let n = self.symbol_count();
         let adjacency: Vec<Vec<u32>> = (0..n as u32).map(|v| self.callees_of(v)).collect();
-        let mut ctx = TarjanContext::new(n);
-        for start in 0..n as u32 {
-            if ctx.index[start as usize].is_none() {
-                ctx.run_from(start, &adjacency);
-            }
-        }
-        ctx.components
+        strongly_connected_components_over_adjacency(n, &adjacency)
     }
+}
+
+/// #1924/#1925 (epic #1906): the Tarjan walk itself, factored out of
+/// `strongly_connected_components` so `ops_filtered.rs`'s `strongly_
+/// connected_components_filtered` can reuse the IDENTICAL algorithm over a
+/// pre-computed FILTERED adjacency list, rather than duplicating ~80 lines
+/// of iterative Tarjan logic (Rule 4, anti-duplication) -- the only thing
+/// that differs between the unfiltered and filtered SCC primitives is HOW
+/// `adjacency` was built (`callees_of` vs `callees_of_filtered`), never the
+/// traversal that consumes it.
+pub(super) fn strongly_connected_components_over_adjacency(n: usize, adjacency: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    let mut ctx = TarjanContext::new(n);
+    for start in 0..n as u32 {
+        if ctx.index[start as usize].is_none() {
+            ctx.run_from(start, adjacency);
+        }
+    }
+    ctx.components
 }
 
 /// Mutable state for the iterative Tarjan SCC walk used by

@@ -70,6 +70,17 @@ pub struct CodeGraphBuilder {
     /// `CodeGraph::location_for`, the same "absent means unknown" contract
     /// `signatures`/`visibilities`/`kinds` already use.
     locations: HashMap<u32, (u32, u32)>,
+    /// Bug #1926: the set of dense symbol ids
+    /// `CodeGraph::is_definitely_dead_code` must treat as "provably
+    /// non-instantiable" (a class's sole private no-arg constructor)
+    /// regardless of `Visibility` or referenced-bit state. A SEPARATE
+    /// per-symbol fact from `visibilities`, deliberately never folded into
+    /// it -- see `graph::extract::local_index::LocalIndex::non_
+    /// instantiable_constructors`'s own doc comment for why widening
+    /// `Visibility` itself was rejected. Analytical data like `visibilities`/
+    /// `kinds`: callers MUST attach it unconditionally regardless of budget
+    /// pressure. A dense id absent here is simply not in the set.
+    non_instantiable_constructors: std::collections::HashSet<u32>,
 }
 
 #[cfg(test)]
@@ -124,6 +135,7 @@ impl CodeGraphBuilder {
             visibilities: HashMap::new(),
             kinds: HashMap::new(),
             locations: HashMap::new(),
+            non_instantiable_constructors: std::collections::HashSet::new(),
         }
     }
 
@@ -178,6 +190,16 @@ impl CodeGraphBuilder {
         self.locations.insert(dense_symbol_id, (file_string_id, line));
     }
 
+    /// Bug #1926: marks `dense_symbol_id` as a
+    /// provably non-instantiable constructor (a class's sole private
+    /// no-arg constructor). Mirrors `add_visibility`/`add_kind`'s
+    /// unconditional-attach contract -- see the field doc on `non_
+    /// instantiable_constructors` above for why this is a SEPARATE fact
+    /// from `Visibility`.
+    pub fn add_non_instantiable_constructor(&mut self, dense_symbol_id: u32) {
+        self.non_instantiable_constructors.insert(dense_symbol_id);
+    }
+
     /// Interns a symbol NAME string, returning its dense id in the shared
     /// string table (see `super::super::string_table::StringTable`).
     pub fn intern_string(&mut self, s: &str) -> u32 {
@@ -223,6 +245,7 @@ impl CodeGraphBuilder {
             self.visibilities,
             self.kinds,
             self.locations,
+            self.non_instantiable_constructors,
         )
     }
 }

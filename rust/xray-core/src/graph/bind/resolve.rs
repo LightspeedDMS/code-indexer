@@ -16,6 +16,7 @@ use super::narrowing::{
     apply_receiver_type_narrowing, apply_same_class_or_super_narrowing,
     apply_super_class_narrowing, apply_type_qualifier_narrowing, param_count_matches_arity,
 };
+use super::receiver_mismatch::apply_receiver_type_mismatch_tagging;
 use super::scope::FileScope;
 use super::REF_KIND_INVOCATION;
 use crate::graph::extract::local_index::{DeclarationKind, ImportKind, LocalIndex};
@@ -338,6 +339,9 @@ pub(crate) fn resolve_reference(
     caller_top_level: Option<&str>,
     index_is_complete: bool,
     receiver_is_type_qualifier: bool,
+    receiver_is_direct_parameter: bool,
+    receiver_type_is_qualified_non_java_lang: bool,
+    file_has_unresolved_external_supertype: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
     if pool.is_empty() {
@@ -373,6 +377,26 @@ pub(crate) fn resolve_reference(
     apply_arity_narrowing(&mut with_reasons, arg_count);
     apply_overload_shape_narrowing(&mut with_reasons, arg_shapes, arg_known_types, type_index);
     apply_receiver_type_narrowing(&mut with_reasons, receiver_type, type_index);
+    // #1924/#1925: runs immediately after `apply_receiver_type_narrowing`
+    // -- both consult the SAME resolved `receiver_type`/`receiver_type_
+    // is_positive` pair, this one to TAG (never delete) candidates whose
+    // owner is provably unrelated to a CLOSED-WORLD, UNSHADOWED receiver
+    // type reached via a genuine PARAMETER binding, an unqualified (or
+    // `java.lang`-qualified) declared type, and a caller whose own
+    // supertype evidence is fully repo-resolved (see `receiver_mismatch.
+    // rs`'s own module doc for all four conditions), exactly the same
+    // "immediately after" ordering #1922's own type-qualifier pass below
+    // documents for its own RECEIVER_TYPE_MATCH dependency.
+    apply_receiver_type_mismatch_tagging(
+        &mut with_reasons,
+        receiver_type,
+        receiver_type_is_positive,
+        receiver_is_direct_parameter,
+        receiver_type_is_qualified_non_java_lang,
+        file_has_unresolved_external_supertype,
+        type_index,
+        &ref_scope.imports,
+    );
     // #1922: MUST run immediately after `apply_receiver_type_narrowing`
     // (consumes the `RECEIVER_TYPE_MATCH` tag it just set) and before
     // `apply_import_context_narrowing` (which otherwise wrongly discards

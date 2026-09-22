@@ -112,6 +112,9 @@ fn same_class_or_super_tags_the_callers_own_type_hierarchy_but_never_narrows() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         candidates.len(),
@@ -193,6 +196,9 @@ fn receiver_type_match_tags_the_receivers_declared_type_but_no_longer_excludes_t
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(
@@ -277,6 +283,9 @@ fn resolve_helper_against(files: &[FileForBind], receiver_type: &str) -> Vec<(De
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     )
 }
@@ -415,6 +424,9 @@ fn resolve_save_against(files: &[FileForBind]) -> Vec<(DeclInfo, u16)> {
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     )
 }
@@ -640,6 +652,9 @@ fn receiver_type_with_no_matching_member_keeps_the_full_pool_pending_the_hard_na
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         candidates.len(),
@@ -713,6 +728,9 @@ fn receiver_type_narrowing_skips_when_receivers_own_supertype_evidence_is_incomp
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(
@@ -801,6 +819,9 @@ fn same_class_or_super_narrowing_skips_when_callers_own_supertype_evidence_is_in
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         candidates.len(),
@@ -854,6 +875,9 @@ fn super_class_narrowing_still_keeps_the_pool_on_incomplete_evidence_after_the_1
         Some("Holder.Nested"),
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
     assert_eq!(

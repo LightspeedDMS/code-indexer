@@ -87,6 +87,19 @@ pub(crate) struct FileTypedNames {
     /// then a single O(1) lookup against this ONE set, never a linear
     /// scan.
     all_local_binding_names: std::collections::HashSet<String>,
+    /// #1924/#1925: exactly the `(enclosing_method, name)` pairs
+    /// `LocalIndex::parameter_typed_names` recorded -- see that field's
+    /// own doc comment for why this is STRICTLY NARROWER than `locals`'s
+    /// own keys (which also include ordinary local variables,
+    /// indistinguishable from a parameter by key alone under the #1919
+    /// per-method-not-per-block conflation). Sole consumer: `is_parameter_
+    /// binding`.
+    parameters: std::collections::HashSet<(SymbolId, String)>,
+    /// #1924 (p12): exactly the `(enclosing_method, name)` pairs
+    /// `LocalIndex::qualified_non_java_lang_parameter_types` recorded --
+    /// see that field's own doc comment. Sole consumer: `is_disqualified_
+    /// by_type_qualifier`.
+    qualified_non_java_lang_parameters: std::collections::HashSet<(SymbolId, String)>,
 }
 
 impl FileTypedNames {
@@ -135,7 +148,28 @@ impl FileTypedNames {
             locals,
             fields,
             all_local_binding_names,
+            parameters: std::collections::HashSet::new(),
+            qualified_non_java_lang_parameters: std::collections::HashSet::new(),
         }
+    }
+
+    /// #1924/#1925: populates `parameters` from `LocalIndex::parameter_
+    /// typed_names` -- a separate builder step, not a second `build`
+    /// parameter, mirroring `with_all_local_binding_names`'s own
+    /// established pattern (so `build`'s existing unit-test call sites,
+    /// none of which exercise parameter-vs-local discrimination, stay
+    /// unchanged).
+    pub(crate) fn with_parameter_bindings(mut self, bindings: &[(SymbolId, String)]) -> Self {
+        self.parameters.extend(bindings.iter().cloned());
+        self
+    }
+
+    /// #1924 (p12): populates `qualified_non_java_lang_parameters` from
+    /// `LocalIndex::qualified_non_java_lang_parameter_types`, the same
+    /// separate-builder-step pattern as `with_parameter_bindings` above.
+    pub(crate) fn with_qualified_non_java_lang_parameters(mut self, bindings: &[(SymbolId, String)]) -> Self {
+        self.qualified_non_java_lang_parameters.extend(bindings.iter().cloned());
+        self
     }
 
     /// #1922: EXTENDS the flat, context-independent local-binding-name
@@ -219,6 +253,21 @@ impl FileTypedNames {
     /// never a scan over `self.locals`.
     pub(crate) fn has_any_local_binding(&self, name: &str) -> bool {
         self.all_local_binding_names.contains(name)
+    }
+
+    /// #1924/#1925: true only when `(enclosing_method, name)` was recorded
+    /// as a genuine formal PARAMETER -- never a block-scoped local
+    /// variable, a field, or a record component. O(1): a single hash-set
+    /// lookup.
+    pub(crate) fn is_parameter_binding(&self, enclosing_method: SymbolId, name: &str) -> bool {
+        self.parameters.contains(&(enclosing_method, name.to_string()))
+    }
+
+    /// #1924 (p12): true only when `(enclosing_method, name)`'s declared
+    /// type was written with an explicit qualifier other than
+    /// `java.lang`. O(1): a single hash-set lookup.
+    pub(crate) fn is_disqualified_by_type_qualifier(&self, enclosing_method: SymbolId, name: &str) -> bool {
+        self.qualified_non_java_lang_parameters.contains(&(enclosing_method, name.to_string()))
     }
 }
 

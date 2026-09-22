@@ -14,13 +14,14 @@
 //! imports, annotations, qualified and bare method invocations, and object
 //! creation), not guessed.
 
+use super::java_annotations::extract_annotations_from_modifiers;
 use super::java_type_names::{
     append_c_style_dimensions, base_name_of_type_node, base_type_name, is_plausible_java_identifier,
     last_named_child_of_kind,
     type_names_in_type_list,
 };
 use super::local_index::{
-    AnnotationRecord, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
+    ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
     InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, NameScope, TypeNestingRecord,
     TypeReferenceRecord, TypedNameRecord,
 };
@@ -43,6 +44,17 @@ struct WalkContext {
     enclosing_type: Option<std::rc::Rc<str>>,
     top_level_type: Option<std::rc::Rc<str>>,
     enclosing_method: Option<SymbolId>,
+    /// Bug #1926 (owner-identity fix): the `symbol` of the immediately
+    /// enclosing TYPE declaration itself -- `None` only when extraction
+    /// could not read that type's own name (a malformed declaration) or
+    /// for a synthetic anonymous/enum-constant body, which has no real
+    /// `Declaration` of its own. Unlike `enclosing_type` (a bare name that
+    /// TWO DIFFERENT types can share, e.g. two distinct nested classes
+    /// both named `Inner` under different outer classes), this is a
+    /// truly unique per-type identity, needed anywhere unambiguous type
+    /// membership matters -- see `java_methods::mark_lone_private_no_arg_
+    /// constructors`.
+    enclosing_type_symbol: Option<SymbolId>,
 }
 
 impl WalkContext {
@@ -51,6 +63,7 @@ impl WalkContext {
             enclosing_type: None,
             top_level_type: None,
             enclosing_method: None,
+            enclosing_type_symbol: None,
         }
     }
 }
@@ -105,7 +118,7 @@ fn dispatch_type_declaration(
     ctx: &WalkContext,
     index: &mut LocalIndex,
 ) -> WalkContext {
-    extract_type_declaration(node, file_id, next_local, index);
+    let enclosing_type_symbol = extract_type_declaration(node, file_id, next_local, index);
     push_type_parameter_names(node, index);
     let enclosing_type = node
         .child_by_kind("identifier")
@@ -155,6 +168,7 @@ fn dispatch_type_declaration(
         enclosing_type,
         top_level_type,
         enclosing_method: None,
+        enclosing_type_symbol,
     }
 }
 
@@ -174,12 +188,14 @@ fn dispatch_method_declaration(
         file_id,
         next_local,
         ctx.enclosing_type.as_deref(),
+        ctx.enclosing_type_symbol,
         index,
     );
     WalkContext {
         enclosing_type: ctx.enclosing_type.clone(),
         top_level_type: ctx.top_level_type.clone(),
         enclosing_method: Some(symbol),
+        enclosing_type_symbol: ctx.enclosing_type_symbol,
     }
 }
 
@@ -371,6 +387,7 @@ fn dispatch_node(
                 enclosing_type: ctx.enclosing_type.clone(),
                 top_level_type: ctx.top_level_type.clone(),
                 enclosing_method: Some(symbol),
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
             }
         }
         "lambda_expression" => {
@@ -611,6 +628,15 @@ impl LanguageExtractor for JavaExtractor {
             }
         }
 
+        // Bug #1926: runs once the whole file's constructors are known
+        // (every `Declaration`/`Visibility`/`constructor_owners` entry the
+        // walk above populates) -- see the function's own doc comment.
+        super::java_methods::mark_lone_private_no_arg_constructors(&mut index);
+        // Bug #1926 (final round): same reasoning, but for `@MethodSource`
+        // requests -- resolution needs every method declared anywhere in
+        // the file, including one declared AFTER the annotated method.
+        super::java_methods::resolve_method_source_edges(&mut index);
+
         index
     }
 }
@@ -698,6 +724,11 @@ fn anonymous_body_context(
         enclosing_type: Some(anon_name),
         top_level_type: Some(top_level_type),
         enclosing_method: None,
+        // No real `Declaration`/symbol exists for a synthetic anonymous or
+        // enum-constant body (never interned via `extract_type_declaration`),
+        // and Java forbids an anonymous class from declaring an explicit
+        // constructor at all, so this never affects constructor counting.
+        enclosing_type_symbol: None,
     })
 }
 
@@ -782,10 +813,8 @@ fn extract_type_declaration(
     file_id: u32,
     next_local: &mut u32,
     index: &mut LocalIndex,
-) {
-    let Some(name_node) = node.child_by_kind("identifier") else {
-        return;
-    };
+) -> Option<SymbolId> {
+    let name_node = node.child_by_kind("identifier")?;
     let name = name_node.text().to_string();
     let symbol = next_symbol(file_id, next_local);
 
@@ -812,6 +841,7 @@ fn extract_type_declaration(
         param_types: Vec::new(),
         is_varargs: false,
     });
+    Some(symbol)
 }
 
 /// Pushes one `InheritanceRecord` of `edge_kind` for every type name found
@@ -931,34 +961,6 @@ fn extract_inheritance(node: &OwnedNode, subtype_name: &str, index: &mut LocalIn
         subtype_name,
         index,
     );
-}
-
-pub(super) fn extract_annotations_from_modifiers(
-    node: &OwnedNode,
-    target_name: &str,
-    index: &mut LocalIndex,
-) {
-    let Some(modifiers) = node.child_by_kind("modifiers") else {
-        return;
-    };
-    for annotation_node in modifiers
-        .children
-        .iter()
-        .filter(|c| c.kind == "marker_annotation" || c.kind == "annotation")
-    {
-        let Some(name_node) = annotation_node
-            .named_children()
-            .into_iter()
-            .find(|c| c.kind == "identifier" || c.kind == "scoped_identifier")
-        else {
-            continue;
-        };
-        index.annotations.push(AnnotationRecord {
-            name: name_node.text().to_string(),
-            target_name: target_name.to_string(),
-            line: annotation_node.start_line,
-        });
-    }
 }
 
 /// Reads one `formal_parameter`/`spread_parameter` node's declared type.

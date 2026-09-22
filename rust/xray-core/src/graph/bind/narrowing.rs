@@ -150,7 +150,7 @@ const NUMERIC_TYPE_NAMES: &[&str] = &[
 const BOOLEAN_TYPE_NAMES: &[&str] = &["boolean", "Boolean"];
 const CHAR_TYPE_NAMES: &[&str] = &["char", "Character"];
 
-fn is_closed_world_value_type(type_name: &str) -> bool {
+pub(super) fn is_closed_world_value_type(type_name: &str) -> bool {
     type_name == "String"
         || NUMERIC_TYPE_NAMES.contains(&type_name)
         || BOOLEAN_TYPE_NAMES.contains(&type_name)

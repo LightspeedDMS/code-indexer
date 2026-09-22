@@ -150,6 +150,17 @@ pub(super) fn parameter_name_and_type(param_node: &OwnedNode) -> Option<(String,
     Some((name_node.text().to_string(), declared_type))
 }
 
+/// #1924 (p12): the dotted QUALIFIER PREFIX `param_node`'s declared type
+/// was explicitly written with, if any -- mirrors the exact type-node
+/// lookup `formal_parameter_type_name` (`java.rs`) uses (the first named
+/// child that is not `modifiers`), then delegates to `java_type_names::
+/// qualified_prefix_of_type_node`. `None` for an unqualified type (`String
+/// s`) or when no type node could be found at all.
+pub(super) fn parameter_qualified_type_prefix(param_node: &OwnedNode) -> Option<String> {
+    let type_node = param_node.named_children().into_iter().find(|c| c.kind != "modifiers")?;
+    super::java_type_names::qualified_prefix_of_type_node(type_node)
+}
+
 /// AC1 (Story #1806, S2b): shared by `field_typed_names` and
 /// `local_variable_typed_names` below -- both `field_declaration` and
 /// `local_variable_declaration` share the IDENTICAL verified real grammar

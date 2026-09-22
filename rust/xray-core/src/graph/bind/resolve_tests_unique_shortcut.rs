@@ -41,6 +41,9 @@ fn unique_name_in_repo_resolves_to_a_single_exact_confidence_candidate() {
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
     assert_eq!(candidates.len(), 1);
     let reasons_bits = candidates[0].1;
@@ -85,6 +88,9 @@ fn a_name_unique_only_in_a_partial_index_does_not_get_exact_confidence() {
         None,
         None,
         None,
+        false,
+        false,
+        false,
         false,
         false,
     );
@@ -159,6 +165,9 @@ fn unique_name_shortcut_tags_receiver_type_match_when_receiver_evidence_confirms
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(candidates.len(), 1, "the sole candidate must survive unchanged");
@@ -229,6 +238,9 @@ fn unique_name_shortcut_does_not_tag_receiver_type_match_without_receiver_corrob
         None,
         true,
         false,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(candidates.len(), 1);
@@ -285,6 +297,9 @@ fn unique_name_shortcut_declines_and_tags_nothing_when_receiver_type_does_not_ma
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
 

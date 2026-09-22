@@ -264,6 +264,30 @@ impl TypeIndex {
         self.incomplete_supertype_names.contains(type_name)
     }
 
+    /// #1924 round 2 (p13): true when `type_name` has EITHER (a)
+    /// `has_incomplete_supertype_evidence` (a syntactically unresolvable
+    /// clause), OR (b) at least one DIRECTLY declared supertype whose bare
+    /// name is not ITSELF a repo-declared type (`is_known_type_name`) --
+    /// i.e. an external/JDK supertype (`extends com.lib.Base`) this binder
+    /// has no visibility into: it cannot see whether that supertype
+    /// privately declares a NESTED type sharing a closed-world name
+    /// (`String`/`Integer`/etc.) that would otherwise be trusted as the
+    /// real JDK type. Sole consumer: `receiver_mismatch`'s caller-side
+    /// guard, which must skip `RECEIVER_TYPE_MISMATCH` tagging entirely
+    /// for any call site inside such a type. Direct supertypes only
+    /// (`direct_parents`), not the transitive closure `supertypes_of`
+    /// walks -- an external supertype anywhere in a resolvable chain is
+    /// already a DIFFERENT type's own direct edge, caught when checking
+    /// that type instead.
+    pub(crate) fn has_unresolved_external_supertype(&self, type_name: &str) -> bool {
+        if self.has_incomplete_supertype_evidence(type_name) {
+            return true;
+        }
+        self.direct_parents
+            .get(type_name)
+            .is_some_and(|parents| parents.iter().any(|parent| !self.is_known_type_name(parent)))
+    }
+
     /// AC1 "engine query": every type that directly or transitively
     /// extends/implements `type_name`, via a genuine BFS. `visited`
     /// starts pre-seeded with `type_name` ITSELF, so a cyclic edge set

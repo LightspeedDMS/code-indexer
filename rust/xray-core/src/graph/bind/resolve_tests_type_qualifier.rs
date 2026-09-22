@@ -80,6 +80,9 @@ fn type_qualified_call_binds_the_qualifier_type_not_the_callers_own_same_named_m
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(
@@ -154,6 +157,9 @@ fn type_qualified_call_with_overloaded_caller_still_binds_only_the_qualifier_typ
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(candidates.len(), 1, "only B.m must survive");
@@ -206,6 +212,9 @@ fn type_qualified_method_reference_with_no_arity_evidence_still_binds_only_the_q
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(candidates.len(), 1);
@@ -258,6 +267,9 @@ fn type_qualified_call_to_an_unresolved_qualifier_still_takes_the_unique_name_sh
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(
@@ -310,6 +322,9 @@ fn unqualified_reference_with_unresolved_receiver_type_still_takes_the_unique_na
         None,
         None,
         true,
+        false,
+        false,
+        false,
         false,
     );
 
@@ -368,6 +383,9 @@ fn lowercase_variable_qualified_call_keeps_the_pre_1922_tag_only_behaviour() {
         true,
         // receiver_is_type_qualifier: false -- e.g. `helper.m()`, a
         // lowercase variable receiver.
+        false,
+        false,
+        false,
         false,
     );
 
@@ -434,6 +452,9 @@ fn type_qualifier_narrowing_skips_when_the_qualifier_types_own_supertype_evidenc
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(
@@ -502,6 +523,9 @@ fn type_qualifier_narrowing_never_hard_empties_on_a_zero_match_even_with_complet
         None,
         true,
         true,
+        false,
+        false,
+        false,
     );
 
     assert_eq!(
