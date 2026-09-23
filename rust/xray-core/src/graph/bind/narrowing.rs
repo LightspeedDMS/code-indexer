@@ -445,22 +445,66 @@ pub(super) fn apply_overload_shape_narrowing(
 /// `SAME_FILE`/`SAME_PACKAGE`/`IMPORTED`/`STATIC_IMPORT`/`WILDCARD_IMPORT`
 /// evidence, when that is a genuine, non-degenerate narrowing (at least
 /// one reachable candidate, and not all of them already were).
+///
+/// Bug #1952 (P1 of epic #1906): this pass answers "is this candidate
+/// reachable from the CALLING FILE's own imports/package/file" -- the
+/// WRONG question for a call whose receiver already resolved (via AC1,
+/// `apply_receiver_type_narrowing`) to a specific type, Positive OR
+/// Advisory. A call written `Util.normalize(x)` names its target's owner
+/// EXPLICITLY; the calling file's own same-package/same-file coincidence
+/// is a much WEAKER signal than that, yet the pre-fix version of this
+/// function let it override the qualifier outright -- deleting the one
+/// candidate the call site's own syntax already named (`RECEIVER_TYPE_
+/// MATCH`) in favor of an unrelated same-package/same-file decoy, exactly
+/// the false-negative-plus-wrong-owner shape #1952 reported (jsoup's
+/// `StringUtil.normaliseWhitespace` vs `TextNode.normaliseWhitespace`,
+/// including a phantom self-edge when the qualified call sat inside the
+/// decoy's own body). `apply_type_qualifier_narrowing`'s own EXCLUSIVE
+/// hard-narrow is gated behind a whole-file safety check (an inherited
+/// field could shadow the qualifier) and legitimately declines to fire on
+/// many real files -- this function must not then reintroduce the exact
+/// deletion that gate exists to prevent, via a completely different,
+/// weaker heuristic.
+///
+/// Fix: a candidate carrying `RECEIVER_TYPE_MATCH` is never removed by
+/// this pass -- `context_reachable` (the ORIGINAL reachability set, driven
+/// solely by import-context evidence, unchanged) still decides whether
+/// this pass has anything to narrow at all (empty means "no import-context
+/// signal exists here, leave everything alone", exactly as before); once
+/// it does, `RECEIVER_TYPE_MATCH`-tagged candidates are ADDED BACK as
+/// survivors rather than left exposed to deletion. Deliberately NOT the
+/// same as adding `RECEIVER_TYPE_MATCH` to `CONTEXT_MASK` itself: doing
+/// that would let `RECEIVER_TYPE_MATCH` alone TRIGGER a brand-new narrow
+/// even when `context_reachable` was otherwise empty (no import evidence
+/// distinguishes anything) -- exactly the shape `resolve_tests_family.rs`'s
+/// `receiver_type_match_tags_the_receivers_declared_type_but_no_longer_
+/// excludes_the_unrelated_sibling` proves must stay a no-op (the #1898
+/// tag-only mandate: `RECEIVER_TYPE_MATCH` must never itself become
+/// grounds for excluding an unrelated sibling that already survived every
+/// other pass). This fix protects an already-would-be-excluded candidate
+/// from deletion; it never manufactures a new exclusion.
 pub(super) fn apply_import_context_narrowing(candidates: &mut Vec<(DeclInfo, u16)>) {
     const CONTEXT_MASK: u16 = reasons::SAME_FILE
         | reasons::SAME_PACKAGE
         | reasons::IMPORTED
         | reasons::STATIC_IMPORT
         | reasons::WILDCARD_IMPORT;
-    let reachable: Vec<usize> = candidates
+    let context_reachable: Vec<usize> = candidates
         .iter()
         .enumerate()
         .filter(|(_, (_, bits))| bits & CONTEXT_MASK != 0)
         .map(|(i, _)| i)
         .collect();
-    if reachable.is_empty() || reachable.len() == candidates.len() {
+    if context_reachable.is_empty() || context_reachable.len() == candidates.len() {
         return;
     }
-    *candidates = reachable
+    let survivors: Vec<usize> = (0..candidates.len())
+        .filter(|i| context_reachable.contains(i) || candidates[*i].1 & reasons::RECEIVER_TYPE_MATCH != 0)
+        .collect();
+    if survivors.len() == candidates.len() {
+        return;
+    }
+    *candidates = survivors
         .into_iter()
         .map(|i| candidates[i].clone())
         .collect();

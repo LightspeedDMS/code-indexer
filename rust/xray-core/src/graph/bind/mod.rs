@@ -544,7 +544,7 @@ fn resolve_all_references(
                     _ => None,
                 })
                 .collect();
-            let r = resolve_site(
+            let mut r = resolve_site(
                 &site.callee_name,
                 REF_KIND_INVOCATION,
                 site.line,
@@ -567,6 +567,37 @@ fn resolve_all_references(
                 file_has_unresolved_external_supertype,
                 site.enclosing_method,
             );
+            // Bug #1952 (P1 of epic #1906): `QUALIFIED_NAME` (reasons bit 7)
+            // was never set anywhere in this binder (the issue's own
+            // census: 0 of 14,674 edges in a real repo) -- there was simply
+            // no call site that tagged it. Purely additive evidence, never
+            // exclusionary (mirrors every sibling reasons-bit tag in
+            // `narrowing.rs`): whenever this call's receiver is a
+            // structurally definite, WHOLE-FILE-SAFETY-CONFIRMED type
+            // qualifier (`receiver_is_type_qualifier` -- the same flag that
+            // gates `apply_type_qualifier_narrowing`'s own exclusive
+            // hard-narrow, computed above), every surviving candidate that
+            // already carries `RECEIVER_TYPE_MATCH` (i.e. is the qualifier's
+            // own resolved owner) additionally earns `QUALIFIED_NAME` --
+            // giving a consumer a way to filter specifically on "the source
+            // itself wrote an explicit type-qualified call that resolved
+            // here", strictly stronger than `RECEIVER_TYPE_MATCH` alone.
+            // Deliberately reuses the ALREADY file-safety-gated flag rather
+            // than a looser, ungated structural check: `receiver_is_type_
+            // qualifier` is `false` whenever the call site's own file
+            // carries any supertype evidence at all (#1922's own shadowing
+            // guard), so this tag is never applied to a call this binder
+            // could not itself rule out as a shadowed-field access -- see
+            // `apply_import_context_narrowing`'s own doc comment (this same
+            // issue) for why the TRUE edge must still survive even when
+            // that gate declines to fire.
+            if receiver_is_type_qualifier {
+                for (_, bits) in r.candidates.iter_mut() {
+                    if *bits & reasons::RECEIVER_TYPE_MATCH != 0 {
+                        *bits |= reasons::QUALIFIED_NAME;
+                    }
+                }
+            }
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
             if !took_unique_name_shortcut(&r.candidates) {
