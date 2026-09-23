@@ -53,7 +53,12 @@ VETTED_ACCESSOR_EXPRESSIONS = (
 )
 
 DOOR_FILES = {
-    "MCP (mcp/handlers/search.py)": "src/code_indexer/server/mcp/handlers/search.py",
+    # Issue #1935: search.py was split into the search/ package; the
+    # execute_live_temporal_search(...) call site now lives in
+    # search/temporal_search.py.
+    "MCP (mcp/handlers/search/temporal_search.py)": (
+        "src/code_indexer/server/mcp/handlers/search/temporal_search.py"
+    ),
     "REST (routers/inline_query.py)": "src/code_indexer/server/routers/inline_query.py",
 }
 

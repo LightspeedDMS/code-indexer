@@ -494,7 +494,9 @@ class TestAC4OmniHandlersAccessControl:
     def test_omni_regex_filters_repo_aliases(self):
         """_omni_regex_search must filter repo_aliases for restricted users."""
         from code_indexer.server.mcp import handlers
-        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
+        from code_indexer.server.mcp.handlers.search import (
+            regex_search as handlers_legacy,
+        )
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -502,9 +504,10 @@ class TestAC4OmniHandlersAccessControl:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        # Patch at _legacy module scope — _omni_regex_search resolves all names
-        # via _legacy module namespace (Phase 2 moved helpers to _utils, but _legacy
-        # imports them, so patch targets must be the _legacy bindings).
+        # Issue #1935: search.py was split into the search/ package;
+        # _omni_regex_search now lives in search/regex_search.py and
+        # resolves all these names via its own bare-imported bindings, so
+        # patch targets must be the regex_search.py bindings.
         with (
             patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
@@ -544,7 +547,7 @@ class TestAC4OmniHandlersAccessControl:
     def test_omni_search_code_filters_repo_aliases(self):
         """_omni_search_code must pass user to _expand_wildcard_patterns."""
         from code_indexer.server.mcp import handlers
-        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
+        from code_indexer.server.mcp.handlers.search import omni as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -552,9 +555,10 @@ class TestAC4OmniHandlersAccessControl:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        # Patch at _legacy module scope — _omni_search_code resolves all names
-        # via _legacy module namespace (Phase 2 moved helpers to _utils, but _legacy
-        # imports them, so patch targets must be the _legacy bindings).
+        # Issue #1935: search.py was split into the search/ package;
+        # _omni_search_code now lives in search/omni.py and resolves all
+        # these names via its own bare-imported bindings, so patch targets
+        # must be the omni.py bindings.
         with (
             patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
@@ -735,7 +739,12 @@ class TestAC7OmniSearchErrorsFiltered:
     def test_omni_regex_errors_filtered_for_restricted_user(self):
         """Errors dict in omni-regex response must only contain accessible repo keys."""
         from code_indexer.server.mcp import handlers
-        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
+        from code_indexer.server.mcp.handlers.search import (
+            _shared as handlers_shared,
+        )
+        from code_indexer.server.mcp.handlers.search import (
+            regex_search as handlers_legacy,
+        )
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -743,13 +752,21 @@ class TestAC7OmniSearchErrorsFiltered:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        # Patch at _legacy module scope — _omni_regex_search resolves all names
-        # via _legacy module namespace after Phase 2 refactor.
+        # Issue #1935: search.py was split into the search/ package;
+        # _omni_regex_search now lives in search/regex_search.py, but the
+        # errors-filtering call it makes (_filter_errors_for_user) lives in
+        # _shared.py and resolves _get_access_filtering_service via its OWN
+        # bare-imported binding there, not regex_search.py's -- patch both.
         # Simulate omni-regex that encounters errors for multiple repos
         with (
             patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
                 handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch.object(
+                handlers_shared,
                 "_get_access_filtering_service",
                 return_value=access_service,
             ),

@@ -1,7 +1,7 @@
 """Bug #1876 N5: xray_explore's front door must validate
 include_patterns/exclude_patterns exactly like its sibling xray_search.
 
-`handle_xray_explore` (src/code_indexer/server/mcp/handlers/xray.py) never
+`handle_xray_explore` (src/code_indexer/server/mcp/handlers/xray/_explore.py) never
 called `_validate_xray_search_patterns` at all -- unlike `handle_xray_search`,
 which validates via that helper before job submission. Two concrete
 consequences: (1) a non-string item or malformed glob passed straight into
@@ -57,7 +57,7 @@ async def test_invalid_include_patterns_rejected_by_real_handler():
     params = {**VALID_PARAMS, "include_patterns": [None]}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -73,7 +73,7 @@ async def test_invalid_exclude_patterns_rejected_by_real_handler():
     params = {**VALID_PARAMS, "exclude_patterns": ["*.{ts,md"]}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -90,7 +90,7 @@ async def test_bare_string_include_patterns_rejected_not_iterated_per_character(
     params = {**VALID_PARAMS, "include_patterns": "*.md"}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)
@@ -104,7 +104,7 @@ async def test_bare_string_exclude_patterns_rejected_not_iterated_per_character(
     params = {**VALID_PARAMS, "exclude_patterns": "*.md"}
 
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
         return_value="/some/path",
     ):
         result = await _import_handler()(params, user)

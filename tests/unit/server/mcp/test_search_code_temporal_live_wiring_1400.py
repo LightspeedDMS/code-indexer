@@ -111,7 +111,7 @@ class TestCompletedFastPathEnvelope:
             "unranked": True,
         }
         with patch(
-            "code_indexer.server.mcp.handlers.search.execute_live_temporal_search",
+            "code_indexer.server.mcp.handlers.search.temporal_search.execute_live_temporal_search",
             return_value=fake_result,
         ) as mock_dispatch:
             result = search_code(_base_params(), _make_user())
@@ -143,7 +143,7 @@ class TestHandoffEnvelope:
             "unranked": True,
         }
         with patch(
-            "code_indexer.server.mcp.handlers.search.execute_live_temporal_search",
+            "code_indexer.server.mcp.handlers.search.temporal_search.execute_live_temporal_search",
             return_value=fake_result,
         ):
             result = search_code(_base_params(), _make_user())
@@ -179,7 +179,7 @@ class TestQueryTrackerThreading:
             "unranked": True,
         }
         with patch(
-            "code_indexer.server.mcp.handlers.search.execute_live_temporal_search",
+            "code_indexer.server.mcp.handlers.search.temporal_search.execute_live_temporal_search",
             return_value=fake_result,
         ) as mock_dispatch:
             search_code(_base_params(), _make_user())

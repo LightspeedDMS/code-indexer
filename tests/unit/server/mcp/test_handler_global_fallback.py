@@ -101,7 +101,7 @@ class TestSearchCodeFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.search._search_global_repo",
+                "code_indexer.server.mcp.handlers.search.code_search._search_global_repo",
                 side_effect=_fake_search_global,
             ),
         ):
@@ -148,15 +148,15 @@ class TestHandleRegexSearchFallback:
             patch(_ARM_PATH, _make_arm(has_repo=False)),
             patch(_GRM_PATH, _make_grm(globally_active=True)),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_legacy",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_legacy",
                 return_value=mock_leg,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._execute_regex_search",
+                "code_indexer.server.mcp.handlers.search.regex_search._execute_regex_search",
                 side_effect=_fake_execute,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_golden_repos_dir",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_golden_repos_dir",
                 return_value="/fake/golden",
             ),
         ):

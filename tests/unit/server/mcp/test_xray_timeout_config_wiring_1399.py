@@ -47,11 +47,11 @@ async def _capture_engine_kwargs_with_config(
     captured: Dict[str, Any] = {}
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value="/some/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.get_config_service",
+            "code_indexer.server.mcp.handlers.xray._infra.get_config_service",
             return_value=config_service,
         ),
     ):
@@ -147,12 +147,12 @@ class TestConfigReadFailureObservability:
 
         with (
             patch.object(
-                xray_handlers,
+                xray_handlers._infra,
                 "get_config_service",
                 return_value=_BrokenConfigService(),
             ),
             patch.object(
-                xray_handlers,
+                xray_handlers._infra,
                 "_record_xray_timeout_config_read_failure_metric",
             ) as mock_record,
         ):
@@ -203,11 +203,15 @@ async def _assert_configuration_degraded_surfaced(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value="/some/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.get_config_service",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            return_value="/some/path",
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._infra.get_config_service",
             return_value=_BrokenConfigService(),
         ),
     ):

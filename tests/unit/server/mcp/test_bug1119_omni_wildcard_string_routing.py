@@ -124,11 +124,11 @@ class TestSearchCodeWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._search_activated_repo",
+                "code_indexer.server.mcp.handlers.search.code_search._search_activated_repo",
                 side_effect=fake_search_activated,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_search_code",
+                "code_indexer.server.mcp.handlers.search.code_search._omni_search_code",
                 side_effect=fake_omni_search,
             ),
             patch.object(
@@ -182,7 +182,7 @@ class TestSearchCodeWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_search_code",
+                "code_indexer.server.mcp.handlers.search.code_search._omni_search_code",
                 side_effect=fake_omni_search,
             ),
             patch.object(
@@ -232,7 +232,7 @@ class TestSearchCodeWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_search_code",
+                "code_indexer.server.mcp.handlers.search.code_search._omni_search_code",
                 side_effect=fake_omni_search,
             ),
             patch.object(
@@ -283,7 +283,7 @@ class TestSearchCodeWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._search_global_repo",
+                "code_indexer.server.mcp.handlers.search.code_search._search_global_repo",
                 side_effect=fake_search_global,
             ),
             patch.object(
@@ -491,7 +491,7 @@ class TestSearchCodeStarExpandsToGlobalRepos:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_search_code",
+                "code_indexer.server.mcp.handlers.search.code_search._omni_search_code",
                 side_effect=fake_omni_search,
             ),
             patch(
@@ -571,11 +571,11 @@ class TestRegexSearchWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_regex_search",
+                "code_indexer.server.mcp.handlers.search.regex_search._omni_regex_search",
                 side_effect=fake_omni_regex,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_legacy",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_legacy",
                 return_value=MagicMock(
                     _resolve_repo_path=MagicMock(side_effect=fake_resolve)
                 ),
@@ -635,7 +635,7 @@ class TestRegexSearchWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._omni_regex_search",
+                "code_indexer.server.mcp.handlers.search.regex_search._omni_regex_search",
                 side_effect=fake_omni_regex,
             ),
             patch.object(
@@ -678,17 +678,17 @@ class TestRegexSearchWildcardStringRouting:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._get_golden_repos_dir",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_golden_repos_dir",
                 return_value="/fake/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_legacy",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_legacy",
                 return_value=MagicMock(
                     _resolve_repo_path=MagicMock(side_effect=fake_resolve)
                 ),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search.api_metrics_service.increment_regex_search"
+                "code_indexer.server.mcp.handlers.search.regex_search.api_metrics_service.increment_regex_search"
             ),
             patch.object(
                 _utils.app_module,

@@ -96,11 +96,11 @@ def _invoke_search_code(params, user, base_dir, mock_manager=None):
                                         return_value=set(),
                                     ):
                                         with patch(
-                                            "code_indexer.server.mcp.handlers.search._load_category_map",
+                                            "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                                             return_value={},
                                         ):
                                             with patch(
-                                                "code_indexer.server.mcp.handlers.search._apply_rerank_and_filter",
+                                                "code_indexer.server.mcp.handlers.search.repo_search._apply_rerank_and_filter",
                                                 side_effect=lambda results, *a, **kw: (
                                                     results,
                                                     _empty_rerank_meta,

@@ -118,7 +118,7 @@ class TestRegexSearchServiceConstructorOffloadMcp:
             patch.object(regex_search_module.Path, "resolve", spy_resolve),
             patch.object(regex_search_module.shutil, "which", spy_which),
             patch(
-                "code_indexer.server.mcp.handlers.search.get_config_service"
+                "code_indexer.server.mcp.handlers.search.regex_search.get_config_service"
             ) as mock_get_config_service,
         ):
             mock_get_config_service.return_value.get_config.return_value = (
