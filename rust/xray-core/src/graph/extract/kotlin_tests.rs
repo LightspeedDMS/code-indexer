@@ -3,6 +3,13 @@
 //! files under this project's per-file line budget).
 
 use super::*;
+// Issue #1936: `kotlin.rs` itself no longer imports these (they moved to
+// sibling modules during the file split), so they must be imported here
+// directly for `use super::*` to resolve them -- mirrors the identical
+// `java_tests.rs` fix for `ArgShape`/`Visibility`.
+use crate::graph::extract::local_index::{
+    DeclarationKind, ImportKind, InheritanceKind, ReceiverExpr, Visibility,
+};
 use std::path::Path;
 
 fn extract_source(source: &str) -> LocalIndex {

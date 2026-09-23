@@ -22,6 +22,12 @@ mod java_methods;
 mod java_receiver;
 mod java_type_names;
 pub mod kotlin;
+mod kotlin_declarations;
+mod kotlin_fields;
+mod kotlin_functions;
+mod kotlin_invocations;
+mod kotlin_receiver;
+mod kotlin_type_names;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;
