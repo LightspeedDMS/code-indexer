@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.69.0] - 2026-09-23
+
+### Fixed
+
+- **Bug #1952 (P1 of epic #1906)**: a type-qualified Java call no longer loses
+  its edge to the type it names. In jsoup, all three `StringUtil.normaliseWhitespace(...)`
+  call sites were attributed to the unrelated `TextNode.normaliseWhitespace`,
+  one of them as a phantom self-edge, and `StringUtil.normaliseWhitespace`
+  listed none of its real callers. Root cause: the exclusive type-qualifier
+  narrow is gated behind #1922's whole-file safety check, which declines on any
+  file whose class carries an `extends`/`implements` clause -- nearly every real
+  Java class. The reference then fell through to import-context narrowing, a
+  heuristic for unqualified bare names, which deleted the candidate the source
+  had explicitly named. A candidate carrying `RECEIVER_TYPE_MATCH` is now never
+  deleted by that pass; the surviving set is a strict superset of the previous
+  one, so it can only ever delete fewer candidates. Over-binding is unchanged
+  and still acceptable -- only the deletion of a true edge is fixed.
+
+  Known gap: `QUALIFIED_NAME` tagging is gated behind the same file-safety
+  check, so on a repository whose classes use inheritance the bit is expected to
+  remain unset. Acceptance criterion 3 of #1952 is not met by this release.
+
 ## [12.68.0] - 2026-09-23
 
 ### Fixed
