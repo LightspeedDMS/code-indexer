@@ -113,9 +113,14 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # mistake. These are documented exemptions, not scrubbed occurrences.
         "LICENSE:3",
         "src/code_indexer/__init__.py:10",
-        "CHANGELOG.md:9648",
-        "CHANGELOG.md:10019",
-        "CHANGELOG.md:10500",
+        # NOTE: these three are CHANGELOG "Contributors" credit lines, keyed
+        # by line number, so EVERY new changelog entry shifts them down and
+        # this list must be re-pointed in the same commit. The 12.67.0 entry
+        # moved them by +40 (9648/10019/10500 -> 9688/10059/10540). Tracked
+        # as a recurring-toil bug (#1948): the key should be content-based.
+        "CHANGELOG.md:9688",
+        "CHANGELOG.md:10059",
+        "CHANGELOG.md:10540",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.
