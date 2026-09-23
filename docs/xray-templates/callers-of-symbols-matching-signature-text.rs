@@ -19,10 +19,23 @@
 // `callers_of` reads the POST-CAP candidate arena, so a matched symbol
 // can legitimately have zero callers even when it is referenced --
 // counted as `matched_with_zero_callers`, not conflated with "no match".
+// Bug #1929 item 2: `callers_of` returns each DISTINCT caller EXACTLY
+// ONCE, never one entry per call site -- `callers_reported` (and the
+// per-caller findings this template emits) is therefore a count of
+// distinct callers, not call sites, even when a caller invokes the
+// matched symbol from several places in its own body.
 //
-// Bug #1904: a bound Method's `signature_for()` carries its declaring
-// type and, where fully known, its real parameter type names --
-// `"Owner.name(ParamType, ...)"`, e.g. `"TimeUtil.parse(XMLGregorianCalendar)"`.
+// Bug #1904 / #1929 item 1: a bound Method's `signature_for()` carries
+// its declaring type and, where fully known, its real parameter type
+// names -- `"Owner.name(ParamType, ...)"`, e.g.
+// `"TimeUtil.parse(XMLGregorianCalendar)"`. A varargs parameter renders
+// with its REAL per-language spelling (Java `char...`, always last;
+// Kotlin `vararg Int`, at whatever position it actually occupies --
+// Kotlin allows `vararg` anywhere, unlike Java), never a bare type name
+// indistinguishable from a genuine one-arg overload. An anonymous or
+// enum-constant-body class's `Owner` renders as
+// `Enclosing$<anon@L<line>:<file_id>:<byte>>` -- the enclosing type's
+// real name and the anon body's own real source line, human-chaseable.
 // It still falls back to an arity-only tail -- `"Owner.name(N params)"`,
 // or bare `"name(N params)"` when even the declaring type is unknown --
 // whenever the extractor could not read every parameter's type or could

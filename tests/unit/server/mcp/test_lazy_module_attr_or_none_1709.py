@@ -36,6 +36,27 @@ SUBPROCESS_TIMEOUT_SECONDS = 60
 # collide with it under `==` comparison.
 _ABSENT = object()
 
+# Bug #1947: two tests below (recovery-after-delattr-teardown for both the
+# generic _utils helper and its xray.py delegate) deliberately trigger a
+# REAL construction of the process-wide FastAPI `app` singleton inside their
+# subprocess -- that is the whole point of the "mock.patch captured the
+# original via getattr(), so teardown deletes rather than restores" scenario
+# they reproduce (see the two class docstrings). cProfile on that construction
+# path (`app.py::create_app` -> `service_init.initialize_services` ->
+# `database_manager.initialize_database`, 271 real `sqlite3.Connection.execute`
+# calls for schema migrations, plus the app_wiring import cascade) shows ~8.4s
+# of unavoidable real work, not test overhead -- there is no fixture or
+# duplicated setup to trim. Measured `call` durations: isolated reruns landed
+# 7.66s-9.60s just now, and historical `.test-telemetry` recorded up to 9.25s
+# (xray delegate) and 13.28s (generic helper) across 2026-09-08..09-22 -- both
+# comfortably under the suite's default 15s ceiling in isolation, but a loaded
+# box pushed the 15s wall-clock ceiling past its budget (Issue #1947). 60s
+# gives >4.5x headroom over the single worst-ever recorded value (13.28s)
+# while still failing fast on an actual hang, matching the
+# `@pytest.mark.timeout(60)` idiom already used for subprocess-heavy tests
+# elsewhere in this suite (tests/unit/test_scip_backends.py:467).
+_APP_SINGLETON_CONSTRUCTION_TIMEOUT_SECONDS = 60
+
 
 def _run_and_assert_ok(code: str, env: dict) -> str:
     """Run `code` in a fresh subprocess, assert clean exit, return stdout."""
@@ -167,6 +188,7 @@ class TestLazyModuleAttrOrNoneRecoversAfterMockPatchDelattrTeardown:
     internal delattr-vs-restore logic ever changes.
     """
 
+    @pytest.mark.timeout(_APP_SINGLETON_CONSTRUCTION_TIMEOUT_SECONDS)
     def test_recovers_via_lazy_values_after_delattr_teardown(self, tmp_path) -> None:
         code = (
             "import sys; "
@@ -218,6 +240,7 @@ class TestXrayLazySingletonAppOrNoneDelegatesAndRecovers:
     sequence (see TestLazyModuleAttrOrNoneRecoversAfterMockPatchDelattrTeardown
     above for the full scenario rationale)."""
 
+    @pytest.mark.timeout(_APP_SINGLETON_CONSTRUCTION_TIMEOUT_SECONDS)
     def test_xray_lazy_singleton_app_or_none_recovers_via_lazy_values(
         self, tmp_path
     ) -> None:

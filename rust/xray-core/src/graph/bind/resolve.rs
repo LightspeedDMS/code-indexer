@@ -14,8 +14,9 @@ use super::narrowing::{
     apply_arity_narrowing, apply_import_context_narrowing, apply_inheritance_family_expansion,
     apply_overload_shape_narrowing, apply_private_visibility_filter,
     apply_receiver_type_narrowing, apply_same_class_or_super_narrowing,
-    apply_super_class_narrowing, param_count_matches_arity,
+    apply_super_class_narrowing, apply_type_qualifier_narrowing, param_count_matches_arity,
 };
+use super::receiver_mismatch::apply_receiver_type_mismatch_tagging;
 use super::scope::FileScope;
 use super::REF_KIND_INVOCATION;
 use crate::graph::extract::local_index::{DeclarationKind, ImportKind, LocalIndex};
@@ -328,6 +329,7 @@ pub(crate) fn resolve_reference(
     ref_scope: &FileScope,
     arg_count: Option<usize>,
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+    arg_known_types: &[Option<String>],
     name_index: &RepoNameIndex,
     type_index: &super::families::TypeIndex,
     receiver_type: Option<&str>,
@@ -336,6 +338,10 @@ pub(crate) fn resolve_reference(
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
     index_is_complete: bool,
+    receiver_is_type_qualifier: bool,
+    receiver_is_direct_parameter: bool,
+    receiver_type_is_qualified_non_java_lang: bool,
+    file_has_unresolved_external_supertype: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
     if pool.is_empty() {
@@ -369,11 +375,64 @@ pub(crate) fn resolve_reference(
         .collect();
     apply_private_visibility_filter(&mut with_reasons, caller_top_level, type_index);
     apply_arity_narrowing(&mut with_reasons, arg_count);
-    apply_overload_shape_narrowing(&mut with_reasons, arg_shapes);
+    apply_overload_shape_narrowing(&mut with_reasons, arg_shapes, arg_known_types, type_index);
     apply_receiver_type_narrowing(&mut with_reasons, receiver_type, type_index);
+    // #1924/#1925: runs immediately after `apply_receiver_type_narrowing`
+    // -- both consult the SAME resolved `receiver_type`/`receiver_type_
+    // is_positive` pair, this one to TAG (never delete) candidates whose
+    // owner is provably unrelated to a CLOSED-WORLD, UNSHADOWED receiver
+    // type reached via a genuine PARAMETER binding, an unqualified (or
+    // `java.lang`-qualified) declared type, and a caller whose own
+    // supertype evidence is fully repo-resolved (see `receiver_mismatch.
+    // rs`'s own module doc for all four conditions), exactly the same
+    // "immediately after" ordering #1922's own type-qualifier pass below
+    // documents for its own RECEIVER_TYPE_MATCH dependency.
+    apply_receiver_type_mismatch_tagging(
+        &mut with_reasons,
+        receiver_type,
+        receiver_type_is_positive,
+        receiver_is_direct_parameter,
+        receiver_type_is_qualified_non_java_lang,
+        file_has_unresolved_external_supertype,
+        type_index,
+        &ref_scope.imports,
+    );
+    // #1922: MUST run immediately after `apply_receiver_type_narrowing`
+    // (consumes the `RECEIVER_TYPE_MATCH` tag it just set) and before
+    // `apply_import_context_narrowing` (which otherwise wrongly discards
+    // a qualifier-confirmed candidate that happens to carry no same-file/
+    // same-package/import evidence, letting an unrelated same-file/
+    // same-package decoy -- often the caller's own self-loop -- win
+    // instead; see a static-facade shape, `class A { static R m(X x) {
+    // return B.m(x); } }` alongside `class B { static R m(X x) {...} }`,
+    // called from inside `A` itself).
+    //
+    // #1931 rework: the ORDERING fix above is not sufficient on its own
+    // whenever the qualifier's bare name collides with MORE than one
+    // candidate (this binder is bare-name-keyed throughout) -- e.g. two
+    // same-bare-name `Target` types in different packages both earn
+    // `RECEIVER_TYPE_MATCH` and both survive `apply_type_qualifier_
+    // narrowing`, but `apply_import_context_narrowing` would then STILL
+    // get a second, unwanted crack at that ALREADY-confirmed pool and
+    // narrow it AGAIN down to whichever one happens to carry a SAME_FILE/
+    // SAME_PACKAGE/import bit -- silently discarding the real,
+    // fully-qualified, cross-package target even though the call's OWN
+    // qualifier already positively confirmed it (proven end to end by
+    // `bug_1931_all_segments_guard_regressions.rs`'s own `fqn_survives_
+    // a_same_bare_name_decoy_in_the_callers_own_file`). So: whenever
+    // `apply_type_qualifier_narrowing` itself fired (its own `bool`
+    // return), this reference's candidate pool is ALREADY authoritatively
+    // qualifier-confirmed -- import-context heuristics (tuned for
+    // resolving an UNQUALIFIED bare name, not a call the source itself
+    // already spelled out with an explicit type qualifier) must not run
+    // again on top of it.
+    let type_qualifier_confirmed =
+        apply_type_qualifier_narrowing(&mut with_reasons, receiver_is_type_qualifier, receiver_type);
     apply_same_class_or_super_narrowing(&mut with_reasons, same_class_context, type_index);
     apply_super_class_narrowing(&mut with_reasons, super_class_context, type_index);
-    apply_import_context_narrowing(&mut with_reasons);
+    if !type_qualifier_confirmed {
+        apply_import_context_narrowing(&mut with_reasons);
+    }
     apply_inheritance_family_expansion(&mut with_reasons, ref_kind, &full_pool, type_index);
     with_reasons
 }
@@ -398,6 +457,108 @@ pub(crate) fn enclosing_symbol(index: &LocalIndex, file_id: u32, line: usize) ->
         .unwrap_or_else(|| make_symbol_id(file_id, u32::MAX))
 }
 
+/// Issue #1930: `enclosing_symbol`'s line heuristic mis-attributes a call
+/// that textually follows an anonymous/local class's own method body --
+/// the nearest PRECEDING declaration by line is that inner method, never
+/// the real enclosing method the call is actually written inside. For an
+/// invocation/method-reference/construction/type-reference site,
+/// `java.rs`'s/`kotlin.rs`'s stack-based `WalkContext` already tracks the
+/// TRUE enclosing method through the AST walk itself -- this prefers
+/// that recorded symbol over the heuristic whenever it is trustworthy,
+/// and falls back to `enclosing_symbol` only for a site that never
+/// carries one at all (a field initializer, or a class-level type
+/// reference/construction).
+///
+/// "Trustworthy" means `site_enclosing_method` names a symbol with a real
+/// `Declaration` in `index.declarations` -- NOT merely `Some(_)`. Both
+/// extractors also assign a SYNTHETIC `enclosing_method` symbol to a
+/// static/instance initializer block, a record compact constructor body
+/// (Java), or a getter/setter/`init` block (Kotlin), purely so
+/// LOCAL-BINDING resolution (`typed_names`) has somewhere to scope to --
+/// see `java.rs`'s `"block" if ctx.enclosing_method.is_none()` arm and
+/// `kotlin.rs`'s `"getter" | "setter" | "anonymous_initializer"` arm,
+/// both of which allocate a fresh symbol with NO matching `Declaration`
+/// pushed anywhere. Trusting that symbol here would attribute the call to
+/// a caller with no name in the graph.
+///
+/// For such a synthetic scope, `index.synthetic_scopes` (Issue #1930
+/// rework, items 1/3) records the symbol of the TYPE lexically enclosing
+/// it -- attribution goes STRAIGHT there, no declaration search at all.
+/// An earlier line-heuristic-based version of this fix evaluated the
+/// ordinary heuristic at the scope's own START line instead of at the
+/// call's line, which fixes the narrow case where the offending
+/// declaration sits INSIDE the scope itself, but real fixtures still
+/// reach PAST the scope's own boundary that way -- an EARLIER nested
+/// type's own method, or a PREVIOUS sibling initializer's anonymous
+/// class -- e.g. `static class Inner { void im() {} } static {
+/// afterInnerClass(); }` wrongly credited `afterInnerClass()` to `Inner.
+/// im()`, which has nothing to do with this static block. Attributing
+/// directly to the enclosing type closes every such case by
+/// construction: with no search, nothing else CAN win. The line
+/// heuristic survives only as the documented fallback
+/// `SyntheticScopeRecord::enclosing_type_symbol`'s own doc comment names
+/// -- one narrow, Java-only case where that symbol is genuinely unknown
+/// (an initializer block inside an ANONYMOUS class's own body).
+///
+/// A `site_enclosing_method` that is `Some` but names neither a real
+/// `Declaration` nor a recorded synthetic scope is structurally
+/// impossible: every `enclosing_method` either extractor ever emits comes
+/// from exactly one of those two paths (`dispatch_method_declaration`/
+/// `extract_method_declaration`, or a synthetic-block arm) -- INCLUDING
+/// the parse-recovery symbol a malformed/nameless declaration allocates
+/// (`extract_method_declaration`/`extract_function_declaration`/
+/// `extract_secondary_constructor`'s own doc comments), which is now
+/// also registered as a synthetic scope carrying its real enclosing
+/// type, never left unregistered. "Structurally impossible" is not
+/// "provably impossible" across two independent extractors and every
+/// future change to either, though, so this never fails silently: a
+/// debug build panics via `debug_assert!` (never a release-mode panic --
+/// Rule 2, anti-fallback, bars a stricter-than-
+/// release failure mode outside `#[cfg(debug_assertions)]`), and every
+/// build (debug or release) logs loudly before falling back to the
+/// ordinary heuristic at the call's own line, the least-wrong answer
+/// available once this branch is reached at all.
+///
+/// A site with no `enclosing_method` at all (`None`: a field initializer,
+/// or a class-level type reference/construction) falls straight through
+/// to the same heuristic at the call's line -- exactly the field/
+/// initializer attribution this heuristic was originally written to
+/// serve, left unchanged.
+pub(crate) fn enclosing_symbol_for_site(
+    index: &LocalIndex,
+    file_id: u32,
+    line: usize,
+    site_enclosing_method: Option<SymbolId>,
+) -> SymbolId {
+    if let Some(symbol) = site_enclosing_method {
+        if index.declarations.iter().any(|d| d.symbol == symbol) {
+            return symbol;
+        }
+        if let Some(scope) = index
+            .synthetic_scopes
+            .iter()
+            .find(|record| record.symbol == symbol)
+        {
+            return scope
+                .enclosing_type_symbol
+                .unwrap_or_else(|| enclosing_symbol(index, file_id, scope.start_line));
+        }
+        debug_assert!(
+            false,
+            "enclosing_symbol_for_site: site_enclosing_method {symbol:?} in file {file_id} \
+             matches neither a Declaration nor a recorded synthetic scope -- this should be \
+             structurally impossible (see this function's own doc comment); falling back to \
+             the line heuristic at line {line}"
+        );
+        eprintln!(
+            "xray: warning: enclosing_symbol_for_site: site_enclosing_method {symbol:?} in \
+             file {file_id} matches neither a Declaration nor a recorded synthetic scope -- \
+             falling back to the line heuristic at line {line}"
+        );
+    }
+    enclosing_symbol(index, file_id, line)
+}
+
 #[cfg(test)]
 #[path = "resolve_tests.rs"]
 mod tests;
@@ -405,3 +566,11 @@ mod tests;
 #[cfg(test)]
 #[path = "resolve_tests_family.rs"]
 mod tests_family;
+
+#[cfg(test)]
+#[path = "resolve_tests_type_qualifier.rs"]
+mod tests_type_qualifier;
+
+#[cfg(test)]
+#[path = "resolve_tests_unique_shortcut.rs"]
+mod tests_unique_shortcut;

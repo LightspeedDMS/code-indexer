@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheConfig
 from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
 
 
@@ -236,50 +237,51 @@ async def test_analyze_graph_cross_file_reference_through_the_real_handler(
 
 
 # H7 (consolidated review, Issue #1811/Bug #1812) wiring-test constants.
-_H7_PREVIEW_SIZE_CHARS = 200
+# Bug #1928 rework: inline count is byte-budget-driven, never a fixed
+# count -- there is now a SINGLE budget (max_fetch_size_chars), read
+# directly off a REAL PayloadCache by xray_truncation.truncate_result_fields
+# (the old two-budget preview_size_chars/max_fetch_size_chars split is
+# gone). _H7_MAX_FETCH_SIZE_CHARS is large enough that several (but not
+# all) findings fit VERBATIM on the first page, exercising ordinary
+# multi-entry packing rather than the (separately tested)
+# single-oversized-entry adaptive shrink a tiny budget like 200 would
+# trigger even for just the first finding. Multi-page pagination is
+# exhaustively covered by tests/unit/server/mcp/test_xray_truncation_*_1928.py's
+# real-SQLite-cache tests -- this test only proves the WIRING (the handler
+# actually routes the pipeline result through _truncate_graph_result).
+_H7_MAX_FETCH_SIZE_CHARS = 1000
 _H7_LARGE_FINDING_COUNT = 30
 _H7_FINDING_MESSAGE_LENGTH = 80
 _H7_SIGNATURE_PADDING_LENGTH = 60
 _H7_TEST_COMPILE_MS = 1
-_H7_EXPECTED_INLINE_LIMIT = 3
 _H7_SAMPLE_INVOLVED_SYMBOL_IDS = [1, 2, 3]
 _H7_ZERO_PARSE_ERRORS = 0
+_H7_CACHE_TTL_SECONDS = 900
+_H7_CLEANUP_INTERVAL_SECONDS = 60
 
 
-class _FakePayloadCacheConfigH7:
-    preview_size_chars: int = _H7_PREVIEW_SIZE_CHARS
-
-
-class _FakePayloadCacheH7:
-    """Minimal fake PayloadCache -- mirrors test_xray_payload_cache.py's
-    own fake, used here only to prove the WIRING (handler calls the
-    truncation helper), not to re-test the helper's own mechanics."""
-
-    def __init__(self, preview_size_chars: int = _H7_PREVIEW_SIZE_CHARS) -> None:
-        self.config = _FakePayloadCacheConfigH7()
-        self.config.preview_size_chars = preview_size_chars
-        self._counter = 0
-
-    def store(self, content: str) -> str:
-        self._counter += 1
-        return f"fake-handle-{self._counter}"
-
-    def truncate_result(self, content: str) -> dict:
-        preview_size = self.config.preview_size_chars
-        if len(content) > preview_size:
-            return {
-                "preview": content[:preview_size],
-                "cache_handle": self.store(content),
-                "has_more": True,
-                "total_size": len(content),
-            }
-        return {"content": content, "cache_handle": None, "has_more": False}
+def _build_h7_real_cache(tmp_path: Path) -> PayloadCache:
+    """A REAL, on-disk PayloadCache for the H7 wiring test. Bug #1928:
+    xray_truncation._store_pages() calls PayloadCache.store_batch()
+    (Bug #1181 one-transaction-per-batch pattern) plus store() for the
+    manifest row -- a bare fake/mock without store_batch() no longer
+    exercises the real code path, so this test uses the same real-cache
+    pattern as tests/unit/server/mcp/test_xray_truncation_*_1928.py."""
+    config = PayloadCacheConfig(
+        preview_size_chars=_H7_MAX_FETCH_SIZE_CHARS,
+        max_fetch_size_chars=_H7_MAX_FETCH_SIZE_CHARS,
+        cache_ttl_seconds=_H7_CACHE_TTL_SECONDS,
+        cleanup_interval_seconds=_H7_CLEANUP_INTERVAL_SECONDS,
+    )
+    cache = PayloadCache(db_path=tmp_path / "h7_payload_cache.db", config=config)
+    cache.initialize()
+    return cache
 
 
 def _build_h7_large_result() -> Dict[str, Any]:
     """A findings/refine fixture large enough to exceed
-    _H7_PREVIEW_SIZE_CHARS once serialized -- the raw pipeline result the
-    real `_run_analyze_graph_pipeline` is mocked to return."""
+    _H7_MAX_FETCH_SIZE_CHARS once serialized -- the raw pipeline result
+    the real `_run_analyze_graph_pipeline` is mocked to return."""
     return {
         "ok": True,
         "status": "ran_ok",
@@ -301,53 +303,58 @@ def _build_h7_large_result() -> Dict[str, Any]:
     }
 
 
-def _build_h7_fake_app_with_cache() -> Any:
-    """A MagicMock app whose app.state.payload_cache is the fake cache,
+def _build_h7_fake_app_with_cache(cache: PayloadCache) -> Any:
+    """A MagicMock app whose app.state.payload_cache is a REAL PayloadCache,
     for patching onto code_indexer.server.mcp.handlers._utils.app_module."""
     from unittest.mock import MagicMock
 
     mock_state = MagicMock()
-    mock_state.payload_cache = _FakePayloadCacheH7()
+    mock_state.payload_cache = cache
     mock_app = MagicMock()
     mock_app.state = mock_state
     return mock_app
 
 
 @pytest.mark.asyncio
-async def test_analyze_graph_large_result_is_routed_through_payload_cache_truncation() -> (
-    None
-):
+async def test_analyze_graph_large_result_is_routed_through_payload_cache_truncation(
+    tmp_path: Path,
+) -> None:
     """H7 (consolidated review, Issue #1811/Bug #1812): a large findings/
     refine result must come back through handle_analyze_graph with
     PayloadCache truncation markers (cache_handle/has_more/truncated) and
-    only 3 findings inline. Spies on `_truncate_graph_result` itself
-    (wrapping the REAL implementation, so behavior is unchanged) to prove
-    the handler actually CALLS it with the pipeline's result -- not just
-    that the response happens to carry the right shape by coincidence."""
+    only a byte-budget-driven prefix of findings inline. Spies on
+    `_truncate_graph_result` itself (wrapping the REAL implementation, so
+    behavior is unchanged) to prove the handler actually CALLS it with the
+    pipeline's result -- not just that the response happens to carry the
+    right shape by coincidence."""
     from unittest.mock import AsyncMock, MagicMock
 
     from code_indexer.server.mcp.handlers import xray_graph as xray_graph_module
-    from code_indexer.server.mcp.handlers.xray import (
+    from code_indexer.server.mcp.handlers.xray_graph import (
         _truncate_graph_result as real_truncate_graph_result,
     )
 
     handler = _import_handler()
     large_result = _build_h7_large_result()
-    mock_app = _build_h7_fake_app_with_cache()
-    truncate_spy = MagicMock(wraps=real_truncate_graph_result)
+    cache = _build_h7_real_cache(tmp_path)
+    try:
+        mock_app = _build_h7_fake_app_with_cache(cache)
+        truncate_spy = MagicMock(wraps=real_truncate_graph_result)
 
-    with (
-        patch(
-            "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
-            new=AsyncMock(return_value=large_result),
-        ),
-        patch.object(xray_graph_module, "_truncate_graph_result", truncate_spy),
-        patch(
-            "code_indexer.server.mcp.handlers._utils.app_module",
-            **{"app": mock_app},
-        ),
-    ):
-        result = await handler(dict(VALID_PARAMS), _make_user())
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray_graph._run_analyze_graph_pipeline",
+                new=AsyncMock(return_value=large_result),
+            ),
+            patch.object(xray_graph_module, "_truncate_graph_result", truncate_spy),
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module",
+                **{"app": mock_app},
+            ),
+        ):
+            result = await handler(dict(VALID_PARAMS), _make_user())
+    finally:
+        cache.close()
 
     truncate_spy.assert_called_once_with(large_result)
 
@@ -358,6 +365,17 @@ async def test_analyze_graph_large_result_is_routed_through_payload_cache_trunca
     )
     assert parsed["has_more"] is True
     assert parsed["truncated"] is True
-    assert len(parsed["findings"]) == _H7_EXPECTED_INLINE_LIMIT
-    assert len(parsed["refine"]) == _H7_EXPECTED_INLINE_LIMIT
+    n_inline = len(parsed["findings"])
+    assert 0 < n_inline < _H7_LARGE_FINDING_COUNT, (
+        "Bug #1928: inline findings must be a genuine byte-budget-driven "
+        "partial prefix -- not all, not none, and never a hardcoded count"
+    )
+    assert parsed["findings"] == large_result["findings"][:n_inline]
+    assert len(parsed["refine"]) <= n_inline
+    inline_size = len(
+        json.dumps({"findings": parsed["findings"], "refine": parsed["refine"]}).encode(
+            "utf-8"
+        )
+    )
+    assert inline_size <= _H7_MAX_FETCH_SIZE_CHARS
     assert parsed["fact_graph_complete"] is True

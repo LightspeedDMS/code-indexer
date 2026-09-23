@@ -74,15 +74,15 @@ def _make_omni_patches():
 
     return fake_multi_response, [
         patch(
-            "code_indexer.server.mcp.handlers.search._expand_wildcard_patterns",
+            "code_indexer.server.mcp.handlers.search.omni._expand_wildcard_patterns",
             return_value=EXPANDED_ALIASES,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search.get_correlation_id",
+            "code_indexer.server.mcp.handlers.search.omni.get_correlation_id",
             return_value=CORRELATION_ID_OMNI,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._format_omni_response",
+            "code_indexer.server.mcp.handlers.search.omni._format_omni_response",
             return_value={
                 "results": [],
                 "total_repos_searched": EXPANDED_REPO_COUNT,
@@ -90,27 +90,27 @@ def _make_omni_patches():
             },
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._flatten_multi_results",
+            "code_indexer.server.mcp.handlers.search.omni._flatten_multi_results",
             return_value=[],
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._load_category_map",
+            "code_indexer.server.mcp.handlers.search.omni._load_category_map",
             return_value={},
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._get_wiki_enabled_repos",
+            "code_indexer.server.mcp.handlers.search.omni._get_wiki_enabled_repos",
             return_value=[],
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._filter_errors_for_user",
+            "code_indexer.server.mcp.handlers.search.omni._filter_errors_for_user",
             return_value={},
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._aggregate_results",
+            "code_indexer.server.mcp.handlers.search.omni._aggregate_results",
             return_value=[],
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._get_access_filtering_service",
+            "code_indexer.server.mcp.handlers.search.omni._get_access_filtering_service",
             return_value=None,
         ),
     ]
@@ -137,11 +137,11 @@ def test_entry_log_fires_with_all_required_fields(caplog):
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.search._search_global_repo",
+            "code_indexer.server.mcp.handlers.search.code_search._search_global_repo",
             return_value=_empty_search_response(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search.get_correlation_id",
+            "code_indexer.server.mcp.handlers.search.code_search.get_correlation_id",
             return_value=CORRELATION_ID_ENTRY,
         ),
         caplog.at_level(
@@ -327,11 +327,11 @@ def test_exit_log_fires_with_correlation_id_result_count_and_elapsed_ms(caplog):
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.search._search_global_repo",
+            "code_indexer.server.mcp.handlers.search.code_search._search_global_repo",
             return_value=_empty_search_response(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search.get_correlation_id",
+            "code_indexer.server.mcp.handlers.search.code_search.get_correlation_id",
             return_value=CORRELATION_ID_EXIT,
         ),
         caplog.at_level(

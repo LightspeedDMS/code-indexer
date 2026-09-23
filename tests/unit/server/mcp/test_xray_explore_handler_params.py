@@ -46,23 +46,23 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
         ) as mock_validate,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -278,7 +278,7 @@ class TestXrayExploreHandlerRenamedParams:
 
         # Validation rejects missing 'pattern' before reaching async infra
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(params, user)
@@ -313,7 +313,7 @@ class TestXrayExploreHandlerMaxResults:
 
         # Validation rejects before async infra needed
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()({**VALID_PARAMS, "max_results": 0}, user)

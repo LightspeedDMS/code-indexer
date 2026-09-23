@@ -3,6 +3,13 @@
 //! files under this project's per-file line budget).
 
 use super::*;
+// Issue #1936: `kotlin.rs` itself no longer imports these (they moved to
+// sibling modules during the file split), so they must be imported here
+// directly for `use super::*` to resolve them -- mirrors the identical
+// `java_tests.rs` fix for `ArgShape`/`Visibility`.
+use crate::graph::extract::local_index::{
+    DeclarationKind, ImportKind, InheritanceKind, ReceiverExpr, Visibility,
+};
 use std::path::Path;
 
 fn extract_source(source: &str) -> LocalIndex {
@@ -44,6 +51,37 @@ fn extracts_a_class_declaration_as_a_type() {
     let decl = index.declaration_named("Greeter").unwrap();
     assert_eq!(decl.kind, DeclarationKind::Type);
     assert_eq!(index.signatures.get(&decl.symbol).unwrap(), "class Greeter");
+}
+
+/// Bug #1929 item 3: an anonymous object-literal type (`object : Base()
+/// { ... }`) must synthesize a name a human can chase -- the enclosing
+/// type's real name plus the object literal's own REAL source line --
+/// never the previous opaque `<anon:{file_id}:{byte}>`, mirroring
+/// `JavaExtractor`'s identical fix for an anonymous/enum-body class.
+/// Braces deliberately span separate lines (idiomatic formatting) to
+/// avoid the documented, unrelated Bug #1937 same-line parse-recovery
+/// defect in the pinned tree-sitter-kotlin-ng grammar.
+#[test]
+fn anonymous_object_literal_synthesized_name_carries_the_enclosing_type_and_a_real_line() {
+    let index = extract_source(
+        "class Outer {\n    fun make() {\n        val x = object : Runnable {\n            override fun run() {}\n        }\n    }\n}\n",
+    );
+    let anon = index
+        .declarations
+        .iter()
+        .find(|d| d.kind == DeclarationKind::Type && d.name.contains("$<anon@L"))
+        .expect("the object literal must produce a synthesized anonymous Type declaration");
+    assert!(
+        anon.name.starts_with("Outer$<anon@L3:"),
+        "anon name must start with the enclosing type's real name and its own real source \
+         line (3, where `object : Runnable {{` begins): got {}",
+        anon.name
+    );
+    assert!(
+        !anon.name.contains("<anon:"),
+        "the old opaque `<anon:file_id:byte>` shape must be gone: got {}",
+        anon.name
+    );
 }
 
 #[test]

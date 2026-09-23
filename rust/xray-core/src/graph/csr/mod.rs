@@ -16,6 +16,7 @@ mod adjacency;
 pub mod builder;
 pub mod code_graph;
 pub mod ops;
+pub mod ops_filtered;
 pub mod wire;
 mod wire_cursor;
 
@@ -136,6 +137,22 @@ pub mod handle {
         /// Bug #1900 (review round 2): exposes `CodeGraph::edge_evidence` --
         /// see `GraphHandle::edge_evidence`.
         edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
+        /// #1924/#1925 (epic #1906): exposes `CodeGraph::callees_of_filtered`
+        /// -- see `GraphHandle::callees_of_filtered`.
+        callees_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::callers_of_filtered` -- see
+        /// `GraphHandle::callers_of_filtered`.
+        callers_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::reachable_from_filtered` -- see
+        /// `GraphHandle::reachable_from_filtered`.
+        reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::reachable_to_filtered` -- see
+        /// `GraphHandle::reachable_to_filtered`.
+        reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::strongly_connected_components_
+        /// filtered` -- see `GraphHandle::strongly_connected_components_
+        /// filtered`.
+        strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -245,6 +262,31 @@ pub mod handle {
         graph_from_ctx(ctx).edge_evidence(from, to)
     }
 
+    /// #1924/#1925: thunk for `callees_of_filtered`.
+    fn thunk_callees_of_filtered(ctx: CtxPtr, symbol: u32, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).callees_of_filtered(symbol, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `callers_of_filtered`.
+    fn thunk_callers_of_filtered(ctx: CtxPtr, symbol: u32, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).callers_of_filtered(symbol, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `reachable_from_filtered`.
+    fn thunk_reachable_from_filtered(ctx: CtxPtr, roots: &[u32], max_depth: usize, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_from_filtered(roots, max_depth, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `reachable_to_filtered`.
+    fn thunk_reachable_to_filtered(ctx: CtxPtr, targets: &[u32], max_depth: usize, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_to_filtered(targets, max_depth, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `strongly_connected_components_filtered`.
+    fn thunk_strongly_connected_components_filtered(ctx: CtxPtr, required: u16, forbidden: u16) -> Vec<Vec<u32>> {
+        graph_from_ctx(ctx).strongly_connected_components_filtered(required, forbidden)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -271,6 +313,11 @@ pub mod handle {
                 visibility_of_fn: thunk_visibility_of,
                 edge_reason_fn: thunk_edge_reason,
                 edge_evidence_fn: thunk_edge_evidence,
+                callees_of_filtered_fn: thunk_callees_of_filtered,
+                callers_of_filtered_fn: thunk_callers_of_filtered,
+                reachable_from_filtered_fn: thunk_reachable_from_filtered,
+                reachable_to_filtered_fn: thunk_reachable_to_filtered,
+                strongly_connected_components_filtered_fn: thunk_strongly_connected_components_filtered,
                 _graph: PhantomData,
             }
         }
@@ -438,6 +485,40 @@ pub mod handle {
         /// alone) and the same complexity caveat as `edge_reason` above.
         pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
             (self.edge_evidence_fn)(self.ctx, from, to)
+        }
+
+        /// #1924/#1925 (epic #1906): the evidence-FILTERED counterpart of
+        /// `callees_of` -- see `CodeGraph::callees_of_filtered`'s doc
+        /// comment for the exact filter contract and complexity guarantee.
+        pub fn callees_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callees_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of `callers_of`
+        /// -- see `CodeGraph::callers_of_filtered`'s doc comment.
+        pub fn callers_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callers_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of
+        /// `reachable_from` -- see `CodeGraph::reachable_from_filtered`'s
+        /// doc comment.
+        pub fn reachable_from_filtered(&self, roots: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_from_filtered_fn)(self.ctx, roots, max_depth, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of
+        /// `reachable_to` -- see `CodeGraph::reachable_to_filtered`'s doc
+        /// comment.
+        pub fn reachable_to_filtered(&self, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_to_filtered_fn)(self.ctx, targets, max_depth, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of `strongly_
+        /// connected_components` -- see `CodeGraph::strongly_connected_
+        /// components_filtered`'s doc comment.
+        pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
+            (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
         }
     }
 
@@ -709,6 +790,104 @@ pub mod handle {
             assert_eq!(handle.edge_evidence(caller, target), graph.edge_evidence(caller, target));
             assert_eq!(handle.edge_evidence(caller, target), Some(reasons::SAME_PACKAGE | reasons::ARITY_MATCH));
             assert_eq!(handle.edge_evidence(caller, 999), None, "a pair with no edge at all must report None through the handle too");
+        }
+
+        /// #1924/#1925: `callees_of_filtered`/`callers_of_filtered` must be
+        /// reachable through `GraphHandle`, delegating byte-for-byte to
+        /// their `CodeGraph` counterparts. `caller` has two callees:
+        /// `matched` (RECEIVER_TYPE_MATCH only) and `mismatched`
+        /// (RECEIVER_TYPE_MATCH | RECEIVER_TYPE_MISMATCH).
+        #[test]
+        fn callees_of_filtered_and_callers_of_filtered_delegate_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+            let caller = builder.intern_symbol(make_symbol_id(12, 0));
+            let matched = builder.intern_symbol(make_symbol_id(12, 1));
+            let mismatched = builder.intern_symbol(make_symbol_id(12, 2));
+            builder.add_reference(caller, 12, 1, 0, &[Candidate::new(matched, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(
+                caller,
+                12,
+                2,
+                0,
+                &[Candidate::new(mismatched, reasons::RECEIVER_TYPE_MATCH | reasons::RECEIVER_TYPE_MISMATCH)],
+            );
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(
+                handle.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                graph.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH)
+            );
+            assert_eq!(
+                handle.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                vec![matched]
+            );
+            assert_eq!(
+                handle.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                graph.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH)
+            );
+            assert_eq!(
+                handle.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                vec![caller]
+            );
+        }
+
+        /// #1924/#1925: `reachable_from_filtered`/`reachable_to_filtered`/
+        /// `strongly_connected_components_filtered` must be reachable
+        /// through `GraphHandle`, delegating byte-for-byte to their
+        /// `CodeGraph` counterparts. Reuses the diamond-plus-cycle fixture
+        /// `reachable_from_and_shortest_path_and_scc_delegate_to_the_real_
+        /// graph` above builds, tagging every edge `RECEIVER_TYPE_MATCH`.
+        #[test]
+        fn reachable_from_filtered_and_reachable_to_filtered_and_scc_filtered_delegate_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(5);
+            let a = builder.intern_symbol(make_symbol_id(13, 0));
+            let b = builder.intern_symbol(make_symbol_id(13, 1));
+            let c = builder.intern_symbol(make_symbol_id(13, 2));
+            let d = builder.intern_symbol(make_symbol_id(13, 3));
+            builder.add_reference(a, 13, 1, 0, &[Candidate::new(b, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(a, 13, 2, 0, &[Candidate::new(c, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(b, 13, 3, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(c, 13, 4, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(d, 13, 5, 0, &[Candidate::new(a, reasons::RECEIVER_TYPE_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            let mut via_handle = handle.reachable_from_filtered(&[a], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_handle.sort_unstable();
+            let mut via_graph = graph.reachable_from_filtered(&[a], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_graph.sort_unstable();
+            assert_eq!(via_handle, via_graph);
+            assert_eq!(via_handle, vec![a, b, c, d]);
+
+            let mut via_handle_to = handle.reachable_to_filtered(&[d], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_handle_to.sort_unstable();
+            let mut via_graph_to = graph.reachable_to_filtered(&[d], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_graph_to.sort_unstable();
+            assert_eq!(via_handle_to, via_graph_to);
+            assert_eq!(via_handle_to, vec![a, b, c, d]);
+
+            let mut via_handle_scc = handle.strongly_connected_components_filtered(reasons::RECEIVER_TYPE_MATCH, 0);
+            let mut via_graph_scc = graph.strongly_connected_components_filtered(reasons::RECEIVER_TYPE_MATCH, 0);
+            for comp in via_handle_scc.iter_mut().chain(via_graph_scc.iter_mut()) {
+                comp.sort_unstable();
+            }
+            via_handle_scc.sort();
+            via_graph_scc.sort();
+            assert_eq!(via_handle_scc, via_graph_scc);
+            assert_eq!(via_handle_scc.len(), 1, "a-b-d, a-c-d, d-a form one strongly connected component");
+
+            // An empty mask must reach the SAME SET of nodes as the unfiltered
+            // primitive -- compared as sorted sets, never raw Vec equality:
+            // `callees_of_filtered` merges per-target evidence via a HashMap
+            // internally (see `AdjacencyIndex::filtered_edges_of`), whose
+            // iteration order is not guaranteed to match `callees_of`'s CSR
+            // build order, even though the CONTENT is identical.
+            let mut empty_mask = handle.reachable_from_filtered(&[a], 100, 0, 0);
+            let mut unfiltered_from = handle.reachable_from(&[a], 100);
+            empty_mask.sort_unstable();
+            unfiltered_from.sort_unstable();
+            assert_eq!(empty_mask, unfiltered_from);
         }
     }
 }

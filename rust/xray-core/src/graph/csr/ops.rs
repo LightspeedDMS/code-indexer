@@ -11,9 +11,18 @@
 //! callback that writes its own unbounded loop OUTSIDE these ops.
 //!
 //! All ops read the "call graph" direction off `Reference.from` -- the
-//! DENSE id of the symbol the reference site is textually INSIDE (see
-//! `crate::graph::bind::resolve::enclosing_symbol`) -- and each
-//! `Reference`'s candidate window as its (possibly ambiguous) targets.
+//! DENSE id of the symbol the reference site is textually INSIDE. Issue
+//! #1930: this is the extractor's own real, AST-walk-tracked enclosing
+//! method when one is known and trustworthy (see
+//! `crate::graph::bind::resolve::enclosing_symbol_for_site`), falling
+//! back to a nearest-preceding-declaration-by-line heuristic
+//! (`crate::graph::bind::resolve::enclosing_symbol`) only for a site
+//! with no such method (a field initializer, a class-level type
+//! reference) or one whose `enclosing_method` is a synthetic scope
+//! symbol with no real `Declaration` (a static/instance initializer
+//! block, a record compact constructor, a Kotlin getter/setter/`init`
+//! block) -- and each `Reference`'s candidate window as its (possibly
+//! ambiguous) targets.
 //! `callees_of(x)` therefore means "every candidate target of every
 //! reference written inside x"; `callers_of(y)` means "every symbol whose
 //! own reference proposed y as a candidate", regardless of whether that
@@ -44,6 +53,54 @@ pub(crate) fn reset_reference_comparison_count() {
 #[cfg(test)]
 pub(crate) fn reference_comparison_count() -> usize {
     REFERENCE_COMPARISON_COUNT.with(|count| count.get())
+}
+
+/// Bug #1929 item 2: returns `raw` with every duplicate removed, keeping
+/// each element's FIRST occurrence position -- the same dedup contract
+/// `AdjacencyIndex::filtered_edges_of` already documents for its own
+/// evidence-filtered callee/caller view ("EXACTLY ONCE, in FIRST-SEEN CSR
+/// order, never a `HashMap`'s unspecified iteration order"). `callees_of`/
+/// `callers_of` now share this exact behavior instead of diverging from
+/// it, so a `required: 0, forbidden: 0` filtered call and its unfiltered
+/// counterpart return the identical (deduplicated) target SET. O(raw.len())
+/// time and one `HashSet<u32>` sized to at most `raw.len()` -- bounded by
+/// this node's own out-/in-degree, never the whole graph (Rule 14).
+///
+/// Bug #1929 rework item 6 (measured, judgement call): this per-call
+/// `HashSet` allocation is genuinely NOT free. Measured on a synthetic
+/// 50,000-node/400,000-edge graph (this crate's own documented target
+/// scale is ~215K declarations/~834K call sites, see `adjacency.rs`), a
+/// full whole-graph `callees_of` pass (one call per node -- the exact
+/// pattern `strongly_connected_components`/`reachable_from`/
+/// `reachable_to` all use) took ~13ms in `--release`: about 152x the
+/// ~86us the raw undeduped `callees_index` accessor takes for the
+/// identical pass.
+///
+/// Deliberately NOT moved to CSR construction time. The SAME shared
+/// adjacency edge array also backs `filtered_edges_of`,
+/// `ambiguous_for_edge`, and `evidence_for_edge`, each of which needs
+/// the RAW, UNDEDUPED, per-occurrence data for its own evidence
+/// semantics -- `filtered_edges_of`'s own doc comment: "checked per
+/// occurrence, never merged across occurrences ... a genuine edge is
+/// never dropped just because a separate, weaker occurrence of the same
+/// pair exists". Deduping that shared array at construction time would
+/// silently break those three accessors. Doing it correctly would
+/// require a SECOND, parallel deduped index used only by `callees_of`/
+/// `callers_of`, doubling this crate's adjacency memory footprint for a
+/// cost (tens of milliseconds, at most a handful of whole-graph passes
+/// per `analyze_graph` invocation) that is not the dominant cost in a
+/// real run (parsing/extraction/binding a large repo runs into
+/// seconds-to-minutes). Revisit if profiling ever shows this dominating
+/// a real `analyze_graph` invocation's wall time.
+fn dedup_preserving_first_seen_order(raw: &[u32]) -> Vec<u32> {
+    let mut seen: HashSet<u32> = HashSet::with_capacity(raw.len());
+    let mut ordered = Vec::with_capacity(raw.len());
+    for &id in raw {
+        if seen.insert(id) {
+            ordered.push(id);
+        }
+    }
+    ordered
 }
 
 impl CodeGraph {
@@ -113,22 +170,34 @@ impl CodeGraph {
     }
 
     /// Every candidate target (dense symbol id) of every reference written
-    /// textually inside `dense_symbol_id`. M2 fix: O(out-degree) via the
-    /// precomputed CSR forward adjacency index (`callees_index`, built
-    /// ONCE at graph construction) -- NEVER a re-scan of every reference
-    /// in the repository, which made this (and every caller that queries
-    /// it once per node: `reachable_from`, `shortest_path_to_any`,
-    /// `strongly_connected_components`) O(V*E) before this fix.
+    /// textually inside `dense_symbol_id`, each appearing EXACTLY ONCE
+    /// (Bug #1929 item 2 -- previously one entry PER CALL SITE, which
+    /// inflated "how many callees does this have" for any caller that
+    /// counts the result; reported live against a real-world
+    /// `Reader.consumeToAny`, where `callers_of` length (5) did not
+    /// match the distinct-caller count (3)). Deduplicated in FIRST-SEEN
+    /// CSR order (never a
+    /// `HashSet`'s unspecified iteration order), mirroring `AdjacencyIndex
+    /// ::filtered_edges_of`'s identical dedup contract. M2 fix: O(out-
+    /// degree) via the precomputed CSR forward adjacency index
+    /// (`callees_index`, built ONCE at graph construction) -- NEVER a
+    /// re-scan of every reference in the repository, which made this (and
+    /// every caller that queries it once per node: `reachable_from`,
+    /// `shortest_path_to_any`, `strongly_connected_components`) O(V*E)
+    /// before that fix; the dedup pass here adds only O(out-degree),
+    /// never a second scan of anything larger.
     pub fn callees_of(&self, dense_symbol_id: u32) -> Vec<u32> {
-        self.callees_index(dense_symbol_id).to_vec()
+        dedup_preserving_first_seen_order(self.callees_index(dense_symbol_id))
     }
 
     /// Every symbol (dense id) that has at least one reference proposing
     /// `dense_symbol_id` as a candidate target -- the reverse of
-    /// `callees_of`. M2 fix: O(in-degree) via the precomputed CSR reverse
-    /// adjacency index, same rationale as `callees_of` above.
+    /// `callees_of`, each appearing EXACTLY ONCE for the identical Bug
+    /// #1929 item 2 reason `callees_of` documents above. M2 fix: O(in-
+    /// degree) via the precomputed CSR reverse adjacency index, same
+    /// rationale as `callees_of` above.
     pub fn callers_of(&self, dense_symbol_id: u32) -> Vec<u32> {
-        self.callers_index(dense_symbol_id).to_vec()
+        dedup_preserving_first_seen_order(self.callers_index(dense_symbol_id))
     }
 
     /// Bounded BFS from `from` to the nearest node in `targets` (shortest
@@ -194,14 +263,26 @@ impl CodeGraph {
     pub fn strongly_connected_components(&self) -> Vec<Vec<u32>> {
         let n = self.symbol_count();
         let adjacency: Vec<Vec<u32>> = (0..n as u32).map(|v| self.callees_of(v)).collect();
-        let mut ctx = TarjanContext::new(n);
-        for start in 0..n as u32 {
-            if ctx.index[start as usize].is_none() {
-                ctx.run_from(start, &adjacency);
-            }
-        }
-        ctx.components
+        strongly_connected_components_over_adjacency(n, &adjacency)
     }
+}
+
+/// #1924/#1925 (epic #1906): the Tarjan walk itself, factored out of
+/// `strongly_connected_components` so `ops_filtered.rs`'s `strongly_
+/// connected_components_filtered` can reuse the IDENTICAL algorithm over a
+/// pre-computed FILTERED adjacency list, rather than duplicating ~80 lines
+/// of iterative Tarjan logic (Rule 4, anti-duplication) -- the only thing
+/// that differs between the unfiltered and filtered SCC primitives is HOW
+/// `adjacency` was built (`callees_of` vs `callees_of_filtered`), never the
+/// traversal that consumes it.
+pub(super) fn strongly_connected_components_over_adjacency(n: usize, adjacency: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    let mut ctx = TarjanContext::new(n);
+    for start in 0..n as u32 {
+        if ctx.index[start as usize].is_none() {
+            ctx.run_from(start, adjacency);
+        }
+    }
+    ctx.components
 }
 
 /// Mutable state for the iterative Tarjan SCC walk used by
@@ -362,6 +443,54 @@ mod tests {
 
         assert_eq!(graph.callers_of(d), vec![b]);
         assert!(graph.callers_of(a).is_empty(), "nothing proposes A as a candidate");
+    }
+
+    /// Bug #1929 item 2: `callers_of` must return each caller EXACTLY
+    /// ONCE, never one entry PER CALL SITE -- reported live against a
+    /// real-world `Reader.consumeToAny`, where `callers_of` length (5) did
+    /// not match the distinct-caller count (3), inflating "how many
+    /// callers does this have" for anyone counting the result. A calls C
+    /// from THREE separate call sites (three distinct `Reference`s, same
+    /// `from`/`to` pair) -- the pre-fix implementation returns A three
+    /// times; the fix must return it once.
+    #[test]
+    fn callers_of_deduplicates_a_caller_with_multiple_call_sites_to_the_same_target() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(3);
+        let a = builder.intern_symbol(make_symbol_id(10, 0));
+        let c = builder.intern_symbol(make_symbol_id(10, 1));
+
+        builder.add_reference(a, 10, 1, 0, &[Candidate::new(c, reasons::SAME_FILE)]);
+        builder.add_reference(a, 10, 2, 0, &[Candidate::new(c, reasons::SAME_FILE)]);
+        builder.add_reference(a, 10, 3, 0, &[Candidate::new(c, reasons::SAME_FILE)]);
+
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.callers_of(c),
+            vec![a],
+            "A calls C from 3 call sites but must appear as a caller exactly once"
+        );
+    }
+
+    /// Bug #1929 item 2, the `callees_of` mirror: B is called from the
+    /// SAME enclosing symbol A across two separate call sites -- A's
+    /// callee list must list B once, not twice.
+    #[test]
+    fn callees_of_deduplicates_a_callee_reached_from_multiple_call_sites() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+        let a = builder.intern_symbol(make_symbol_id(11, 0));
+        let b = builder.intern_symbol(make_symbol_id(11, 1));
+
+        builder.add_reference(a, 11, 1, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
+        builder.add_reference(a, 11, 2, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
+
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.callees_of(a),
+            vec![b],
+            "A calls B from 2 call sites but must appear as a callee exactly once"
+        );
     }
 
     /// AC7: "reachable_from(roots, max_depth)" -- a bounded BFS over

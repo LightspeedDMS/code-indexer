@@ -52,7 +52,7 @@ def _call_handler(tmp_path, params: Dict[str, Any]) -> Dict[str, Any]:
     """Call handle_xray_dump_ast with _resolve_repo_path mocked to tmp_path."""
     user = _make_user(UserRole.NORMAL_USER)
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
         return_value=str(tmp_path),
     ):
         handler = _import_handler()
@@ -126,18 +126,18 @@ class TestMaxNodesForwarding:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
                 return_value=str(tmp_path),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray.XRaySearchEngine._serialize_ast",
+                "code_indexer.server.mcp.handlers.xray._dump_ast.XRaySearchEngine._serialize_ast",
                 return_value={"type": "module", "children": []},
             ) as spy_serialize,
         ):
             # Also need to patch ast_engine.detect_language and parse so we don't
             # need tree-sitter installed
             with patch(
-                "code_indexer.server.mcp.handlers.xray.XRaySearchEngine"
+                "code_indexer.server.mcp.handlers.xray._dump_ast.XRaySearchEngine"
             ) as MockEngine:
                 mock_instance = MockEngine.return_value
                 mock_instance.ast_engine.detect_language.return_value = "python"
@@ -168,16 +168,16 @@ class TestMaxNodesForwarding:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
                 return_value=str(tmp_path),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray.XRaySearchEngine._serialize_ast",
+                "code_indexer.server.mcp.handlers.xray._dump_ast.XRaySearchEngine._serialize_ast",
                 return_value={"type": "module", "children": []},
             ) as spy_serialize,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.xray.XRaySearchEngine"
+                "code_indexer.server.mcp.handlers.xray._dump_ast.XRaySearchEngine"
             ) as MockEngine:
                 mock_instance = MockEngine.return_value
                 mock_instance.ast_engine.detect_language.return_value = "python"

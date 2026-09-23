@@ -857,18 +857,21 @@ Other validation rejection messages name the offending construct and include a d
 
 ### Large Result Paging
 
-For results larger than ~2000 chars (configurable via Web UI `payload_preview_size_chars`), the polled job result is truncated and stored in PayloadCache. Additional fields:
+For results larger than the server's single payload character budget (Web UI `payload_max_fetch_size_chars`, default 5000 chars), the polled job result is truncated and the FULL set is stored in PayloadCache as a series of whole-entry pages. The inline budget IS the page budget -- there is no separate, smaller preview threshold. `matches[]`/`evaluation_errors[]` come back inline as many WHOLE leading entries as fit within `payload_max_fetch_size_chars` -- a result with many small entries can inline dozens of them. **No entry is ever partially cut to fit a page**: an entry that alone exceeds the budget gets its own, necessarily oversized, page in the cache, intact and unmodified. Additional fields:
 
-- `truncated: true` -- set when the matches+errors JSON exceeded the preview cap
+- `truncated: true` -- set when the matches+errors JSON exceeded the character budget
 - `has_more: true` -- synonym; set with `truncated`
 - `cache_handle: "<uuid>"` -- opaque handle for paged retrieval
-- `total_size: <int>` -- full payload byte size
-- `matches_and_errors_preview: "<first 2000 chars of JSON>"` -- quick preview
-- `matches[]` and `evaluation_errors[]` -- only the first 3 entries inline
+- `total_pages: <int>` -- number of independently-fetchable cache pages the full content was split across
+- `inline_entry_truncated: true` -- present only in the rare case where the single first entry alone exceeds the budget; it is then adaptively shrunk (string/list fields capped) for THIS inline response ONLY -- the cached copy stays whole and unmodified
+- `matches[]` and `evaluation_errors[]` -- as many whole leading entries as fit the character budget (never a fixed count, never a partially-truncated entry unless `inline_entry_truncated` is set)
+- `fetch_tool_hint` -- names `cidx_fetch_cached_payload` and describes the page format below
 
-To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`), or use the discoverable `cidx_fetch_cached_payload` MCP tool.
+To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP tool with `cache_handle`, incrementing `page` from 1 through `total_pages` (or until `has_more` is `false`). Each page is stored as its own independent cache row and is returned WHOLE and unsliced regardless of the server's CURRENT `payload_max_fetch_size_chars` setting -- a config change between when a result was produced and when you fetch it cannot corrupt or misalign a page. Each page is an independently parseable JSON object `{"matches": [...], "evaluation_errors": [...]}` holding a whole-entry slice -- `json.loads` (or equivalent) works on every page by itself; concatenate every page's `matches`/`evaluation_errors` lists, in page order, to reconstruct the full arrays exactly, in original order.
 
-When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors[]` arrays are returned inline.
+When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors[]` arrays are returned inline, unmodified.
+
+**Cache degradation and failure** (Bug #1928 final round): `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the search already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
 
 ## Iterating on Your Evaluator
 

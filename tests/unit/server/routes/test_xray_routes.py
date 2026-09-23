@@ -545,9 +545,9 @@ def _store_test_finder_pattern(cidx_meta: Path, name: str = "test-finder-1812") 
 
 
 def _patch_cidx_meta_1812(cidx_meta: Path):
-    """Patch the cidx-meta path resolver used by handlers.xray._resolve_evaluator_code."""
+    """Patch the cidx-meta path resolver used by handlers.xray._infra._resolve_evaluator_code."""
     return patch(
-        "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+        "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
         return_value=cidx_meta,
     )
 

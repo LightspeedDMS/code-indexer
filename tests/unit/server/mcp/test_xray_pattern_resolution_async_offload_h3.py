@@ -1,6 +1,6 @@
 """Consolidated review finding H3 (Issue #1811/Bug #1812, Codex).
 
-`_resolve_evaluator_code` (handlers/xray.py) can do real filesystem I/O
+`_resolve_evaluator_code` (handlers/xray/_infra.py) can do real filesystem I/O
 (`XrayPatternService.ensure_seed_patterns`'s mkdir/write_text, and
 `_load_pattern`'s YAML read) AND spawn a git subprocess (`ensure_seed_
 patterns`'s git add + git commit) when `pattern_name` is supplied.
@@ -96,11 +96,11 @@ async def test_xray_search_pattern_resolution_runs_on_the_dedicated_xray_executo
     try:
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_evaluator_code",
+                "code_indexer.server.mcp.handlers.xray._infra._resolve_evaluator_code",
                 side_effect=_fake_resolve_evaluator_code,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+                "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
                 return_value=real_executor,
             ),
         ):
@@ -169,12 +169,12 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
                 _fake_resolve_and_prepare_pattern,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+                "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
                 return_value=real_executor,
             ),
-            patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", False),
+            patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", False),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
                 return_value=Path("/tmp/fake-cidx-meta-for-offload-test"),
             ),
         ):

@@ -62,6 +62,13 @@ def _xray_single_repo_env(
     mock_app.activated_repo_manager = None
     mock_app.golden_repo_manager = None
     mock_app.app.state.xray_cell_limiter = xray_cell_limiter
+    # Bug #1928: _truncate_large_array_fields now compares
+    # payload_cache.config.preview_size_chars directly (no longer hidden
+    # behind a mocked-away PayloadCache.truncate_result() call) -- these
+    # tests are about job status transitions, not truncation, so make
+    # PayloadCache explicitly unavailable rather than leaving it as an
+    # unconfigured MagicMock.
+    mock_app.app.state.payload_cache = None
 
     if resolved_future is None:
         resolved_future = asyncio.Future()
@@ -72,27 +79,47 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            return_value="/fake/repo/path",
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            return_value=mock_jt,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
         ) as mock_validate,
+        patch(
+            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+        ) as mock_validate_explore,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
         mock_validate.return_value = MagicMock(ok=True)
+        mock_validate_explore.return_value = MagicMock(ok=True)
         yield mock_bjm, mock_jt, mock_exec, loop_instance
 
 

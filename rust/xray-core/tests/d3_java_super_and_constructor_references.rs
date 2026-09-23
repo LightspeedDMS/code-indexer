@@ -561,19 +561,16 @@ enum Op {
     );
 }
 
-/// #1873/#1875 rework, F3 (MEDIUM): the D2 visibility filter ran AFTER all
-/// narrowing, so an inaccessible private candidate from an UNRELATED
-/// top-level type could knock the real, accessible target out of the
-/// candidate set during overload-shape narrowing, then get removed itself
-/// by D2 -- leaving BOTH candidates unreferenced. `A.run` makes a bare
-/// (same-class) call to `log((Foo) f)`; `A.log(Object)` is the only
-/// legitimately reachable declaration (an unqualified call from A can never
-/// resolve to B's unrelated private `log(Foo)`), but overload-shape
-/// narrowing's named-type preference step exactly matches the cast's `Foo`
-/// argument against B.log's declared `Foo` parameter and narrows to B.log
-/// ALONE before D2 ever runs -- D2 then removes B.log (cross-top-level
-/// private), leaving A.log with zero caller edges even though this is its
-/// own real (and only) call site. Reviewer probe P4 (javac-validated).
+/// #1873/#1875 rework, F3 (MEDIUM): the D2 visibility filter runs AFTER
+/// candidate-set narrowing/tagging. `A.run` makes a bare (same-class)
+/// call to `log((Foo) f)`; `A.log(Object)` is the only legitimately
+/// reachable declaration (an unqualified call from A can never resolve to
+/// B's unrelated private `log(Foo)`). The cast's `Foo` argument exactly
+/// matches B.log's declared `Foo` parameter, but Cast/Constructor
+/// named-type evidence is TAG-ONLY -- it can never remove `A.log` from
+/// the candidate set, so D2 alone correctly filters out the cross-
+/// top-level private `B.log`, leaving `A.log` with its own real (and
+/// only) caller edge.
 #[test]
 fn overload_shape_narrowing_before_d2_does_not_falsely_kill_the_real_target() {
     let source = r#"

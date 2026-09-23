@@ -86,6 +86,50 @@ pub const RECEIVER_TYPE_MATCH: u16 = 1 << 12;
 /// enclosing type or one of its transitive supertypes -- the "same-class
 /// and super resolution" the amendment attributed 10.0% of bound calls to.
 pub const SAME_CLASS_OR_SUPER: u16 = 1 << 13;
+/// #1924/#1925 (epic #1906): set ONLY when ALL FOUR of the following hold:
+///
+/// (a) the call's receiver has a POSITIVELY known declared type (a real
+///     `TypedNameRecord` hit, never an open-world guess -- see
+///     `super::bind::receiver::ReceiverEvidence::Positive`) that is
+///     CLOSED-WORLD (`String`, a primitive, a boxed numeric/boolean/char
+///     wrapper, or any array type) AND whose bare simple name is NOT ALSO
+///     a repo-declared type, an explicitly imported type (ordinary OR
+///     single-member static), or a known generic type parameter -- a
+///     repo can legally declare its own class literally named `String`
+///     in the same package, shadowing `java.lang.String`;
+/// (b) the receiver binding is a genuine method/constructor PARAMETER,
+///     never a block-scoped local variable or a field -- this binder's
+///     own typed-name lookup is keyed per METHOD, not per BLOCK (#1919),
+///     so a field access can be misresolved to an unrelated, same-method
+///     local's declared type;
+/// (c) that parameter's declared type was written UNQUALIFIED, or
+///     qualified exactly as `java.lang.*` -- this binder's type model
+///     only ever records a declared type's bare simple name, so a
+///     parameter written `com.lib.String s` records the same `"String"`
+///     as one written `String s`, even though `com.lib.String` is a
+///     different, unproven type that may legally have a repo-declared
+///     subtype;
+/// (d) EVERY type declared in the call site's own FILE has fully
+///     repo-resolved supertype evidence -- a type extending an
+///     external/unindexed supertype may have a NESTED type privately
+///     shadowing a closed-world name from further outside than this
+///     binder can see into, on ANY nesting level, not just the call's
+///     immediate enclosing type. Judged by SIMPLE NAME only, like every
+///     other bare-name lookup in this binder: a repo-declared type
+///     sharing the SAME bare name as the real external supertype makes
+///     that supertype look "resolved" even though it is not actually the
+///     same type.
+///
+/// Under all four conditions, this candidate's `enclosing_type` naming a
+/// REPO-declared type is real evidence of unrelatedness: no repo type can
+/// ever have a repo-declared subtype of a genuinely closed-world receiver
+/// type (they are `final`, or not reference types at all). Set by
+/// `super::bind::receiver_mismatch::apply_receiver_type_mismatch_tagging`,
+/// TAG-ONLY like every other bit here -- it never removes a candidate,
+/// it only gives an evaluator (via `GraphHandle`'s evidence-filtered
+/// traversal primitives, e.g. `callees_of_filtered`) the means to drop
+/// these edges from its own analysis.
+pub const RECEIVER_TYPE_MISMATCH: u16 = 1 << 14;
 
 /// Every reasons flag, for iteration in tests and future observability code.
 /// Ordering here is purely presentational (declaration order); it carries no
@@ -106,6 +150,7 @@ pub const ALL_FLAGS: &[u16] = &[
     FAMILY_TRUNCATED,
     RECEIVER_TYPE_MATCH,
     SAME_CLASS_OR_SUPER,
+    RECEIVER_TYPE_MISMATCH,
 ];
 
 #[cfg(test)]
@@ -135,11 +180,12 @@ mod tests {
     /// Every flag is typed `u16` (the exact storage type
     /// `Candidate.reasons` uses, AC5), so fitting is guaranteed by the type
     /// system alone. What this guards against is silently growing past 16
-    /// flags without anyone revisiting the CSR layout: with 14 flags
-    /// declared today, there is headroom for 2 more before a 17th flag
-    /// would no longer fit and this count would need to change.
+    /// flags without anyone revisiting the CSR layout: with 15 flags
+    /// declared today (#1924 added `RECEIVER_TYPE_MISMATCH`, the 15th),
+    /// there is headroom for exactly 1 more before a 17th flag would no
+    /// longer fit and this count would need to change.
     #[test]
-    fn fourteen_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
-        assert_eq!(ALL_FLAGS.len(), 14);
+    fn fifteen_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
+        assert_eq!(ALL_FLAGS.len(), 15);
     }
 }

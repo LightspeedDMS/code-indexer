@@ -74,10 +74,10 @@ def test_rest_resolver_rejects_real_graph_pattern_with_pattern_mode_mismatch(
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", True),
+        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
     ):
         with pytest.raises(HTTPException) as exc_info:
             _resolve_evaluator_code_or_raise(body)

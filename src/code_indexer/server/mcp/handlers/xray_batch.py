@@ -29,7 +29,7 @@ from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
-from . import _utils
+from . import _utils, xray_truncation
 from ._utils import _mcp_response, _parse_json_string_array
 from .xray import _lazy_singleton_app_or_none, _resolve_evaluator_code
 from code_indexer.server.services.query_admission_gate import (
@@ -134,58 +134,41 @@ def _truncate_xray_batch_result(
     result: Dict[str, Any],
     payload_cache: Any,
 ) -> Dict[str, Any]:
-    """Apply PayloadCache truncation to a batch result.
+    """Apply PayloadCache truncation to matches[]/errors[]/
+    evaluation_errors[] -- see xray_truncation.truncate_result_fields()
+    for the shared mechanics (Bug #1928: whole, unmodified entries per
+    cache page; each page its own PayloadCache row; inline budget =
+    payload_max_fetch_size_chars; no more fixed-3-entry cap or duplicate
+    preview field). Called from `_job_fn`, which already runs inside the
+    BackgroundJobManager worker thread pool -- off the event loop -- so
+    no additional offload is needed here (unlike xray_graph.py's `async
+    def` handlers).
 
-    Serializes matches[], errors[], and evaluation_errors[] as a single JSON
-    blob.  When oversized the full blob is stored in PayloadCache and the
-    response carries cache_handle + preview.  When small the full arrays are
-    returned inline.
+    When payload_cache is None, xray_truncation.truncate_result_fields()'s
+    own guard (Bug #1928 P3) returns a bounded, cache_unavailable=True
+    result rather than the full unbounded arrays.
 
-    When payload_cache is None the original result is returned unchanged.
+    Bug #1928 round 3 (P1): a page-set write failure (whole-entry pages
+    + the pages-v1 manifest, one atomic batch) raises PageSetStoreError
+    -- caught here and surfaced as an explicit error, never a
+    cache_handle pointing at data that was not durably written.
     """
-    if payload_cache is None:
-        return result
-
-    large_payload = json.dumps(
-        {
-            "matches": result.get("matches", []),
-            "errors": result.get("errors", []),
-            "evaluation_errors": result.get("evaluation_errors", []),
-        }
-    )
-
-    truncation = payload_cache.truncate_result(large_payload)
-
-    # Preserve all top-level scalar fields.
-    truncated: Dict[str, Any] = {
-        k: v
-        for k, v in result.items()
-        if k not in ("matches", "errors", "evaluation_errors")
-    }
-
-    if truncation.get("has_more"):
-        truncated["matches"] = result.get("matches", [])[:3]
-        truncated["errors"] = result.get("errors", [])[:3]
-        truncated["evaluation_errors"] = result.get("evaluation_errors", [])[:3]
-        truncated["matches_and_errors_preview"] = truncation["preview"]
-        truncated["cache_handle"] = truncation["cache_handle"]
-        truncated["has_more"] = True
-        truncated["total_size"] = truncation["total_size"]
-        truncated["truncated"] = True
-        truncated["fetch_tool_hint"] = (
-            f"Result truncated to first 3 entries; full result available at "
-            f"cache_handle '{truncation['cache_handle']}' — fetch via the "
-            f"`cidx_fetch_cached_payload` MCP tool with that handle."
+    try:
+        return xray_truncation.truncate_result_fields(
+            result, payload_cache, ["matches", "errors", "evaluation_errors"]
         )
-    else:
-        truncated["matches"] = result.get("matches", [])
-        truncated["errors"] = result.get("errors", [])
-        truncated["evaluation_errors"] = result.get("evaluation_errors", [])
-        truncated["cache_handle"] = None
-        truncated["has_more"] = False
-        truncated["truncated"] = False
-
-    return truncated
+    except xray_truncation.PageSetStoreError as exc:
+        logger.error("xray_search_batch truncation: page-set store failed: %s", exc)
+        # Bug #1928 final round (Opus P4.6): preserve the non-truncated
+        # metadata the batch run already produced -- only matches/errors/
+        # evaluation_errors are genuinely undeliverable (the write failed).
+        base_metadata = getattr(exc, "base_metadata", {})
+        return {
+            **base_metadata,
+            "success": False,
+            "error": "cache_store_failed",
+            "message": f"Failed to store the truncated result in cache: {exc}",
+        }
 
 
 # ---------------------------------------------------------------------------

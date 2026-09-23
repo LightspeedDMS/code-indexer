@@ -76,17 +76,53 @@ pub(crate) enum LocalLookup {
 pub(crate) struct FileTypedNames {
     locals: HashMap<(SymbolId, String), LocalTypeEvidence>,
     fields: HashMap<(String, String), String>,
+    /// #1922: a FLAT, context-independent existence set -- see
+    /// `has_any_local_binding`'s own doc comment for why `locals` alone
+    /// (keyed by `(enclosing_method, name)`) is not, by itself, a
+    /// sufficient substrate for that check. Seeded in `build` from every
+    /// `NameScope::Local` record's own name (the exact same names
+    /// `locals`'s keys already carry, just without the `enclosing_method`
+    /// half) and extended in `with_all_local_binding_names` with names
+    /// that have NO enclosing method at all -- `has_any_local_binding` is
+    /// then a single O(1) lookup against this ONE set, never a linear
+    /// scan.
+    all_local_binding_names: std::collections::HashSet<String>,
+    /// #1924/#1925: exactly the `(enclosing_method, name)` pairs
+    /// `LocalIndex::parameter_typed_names` recorded -- see that field's
+    /// own doc comment for why this is STRICTLY NARROWER than `locals`'s
+    /// own keys (which also include ordinary local variables,
+    /// indistinguishable from a parameter by key alone under the #1919
+    /// per-method-not-per-block conflation). Sole consumer: `is_parameter_
+    /// binding`.
+    parameters: std::collections::HashSet<(SymbolId, String)>,
+    /// #1924 (p12): exactly the `(enclosing_method, name)` pairs
+    /// `LocalIndex::qualified_non_java_lang_parameter_types` recorded --
+    /// see that field's own doc comment. Sole consumer: `is_disqualified_
+    /// by_type_qualifier`.
+    qualified_non_java_lang_parameters: std::collections::HashSet<(SymbolId, String)>,
 }
 
 impl FileTypedNames {
     /// Bounded loop: iterates once per already-extracted `TypedNameRecord`
-    /// (finite, fixed by the file's own record count, Rule 14).
+    /// (finite, fixed by the file's own record count, Rule 14). Every
+    /// `NameScope::Local` record's name is ALSO inserted into `all_local_
+    /// binding_names` here -- the exact same names `locals`'s own keys
+    /// carry, seeded once at build time rather than re-scanned per
+    /// `has_any_local_binding` call. `with_all_local_binding_names` below
+    /// EXTENDS this same set (never replaces it), so the two insertion
+    /// points together cover the identical name set `has_any_local_
+    /// binding`'s pre-O(1) implementation checked -- only ever a superset
+    /// grows here, never a name removed, so narrowing can only become
+    /// MORE conservative than before, never less.
     pub(crate) fn build(typed_names: &[TypedNameRecord]) -> Self {
         let mut locals: HashMap<(SymbolId, String), LocalTypeEvidence> = HashMap::new();
         let mut fields = HashMap::new();
+        let mut all_local_binding_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for record in typed_names {
             match &record.scope {
                 NameScope::Local { enclosing_method } => {
+                    all_local_binding_names.insert(record.name.clone());
                     let key = (*enclosing_method, record.name.clone());
                     match locals.get(&key) {
                         None => {
@@ -108,7 +144,47 @@ impl FileTypedNames {
                 }
             }
         }
-        FileTypedNames { locals, fields }
+        FileTypedNames {
+            locals,
+            fields,
+            all_local_binding_names,
+            parameters: std::collections::HashSet::new(),
+            qualified_non_java_lang_parameters: std::collections::HashSet::new(),
+        }
+    }
+
+    /// #1924/#1925: populates `parameters` from `LocalIndex::parameter_
+    /// typed_names` -- a separate builder step, not a second `build`
+    /// parameter, mirroring `with_all_local_binding_names`'s own
+    /// established pattern (so `build`'s existing unit-test call sites,
+    /// none of which exercise parameter-vs-local discrimination, stay
+    /// unchanged).
+    pub(crate) fn with_parameter_bindings(mut self, bindings: &[(SymbolId, String)]) -> Self {
+        self.parameters.extend(bindings.iter().cloned());
+        self
+    }
+
+    /// #1924 (p12): populates `qualified_non_java_lang_parameters` from
+    /// `LocalIndex::qualified_non_java_lang_parameter_types`, the same
+    /// separate-builder-step pattern as `with_parameter_bindings` above.
+    pub(crate) fn with_qualified_non_java_lang_parameters(mut self, bindings: &[(SymbolId, String)]) -> Self {
+        self.qualified_non_java_lang_parameters.extend(bindings.iter().cloned());
+        self
+    }
+
+    /// #1922: EXTENDS the flat, context-independent local-binding-name
+    /// set `build` already seeded with `java_receiver::collect_all_
+    /// local_binding_names`'s own extraction (`LocalIndex::all_local_
+    /// binding_names`, computed once during extraction) -- see
+    /// `has_any_local_binding`'s own doc comment for why `build`'s
+    /// `NameScope::Local`-keyed substrate cannot represent a binding
+    /// declared outside any method body at all. A separate builder step,
+    /// not a second `build` parameter, so `build`'s existing unit-test
+    /// call sites (none of which exercise a binding declared outside any
+    /// method body) stay unchanged.
+    pub(crate) fn with_all_local_binding_names(mut self, names: &[String]) -> Self {
+        self.all_local_binding_names.extend(names.iter().cloned());
+        self
     }
 
     /// Looks up `name`'s declared type, preferring a LOCAL/PARAMETER
@@ -147,6 +223,51 @@ impl FileTypedNames {
             Some(declared_type) => LocalLookup::Found(declared_type.clone()),
             None => LocalLookup::Missing,
         }
+    }
+
+    /// #1922: true when `name` is recorded as a LOCAL/PARAMETER binding
+    /// ANYWHERE in this file -- deliberately WIDER than `lookup`'s own
+    /// exact `(enclosing_method, name)` key match, in TWO independent
+    /// ways. First, `lookup`'s `Missing` result is not always a genuine
+    /// absence -- a captured local in an anonymous/local class is looked
+    /// up under the WRONG (inner) enclosing-method key and produces a
+    /// FALSE `Missing` for a REAL local declared in an outer, lexically-
+    /// enclosing method (e.g. `final Target Helper = ...;` in an outer
+    /// method, captured and read as `Helper.helper()` inside an anonymous
+    /// `Runnable`'s body) -- `build`'s own seeding of `all_local_binding_
+    /// names` from every `NameScope::Local` record still covers this
+    /// case. Second, a binding declared OUTSIDE any method body at all (a
+    /// lambda parameter in a field initializer, an enum constant's
+    /// argument list, or a switch-expression pattern in a field
+    /// initializer) has NO enclosing method `SymbolId` to key `self.
+    /// locals` by in the first place -- `with_all_local_binding_names`'s
+    /// own extension (`java_receiver::collect_all_local_binding_names`'s
+    /// flat, context-independent extraction) is what still catches those.
+    /// This is NOT scope resolution (no block/branch reasoning, no
+    /// shadowing rules, #1919 does not apply) -- a flat existence check,
+    /// the exact same shape `TypeIndex::is_known_field_name`/
+    /// `is_known_type_name` already use at repo scope, just at file scope
+    /// for locals. Sole consumer: `is_definite_type_qualifier`, which
+    /// must stay conservative -- never wrongly conclude "definitely a
+    /// type" in the face of either gap. O(1): a single hash-set lookup,
+    /// never a scan over `self.locals`.
+    pub(crate) fn has_any_local_binding(&self, name: &str) -> bool {
+        self.all_local_binding_names.contains(name)
+    }
+
+    /// #1924/#1925: true only when `(enclosing_method, name)` was recorded
+    /// as a genuine formal PARAMETER -- never a block-scoped local
+    /// variable, a field, or a record component. O(1): a single hash-set
+    /// lookup.
+    pub(crate) fn is_parameter_binding(&self, enclosing_method: SymbolId, name: &str) -> bool {
+        self.parameters.contains(&(enclosing_method, name.to_string()))
+    }
+
+    /// #1924 (p12): true only when `(enclosing_method, name)`'s declared
+    /// type was written with an explicit qualifier other than
+    /// `java.lang`. O(1): a single hash-set lookup.
+    pub(crate) fn is_disqualified_by_type_qualifier(&self, enclosing_method: SymbolId, name: &str) -> bool {
+        self.qualified_non_java_lang_parameters.contains(&(enclosing_method, name.to_string()))
     }
 }
 
@@ -399,6 +520,40 @@ fn resolve_identifier_receiver(
     }
 }
 
+/// Bug #1923 (AC2, reworked to TAG-ONLY -- see the doc comment on
+/// `apply_overload_shape_narrowing` in `narrowing.rs`): resolves a
+/// bare-identifier CALL ARGUMENT's declared type, consumed ONLY to
+/// decide whether `OVERLOAD_ARG_TYPE_MATCH` is TAGGED -- this result
+/// NEVER drives a candidate-set exclusion, mirroring the permanently-
+/// tag-only contract `apply_receiver_type_narrowing` already documents
+/// for the analogous receiver-type case. Reuses `resolve_identifier_receiver`'s
+/// exact lookup (Rule 4, anti-duplication) rather than a second copy of
+/// the same local/parameter/field substrate -- an argument identifier
+/// and a receiver identifier are looked up identically (same per-file
+/// `FileTypedNames`, same enclosing-method/enclosing-type scoping). The
+/// result is narrowed to `ReceiverEvidence::Positive` ONLY: a genuine
+/// `TypedNameRecord` hit (a real local/parameter/field declaration in
+/// THIS file). `Advisory` (either open-world fallback --
+/// `unambiguous_field_type`/`is_known_type_name`, both cross-file or
+/// name-coincidence guesses) and `Ambiguous`/`Missing` (folded to `None`
+/// by `resolve_identifier_receiver` already) all return `None` here --
+/// this is about TAG ACCURACY, not about gating a deletion that no
+/// longer happens: an Advisory guess must not even mislabel a candidate
+/// as compatible/incompatible, since the tag is presented to callers as
+/// "not provably incompatible" evidence, never a raw guess.
+pub(crate) fn resolve_argument_identifier_type(
+    name: &str,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    typed_names: &FileTypedNames,
+    type_index: &TypeIndex,
+) -> Option<String> {
+    match resolve_identifier_receiver(name, enclosing_type, enclosing_method, typed_names, type_index) {
+        ReceiverEvidence::Positive(declared_type) => Some(declared_type),
+        ReceiverEvidence::Advisory(_) | ReceiverEvidence::None => None,
+    }
+}
+
 /// Resolves the BASE (non-chained) receiver -- `current`, after every
 /// `Chained` wrapping has already been peeled off by the caller -- to its
 /// evidence-tiered type, with no chain-following of its own. Split out of
@@ -429,6 +584,18 @@ fn resolve_receiver_base(
             resolve_identifier_receiver(name, enclosing_type, enclosing_method, typed_names, type_index)
         }
         ReceiverExpr::Other => ReceiverEvidence::None,
+        // #1931: a dotted qualifier reached as the BASE of a `Chained`
+        // wrapper (e.g. `Outer.Inner.build().foo()`) is deliberately OUT
+        // of scope for chain-following -- mirrors the exact same
+        // narrower-than-general-resolution limit `mod.rs`'s own
+        // `receiver_is_type_qualifier` comment already documents for a
+        // bare `Identifier` under a `Chained` wrapper ("a Chained
+        // receiver's own type is inferred via return-type chaining, not a
+        // bare qualifier the source itself wrote"). `resolve_dotted_
+        // qualifier_type` is the sole resolver for a DIRECT dotted
+        // qualifier, called straight from `mod.rs`, never through this
+        // function.
+        ReceiverExpr::DottedQualifier(_) => ReceiverEvidence::None,
         ReceiverExpr::Chained { .. } => {
             unreachable!("the caller strips every Chained layer before calling this")
         }
@@ -504,651 +671,5 @@ pub(crate) fn resolve_receiver_type(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::bind::FileForBind;
-    use crate::graph::extract::local_index::{
-        Declaration, DeclarationKind as DK, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord,
-    };
-    use crate::graph::identity::make_symbol_id;
-
-    /// #1910 prerequisite 1 (round4-findings.md finding 1): `FileTypedNames`
-    /// keys locals by `(enclosing_method, name)`, but Java scopes a local
-    /// by BLOCK. Two legal same-named locals in SIBLING blocks of the SAME
-    /// method are never simultaneously in scope under real javac, but this
-    /// per-method key cannot tell them apart -- last-write-wins would let
-    /// an ARBITRARY one of the two declared types answer a lookup for
-    /// EITHER call site, exactly the failure that let a live private
-    /// method be reported `is_definitely_dead_code() == Some(true)` in
-    /// round 4. The safe fix (named explicitly in the issue as an
-    /// acceptable minimal alternative to full block-scoping): once a
-    /// `(method, name)` key has seen two DIFFERENT declared types, it is
-    /// permanently ambiguous and `lookup` must return `LocalLookup::
-    /// Ambiguous` -- a DISTINCT, TERMINAL outcome from a genuine `Missing`
-    /// lookup (round 6, finding 1's remediation; see `LocalLookup`'s own
-    /// doc comment) -- rather than guess.
-    #[test]
-    fn file_typed_names_refuses_to_pick_a_type_when_sibling_blocks_declare_the_same_name_with_different_types(
-    ) {
-        let method_symbol = make_symbol_id(1, 0);
-        let records = vec![
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Foo".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Bar".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-        ];
-        let typed_names = FileTypedNames::build(&records);
-        assert_eq!(
-            typed_names.lookup(Some(method_symbol), None, "x"),
-            LocalLookup::Ambiguous,
-            "two sibling-block locals sharing a bare name but disagreeing on declared type \
-             must resolve to the DISTINCT, terminal Ambiguous outcome -- never a guessed type \
-             AND never collapsed into an ordinary Missing lookup (#1910 round 6, finding 1)"
-        );
-    }
-
-    /// Companion to the ambiguity test above: the SAME name repeating with
-    /// the SAME declared type (e.g. two independent `for (String s : ...)`
-    /// loops in sibling blocks of one method -- extremely common, legal
-    /// Java) must NOT be treated as ambiguous -- there is no genuine
-    /// disagreement to be conservative about.
-    #[test]
-    fn file_typed_names_still_resolves_when_sibling_blocks_repeat_the_same_name_and_type() {
-        let method_symbol = make_symbol_id(1, 0);
-        let records = vec![
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Foo".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Foo".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-        ];
-        let typed_names = FileTypedNames::build(&records);
-        assert_eq!(
-            typed_names.lookup(Some(method_symbol), None, "x"),
-            LocalLookup::Found("Foo".to_string())
-        );
-    }
-
-    /// AC1: a local/parameter binding must be preferred over a
-    /// same-named field -- the discriminating case ordinary Java scoping
-    /// requires (shadowing).
-    #[test]
-    fn file_typed_names_prefers_a_local_binding_over_a_field_of_the_same_name() {
-        let method_symbol = make_symbol_id(1, 0);
-        let records = vec![
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Local".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-            TypedNameRecord {
-                name: "x".to_string(),
-                declared_type: "Field".to_string(),
-                scope: NameScope::Field {
-                    enclosing_type: "Owner".to_string(),
-                },
-            },
-        ];
-        let typed_names = FileTypedNames::build(&records);
-        assert_eq!(
-            typed_names.lookup(Some(method_symbol), Some("Owner"), "x"),
-            LocalLookup::Found("Local".to_string())
-        );
-        // Without a matching local (different method), falls back to the field.
-        assert_eq!(
-            typed_names.lookup(Some(make_symbol_id(1, 99)), Some("Owner"), "x"),
-            LocalLookup::Found("Field".to_string())
-        );
-        assert_eq!(
-            typed_names.lookup(None, None, "neverDeclared"),
-            LocalLookup::Missing
-        );
-    }
-
-    fn method_decl(name: &str, file_id: u32, local: u32) -> Declaration {
-        Declaration {
-            kind: DK::Method,
-            name: name.to_string(),
-            line: 1,
-            symbol: make_symbol_id(file_id, local),
-            param_count: Some(0),
-            param_types: Vec::new(),
-            is_varargs: false,
-        }
-    }
-
-    /// AC1: `obj.doSomething()` where `obj` is a locally-declared `Foo`
-    /// resolves to `"Foo"`.
-    #[test]
-    fn resolve_receiver_type_resolves_a_simple_identifier_via_typed_names() {
-        let method_symbol = make_symbol_id(1, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "obj".to_string(),
-            declared_type: "Foo".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-        let name_index = RepoNameIndex::build(&[]);
-        let type_index = TypeIndex::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("obj".to_string()),
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(resolved, ReceiverEvidence::Positive("Foo".to_string()));
-    }
-
-    /// AC2: THE central discriminating case named in the story --
-    /// `auth.realm().requireX()`'s receiver (as seen from `requireX`) is
-    /// `Chained { method_name: "realm", receiver: Identifier("auth") }`.
-    /// `auth`'s declared type is `Auth`; `Auth.realm()` declares return
-    /// type `Realm` -- the resolved receiver type must be `"Realm"`,
-    /// proving the chain was followed, not just the base.
-    #[test]
-    fn resolve_receiver_type_follows_a_chained_call_through_a_declared_return_type() {
-        const AUTH_FILE_ID: u32 = 5;
-        let mut auth_file = LocalIndex::new();
-        auth_file
-            .declarations
-            .push(method_decl("realm", AUTH_FILE_ID, 0));
-        auth_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
-            enclosing_type: "Auth".to_string(),
-        });
-        auth_file.method_return_types.push(MethodReturnTypeRecord {
-            method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
-            return_type: "Realm".to_string(),
-        });
-        let files = vec![FileForBind {
-            file_id: AUTH_FILE_ID,
-            language: "java".to_string(),
-            index: auth_file,
-        }];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-
-        let method_symbol = make_symbol_id(9, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "auth".to_string(),
-            declared_type: "Auth".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-
-        let receiver = ReceiverExpr::Chained {
-            method_name: "realm".to_string(),
-            receiver: Box::new(ReceiverExpr::Identifier("auth".to_string())),
-        };
-        let resolved = resolve_receiver_type(
-            &receiver,
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(resolved, ReceiverEvidence::Positive("Realm".to_string()));
-    }
-
-    /// P1-4 (#1898 code review, AC3): `TimeUtil.parse("a")`'s receiver is
-    /// `ReceiverExpr::Identifier("TimeUtil")` -- a CLASS NAME, not a
-    /// local/field/parameter, so `typed_names.lookup` has no evidence for
-    /// it at all. Before this fix, that meant `resolve_receiver_type`
-    /// returned `None`, so no receiver-type narrowing ever ran and the
-    /// call fanned out to every same-named method in the repo (#1898's
-    /// own bug report). `TimeUtil` IS a known in-repo type (recorded via
-    /// `type_nesting`), so the receiver must resolve to `"TimeUtil"`
-    /// itself.
-    ///
-    /// #1910 SALVAGE: a round 6/7 attempt promoted this fallback to
-    /// `Positive` for a type declared/imported by the SAME calling file,
-    /// but round 7's review proved even that narrower substrate rests on
-    /// `FileTypedNames::lookup`'s `Missing` result, which is not always a
-    /// genuine absence (the captured-local scope-key problem) -- so this
-    /// fallback stays `Advisory` permanently, exactly as it shipped
-    /// before any #1910 attempt.
-    #[test]
-    fn resolve_receiver_type_resolves_a_static_type_identifier_via_known_type_names() {
-        let files = vec![FileForBind {
-            file_id: 20,
-            language: "java".to_string(),
-            index: {
-                let mut index = LocalIndex::new();
-                index.type_nesting.push(
-                    crate::graph::extract::local_index::TypeNestingRecord {
-                        type_name: "TimeUtil".to_string(),
-                        top_level_type: "TimeUtil".to_string(),
-                    },
-                );
-                index
-            },
-        }];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-        let typed_names = FileTypedNames::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("TimeUtil".to_string()),
-            Some("Caller"),
-            None,
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::Advisory("TimeUtil".to_string()),
-            "a bare identifier resolved only via the is_known_type_name fallback (no direct \
-             typed-name evidence) must be tagged Advisory, never Positive"
-        );
-    }
-
-    /// Negative control: an identifier that is neither a typed
-    /// local/field/parameter NOR a known in-repo type name must still
-    /// resolve to `None` -- never a guessed type (Rule 2, anti-fallback).
-    #[test]
-    fn resolve_receiver_type_returns_none_for_an_identifier_with_no_evidence_at_all() {
-        let name_index = RepoNameIndex::build(&[]);
-        let type_index = TypeIndex::build(&[]);
-        let typed_names = FileTypedNames::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("neverDeclaredAnywhere".to_string()),
-            Some("Caller"),
-            None,
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(resolved, ReceiverEvidence::None);
-    }
-
-    /// #1910 prerequisite 2 (round4-findings.md finding 2): `is_pseudo_type`
-    /// was applied only to the BASE identifier's declared-type string, not
-    /// to a chain step's own resolved return type. `auth.realm()`'s
-    /// receiver chain here is `Chained { method_name: "realm", receiver:
-    /// Identifier("auth") }`; `auth`'s declared type is the real, positive
-    /// `"Auth"`, but `Auth.realm()`'s declared return type is a bare
-    /// GENERIC TYPE PARAMETER name (`"T"`, e.g. `<T> T realm()`) -- not a
-    /// real class this binder can narrow against. Before this fix, the
-    /// chain-following loop trusted `next_type` verbatim, promoting `"T"`
-    /// straight into `Positive("T")`; that fabricated type could then
-    /// coincidentally collide with an unrelated in-repo class literally
-    /// named `T` and hard-delete a real candidate. The fix: every chain
-    /// step's resolved type must clear the SAME `is_pseudo_type` guard the
-    /// base identifier already does.
-    #[test]
-    fn resolve_receiver_type_rejects_a_pseudo_type_returned_by_an_intermediate_chain_step() {
-        const AUTH_FILE_ID: u32 = 5;
-        let mut auth_file = LocalIndex::new();
-        auth_file
-            .declarations
-            .push(method_decl("realm", AUTH_FILE_ID, 0));
-        auth_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
-            enclosing_type: "Auth".to_string(),
-        });
-        auth_file.method_return_types.push(MethodReturnTypeRecord {
-            method_symbol: make_symbol_id(AUTH_FILE_ID, 0),
-            return_type: "T".to_string(),
-        });
-        auth_file.type_parameter_names.push("T".to_string());
-        let files = vec![FileForBind {
-            file_id: AUTH_FILE_ID,
-            language: "java".to_string(),
-            index: auth_file,
-        }];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-
-        let method_symbol = make_symbol_id(9, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "auth".to_string(),
-            declared_type: "Auth".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-
-        let receiver = ReceiverExpr::Chained {
-            method_name: "realm".to_string(),
-            receiver: Box::new(ReceiverExpr::Identifier("auth".to_string())),
-        };
-        let resolved = resolve_receiver_type(
-            &receiver,
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "a chain step whose declared return type is a bare generic type parameter name \
-             must never resolve to that pseudo-type, even though the chain's BASE was Positive"
-        );
-    }
-
-    /// P1-A (#1898 code review round 2, epic #1906): `var x = new Svc();`
-    /// records `x`'s declared type as the LITERAL STRING `"var"` (the
-    /// extractor performs no type inference -- see `java_type_names::
-    /// resolve_type_node_base_name`). `"var"` is a reserved Java keyword,
-    /// never a legal class name, so it must never drive `apply_receiver_
-    /// type_narrowing`'s hard filter -- `resolve_receiver_type` must
-    /// return `None` (missing evidence, narrowing skipped) rather than
-    /// this pseudo-type string.
-    #[test]
-    fn resolve_receiver_type_rejects_the_var_pseudo_type_and_returns_none() {
-        let method_symbol = make_symbol_id(1, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "svc".to_string(),
-            declared_type: "var".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-        let name_index = RepoNameIndex::build(&[]);
-        let type_index = TypeIndex::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("svc".to_string()),
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "a var-typed receiver must never resolve to the literal string \"var\""
-        );
-    }
-
-    /// P1-A: `<T extends Svc> void run(T t) { t.ping(); }` records `t`'s
-    /// declared type as `"T"` -- a generic TYPE PARAMETER name, never a
-    /// concrete class this binder can narrow against. `TypeIndex` knows
-    /// `"T"` was declared as a type parameter (via `type_parameter_names`,
-    /// populated from the method's own `<T extends Svc>` clause), so
-    /// `resolve_receiver_type` must reject it the same way it rejects
-    /// `"var"`.
-    #[test]
-    fn resolve_receiver_type_rejects_a_generic_type_parameter_name_and_returns_none() {
-        let method_symbol = make_symbol_id(1, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "t".to_string(),
-            declared_type: "T".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-        let mut index = LocalIndex::new();
-        index.type_parameter_names.push("T".to_string());
-        let files = vec![FileForBind {
-            file_id: 1,
-            language: "java".to_string(),
-            index,
-        }];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("t".to_string()),
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "a generic-type-parameter-typed receiver must never resolve to the type \
-             parameter's own bare name"
-        );
-    }
-
-    /// P1-B (#1898 code review round 2, epic #1906): an untyped lambda
-    /// parameter (`(x) -> x.foo()`, no explicit type annotation) records
-    /// an EMPTY-STRING declared-type sentinel (`java_receiver::lambda_
-    /// param_typed_names`'s own doc comment) -- the name IS a genuine
-    /// local binding (so `typed_names.lookup` correctly returns `Some`,
-    /// never falling through to the coincidental-type-name fallback), but
-    /// the empty string itself is exactly as much a pseudo-type as `"var"`
-    /// and must never drive a hard receiver-type filter either.
-    #[test]
-    fn resolve_receiver_type_rejects_the_empty_string_sentinel_for_an_untyped_local_binding_and_returns_none(
-    ) {
-        let method_symbol = make_symbol_id(1, 0);
-        let typed_names = FileTypedNames::build(&[TypedNameRecord {
-            name: "x".to_string(),
-            declared_type: String::new(),
-            scope: NameScope::Local {
-                enclosing_method: method_symbol,
-            },
-        }]);
-        let name_index = RepoNameIndex::build(&[]);
-        let type_index = TypeIndex::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("x".to_string()),
-            Some("Caller"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "an untyped local binding's empty-string sentinel must never resolve to a \
-             (fabricated, empty-named) receiver type"
-        );
-    }
-
-    /// P1-B (#1898 code review round 2, epic #1906): an identifier with NO
-    /// typed-name evidence in THIS file (e.g. an inner class reading its
-    /// outer class's field, or an inherited field declared in a different
-    /// file -- `typed_names.lookup` misses both) must resolve via the
-    /// REPO-WIDE `unambiguous_field_type` substrate to the field's REAL
-    /// declared type -- never fall back to `is_known_type_name` and guess
-    /// the coincidentally same-named type instead.
-    #[test]
-    fn resolve_receiver_type_resolves_a_type_name_fallback_to_the_unambiguous_field_type_when_the_identifier_is_also_a_known_field_name(
-    ) {
-        let mut type_decl_file = LocalIndex::new();
-        type_decl_file.type_nesting.push(
-            crate::graph::extract::local_index::TypeNestingRecord {
-                type_name: "handle".to_string(),
-                top_level_type: "handle".to_string(),
-            },
-        );
-        let mut field_decl_file = LocalIndex::new();
-        field_decl_file.typed_names.push(TypedNameRecord {
-            name: "handle".to_string(),
-            declared_type: "Caller".to_string(),
-            scope: NameScope::Field {
-                enclosing_type: "Outer".to_string(),
-            },
-        });
-        let files = vec![
-            FileForBind {
-                file_id: 1,
-                language: "java".to_string(),
-                index: type_decl_file,
-            },
-            FileForBind {
-                file_id: 2,
-                language: "java".to_string(),
-                index: field_decl_file,
-            },
-        ];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-        // This file's OWN typed_names carries no evidence for "handle" at
-        // all -- mirroring the real gap (the field lives on "Outer" in a
-        // DIFFERENT file/scope than the caller's own).
-        let typed_names = FileTypedNames::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("handle".to_string()),
-            Some("Inner"),
-            None,
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::Advisory("Caller".to_string()),
-            "the field's own unambiguous declared type must win, never the coincidentally \
-             same-named type -- but only as ADVISORY evidence, never Positive, since it came \
-             from the unambiguous_field_type fallback rather than a direct typed-name hit"
-        );
-    }
-
-    /// P1-B: when the SAME bare name is used as a field with genuinely
-    /// CONFLICTING declared types elsewhere in the repo (an unrelated
-    /// field, not the same one), `unambiguous_field_type` has no answer
-    /// and the static-type-name fallback must ALSO stay blocked (`name`
-    /// is still a known field name) -- `None`, never a guess either way.
-    #[test]
-    fn resolve_receiver_type_returns_none_when_the_identifier_is_a_field_name_with_conflicting_declared_types(
-    ) {
-        let mut field_decl_file_a = LocalIndex::new();
-        field_decl_file_a.typed_names.push(TypedNameRecord {
-            name: "handle".to_string(),
-            declared_type: "Caller".to_string(),
-            scope: NameScope::Field {
-                enclosing_type: "Outer".to_string(),
-            },
-        });
-        let mut field_decl_file_b = LocalIndex::new();
-        field_decl_file_b.typed_names.push(TypedNameRecord {
-            name: "handle".to_string(),
-            declared_type: "SomethingElse".to_string(),
-            scope: NameScope::Field {
-                enclosing_type: "Unrelated".to_string(),
-            },
-        });
-        let files = vec![
-            FileForBind {
-                file_id: 1,
-                language: "java".to_string(),
-                index: field_decl_file_a,
-            },
-            FileForBind {
-                file_id: 2,
-                language: "java".to_string(),
-                index: field_decl_file_b,
-            },
-        ];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-        let typed_names = FileTypedNames::build(&[]);
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("handle".to_string()),
-            Some("Inner"),
-            None,
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "conflicting declared types for the same field bare name must never resolve to \
-             either guessed type"
-        );
-    }
-
-    /// #1910 round 6, finding 1's remediation, at the `resolve_receiver_
-    /// type` level: an AMBIGUOUS local binding (two sibling-block locals
-    /// with different declared types) must resolve `ReceiverEvidence::
-    /// None` even when a coincidentally same-named class IS a known
-    /// in-repo type (so the `is_known_type_name` Advisory fallback would
-    /// otherwise fire) -- proving `Ambiguous` never falls through to
-    /// either open-world fallback.
-    #[test]
-    fn ambiguous_local_binding_never_falls_through_to_the_static_type_name_fallback() {
-        let method_symbol = make_symbol_id(1, 0);
-        let typed_names = FileTypedNames::build(&[
-            TypedNameRecord {
-                name: "handle".to_string(),
-                declared_type: "Target".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-            TypedNameRecord {
-                name: "handle".to_string(),
-                declared_type: "String".to_string(),
-                scope: NameScope::Local {
-                    enclosing_method: method_symbol,
-                },
-            },
-        ]);
-        let mut index = LocalIndex::new();
-        index.type_nesting.push(
-            crate::graph::extract::local_index::TypeNestingRecord {
-                type_name: "handle".to_string(),
-                top_level_type: "handle".to_string(),
-            },
-        );
-        let files = vec![FileForBind {
-            file_id: 1,
-            language: "java".to_string(),
-            index,
-        }];
-        let name_index = RepoNameIndex::build(&files);
-        let type_index = TypeIndex::build(&files);
-        // The coincidental class "handle" is a known in-repo type name
-        // (via `type_nesting`) -- the strongest possible case for the
-        // `is_known_type_name` Advisory fallback to misfire on.
-
-        let resolved = resolve_receiver_type(
-            &ReceiverExpr::Identifier("handle".to_string()),
-            Some("Target"),
-            Some(method_symbol),
-            &typed_names,
-            &name_index,
-            &type_index,
-        );
-        assert_eq!(
-            resolved,
-            ReceiverEvidence::None,
-            "an AMBIGUOUS local binding must never fall through to the static-type-name \
-             fallback, even though the coincidentally same-named class 'handle' is a known \
-             in-repo type"
-        );
-    }
-}
+#[path = "receiver_tests.rs"]
+mod tests;

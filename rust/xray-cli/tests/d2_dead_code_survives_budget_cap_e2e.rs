@@ -51,6 +51,7 @@ fn build_capped_graph_and_dead_symbol() -> (CodeGraph, u32) {
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     };
     let mut files: Vec<FileForBind> = (1u32..=3)
         .map(|file_id| {

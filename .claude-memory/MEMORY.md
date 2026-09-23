@@ -93,6 +93,7 @@
 ## Architectural Invariants
 - [project_eks_is_eventual_deployment_target.md](project_eks_is_eventual_deployment_target.md) - containerized EKS is the target; no DRBD/Pacemaker/EFS
 - [project_verify_both_staging_environments.md](project_verify_both_staging_environments.md) - verify BOTH clustered (postgres) and solo (SQLite) staging
+- [feedback_staging_solo_is_a_separate_host.md](feedback_staging_solo_is_a_separate_host.md) - always test staging solo too; prove "solo" from the host's config (storage_mode), never from docs -- .local-testing §1 is stale (it's a cluster node)
 - [project_query_is_everything.md](project_query_is_everything.md) - query capability is core value; never break it
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - reranker fires after RRF coalescing, before truncation
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - fixed in #1100; scheduler uses the registry tracking backend

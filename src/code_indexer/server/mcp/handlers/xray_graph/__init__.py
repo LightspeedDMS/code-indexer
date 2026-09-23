@@ -26,277 +26,82 @@ conservative choice that avoids introducing an unconfirmed dashboard-
 visible job while still satisfying the story's "async `await_seconds` like
 `xray_search`" intent at reduced scope -- `await_seconds` is accepted for
 forward compatibility but does not yet change behavior.
+
+Issue #1935 Part 2: this module used to be a single 1,407-line file. It is
+now a package split by concern -- request parsing/validation
+(`_request_parsing.py`), whole-repo candidate-file collection
+(`_candidates.py`), and result truncation/multi-repo error shaping
+(`_result_shaping.py`) -- with every symbol re-exported here so every
+existing `from ...xray_graph import X` import keeps working unchanged.
+
+The four functions that remain directly in this file
+(`_resolve_repo_and_files`, `_run_analyze_graph_pipeline`,
+`_run_multi_repo_analyze_graph`, `handle_analyze_graph`) do so because the
+existing test suite monkeypatches several of their collaborators at the
+flat `code_indexer.server.mcp.handlers.xray_graph.<name>` path (e.g.
+`_resolve_repo_path`, `_resolve_repo_and_files`, `_get_xray_cell_limiter`,
+`_run_analyze_graph_pipeline`, `_GRAPH_CANDIDATE_FILES_CAP`,
+`time.monotonic`) to intercept a caller's behavior. Such a patch only takes
+effect when the calling function's bare-name lookup resolves through the
+exact module object being patched (a function's global name lookups always
+go through the module it was DEFINED in, never the module it happens to be
+called from) -- so keeping these four callers physically in this
+`__init__.py`, with every collaborator name imported into ITS namespace,
+preserves that patch semantics unchanged after the split.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import anyio
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
-from ._utils import (
+from .._utils import (
     _enforce_repo_count_cap,
     _mcp_response,
-    _parse_and_collapse_repo_alias,
+    _parse_and_collapse_repo_alias,  # noqa: F401 -- re-exported for import-path parity
     cap_breach_response,
 )
-from .xray import (
+from .. import xray_truncation  # noqa: F401 -- re-exported for import-path parity
+from ..xray import (
     _get_xray_cell_limiter,
+    _lazy_singleton_app_or_none,  # noqa: F401 -- re-exported for import-path parity
     _pattern_scope_alias,
     _resolve_evaluator_code_off_loop,
     _resolve_repo_path,
+)
+
+from ._candidates import (  # noqa: F401 -- re-exported for import-path parity
+    _GRAPH_CANDIDATE_FILES_CAP,
+    _SKIP_DIR_NAMES,
+    _collect_graph_candidate_files,
+)
+from ._request_parsing import (  # noqa: F401 -- re-exported for import-path parity
+    _DEFAULT_TIMEOUT_SECONDS,
+    _TIMEOUT_MIN,
+    _TIMEOUT_MAX,
+    _validate_glob_patterns,
+    _parse_timeout_seconds,
+    _parse_refine_flag,
+    _parse_analyze_graph_request,
+)
+from ._result_shaping import (  # noqa: F401 -- re-exported for import-path parity
     _truncate_graph_result,
+    _dedupe_preserve_order,
+    _MULTI_REPO_ERROR_ALLOWED_FIELDS,
+    _MULTI_REPO_ERROR_STRING_MAX_CHARS,
+    _truncate_error_string,
+    _sanitized_exception_message,
+    _bound_repo_error_payload,
 )
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_TIMEOUT_SECONDS = 120
-_TIMEOUT_MIN = 10
-_TIMEOUT_MAX = 600
-
-# Bug #1913 (Epic #1906 P9 follow-up; supersedes the Issue #1902 admission
-# predicate this constant originally bounded). Reuses `_TIMEOUT_MAX` -- the
-# SAME 600s a SINGLE-repo `timeout_seconds` already promises never to
-# exceed -- as the threshold `_run_multi_repo_analyze_graph` checks
-# `time.monotonic() - t0` against before STARTING each alias.
-#
-# WHAT THIS ACTUALLY IS (P2-B, dual review, corrected after both
-# reviewers independently flagged the previous wording as a false wall-
-# clock guarantee -- the exact defect class #1913 itself exists to fix,
-# so this comment must not reproduce it): a BETWEEN-ALIAS ADMISSION GATE,
-# not a deadline. It can refuse to START a later alias once the threshold
-# is observed; it CANNOT bound the alias already in flight when the check
-# last passed, because the check only runs between iterations, never
-# inside one. Concretely: 2 aliases at `timeout_seconds=600`, alias A
-# finishes at t=599 (gate passes, elapsed < 600), alias B then waits up to
-# 600s on `limiter.acquire(timeout=...)` (OUTSIDE `run_graph_analysis`'s
-# own deadline), runs up to another 600s inside `run_graph_analysis`, plus
-# an entirely unclocked `_resolve_repo_and_files` walk -- roughly 1800s
-# real wall clock, THREE TIMES the advertised ceiling, and strictly MORE
-# exposure than the single-repo path this constant claims to match.
-#
-# Worse than merely long: `_resolve_repo_and_files`'s `os.walk` carries no
-# clock of its own, and this project's shared storage is `hard` NFS,
-# which can block a stat/readdir call FOREVER on a wedged host (see
-# CLAUDE.md's "Treat `hard` NFS as able to block FOREVER" invariant). The
-# in-flight alias in that case is not "long" -- it is UNBOUNDED, and the
-# next-loop admission check is never reached at all. There is no finite
-# number this constant, or any comment on it, can honestly claim as a
-# hard bound on total request wall clock.
-#
-# A REAL bound would require deadline-aware, CANCELLABLE repo resolution
-# (so an in-flight `os.walk`/NFS stall can be aborted at a deadline) and
-# remaining-budget propagation through both `limiter.acquire(timeout=...)`
-# and `backend.run_graph_analysis(timeout_seconds=...)` for every
-# subsequent alias -- none of which this Python-only admission gate does.
-# Carried forward from the deleted `_check_multi_repo_timeout_budget`
-# (the previous admission predicate this superseded), whose docstring was
-# the only place in this file that stated this caveat honestly: do not
-# let it die with that function.
-_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS = _TIMEOUT_MAX
-
-# R3-2 (Codex re-review, ROUND 3): the SAME whole-repo candidate-file cap
-# Rust's `GRAPH_INDEX_MAX_FILES` (rust/xray-cli/src/main.rs) enforces --
-# must stay in sync with that constant. Capping HERE, during the Python-
-# side walk that produces the `--files-from` list, is what actually closes
-# the "millions of matching files" OOM vector: Rust's own `max_files`
-# bound only ever sees what Python already wrote to that file, so without
-# this the full unbounded path list would already be materialized (and
-# handed to Rust) before Rust's limit ever gets a chance to engage.
-_GRAPH_CANDIDATE_FILES_CAP = 50_000
-
-# Directory names skipped during the whole-repo candidate walk -- common
-# VCS/build-artifact directories every other xray tool's own file
-# discovery implicitly avoids too.
-_SKIP_DIR_NAMES = {
-    ".git",
-    ".code-indexer",
-    "node_modules",
-    ".venv",
-    "__pycache__",
-    "target",
-    "dist",
-    "build",
-}
-
-
-def _collect_graph_candidate_files(
-    repo_path: Path,
-    include_patterns: List[str],
-    exclude_patterns: List[str],
-    max_files: int,
-    extractor_extensions: Dict[str, str],
-) -> Tuple[List[str], bool, int, int, List[str]]:
-    """Whole-repo, glob-filtered file walk producing repo-relative POSIX
-    paths for `--build-graph`'s `--files-from` list.
-
-    Bug #1907 (the most dangerous defect in epic #1906): scoping
-    `include_patterns`/`exclude_patterns` to one extractable language on a
-    mixed-language repo used to make `analyze_graph` report
-    `fact_graph_complete: true` with every degradation counter at zero,
-    while the graph was missing every call site in the excluded language
-    -- an excluded file never became a candidate, so no Rust-side counter
-    could ever count it. Narrowing the scope did NOT improve completeness,
-    it HID the incompleteness, and a method called only from the unread
-    language could be reported `is_definitely_dead_code() == Some(true)`:
-    a false dead verdict on live code.
-
-    `extractor_extensions` (obtained from `xray-cli --print-graph-
-    extractor-extensions` via `rust_backend.get_graph_extractor_
-    extensions`, the single source of truth Rust's extractor registry
-    owns) is what lets this walk classify a file it is about to exclude:
-    `files_excluded_with_extractor` counts an excluded file whose language
-    genuinely COULD have contributed a real call edge had it been read --
-    the caller MUST downgrade `fact_graph_complete` on a nonzero count
-    here. `files_excluded_without_extractor` counts an excluded file whose
-    language has no extractor at all (e.g. `README.md`) -- excluding it
-    changes nothing about completeness, since including it would not have
-    produced any real call edges either way. Conflating the two would
-    re-create this bug in a new shape. `languages_excluded_with_extractor`
-    (sorted, deduplicated) names WHICH languages went unread, so a caller
-    learns what is missing, not merely that something is (AC3).
-    Classification is a bare extension lookup against the already-in-hand
-    `extractor_extensions` dict -- no filesystem call per file, so this
-    adds no measurable cost to the walk at fleet scale (~900 repos).
-
-    Deliberately a plain path walk, not the CLI indexing pipeline's
-    `Config`-bound `FileFinder` (Rule 4 anti-duplication does not apply
-    here: `FileFinder` requires constructing a full indexing `Config` this
-    spontaneous MCP tool has no reason to build). `include_patterns`/
-    `exclude_patterns` follow `xray_search`'s own glob semantics.
-
-    Synchronous by design -- callers MUST run this via
-    `anyio.to_thread.run_sync`, never directly on the event loop (this
-    walks the real filesystem and can take real wall-clock time on a large
-    repo). Bounded by the repo's own finite file count (Rule 14).
-
-    Consolidated review finding H6 (Issue #1811/Bug #1812): uses
-    `os.walk` and prunes `_SKIP_DIR_NAMES` IN PLACE on `dirnames` so a
-    skipped subtree (`.git`, `node_modules`, `.venv`, `target`, `dist`,
-    `build`, `__pycache__`) is never descended into at all -- the
-    previous `sorted(repo_path.rglob("*"))` implementation enumerated and
-    `is_file()`-stat'd EVERY entry under those directories before
-    discarding it as a post-hoc filter, which at production scale (hard
-    NFSv3, ~5ms/op) can burn the tool's entire `timeout_seconds` budget on
-    discarded work before a single real file is parsed.
-
-    R3-2 (Codex re-review, ROUND 3): STOPS collecting once `max_files`
-    matching paths have been found, rather than walking the whole repo
-    and slicing afterward -- on a repo with millions of matching files,
-    materializing the full path list before any limit engages risks
-    OOM/timeout. Continues scanning only long enough to detect ONE
-    additional match beyond the cap (then breaks immediately), returning
-    `(paths, collection_truncated)` so the caller can honestly surface
-    truncation via the existing degradation path rather than silently
-    dropping files. Iterates `sorted(filenames)` per directory (rather
-    than os.walk's raw, filesystem-dependent order) so WHICH files get
-    truncated away, once the cap engages mid-directory, is deterministic
-    and reproducible -- the final aggregate `results.sort()` already
-    normalizes OUTPUT order regardless; this only affects the SELECTION
-    made while a cap is hit mid-directory.
-
-    Raises:
-        ValueError: if `max_files < 1` -- a non-positive cap would make
-            the first matching file trigger truncation and return zero
-            paths, a surprising/invalid limit rather than a real bound.
-    """
-    if max_files < 1:
-        raise ValueError(f"max_files must be >= 1, got {max_files}")
-    # Bug #1876: routes through the SAME PathPatternMatcher-backed compiled
-    # selector (items 3/5/6) regex_search.py's indexed path and
-    # xray_search's directory-walk (AST) path both use, keeping all three
-    # X-Ray/search tools in agreement on one canonical glob normalization
-    # policy (brace groups, bare-directory tokens, leading `./`/`*/`).
-    # This is NOT "one glob implementation" end to end: xray_search's
-    # content mode (ripgrep-backed) still hands its normalized globs to
-    # ripgrep's own `-g` matcher, a separate glob engine fed by the same
-    # normalization -- only directory-walk/AST callers like this one use
-    # this Python selector directly. Built ONCE, outside the loop, so the
-    # compiled PathSpec amortizes across every file visited during this
-    # walk instead of recompiling the same include/exclude patterns per
-    # file.
-    from code_indexer.services.path_pattern_matcher import PathPatternMatcher
-
-    selector = PathPatternMatcher().create_selector(include_patterns, exclude_patterns)
-    results: List[str] = []
-    collection_truncated = False
-    files_excluded_with_extractor = 0
-    files_excluded_without_extractor = 0
-    languages_excluded_with_extractor: Set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(repo_path):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
-        for filename in sorted(filenames):
-            rel = Path(dirpath, filename).relative_to(repo_path).as_posix()
-            if not selector.select(rel):
-                # Bug #1907: this file will NEVER reach Rust -- classify it
-                # NOW, while its extension is still in hand, or it becomes
-                # permanently invisible to every completeness counter.
-                # Extension lookup only, no filesystem call.
-                ext = Path(filename).suffix.lstrip(".").lower()
-                language = extractor_extensions.get(ext) if ext else None
-                if language is not None:
-                    files_excluded_with_extractor += 1
-                    languages_excluded_with_extractor.add(language)
-                else:
-                    files_excluded_without_extractor += 1
-                continue
-            if len(results) >= max_files:
-                collection_truncated = True
-                break
-            results.append(rel)
-        if collection_truncated:
-            break
-    results.sort()
-    return (
-        results,
-        collection_truncated,
-        files_excluded_with_extractor,
-        files_excluded_without_extractor,
-        sorted(languages_excluded_with_extractor),
-    )
-
-
-def _validate_glob_patterns(
-    value: Any, field_name: str
-) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
-    """Validates and compiles `value` before it reaches the graph pipeline.
-
-    A bare string (e.g. `"*.py"` instead of `["*.py"]`) would otherwise
-    silently iterate per CHARACTER, producing nonsensical single-character
-    glob patterns. A syntactically invalid glob would otherwise fail later
-    during candidate collection, where an invalid exclude can fail open.
-
-    Returns `(patterns, None)` on success (`patterns` is `[]` for `None`),
-    or `(None, error_dict)` on a type or pattern violation.
-    """
-    from code_indexer.services.path_pattern_matcher import (
-        InvalidPatternError,
-        PathPatternMatcher,
-    )
-
-    if value is None:
-        return [], None
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        return None, {
-            "error": f"{field_name}_invalid",
-            "message": f"{field_name} must be a list of strings",
-        }
-    try:
-        PathPatternMatcher().compile_patterns(value)
-    except InvalidPatternError as exc:
-        return None, {
-            "error": f"{field_name}_invalid",
-            "message": str(exc),
-        }
-    return value, None
 
 
 def _resolve_repo_and_files(
@@ -408,188 +213,6 @@ def _resolve_repo_and_files(
         files_excluded_with_extractor,
         files_excluded_without_extractor,
         languages_excluded_with_extractor,
-        None,
-    )
-
-
-def _parse_timeout_seconds(timeout_raw: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """Validates `timeout_raw` is a finite number (rejects bool, NaN,
-    +/-inf, and non-numeric types) before ever calling `int(...)` on it --
-    `int(float("nan"))`/`int(float("inf"))` raise `ValueError`/
-    `OverflowError`, which must never surface as an unstructured failure.
-    Clamps to `[_TIMEOUT_MIN, _TIMEOUT_MAX]` on success.
-    """
-    if isinstance(timeout_raw, bool) or not isinstance(timeout_raw, (int, float)):
-        return 0, {
-            "error": "timeout_seconds_invalid",
-            "message": f"timeout_seconds must be a number, got {timeout_raw!r}",
-        }
-    if isinstance(timeout_raw, float) and not math.isfinite(timeout_raw):
-        return 0, {
-            "error": "timeout_seconds_invalid",
-            "message": f"timeout_seconds must be finite, got {timeout_raw!r}",
-        }
-    return max(_TIMEOUT_MIN, min(_TIMEOUT_MAX, int(timeout_raw))), None
-
-
-def _parse_refine_flag(refine_raw: Any) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """Bug #1909: validates the new opt-in `refine` request parameter.
-
-    Must be a real boolean (never a truthy string/int -- `bool` is itself
-    a subtype of `int` in Python, so `isinstance(refine_raw, bool)` must be
-    checked BEFORE any numeric check ever could accept it). Defaults to
-    `False` when omitted -- `--refine` is opt-in, never the default,
-    mirroring `_parse_timeout_seconds`'s fail-fast validation convention.
-    """
-    if not isinstance(refine_raw, bool):
-        return False, {
-            "error": "refine_invalid",
-            "message": f"refine must be a boolean, got {refine_raw!r}",
-        }
-    return refine_raw, None
-
-
-def _parse_analyze_graph_request(
-    params: Any,
-) -> Tuple[
-    Union[str, List[str]],
-    str,
-    List[str],
-    List[str],
-    int,
-    bool,
-    Optional[Dict[str, Any]],
-]:
-    """Parses and validates `params` for `handle_analyze_graph` -- factored
-    out to keep that handler itself short. Returns either the 5 real
-    parsed values with a `None` error, or empty/zero placeholders with a
-    populated error dict (which the caller must check FIRST).
-
-    Issue #1902: `repository_alias` now accepts a bare string, a native
-    list of strings, OR a JSON-encoded string array -- matching
-    `xray_search`'s documented contract EXACTLY, via the SAME
-    `_parse_and_collapse_repo_alias` seam `handlers/xray.py`'s
-    `handle_xray_search`/`handle_xray_explore` already use (no fourth copy
-    of this parsing). A single-element list collapses to a plain string
-    (mirrors xray.py's v10.4.5 Defect 5 ergonomic normalization), so
-    callers of a single repo see the unchanged single-repo response shape
-    regardless of which form they used.
-
-    Issue #1902 P9 review, P3: an empty string ANYWHERE inside the list
-    (`[""]`, or `["real-repo", ""]`) is rejected with the SAME
-    `repository_alias_required` error a bare `""` already gets, rather
-    than silently entering the multi-repo path where it would otherwise
-    surface much later as a per-alias `repository_not_found` -- the same
-    user mistake must not produce two different error shapes depending on
-    whether it was wrapped in a list.
-    """
-    if not isinstance(params, dict):
-        return (
-            "",
-            "",
-            [],
-            [],
-            0,
-            False,
-            {
-                "error": "invalid_params",
-                "message": "params must be an object",
-            },
-        )
-
-    repo_alias_raw = params.get("repository_alias", "")
-    evaluator_code = params.get("evaluator_code", "")
-    pattern_name = params.get("pattern_name")
-
-    repo_alias = _parse_and_collapse_repo_alias(repo_alias_raw)
-
-    repo_alias_type_valid = isinstance(repo_alias, str) or (
-        isinstance(repo_alias, list)
-        and all(isinstance(item, str) for item in repo_alias)
-    )
-    if (
-        not isinstance(evaluator_code, str)
-        or not repo_alias_type_valid
-        or (pattern_name is not None and not isinstance(pattern_name, str))
-    ):
-        return (
-            "",
-            "",
-            [],
-            [],
-            0,
-            False,
-            {
-                "error": "invalid_params",
-                "message": (
-                    "repository_alias must be a string, a list of strings, or a "
-                    "JSON-encoded list of strings, and evaluator_code must be a "
-                    "string"
-                ),
-            },
-        )
-    if not evaluator_code and not pattern_name:
-        return (
-            "",
-            "",
-            [],
-            [],
-            0,
-            False,
-            {
-                "error": "evaluator_code_required",
-                "message": "Either evaluator_code or pattern_name must be provided",
-            },
-        )
-    repo_alias_empty = repo_alias == "" or (
-        isinstance(repo_alias, list)
-        and (len(repo_alias) == 0 or any(item == "" for item in repo_alias))
-    )
-    if repo_alias_empty:
-        return (
-            "",
-            "",
-            [],
-            [],
-            0,
-            False,
-            {
-                "error": "repository_alias_required",
-                "message": "repository_alias must be a non-empty string, or a "
-                "non-empty list/JSON array of non-empty strings",
-            },
-        )
-
-    include_patterns, err = _validate_glob_patterns(
-        params.get("include_patterns"), "include_patterns"
-    )
-    if err is not None:
-        return "", "", [], [], 0, False, err
-    exclude_patterns, err = _validate_glob_patterns(
-        params.get("exclude_patterns"), "exclude_patterns"
-    )
-    if err is not None:
-        return "", "", [], [], 0, False, err
-
-    timeout_seconds, err = _parse_timeout_seconds(
-        params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS)
-    )
-    if err is not None:
-        return "", "", [], [], 0, False, err
-
-    refine, err = _parse_refine_flag(params.get("refine", False))
-    if err is not None:
-        return "", "", [], [], 0, False, err
-
-    assert include_patterns is not None  # guaranteed by _validate_glob_patterns
-    assert exclude_patterns is not None
-    return (
-        repo_alias,
-        evaluator_code,
-        include_patterns,
-        exclude_patterns,
-        timeout_seconds,
-        refine,
         None,
     )
 
@@ -830,141 +453,46 @@ async def _run_analyze_graph_pipeline(
     return result
 
 
-def _dedupe_preserve_order(aliases: List[str]) -> List[str]:
-    """Order-preserving de-duplication for a multi-repo alias list (Issue
-    #1902 P9 review, P3).
-
-    `["dup", "dup", "other"]` must analyze `"dup"` exactly ONCE, not twice:
-    the previous behavior ran two full graph builds of the same repo and
-    returned `len(results) == 2 != len(repositories) == 3` with `ok: true`,
-    misleading any caller that uses that equality as a completeness check.
-    `_enforce_repo_count_cap`'s own docstring already documents that it
-    expects a POST-DEDUP list ("Final merged alias list (post-expansion,
-    post-dedup)") -- this is the seam that makes that true for
-    analyze_graph's multi-repo path.
-
-    MUST run before the repo-count cap check (N copies of one alias must
-    not consume N cap slots).
-    """
-    return list(dict.fromkeys(aliases))
-
-
-# Issue #1902 P9 review, P3: fields copied from a per-alias failure result
-# into that alias's `errors[]` entry. An explicit ALLOWLIST (rather than
-# spreading `repo_result` wholesale) means a field added to a FUTURE
-# `_graph_error_result`/pipeline error shape must be deliberately added
-# here too (Rule 13, anti-silent-failure: an unbounded field must be opted
-# IN, never inherited by default). Never includes "ok" (always False on
-# this path already, redundant), "findings"/"refine" (always empty on
-# every KNOWN error path today, per `_graph_error_result`), "degradation"/
-# "cached"/"compile_ms"/"fact_graph_complete" (meaningless on a failure).
-_MULTI_REPO_ERROR_ALLOWED_FIELDS = (
-    "error",
-    "message",
-    "error_code",
-    "offending_construct",
-    "offending_line",
-    "status",
-    "build_status",
-)
-# A real `RustNativeBackend.run_graph_analysis` compile/execution failure's
-# "error" field is `{"error_type", "error_message"}`, and `error_message`
-# carries the FULL rustc/xray-cli stderr verbatim -- `_sanitize_error_message`
-# only redacts server paths, it never truncates. Appended once per FAILING
-# alias, an unbounded string multiplies that cost by N.
-_MULTI_REPO_ERROR_STRING_MAX_CHARS = 2000
-
-
-def _truncate_error_string(value: str) -> str:
-    """Caps a single string field's length for a bounded per-alias error
-    payload (Issue #1902 P9 review, P3). Leaves short strings untouched."""
-    if len(value) <= _MULTI_REPO_ERROR_STRING_MAX_CHARS:
-        return value
-    omitted = len(value) - _MULTI_REPO_ERROR_STRING_MAX_CHARS
-    return f"{value[:_MULTI_REPO_ERROR_STRING_MAX_CHARS]}... [truncated {omitted} more chars]"
-
-
-def _sanitized_exception_message(exc: BaseException) -> str:
-    """Builds a public-safe message for an unhandled per-alias pipeline
-    exception (Bug #1913 P1, dual review).
-
-    Two failures in the pre-review version this replaces:
-    1. `str(exc)` was returned RAW into a public MCP response. A
-       `FileNotFoundError`/`OSError` raised by `_resolve_repo_and_files`
-       (the live exception surface this guard exists for) carries an
-       ABSOLUTE SERVER PATH in its message -- this repository's own
-       disclosure rules forbid system internals (mount paths, hostnames)
-       reaching a caller, and `RustNativeBackend.run_graph_analysis`'s own
-       structured-error path already never does this (every
-       `error_message` goes through `_sanitize_error_message` at
-       `rust_backend.py:433` before it leaves the process). This is the
-       SAME sanitiser, applied lazily (mirrors this module's existing
-       lazy `RustNativeBackend` import) to keep parity with that path.
-    2. `str(exc)` is EMPTY for a bare `RuntimeError()`/`KeyError()` --
-       verified directly -- so a bare raise previously produced
-       `"message": ""`, zero diagnostic content. The exception TYPE name
-       is always included, so even a detail-free exception still tells
-       the caller something concrete happened and what kind.
-    """
-    from code_indexer.xray.rust_backend import _sanitize_error_message
-
-    exc_type = type(exc).__name__
-    detail = _sanitize_error_message(str(exc))
-    return f"{exc_type}: {detail}" if detail else exc_type
-
-
-def _bound_repo_error_payload(repo_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Builds the bounded per-alias failure payload for `errors[]` (Issue
-    #1902 P9 review, P3) -- the caller must already know `repo_result` is a
-    failure (`repo_result.get("error")` truthy) before calling this.
-
-    Copies ONLY `_MULTI_REPO_ERROR_ALLOWED_FIELDS`, never the full
-    `repo_result` dict, and truncates any string value found (including
-    inside a nested `error` dict, e.g. `error.error_message`) via
-    `_truncate_error_string`. `repository_alias` is NEVER a key this
-    function can produce -- the caller adds it AFTER spreading this
-    function's return value, so a `repository_alias` key that happened to
-    already exist inside `repo_result` (were it ever added to the
-    allowlist) could never clobber the real one.
-
-    Bug #1913 P2-A (dual review, both reviewers independently): also
-    GUARANTEES a non-empty top-level `message`. `_graph_error_result`
-    (rust_backend.py) -- the real compile/build/analyze failure shape,
-    the single most likely real failure of this tool -- returns
-    `{"error": {"error_type", "error_message"}, ...}` with NO top-level
-    `message` key at all. Left unhandled, that shape produced an
-    `errors[]` entry with `error` as a DICT and `message` silently
-    absent: a caller doing `entry["message"]` got a `KeyError`, one
-    treating `entry["error"]` as a string got a dict. When `message` is
-    still missing/falsy after the allowlisted copy AND `error` is a dict,
-    synthesize it from the (already-truncated) `error["error_message"]`,
-    falling back to `error["error_type"]` -- so the `{repository_alias,
-    error, message}` contract `analyze_graph.md` documents is actually
-    TRUE for every entry, not merely described as true.
-    """
-    bounded: Dict[str, Any] = {}
-    for field in _MULTI_REPO_ERROR_ALLOWED_FIELDS:
-        if field not in repo_result:
-            continue
-        value = repo_result[field]
-        if isinstance(value, str):
-            bounded[field] = _truncate_error_string(value)
-        elif isinstance(value, dict):
-            bounded[field] = {
-                k: (_truncate_error_string(v) if isinstance(v, str) else v)
-                for k, v in value.items()
-            }
-        else:
-            bounded[field] = value
-    if not bounded.get("message"):
-        error_value = bounded.get("error")
-        if isinstance(error_value, dict):
-            bounded["message"] = (
-                error_value.get("error_message")
-                or error_value.get("error_type")
-                or "analyze_graph pipeline failure (no further detail available)"
-            )
-    return bounded
+# Bug #1913 (Epic #1906 P9 follow-up; supersedes the Issue #1902 admission
+# predicate this constant originally bounded). Reuses `_TIMEOUT_MAX` -- the
+# SAME 600s a SINGLE-repo `timeout_seconds` already promises never to
+# exceed -- as the threshold `_run_multi_repo_analyze_graph` checks
+# `time.monotonic() - t0` against before STARTING each alias.
+#
+# WHAT THIS ACTUALLY IS (P2-B, dual review, corrected after both
+# reviewers independently flagged the previous wording as a false wall-
+# clock guarantee -- the exact defect class #1913 itself exists to fix,
+# so this comment must not reproduce it): a BETWEEN-ALIAS ADMISSION GATE,
+# not a deadline. It can refuse to START a later alias once the threshold
+# is observed; it CANNOT bound the alias already in flight when the check
+# last passed, because the check only runs between iterations, never
+# inside one. Concretely: 2 aliases at `timeout_seconds=600`, alias A
+# finishes at t=599 (gate passes, elapsed < 600), alias B then waits up to
+# 600s on `limiter.acquire(timeout=...)` (OUTSIDE `run_graph_analysis`'s
+# own deadline), runs up to another 600s inside `run_graph_analysis`, plus
+# an entirely unclocked `_resolve_repo_and_files` walk -- roughly 1800s
+# real wall clock, THREE TIMES the advertised ceiling, and strictly MORE
+# exposure than the single-repo path this constant claims to match.
+#
+# Worse than merely long: `_resolve_repo_and_files`'s `os.walk` carries no
+# clock of its own, and this project's shared storage is `hard` NFS,
+# which can block a stat/readdir call FOREVER on a wedged host (see
+# CLAUDE.md's "Treat `hard` NFS as able to block FOREVER" invariant). The
+# in-flight alias in that case is not "long" -- it is UNBOUNDED, and the
+# next-loop admission check is never reached at all. There is no finite
+# number this constant, or any comment on it, can honestly claim as a
+# hard bound on total request wall clock.
+#
+# A REAL bound would require deadline-aware, CANCELLABLE repo resolution
+# (so an in-flight `os.walk`/NFS stall can be aborted at a deadline) and
+# remaining-budget propagation through both `limiter.acquire(timeout=...)`
+# and `backend.run_graph_analysis(timeout_seconds=...)` for every
+# subsequent alias -- none of which this Python-only admission gate does.
+# Carried forward from the deleted `_check_multi_repo_timeout_budget`
+# (the previous admission predicate this superseded), whose docstring was
+# the only place in this file that stated this caveat honestly: do not
+# let it die with that function.
+_MULTI_REPO_TOTAL_TIMEOUT_CEILING_SECONDS = _TIMEOUT_MAX
 
 
 async def _run_multi_repo_analyze_graph(
@@ -1055,12 +583,16 @@ async def _run_multi_repo_analyze_graph(
         holds -- a caller can use that as a completeness check.
       - "results": {alias: <that alias's own, individually PayloadCache-
         truncated, single-repo analyze_graph result>} -- only for aliases
-        that resolved and ran.
+        that resolved, ran, AND were successfully truncated/cached.
       - "errors": [{**_bound_repo_error_payload(error_dict),
         "repository_alias": alias}] for aliases that failed (unknown alias,
         no candidate files, a real compile error, an unhandled pipeline
-        exception, ...) or were never started because the elapsed deadline
-        had already been reached (`{"error": "multi_repo_deadline_
+        exception, a per-repo PayloadCache page-set write failure
+        surfaced by `_truncate_graph_result` as {"success": False,
+        "error": "cache_store_failed", ...} -- Bug #1928 final round,
+        Opus P3.2 -- never left in results[alias] where the top-level
+        "ok" flag would stay True, ...) or were never started because
+        the elapsed deadline had already been reached (`{"error": "multi_repo_deadline_
         exceeded", "message": <ceiling + remediation text>,
         "repository_alias": alias}`) -- never silently dropped, and never
         an unbounded copy of the full per-alias result (Issue #1902 P9
@@ -1148,7 +680,29 @@ async def _run_multi_repo_analyze_graph(
                 {**_bound_repo_error_payload(repo_result), "repository_alias": alias}
             )
         else:
-            results[alias] = _truncate_graph_result(repo_result)
+            # Bug #1928 P2: this handler is `async def` and runs directly
+            # on the event loop -- truncation now does real synchronous
+            # DB I/O (PayloadCache.store_batch()/store()) plus JSON
+            # serialization, which must never block the loop.
+            truncated = await anyio.to_thread.run_sync(
+                _truncate_graph_result, repo_result
+            )
+            # Bug #1928 final round (Opus P3.2): _truncate_graph_result can
+            # itself fail (a page-set write failure surfaced as
+            # {"success": False, "error": "cache_store_failed", ...}) --
+            # that must be routed into errors[] like any other per-repo
+            # failure, never land in results[alias] with the top-level
+            # "ok" flag staying True. Its shape already has a truthy
+            # "error" key, matching what _bound_repo_error_payload expects.
+            if truncated.get("success") is False:
+                errors.append(
+                    {
+                        **_bound_repo_error_payload(truncated),
+                        "repository_alias": alias,
+                    }
+                )
+            else:
+                results[alias] = truncated
     return {
         "ok": len(errors) == 0,
         "mode": "multi_repo",
@@ -1320,7 +874,11 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     # same PayloadCache truncation every other xray result gets -- a
     # whole-repo graph analysis's findings[]/refine[] can be strictly
     # larger than a single-file search's matches[]/evaluation_errors[].
-    return _mcp_response(_truncate_graph_result(result))
+    # Bug #1928 P2: offloaded via anyio.to_thread.run_sync -- see
+    # _truncate_graph_result's own docstring for why (real DB I/O +
+    # serialization must never block this async handler's event loop).
+    truncated = await anyio.to_thread.run_sync(_truncate_graph_result, result)
+    return _mcp_response(truncated)
 
 
 def _register(registry: Dict[str, Any]) -> None:

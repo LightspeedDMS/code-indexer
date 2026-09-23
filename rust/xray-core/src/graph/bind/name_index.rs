@@ -37,6 +37,15 @@ pub(crate) struct DeclInfo {
     /// constructor, or a method whose return type could not be
     /// determined) -- never a guessed value.
     pub(crate) return_type: Option<String>,
+    /// Bug #1923 (P2): the owning FILE's `FileForBind::language`
+    /// (e.g. `"java"`, `"kotlin"`), copied straight through -- lets a
+    /// language-specific tag check (`narrowing::candidate_has_named_
+    /// type_mismatch`) recognise a NON-Java callee and skip a
+    /// compatibility rule built entirely on Java's own type vocabulary,
+    /// which would otherwise misread a Kotlin declaration's `Int`/`Any`
+    /// param types as provably incompatible with a Java caller's
+    /// resolved `int`/`Object` argument.
+    pub(crate) language: String,
     /// D2: copied from the extraction-time declaration visibility. Unknown
     /// remains conservative and is never filtered as private.
     pub(crate) visibility: Visibility,
@@ -78,6 +87,7 @@ impl RepoNameIndex {
                         enclosing_type: owners_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
                         param_types: decl.param_types.clone(),
                         is_varargs: decl.is_varargs,
+                        language: file.language.clone(),
                         return_type: return_types_by_symbol
                             .get(&decl.symbol)
                             .map(|t| t.to_string()),
@@ -120,6 +130,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         }
     }
 
@@ -164,6 +175,7 @@ mod tests {
             param_count: Some(1),
             param_types: vec!["String".to_string()],
             is_varargs: true,
+            vararg_index: None,
         });
         index.method_owners.push(MethodOwnerRecord {
             method_symbol: make_symbol_id(1, 0),
@@ -180,6 +192,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
 
         let files = vec![FileForBind {
@@ -218,6 +231,7 @@ mod tests {
             param_count: Some(0),
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
         index.method_return_types.push(MethodReturnTypeRecord {
             method_symbol: make_symbol_id(1, 0),
@@ -231,6 +245,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
 
         let files = vec![FileForBind {

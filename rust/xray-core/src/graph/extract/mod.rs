@@ -15,10 +15,19 @@
 //! worse than an explicit, observable "not yet supported" signal.
 
 pub mod java;
+mod java_annotations;
+mod java_fields;
 mod java_invocations;
+mod java_methods;
 mod java_receiver;
 mod java_type_names;
 pub mod kotlin;
+mod kotlin_declarations;
+mod kotlin_fields;
+mod kotlin_functions;
+mod kotlin_invocations;
+mod kotlin_receiver;
+mod kotlin_type_names;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;
@@ -54,6 +63,41 @@ pub fn extractor_for_language(ext: &str) -> ExtractorLookup {
         "kt" | "kts" => ExtractorLookup::Supported(Box::new(kotlin::KotlinExtractor)),
         _ => ExtractorLookup::Unsupported,
     }
+}
+
+/// Bug #1929 item 3: synthesizes a human-chaseable name for an anonymous
+/// (Java `new Base() { ... }` / enum-constant body) or anonymous-object
+/// (Kotlin `object : Base() { ... }`) type -- shared by BOTH extractors
+/// since the naming scheme is identical and language-agnostic (Rule 4,
+/// anti-duplication; `kotlin.rs`'s own `type_declaration_name` doc
+/// comment already says it "mirrors `JavaExtractor`'s own F1 anonymous-
+/// class naming scheme exactly"). Replaces the prior opaque
+/// `<anon:{file_id}:{byte}>` (two large numbers with zero human meaning,
+/// reported live as e.g. `<anon:918273645:42>.read(...)` against a
+/// real-world enum whose every constant overrides `read()` in its own
+/// anonymous body) with `{enclosing}$<anon@L{line}:{file_id}:
+/// {byte}>` -- the enclosing type's real bare name and the anonymous
+/// body's own REAL source line are now visible up front.
+///
+/// `file_id`/`start_byte` are KEPT (never dropped) after the
+/// human-readable prefix: this name is used as a bare-name key in the
+/// REPO-WIDE `TypeIndex` (`graph::bind::families`) for supertype
+/// resolution, so it must stay GLOBALLY unique across the whole analysed
+/// set -- two anonymous bodies in different files, or even two on the
+/// exact same source line of the same file (`new A(){}; new B(){};`),
+/// must never collide onto the identical string, which would silently
+/// merge two unrelated anonymous types' supertype evidence in
+/// `TypeIndex::supertypes_of`. `enclosing_type` is `None` only when
+/// extraction could not determine it (a malformed declaration) and
+/// renders as `<unknown>` rather than fabricating a name.
+fn synthesize_anon_type_name(
+    enclosing_type: Option<&str>,
+    file_id: u32,
+    start_line: usize,
+    start_byte: usize,
+) -> std::rc::Rc<str> {
+    let enclosing = enclosing_type.unwrap_or("<unknown>");
+    std::rc::Rc::from(format!("{enclosing}$<anon@L{start_line}:{file_id}:{start_byte}>"))
 }
 
 /// Extensions with a real `LanguageExtractor` registered, paired with a

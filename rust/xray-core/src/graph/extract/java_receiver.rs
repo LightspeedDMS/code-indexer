@@ -99,6 +99,10 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
                     None => break ReceiverExpr::None,
                 }
             }
+            "field_access" => match build_dotted_qualifier_segments(node) {
+                Some(segments) => break ReceiverExpr::DottedQualifier(segments),
+                None => return ReceiverExpr::Other,
+            },
             _ => return ReceiverExpr::Other,
         }
     };
@@ -109,6 +113,58 @@ pub(super) fn build_receiver_expr(start: &OwnedNode) -> ReceiverExpr {
             method_name,
             receiver: Box::new(acc),
         })
+}
+
+/// #1931: walks a `field_access` chain's SEGMENTS -- `Outer.Inner` ->
+/// `["Outer", "Inner"]`, `com.example.Target` -> `["com", "example",
+/// "Target"]` -- structurally, never by splitting raw source text (same
+/// discipline `java_type_names`'s own qualified-name helpers document).
+/// Verified real tree-sitter-java grammar shape: `field_access` has
+/// exactly two named children, `object` and `field`, in that order;
+/// `field` is an `identifier` for an ordinary member/type-name segment,
+/// but can also be the KEYWORD node `this` for a qualified enclosing-
+/// instance reference (`Outer.this`) -- that shape is NOT a dotted type
+/// qualifier at all (it denotes an object reference, not a further type
+/// segment) and this function returns `None` for it, never fabricating a
+/// segment out of a keyword. `object` itself may be a plain `identifier`
+/// (the chain's base) or another `field_access` (one more dotted level) --
+/// any other `object` kind (a method call, `this`, `super`, a
+/// parenthesized/cast expression, ...) means this chain does not denote a
+/// pure dotted name and returns `None`.
+///
+/// Bounded, non-recursive walk (Rule 14, mirroring `build_receiver_expr`
+/// itself): each iteration either terminates (an `identifier` base, or a
+/// disqualifying shape) or descends one `field_access` level, up to
+/// `MAX_RECEIVER_CHAIN_DEPTH` times -- the SAME cap `build_receiver_expr`
+/// already enforces for a chained-call receiver, reused here rather than
+/// a second, independent bound (Rule 4, anti-duplication).
+fn build_dotted_qualifier_segments(start: &OwnedNode) -> Option<Vec<String>> {
+    let mut node = start;
+    let mut segments: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        depth += 1;
+        if depth > MAX_RECEIVER_CHAIN_DEPTH {
+            return None;
+        }
+        match node.kind.as_str() {
+            "identifier" => {
+                segments.push(node.text().to_string());
+                break;
+            }
+            "field_access" => {
+                let named = node.named_children();
+                if named.len() != 2 || named[1].kind != "identifier" {
+                    return None;
+                }
+                segments.push(named[1].text().to_string());
+                node = named[0];
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments)
 }
 
 /// AC2 (Story #1806, S2b): a `method_declaration`'s declared return type
@@ -150,6 +206,17 @@ pub(super) fn parameter_name_and_type(param_node: &OwnedNode) -> Option<(String,
     Some((name_node.text().to_string(), declared_type))
 }
 
+/// #1924 (p12): the dotted QUALIFIER PREFIX `param_node`'s declared type
+/// was explicitly written with, if any -- mirrors the exact type-node
+/// lookup `formal_parameter_type_name` (`java.rs`) uses (the first named
+/// child that is not `modifiers`), then delegates to `java_type_names::
+/// qualified_prefix_of_type_node`. `None` for an unqualified type (`String
+/// s`) or when no type node could be found at all.
+pub(super) fn parameter_qualified_type_prefix(param_node: &OwnedNode) -> Option<String> {
+    let type_node = param_node.named_children().into_iter().find(|c| c.kind != "modifiers")?;
+    super::java_type_names::qualified_prefix_of_type_node(type_node)
+}
+
 /// AC1 (Story #1806, S2b): shared by `field_typed_names` and
 /// `local_variable_typed_names` below -- both `field_declaration` and
 /// `local_variable_declaration` share the IDENTICAL verified real grammar
@@ -160,7 +227,7 @@ pub(super) fn parameter_name_and_type(param_node: &OwnedNode) -> Option<(String,
 /// `scope`. Empty (never a guessed type) when the declared type could not
 /// be determined.
 fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<TypedNameRecord> {
-    let Some(declared_type) = node
+    let Some(base_type) = node
         .named_children()
         .into_iter()
         .find(|c| c.kind != "modifiers" && c.kind != "variable_declarator")
@@ -168,14 +235,23 @@ fn typed_names_from_declarators(node: &OwnedNode, scope: NameScope) -> Vec<Typed
     else {
         return Vec::new();
     };
+    // Bug #1923 rework: C-style dimensions live on the DECLARATOR, not
+    // the shared type node -- `int a[], b;` declares an array `a` and a
+    // scalar `b` from the SAME statement, so each declarator's own
+    // `dimensions` child (if any) must be read individually via
+    // `append_c_style_dimensions`, never a single `base_type` reused
+    // verbatim for every comma-separated declarator.
     node.children
         .iter()
         .filter(|c| c.kind == "variable_declarator")
-        .filter_map(|d| d.child_by_kind("identifier"))
-        .map(|name_node| TypedNameRecord {
-            name: name_node.text().to_string(),
-            declared_type: declared_type.clone(),
-            scope: scope.clone(),
+        .filter_map(|d| {
+            let name_node = d.child_by_kind("identifier")?;
+            let declared_type = super::java_type_names::append_c_style_dimensions(base_type.clone(), d);
+            Some(TypedNameRecord {
+                name: name_node.text().to_string(),
+                declared_type,
+                scope: scope.clone(),
+            })
         })
         .collect()
 }
@@ -472,6 +548,136 @@ pub(super) fn lambda_param_typed_names(
     }
 }
 
+/// #1922: `collect_all_local_binding_names`'s own per-node-kind dispatch,
+/// split out to stay under the function-length budget. Each arm mirrors
+/// its `X_typed_name(s)` sibling's own verified grammar shape but reads
+/// ONLY the name, never a declared type or scope.
+fn push_binding_names_for(node: &OwnedNode, names: &mut Vec<String>) {
+    match node.kind.as_str() {
+        "formal_parameter" | "spread_parameter" => {
+            if let Some((name, _)) = parameter_name_and_type(node) {
+                names.push(name);
+            }
+        }
+        "local_variable_declaration" => names.extend(
+            node.children
+                .iter()
+                .filter(|c| c.kind == "variable_declarator")
+                .filter_map(|d| d.child_by_kind("identifier"))
+                .map(|n| n.text().to_string()),
+        ),
+        "catch_formal_parameter" | "enhanced_for_statement" => {
+            if let Some(name) = node.child_by_kind("identifier") {
+                names.push(name.text().to_string());
+            }
+        }
+        "resource" => {
+            // Mirrors `resource_typed_name`'s own "existing variable"
+            // resource form discrimination (Java 9+ `try
+            // (alreadyDeclaredVar) { ... }` introduces no new binding).
+            if node.named_children().len() >= 2 {
+                if let Some(name) = node.child_by_kind("identifier") {
+                    names.push(name.text().to_string());
+                }
+            }
+        }
+        "instanceof_expression" => {
+            // Mirrors `instanceof_pattern_typed_name`'s own shape: a
+            // bound pattern variable is always the LAST named child, an
+            // `identifier`, only when present at all.
+            let named = node.named_children();
+            if named.len() >= 3 && named[named.len() - 1].kind == "identifier" {
+                names.push(named[named.len() - 1].text().to_string());
+            }
+        }
+        "type_pattern" => {
+            let named = node.named_children();
+            if named.len() == 2 && named[1].kind == "identifier" {
+                names.push(named[1].text().to_string());
+            }
+        }
+        "record_pattern_component" => {
+            let named = node.named_children();
+            if named.len() == 2 && named[1].kind == "identifier" && named[1].text() != "_" {
+                names.push(named[1].text().to_string());
+            }
+        }
+        "lambda_expression" => push_lambda_param_names(node, names),
+        _ => {}
+    }
+}
+
+/// A lambda's UNTYPED parameter forms (a bare identifier with no parens,
+/// or multiple comma-separated untyped identifiers) need separate
+/// handling: neither produces a `formal_parameter` node at all, unlike
+/// the explicitly-typed `(Worker Svc) -> ...` form, which the
+/// `formal_parameter` arm above already covers (the grammar nests it
+/// inside the SAME `formal_parameters` -> `formal_parameter` shape a
+/// method's own parameters use).
+fn push_lambda_param_names(node: &OwnedNode, names: &mut Vec<String>) {
+    let Some(parameters) = node.named_children().into_iter().next() else {
+        return;
+    };
+    match parameters.kind.as_str() {
+        "identifier" => names.push(parameters.text().to_string()),
+        "inferred_parameters" => names.extend(
+            parameters
+                .named_children()
+                .into_iter()
+                .filter(|c| c.kind == "identifier")
+                .map(|c| c.text().to_string()),
+        ),
+        _ => {}
+    }
+}
+
+/// #1922: every NAME this file binds as a local, parameter, or pattern
+/// variable, regardless of whether the binding has an enclosing method --
+/// a lambda parameter in a field initializer, an enum constant's
+/// argument list, or a switch-expression pattern in a field initializer
+/// are all still genuine Java local bindings, even though `NameScope::
+/// Local` cannot represent them (it requires a real enclosing METHOD
+/// `SymbolId`, and none of those contexts ever sets one). Sole consumer:
+/// `receiver::FileTypedNames::has_any_local_binding`'s flat, context-
+/// independent existence check. Extracts NAMES ONLY -- never a declared
+/// type, never a scope -- and performs NO scope/flow resolution (this is
+/// existence, not visibility; #1919 does not apply).
+///
+/// ONE explicit-stack pre-order walk over the WHOLE tree (mirroring
+/// `OwnedNode::descendants_of_kind`'s own bounded-stack pattern, Rule 14:
+/// total pushes equal the file's finite node count), matching each
+/// node's kind inline via `push_binding_names_for` -- never N separate
+/// per-kind tree walks.
+///
+/// A `record_declaration`'s own component list (`record Point(int x, int
+/// y) {}`) shares the IDENTICAL `formal_parameters` -> `formal_parameter`
+/// grammar shape a method's parameters use (this extractor's own record-
+/// component extraction elsewhere already relies on that), but a
+/// component is a FIELD (an implicit accessor), never a local/parameter
+/// binding -- so this walk explicitly skips pushing a `record_
+/// declaration`'s own DIRECT `formal_parameters` child onto the stack
+/// (everything else about the record -- its body's methods, nested
+/// types, and any lambdas/locals genuinely declared inside them -- is
+/// still pushed and walked normally).
+pub(super) fn collect_all_local_binding_names(root: &OwnedNode) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut stack: Vec<&OwnedNode> = root.children.iter().rev().collect();
+    while let Some(node) = stack.pop() {
+        push_binding_names_for(node, &mut names);
+        if node.kind == "record_declaration" {
+            stack.extend(
+                node.children
+                    .iter()
+                    .filter(|c| c.kind != "formal_parameters")
+                    .rev(),
+            );
+        } else {
+            stack.extend(node.children.iter().rev());
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +847,62 @@ mod tests {
             None,
             "an underscore-pattern component introduces no binding and must yield no record"
         );
+    }
+
+    /// #1931: a TWO-SEGMENT dotted qualifier (`Outer.Inner.goD()`) must
+    /// capture BOTH segments, in source order, as a `DottedQualifier` --
+    /// never collapsed to `Other` the way HEAD's extraction (which only
+    /// recognises a bare `identifier` object) does. This is the exact
+    /// repro shape from issue #1931: `Outer.Inner.goD` currently reports
+    /// `callers=0` because the receiver never participates in
+    /// type-qualifier binding at all.
+    #[test]
+    fn build_receiver_expr_recognizes_a_two_segment_dotted_qualifier_chain() {
+        let invocation = parse_first_invocation(
+            "class Caller {\n    void run() {\n        Outer.Inner.goD();\n    }\n}\n",
+        );
+        let (object, name) = invocation_object_and_name(&invocation);
+        assert_eq!(name.unwrap().text(), "goD");
+        let receiver = build_receiver_expr(object.expect("Outer.Inner.goD() has an object"));
+        assert_eq!(
+            receiver,
+            ReceiverExpr::DottedQualifier(vec!["Outer".to_string(), "Inner".to_string()])
+        );
+    }
+
+    /// #1931: a fully-qualified THREE-segment chain
+    /// (`com.example.Target.m()`) must capture every segment, in order.
+    #[test]
+    fn build_receiver_expr_recognizes_a_three_segment_dotted_qualifier_chain() {
+        let invocation = parse_first_invocation(
+            "class Caller {\n    void run() {\n        com.example.Target.m();\n    }\n}\n",
+        );
+        let (object, _name) = invocation_object_and_name(&invocation);
+        let receiver = build_receiver_expr(object.expect("com.example.Target.m() has an object"));
+        assert_eq!(
+            receiver,
+            ReceiverExpr::DottedQualifier(vec![
+                "com".to_string(),
+                "example".to_string(),
+                "Target".to_string(),
+            ])
+        );
+    }
+
+    /// #1931: a qualified `Outer.this.foo()` reference is NOT a dotted
+    /// TYPE qualifier at all (`Outer.this` denotes an enclosing-instance
+    /// reference) -- the base of the chain is the `this` keyword, not a
+    /// plain identifier, so this must stay `Other`, never a fabricated
+    /// `DottedQualifier` that would misrepresent an instance reference as
+    /// a type reference.
+    #[test]
+    fn build_receiver_expr_returns_other_for_a_qualified_this_reference() {
+        let invocation = parse_first_invocation(
+            "class Outer {\n    class Inner {\n        void run() {\n            Outer.this.foo();\n        }\n    }\n}\n",
+        );
+        let (object, _name) = invocation_object_and_name(&invocation);
+        let receiver = build_receiver_expr(object.expect("Outer.this.foo() has an object"));
+        assert_eq!(receiver, ReceiverExpr::Other);
     }
 
     /// AC1: `int a, b;` yields TWO `TypedNameRecord`s (one per

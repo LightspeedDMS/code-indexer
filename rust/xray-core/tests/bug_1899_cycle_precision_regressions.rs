@@ -25,24 +25,32 @@
 //! `wrong_arity_three_node_component_no_longer_forms_a_cycle_after_1898`
 //! asserts ed65c3a8's win: NO multi-node component survives.
 //!
-//! `same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_for_1910`
-//! is an ACCEPTED-REGRESSION PIN, not an aspiration: it asserts the false
-//! 3-node component IS STILL PRESENT today. #1910 owns making
-//! receiver-type narrowing able to delete a statically-qualified call's
-//! out-of-type candidates again. When #1910 lands, THIS TEST WILL START
-//! FAILING (the false component will disappear); at that point delete
-//! this test (or flip its assertion and rename it), do not "fix" it by
-//! loosening the assertion.
+//! `same_arity_statically_qualified_calls_no_longer_fabricate_a_false_cycle_after_1922`
+//! (formerly `..._still_fabricate_a_false_cycle_pinned_for_1910`, an
+//! ACCEPTED-REGRESSION PIN) is INVERTED per its own documented
+//! instructions ("when #1910 lands ... delete this test (or flip its
+//! assertion and rename it), do not loosen it"): #1910's own inferred-
+//! local-type approach was closed without shipping; #1922 instead
+//! delivers the SAME statically-qualified-call capability through a
+//! narrower, provably-safe mechanism (`narrowing::apply_type_qualifier_
+//! narrowing`, gated on the qualifier being a literal type-shaped
+//! identifier with zero local-variable-scope analysis). The false 3-node
+//! component this fixture reproduced is now GONE: each `ParserX.parse`'s
+//! `TimeUtil.parse(input)` call binds exclusively to `TimeUtil.parse`,
+//! never to a same-arity sibling.
 //!
-//! `same_arity_overload_self_loop_is_unaffected_by_1898` reproduces the
-//! shipped template's 20-self-loop-singleton shape: a generated-accessor-
-//! style setter that a human reading the source can see cannot recurse,
-//! but which the heuristic binder still self-loops because it cannot
-//! discriminate two SAME-ARITY overloads of the same name by parameter
-//! TYPE. Arity narrowing only discriminates by argument COUNT, so this
-//! shape is untouched by ed65c3a8 -- the test measures that, it does not
-//! assume it (see the accompanying report for the A/B evidence across the
-//! pre-ed65c3a8 tree).
+//! `same_arity_overload_self_loop_is_unaffected_by_1898_or_1923`
+//! reproduces the shipped `find-reference-cycles.rs` template's
+//! 20-self-loop-singleton shape: a generated-accessor-style setter that
+//! a human reading the source can see cannot recurse, which the
+//! heuristic binder still self-loops on because it cannot discriminate
+//! two SAME-ARITY overloads of the same name by parameter TYPE. Arity
+//! narrowing only discriminates by argument COUNT, so this shape is
+//! untouched by ed65c3a8. Named-type (identifier/`this`) argument
+//! evidence is TAG-ONLY: the argument passed (`wrapped`, a bare
+//! identifier local) resolves a real declared type (`WrapperId`), but
+//! that resolution only ever decides `OVERLOAD_ARG_TYPE_MATCH` tagging,
+//! never candidate-set exclusion, so the self-loop remains.
 //!
 //! Out of scope, deliberately NOT implemented here: #1899's third AC
 //! ("mark an edge whose candidate window had more than one surviving
@@ -238,15 +246,15 @@ fn write_same_arity_magnet_fixture(dir: &Path) {
     }
 }
 
-/// THIS IS AN ACCEPTED-REGRESSION PIN, NOT AN ASPIRATION. #1910's AC2
-/// ("`TimeUtil.parse(x)`-shaped statically-qualified calls bind only
-/// within the qualified type or its recorded supertypes") is what fixes
-/// this. When #1910 lands, this fixture's false 3-node component will
-/// disappear and THIS TEST WILL FAIL -- that failure is the intended
-/// signal that #1910 shipped; at that point delete or invert this test,
-/// do not loosen it.
+/// INVERTED by #1922 (formerly an ACCEPTED-REGRESSION PIN naming #1910,
+/// which was closed without shipping -- see this file's module doc):
+/// `TimeUtil.parse(x)`-shaped statically-qualified calls now bind ONLY
+/// within the qualified type, so the false 3-node SCC this fixture used
+/// to fabricate must no longer exist -- `ParserA.parse` must land in a
+/// SINGLETON component (or one that excludes both siblings), never one
+/// containing `ParserB.parse`/`ParserC.parse`.
 #[test]
-fn same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_for_1910() {
+fn same_arity_statically_qualified_calls_no_longer_fabricate_a_false_cycle_after_1922() {
     let dir = TempDir::new().unwrap();
     write_same_arity_magnet_fixture(dir.path());
     let files = ["TimeUtil.java", "ParserA.java", "ParserB.java", "ParserC.java"];
@@ -263,18 +271,10 @@ fn same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_fo
         .expect("ParserA.parse must be in some component");
 
     assert!(
-        component.contains(&b) && component.contains(&c),
-        "ACCEPTED REGRESSION (pinned for #1910): every same-arity \
-         `parse(1 params)` call site still binds to every sibling's \
-         `parse`, fabricating ParserA/B/C.parse into one false SCC: \
-         {component:?}. If this just failed, #1910 landed -- delete or \
-         invert this test, do not loosen it."
-    );
-    assert_eq!(
-        component.len(),
-        3,
-        "the false component's size must stay pinned at exactly the 3 \
-         sibling parsers (TimeUtil.parse is a leaf and must never join)"
+        !component.contains(&b) && !component.contains(&c),
+        "#1922: each ParserX.parse's TimeUtil.parse(input) call must bind exclusively to \
+         TimeUtil.parse -- ParserA.parse must never share a component with ParserB.parse/ \
+         ParserC.parse again, got {component:?}"
     );
 }
 
@@ -286,66 +286,66 @@ fn same_arity_statically_qualified_calls_still_fabricate_a_false_cycle_pinned_fo
 /// Reproduces the shipped `find-reference-cycles.rs` template's
 /// self-loop-singleton shape: a generated-accessor-style setter that a
 /// human reading the source can see CANNOT recurse (it delegates to a
-/// differently-typed overload of the same name, the standard JAXB/VO
-/// String -> wrapper-type coercion pattern), yet the heuristic binder
-/// reports a self-loop because it cannot discriminate two SAME-ARITY
-/// (both 1 param) overloads of `setBodID` by parameter TYPE. The argument
-/// passed (`wrapped`, a bare identifier local) carries no
-/// `Cast`/`Constructor` shape, so `apply_overload_shape_narrowing`'s
-/// named-type preference -- the one mechanism that COULD discriminate
-/// this case -- never activates either.
+/// differently-typed overload of the same name, a standard String ->
+/// wrapper-type coercion pattern). The heuristic binder reports a
+/// self-loop anyway because it cannot discriminate two SAME-ARITY (both
+/// 1 param) overloads of `setWrapperId` by parameter TYPE: the argument
+/// passed (`wrapped`, a bare identifier local) resolves a real declared
+/// type (`WrapperId`, from its `WrapperId wrapped = ...;` local
+/// declaration in the SAME method) as genuine "typed local already
+/// recorded" evidence under #1923 -- but that evidence is TAG-ONLY (see
+/// this file's module doc), so it can never exclude `setWrapperId(
+/// String)` from the candidate set, and the self-loop remains.
 fn write_self_loop_fixture(dir: &Path) {
     write_java(
         dir,
         "GeneratedValueObject.java",
         r#"package p;
 public class GeneratedValueObject {
-    private BodID bodID;
-    public void setBodID(String value) {
-        BodID wrapped = createWrapper(value);
-        setBodID(wrapped);
+    private WrapperId wrapperId;
+    public void setWrapperId(String value) {
+        WrapperId wrapped = createWrapper(value);
+        setWrapperId(wrapped);
     }
-    private void setBodID(BodID value) {
-        this.bodID = value;
+    private void setWrapperId(WrapperId value) {
+        this.wrapperId = value;
     }
-    private BodID createWrapper(String value) {
+    private WrapperId createWrapper(String value) {
         return null;
     }
 }
 "#,
     );
-    write_java(dir, "BodID.java", "package p;\npublic class BodID {\n}\n");
+    write_java(dir, "WrapperId.java", "package p;\npublic class WrapperId {\n}\n");
 }
 
-/// This shape is untouched by ed65c3a8: `apply_arity_narrowing` only
-/// changes behaviour when arity evidence RULES OUT a candidate (zero
-/// matches). Both `setBodID(String)` and `setBodID(BodID)` genuinely
-/// match this call's arity (1), so the pre- and post-#1898 arity pass
-/// produce the IDENTICAL retained set here -- the fix's changed code path
-/// is never exercised. See the accompanying report for the A/B
-/// measurement across the pre-ed65c3a8 tree confirming this shape's
-/// self-loop count is unchanged.
+/// `apply_arity_narrowing` only changes behaviour when arity evidence
+/// rules out a candidate; both overloads genuinely match this call's
+/// arity (1). Named-type (identifier/`this`) argument evidence is
+/// TAG-ONLY, so it likewise never removes a candidate --
+/// `setWrapperId(String)` still shows a self-loop via the same-arity
+/// overload magnet.
 #[test]
-fn same_arity_overload_self_loop_is_unaffected_by_1898() {
+fn same_arity_overload_self_loop_is_unaffected_by_1898_or_1923() {
     let dir = TempDir::new().unwrap();
     write_self_loop_fixture(dir.path());
-    let graph = build_graph_over(dir.path(), &["GeneratedValueObject.java", "BodID.java"]);
+    let graph = build_graph_over(dir.path(), &["GeneratedValueObject.java", "WrapperId.java"]);
 
     let index = extract_index(dir.path(), "GeneratedValueObject.java");
     let public_setter = index
         .declarations
         .iter()
-        .find(|d| d.name == "setBodID" && d.param_types.first().map(String::as_str) == Some("String"))
-        .expect("fixture bug: no setBodID(String) declaration")
+        .find(|d| d.name == "setWrapperId" && d.param_types.first().map(String::as_str) == Some("String"))
+        .expect("fixture bug: no setWrapperId(String) declaration")
         .symbol;
-    let dense = graph.dense_id_for(public_setter).expect("setBodID(String) must be interned");
+    let dense = graph.dense_id_for(public_setter).expect("setWrapperId(String) must be interned");
 
     assert!(
         graph.callees_of(dense).contains(&dense),
-        "reproduction failed: setBodID(String) must show a self-loop via \
+        "reproduction failed: setWrapperId(String) must show a self-loop via \
          the same-arity overload magnet -- the exact \
          `possible_candidate_cycle self_loop=true` shape the shipped \
-         template reports for the production JAXB/VO accessors"
+         template reports for a genuine same-arity accessor overload"
     );
     assert_eq!(
         component_size_containing(&graph, dense),

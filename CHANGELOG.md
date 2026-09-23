@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.68.0] - 2026-09-23
+
+### Fixed
+
+- **X-Ray graph correctness (epic #1906)**: a type-qualified call `Type.m()` now
+  binds to the named type instead of the caller's own same-named method
+  (#1922); overload evidence bits reflect argument types, and argument-type
+  evidence never removes a candidate (#1923); calls on a receiver whose
+  declared type lives outside the repository carry a receiver-mismatch bit
+  (#1924); receiver narrowing no longer keeps the wrong-owner candidate
+  (#1925); `is_definitely_dead_code` no longer reports private utilities as
+  dead (#1926); caller attribution uses the lexical enclosing method rather
+  than a nearest-preceding-declaration heuristic (#1930); nested and fully
+  qualified type qualifiers bind under the same soundness guards (#1931);
+  signatures, distinct callers, anonymous owners and user line numbers are
+  accurate (#1929, #1937).
+
+  The governing rule throughout: missing or negative evidence never deletes a
+  candidate. Over-binding is the safe direction, because deletion produces
+  confidently wrong `dead=true` verdicts.
+
+- **#1927**: the served `analyze_graph` description carries the evaluator
+  contract, and its examples are compiled by a test rather than asserted to
+  work.
+- **#1928**: X-Ray result paging returns whole entries in independently
+  parseable pages, instead of truncating a message mid-value.
+- **#1932, #1933**: two load-sensitive server tests made deterministic.
+- **#1947**: the two app-singleton recovery tests carry an explicit timeout
+  sized to their measured cost; they construct a real FastAPI app singleton,
+  which is the scenario they exist to reproduce.
+
+### Changed
+
+- **#1934, #1935, #1936**: five modules that were far over the 1,000-line limit
+  are split into focused packages -- `compiler.rs`, `kotlin.rs`,
+  `sqlite_backends.py` (8,745 lines), `protocols.py`, and the `search`, `xray`
+  and `xray_graph` MCP handlers. All are pure moves, verified function-by-
+  function against the previous revision; the Rust compile-cache identity is
+  byte-identical before and after.
+
 ## [12.65.0] - 2026-09-17
 
 ### Fixed

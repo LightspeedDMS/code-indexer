@@ -82,7 +82,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "small.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             result = xray_handlers.handle_xray_dump_ast(params, user)
@@ -97,7 +97,9 @@ class TestXrayDumpAstSizeCap:
     ) -> None:
         """A file above the cap must never reach the in-process parse --
         it gets a clear, actionable error instead."""
-        monkeypatch.setattr(xray_handlers, "_DUMP_AST_MAX_FILE_SIZE_BYTES", 100)
+        monkeypatch.setattr(
+            xray_handlers._dump_ast, "_DUMP_AST_MAX_FILE_SIZE_BYTES", 100
+        )
 
         big_file = tmp_path / "big.py"
         big_file.write_text("x = 1\n" * 100)  # well over 100 bytes
@@ -107,7 +109,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "big.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             result = xray_handlers.handle_xray_dump_ast(params, user)
@@ -126,7 +128,9 @@ class TestXrayDumpAstSizeCap:
         return in well under the time a real parse of that much source
         would take, demonstrating the freeze is bounded (rejected), not
         proportional to file size."""
-        monkeypatch.setattr(xray_handlers, "_DUMP_AST_MAX_FILE_SIZE_BYTES", 1024)
+        monkeypatch.setattr(
+            xray_handlers._dump_ast, "_DUMP_AST_MAX_FILE_SIZE_BYTES", 1024
+        )
 
         huge_file = tmp_path / "huge.py"
         # ~1 MB of real, syntactically valid-looking Python source.
@@ -137,7 +141,7 @@ class TestXrayDumpAstSizeCap:
         params = {"repository_alias": "myrepo-global", "file_path": "huge.py"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             start = time.perf_counter()
@@ -163,7 +167,9 @@ class TestXrayDumpAstSizeCap:
         cap-based rejection (a cheap os.stat()) scales with concurrency
         instead of a per-call GIL-held parse accumulating N x freeze time."""
         monkeypatch.setattr(
-            xray_handlers, "_DUMP_AST_MAX_FILE_SIZE_BYTES", _CONCURRENT_TEST_CAP_BYTES
+            xray_handlers._dump_ast,
+            "_DUMP_AST_MAX_FILE_SIZE_BYTES",
+            _CONCURRENT_TEST_CAP_BYTES,
         )
 
         huge_file = tmp_path / "concurrent_huge.py"
@@ -177,7 +183,7 @@ class TestXrayDumpAstSizeCap:
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._dump_ast._resolve_repo_path",
             return_value=str(tmp_path),
         ):
             start = time.perf_counter()

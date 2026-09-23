@@ -35,6 +35,7 @@ pub(super) fn method_decl(
         param_count,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -50,6 +51,7 @@ pub(super) fn package_decl(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -70,6 +72,7 @@ fn out_of_repo_reference_resolves_to_an_empty_candidate_set() {
         &scope,
         None,
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -78,6 +81,10 @@ fn out_of_repo_reference_resolves_to_an_empty_candidate_set() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert!(candidates.is_empty());
 }
@@ -105,6 +112,7 @@ fn ambiguous_same_name_declarations_yield_a_multi_candidate_set_not_a_picked_win
         &scope,
         None,
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -113,6 +121,10 @@ fn ambiguous_same_name_declarations_yield_a_multi_candidate_set_not_a_picked_win
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(candidates.len(), 2);
 }
@@ -138,6 +150,7 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         &scope,
         None,
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -146,6 +159,10 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(level0.len(), 2, "level 0 (no arity known) keeps both");
 
@@ -156,6 +173,7 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         &scope,
         Some(2),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -164,6 +182,10 @@ fn arity_narrowing_removes_candidates_a_bare_name_match_would_have_kept() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(narrowed.len(), 1);
     assert_eq!(narrowed[0].0.file_id, 11);
@@ -184,6 +206,7 @@ fn varargs_method_decl(
         param_count: Some(param_count),
         param_types: Vec::new(),
         is_varargs: true,
+        vararg_index: None,
     }
 }
 
@@ -217,6 +240,7 @@ fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
         &scope,
         Some(5),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -225,6 +249,10 @@ fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         narrowed.len(),
@@ -235,14 +263,18 @@ fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
     assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
 }
 
-/// AC2: a `Cast`/`Constructor` argument's named type is OPEN-WORLD
-/// evidence -- it never EXCLUDES a candidate on name mismatch alone
-/// (this repo's heuristic inheritance index cannot prove two named
-/// types are unrelated), but it DOES preferentially narrow to the
-/// candidate whose declared type EXACTLY matches, when a genuine
-/// match exists among the candidates.
+/// Bug #1923: a `Cast`/`Constructor` argument's NAMED type
+/// is OPEN-WORLD evidence -- it never excludes a candidate on name
+/// mismatch (this repo's heuristic inheritance index cannot prove two
+/// named types are unrelated), and it no longer PREFERENTIALLY narrows
+/// to an exact bare-name match either: two DIFFERENTLY-PACKAGED types
+/// can share the identical bare name after normalization, making an
+/// "exact match" here a potential false positive, not genuine identity.
+/// Both same-arity candidates stay in the pool, and BOTH carry
+/// `OVERLOAD_ARG_TYPE_MATCH` -- neither is provably incompatible with a
+/// named-type argument.
 #[test]
-fn named_type_preference_narrows_between_two_unrelated_named_types() {
+fn named_type_cast_evidence_is_tag_only_and_never_excludes_an_unrelated_candidate() {
     use crate::graph::extract::local_index::ArgShape;
 
     let mut file_a = LocalIndex::new();
@@ -266,6 +298,7 @@ fn named_type_preference_narrows_between_two_unrelated_named_types() {
     };
 
     let arg_shapes = [ArgShape::Cast("Foo".to_string())];
+    let arg_known_types = [Some("Foo".to_string())];
     let narrowed = resolve_reference(
         "save",
         REF_KIND_INVOCATION,
@@ -273,6 +306,7 @@ fn named_type_preference_narrows_between_two_unrelated_named_types() {
         &scope,
         Some(1),
         &arg_shapes,
+        &arg_known_types,
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -281,14 +315,20 @@ fn named_type_preference_narrows_between_two_unrelated_named_types() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
-    assert_eq!(
-        narrowed.len(),
-        1,
-        "the exactly-matching Foo-typed candidate must be preferred"
-    );
-    assert_eq!(narrowed[0].0.file_id, 10);
-    assert_ne!(narrowed[0].1 & reasons::OVERLOAD_ARG_TYPE_MATCH, 0);
+    assert_eq!(narrowed.len(), 2, "a named-type Cast argument must never exclude either candidate");
+    for candidate in &narrowed {
+        assert_ne!(
+            candidate.1 & reasons::OVERLOAD_ARG_TYPE_MATCH,
+            0,
+            "file_id {}: neither Foo nor Bar is provably incompatible with a Foo-typed cast argument",
+            candidate.0.file_id
+        );
+    }
 }
 
 fn method_decl_with_types(
@@ -305,6 +345,7 @@ fn method_decl_with_types(
         param_count: Some(param_types.len()),
         param_types,
         is_varargs: false,
+        vararg_index: None,
     }
 }
 
@@ -345,6 +386,7 @@ fn literal_shape_excludes_a_candidate_with_a_definitely_incompatible_declared_ty
         &scope,
         Some(1),
         &arg_shapes,
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -353,6 +395,10 @@ fn literal_shape_excludes_a_candidate_with_a_definitely_incompatible_declared_ty
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         narrowed.len(),
@@ -394,6 +440,7 @@ fn import_context_narrows_further_than_arity_alone() {
         &scope_no_import,
         Some(0),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -402,6 +449,10 @@ fn import_context_narrows_further_than_arity_alone() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         arity_only.len(),
@@ -424,6 +475,7 @@ fn import_context_narrows_further_than_arity_alone() {
         &scope_with_import,
         Some(0),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -432,6 +484,10 @@ fn import_context_narrows_further_than_arity_alone() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(narrowed.len(), 1);
     assert_eq!(narrowed[0].0.file_id, 11);
@@ -466,6 +522,7 @@ fn arity_mismatch_with_no_matching_candidate_yields_zero_not_the_wrong_arity_poo
         &scope,
         Some(0),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -474,6 +531,10 @@ fn arity_mismatch_with_no_matching_candidate_yields_zero_not_the_wrong_arity_poo
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert!(
         candidates.is_empty(),
@@ -506,6 +567,7 @@ fn arity_mismatch_one_arg_call_against_zero_param_declarations_yields_zero() {
         &scope,
         Some(1),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -514,6 +576,10 @@ fn arity_mismatch_one_arg_call_against_zero_param_declarations_yields_zero() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert!(
         candidates.is_empty(),
@@ -550,6 +616,7 @@ fn unknown_arity_still_admits_the_full_candidate_pool() {
         &scope,
         None,
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -558,6 +625,10 @@ fn unknown_arity_still_admits_the_full_candidate_pool() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         candidates.len(),
@@ -601,6 +672,7 @@ fn arity_narrowing_retains_a_candidate_with_unknown_param_count_evidence() {
         &scope,
         Some(2),
         &[],
+        &[],
         &name_index,
         &super::super::families::TypeIndex::build(&[]),
         None,
@@ -609,6 +681,10 @@ fn arity_narrowing_retains_a_candidate_with_unknown_param_count_evidence() {
         None,
         None,
         true,
+        false,
+        false,
+        false,
+        false,
     );
     assert_eq!(
         candidates.len(),

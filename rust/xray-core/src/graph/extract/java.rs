@@ -14,15 +14,14 @@
 //! imports, annotations, qualified and bare method invocations, and object
 //! creation), not guessed.
 
+use super::java_annotations::extract_annotations_from_modifiers;
 use super::java_type_names::{
-    base_name_of_type_node, base_type_name, is_plausible_java_identifier, last_named_child_of_kind,
-    type_names_in_type_list,
+    append_c_style_dimensions, base_name_of_type_node, base_type_name, type_names_in_type_list,
 };
 use super::local_index::{
-    AnnotationRecord, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
-    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord,
-    MethodReturnTypeRecord, NameScope, TypeNestingRecord, TypeReferenceRecord, TypedNameRecord,
-    Visibility,
+    ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
+    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, NameScope,
+    SyntheticScopeRecord, TypeNestingRecord, TypedNameRecord,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
@@ -43,6 +42,17 @@ struct WalkContext {
     enclosing_type: Option<std::rc::Rc<str>>,
     top_level_type: Option<std::rc::Rc<str>>,
     enclosing_method: Option<SymbolId>,
+    /// Bug #1926 (owner-identity fix): the `symbol` of the immediately
+    /// enclosing TYPE declaration itself -- `None` only when extraction
+    /// could not read that type's own name (a malformed declaration) or
+    /// for a synthetic anonymous/enum-constant body, which has no real
+    /// `Declaration` of its own. Unlike `enclosing_type` (a bare name that
+    /// TWO DIFFERENT types can share, e.g. two distinct nested classes
+    /// both named `Inner` under different outer classes), this is a
+    /// truly unique per-type identity, needed anywhere unambiguous type
+    /// membership matters -- see `java_methods::mark_lone_private_no_arg_
+    /// constructors`.
+    enclosing_type_symbol: Option<SymbolId>,
 }
 
 impl WalkContext {
@@ -51,6 +61,7 @@ impl WalkContext {
             enclosing_type: None,
             top_level_type: None,
             enclosing_method: None,
+            enclosing_type_symbol: None,
         }
     }
 }
@@ -84,7 +95,7 @@ impl WalkContext {
 /// interface/record/enum/annotation-type declarations) and
 /// `extract_method_declaration` (methods and constructors) rather than
 /// duplicated at each call site (Rule 4, anti-duplication).
-fn push_type_parameter_names(node: &OwnedNode, index: &mut LocalIndex) {
+pub(super) fn push_type_parameter_names(node: &OwnedNode, index: &mut LocalIndex) {
     let Some(type_parameters) = node.child_by_kind("type_parameters") else {
         return;
     };
@@ -105,7 +116,7 @@ fn dispatch_type_declaration(
     ctx: &WalkContext,
     index: &mut LocalIndex,
 ) -> WalkContext {
-    extract_type_declaration(node, file_id, next_local, index);
+    let enclosing_type_symbol = extract_type_declaration(node, file_id, next_local, index);
     push_type_parameter_names(node, index);
     let enclosing_type = node
         .child_by_kind("identifier")
@@ -155,6 +166,7 @@ fn dispatch_type_declaration(
         enclosing_type,
         top_level_type,
         enclosing_method: None,
+        enclosing_type_symbol,
     }
 }
 
@@ -169,17 +181,19 @@ fn dispatch_method_declaration(
     ctx: &WalkContext,
     index: &mut LocalIndex,
 ) -> WalkContext {
-    let symbol = extract_method_declaration(
+    let symbol = super::java_methods::extract_method_declaration(
         node,
         file_id,
         next_local,
         ctx.enclosing_type.as_deref(),
+        ctx.enclosing_type_symbol,
         index,
     );
     WalkContext {
         enclosing_type: ctx.enclosing_type.clone(),
         top_level_type: ctx.top_level_type.clone(),
         enclosing_method: Some(symbol),
+        enclosing_type_symbol: ctx.enclosing_type_symbol,
     }
 }
 
@@ -200,7 +214,34 @@ fn dispatch_node(
             dispatch_method_declaration(node, file_id, next_local, &ctx, index)
         }
         "field_declaration" => {
-            extract_field_declaration(
+            super::java_fields::extract_field_declaration(
+                node,
+                file_id,
+                next_local,
+                ctx.enclosing_type.as_deref(),
+                index,
+            );
+            ctx
+        }
+        // #1922: an interface/annotation-
+        // type member field (`interface Consts { Worker INSTANCE = new
+        // Worker(); }`) parses as `constant_declaration`, a DISTINCT node
+        // kind from `field_declaration` -- verified real grammar shape
+        // (tree-sitter-java 0.23.5 `node-types.json`): `[modifiers]? type
+        // (variable_declarator)+`, identical to `field_declaration`'s own
+        // shape. Before this fix, NO typed-name evidence was ever recorded
+        // for it, so `TypeIndex::is_known_field_name` could not see it --
+        // an uppercase interface constant used as a receiver
+        // (`INSTANCE.secretWork()`) was indistinguishable from a genuine
+        // type qualifier, and #1922's `apply_type_qualifier_narrowing`
+        // would wrongly narrow past it. `constant_declaration` is used
+        // ONLY for interface/annotation-type body members (mutually
+        // exclusive with `field_declaration`, real class/enum/record
+        // fields), and every such member is implicitly `public static
+        // final` regardless of what the source repeats -- see
+        // `extract_constant_declaration`'s own doc comment.
+        "constant_declaration" => {
+            super::java_fields::extract_constant_declaration(
                 node,
                 file_id,
                 next_local,
@@ -340,10 +381,19 @@ fn dispatch_node(
         // pushed onto the walk stack.
         "block" if ctx.enclosing_method.is_none() => {
             let symbol = next_symbol(file_id, next_local);
+            // Issue #1930 items 1/3: records this scope's lexically
+            // enclosing type (and start line, the narrow fallback) -- see
+            // `LocalIndex::synthetic_scopes`'s own doc comment.
+            index.synthetic_scopes.push(SyntheticScopeRecord {
+                symbol,
+                start_line: node.start_line,
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
+            });
             WalkContext {
                 enclosing_type: ctx.enclosing_type.clone(),
                 top_level_type: ctx.top_level_type.clone(),
                 enclosing_method: Some(symbol),
+                enclosing_type_symbol: ctx.enclosing_type_symbol,
             }
         }
         "lambda_expression" => {
@@ -383,7 +433,7 @@ fn dispatch_node(
             ctx
         }
         "type_identifier" => {
-            super::java_invocations::extract_type_reference(node, index);
+            super::java_invocations::extract_type_reference(node, ctx.enclosing_method, index);
             ctx
         }
         "method_reference" => {
@@ -396,55 +446,15 @@ fn dispatch_node(
             ctx
         }
         "marker_annotation" | "annotation" => {
-            extract_annotation_usage_reference(node, index);
+            super::java_invocations::extract_annotation_usage_reference(
+                node,
+                ctx.enclosing_method,
+                index,
+            );
             ctx
         }
         _ => ctx,
     }
-}
-
-/// N2 (#1873/#1875 second-review rework): using an annotation (`@Marker`,
-/// `@Marker(...)`, or a qualified `@Outer.Marker`) is a real reference to
-/// the annotation TYPE's own declaration -- F6 made
-/// `annotation_type_declaration` dispatch as a type declaration (so
-/// `@interface` types get a symbol), but nothing emitted the matching
-/// reference edge, so a created symbol with no possible inbound edge was
-/// automatically reported dead. Grammar (`marker_annotation`/`annotation`):
-/// `field('name', $._name)` is always either a bare `identifier` or a
-/// qualified `scoped_identifier`.
-///
-/// N1 (#1873/#1875 third-review rework): the qualified case used to be
-/// resolved via a raw-text split (`last_dot_segment`), which captures any
-/// whitespace/line-break/comment token that legally sits between the dot
-/// and the final identifier (e.g. `@Outer. Marker`) as part of the
-/// "name" -- garbage that can never match the real declaration. Fixed by
-/// taking the qualified name's LAST named `identifier` child structurally
-/// (`last_named_child_of_kind`), the same fix applied to
-/// `java_type_names::resolve_type_node_base_name`'s qualified-type arms,
-/// validated by the same `is_plausible_java_identifier` backstop. Fires on
-/// EVERY annotation usage in the file (including ones with no in-repo
-/// declaration, e.g. `@Override`), which is harmless: an unresolvable type
-/// reference simply resolves to an empty candidate pool downstream, a
-/// no-op.
-fn extract_annotation_usage_reference(node: &OwnedNode, index: &mut LocalIndex) {
-    let Some(name_node) = node
-        .named_children()
-        .into_iter()
-        .find(|c| c.kind == "identifier" || c.kind == "scoped_identifier")
-    else {
-        return;
-    };
-    let type_name = match name_node.kind.as_str() {
-        "scoped_identifier" => last_named_child_of_kind(name_node, "identifier"),
-        _ => Some(name_node.text().to_string()),
-    };
-    let Some(type_name) = type_name.filter(|name| is_plausible_java_identifier(name)) else {
-        return;
-    };
-    index.type_references.push(TypeReferenceRecord {
-        type_name,
-        line: node.start_line,
-    });
 }
 
 /// Issue #1873: a `method_reference` (`this::name`, `Type::name`,
@@ -494,6 +504,7 @@ fn push_constructor_reference(
     index.constructions.push(ConstructionSite {
         type_name: type_name.clone(),
         line: node.start_line,
+        enclosing_method,
     });
     index.invocations.push(InvocationSite {
         callee_name: type_name,
@@ -556,13 +567,24 @@ impl LanguageExtractor for JavaExtractor {
 
         extract_package(root, file_id, &mut next_local, &mut index);
         extract_imports(root, &mut index);
+        // #1922: a SEPARATE, context-independent traversal (own bounded
+        // stack, `collect_all_local_binding_names`'s own doc comment) --
+        // the main context-carrying walk below cannot see a binding
+        // declared outside any method body (a field-initializer lambda,
+        // an enum constant's argument list) at all, since `NameScope::
+        // Local` requires a real enclosing METHOD `SymbolId` that such a
+        // context never sets.
+        index.all_local_binding_names =
+            super::java_receiver::collect_all_local_binding_names(root);
 
         let mut stack: Vec<(&OwnedNode, WalkContext)> = vec![(root, WalkContext::root())];
         // Bounded: each iteration pops one node from `stack` and pushes its
         // (finite) children; total pushes across the walk equal the tree's
         // finite node count -- the same bound `OwnedNode`'s own traversals
-        // use (see owned_node.rs). This is the ONLY traversal of the tree
-        // besides the two direct (non-recursive) top-level lookups above.
+        // use (see owned_node.rs). This is the ONLY traversal that carries
+        // WalkContext (enclosing type/method) -- the two direct top-level
+        // lookups above and `collect_all_local_binding_names` are each
+        // their own separate, bounded pass.
         while let Some((node, ctx)) = stack.pop() {
             let child_context = dispatch_node(node, file_id, &mut next_local, ctx, &mut index);
             for child in &node.children {
@@ -573,11 +595,20 @@ impl LanguageExtractor for JavaExtractor {
             }
         }
 
+        // Bug #1926: runs once the whole file's constructors are known
+        // (every `Declaration`/`Visibility`/`constructor_owners` entry the
+        // walk above populates) -- see the function's own doc comment.
+        super::java_methods::mark_lone_private_no_arg_constructors(&mut index);
+        // Bug #1926 (final round): same reasoning, but for `@MethodSource`
+        // requests -- resolution needs every method declared anywhere in
+        // the file, including one declared AFTER the annotated method.
+        super::java_methods::resolve_method_source_edges(&mut index);
+
         index
     }
 }
 
-fn next_symbol(file_id: u32, next_local: &mut u32) -> SymbolId {
+pub(super) fn next_symbol(file_id: u32, next_local: &mut u32) -> SymbolId {
     let symbol = make_symbol_id(file_id, *next_local);
     *next_local += 1;
     symbol
@@ -625,8 +656,17 @@ fn anonymous_body_context(
             .map(|t| t.to_string()),
         _ => return None,
     };
-    let anon_name: std::rc::Rc<str> =
-        std::rc::Rc::from(format!("<anon:{file_id}:{}>", node.start_byte));
+    // Bug #1929 item 3: human-chaseable name (enclosing type + real
+    // source line), never the opaque raw `file_id`/byte-offset pair --
+    // see `synthesize_anon_type_name`'s own doc comment for why file_id/
+    // byte are still KEPT after the readable prefix (global uniqueness
+    // in the repo-wide `TypeIndex`).
+    let anon_name: std::rc::Rc<str> = super::synthesize_anon_type_name(
+        parent_context.enclosing_type.as_deref(),
+        file_id,
+        node.start_line,
+        node.start_byte,
+    );
     // N1 (#1873/#1875 second-review rework): a genuinely unparseable
     // anonymous/enum-constant supertype must still get its OWN distinct anon
     // context (never silently fall back to the syntactically-surrounding
@@ -660,6 +700,11 @@ fn anonymous_body_context(
         enclosing_type: Some(anon_name),
         top_level_type: Some(top_level_type),
         enclosing_method: None,
+        // No real `Declaration`/symbol exists for a synthetic anonymous or
+        // enum-constant body (never interned via `extract_type_declaration`),
+        // and Java forbids an anonymous class from declaring an explicit
+        // constructor at all, so this never affects constructor counting.
+        enclosing_type_symbol: None,
     })
 }
 
@@ -685,6 +730,7 @@ fn extract_package(root: &OwnedNode, file_id: u32, next_local: &mut u32, index: 
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
 }
 
@@ -744,10 +790,8 @@ fn extract_type_declaration(
     file_id: u32,
     next_local: &mut u32,
     index: &mut LocalIndex,
-) {
-    let Some(name_node) = node.child_by_kind("identifier") else {
-        return;
-    };
+) -> Option<SymbolId> {
+    let name_node = node.child_by_kind("identifier")?;
     let name = name_node.text().to_string();
     let symbol = next_symbol(file_id, next_local);
 
@@ -764,7 +808,7 @@ fn extract_type_declaration(
     index.signatures.insert(symbol, signature);
     index
         .visibilities
-        .insert(symbol, visibility_of_modifiers(node));
+        .insert(symbol, super::java_fields::visibility_of_modifiers(node));
     index.declarations.push(Declaration {
         kind: DeclarationKind::Type,
         name,
@@ -773,7 +817,9 @@ fn extract_type_declaration(
         param_count: None,
         param_types: Vec::new(),
         is_varargs: false,
+        vararg_index: None,
     });
+    Some(symbol)
 }
 
 /// Pushes one `InheritanceRecord` of `edge_kind` for every type name found
@@ -782,6 +828,28 @@ fn extract_type_declaration(
 /// the identical `-> type_list -> type_identifier|generic_type` shape). N1:
 /// records `subtype_name` into `index.incomplete_supertypes` when the type
 /// list carried an entry `type_names_in_type_list` could not resolve.
+///
+/// #1922: `container` (the `super_interfaces`/`extends_interfaces` node
+/// itself) existing at all is ALREADY proof this type carries an
+/// `implements`/`extends` clause SYNTACTICALLY -- the grammar only ever
+/// produces that container node in response to the keyword being
+/// present. If it has no `type_list` child, the clause's real supertype
+/// set is UNKNOWN, never "there is no clause at all" -- silently
+/// returning here used to drop this fact entirely, which could fool
+/// `receiver::file_has_no_supertype_evidence` (the guard requiring ANY
+/// type with an explicit clause to disable hard-narrowing for the whole
+/// file) into wrongly treating this type as having no supertype
+/// evidence. Recording incomplete evidence instead fails closed, exactly
+/// like the sibling `superclass`-with-no-resolved-type arm in `extract_
+/// inheritance` below already does. Not unit-tested directly: 13
+/// malformed `implements`/`extends` shapes were tried against this
+/// crate's vendored tree-sitter-java grammar (missing type list, bare
+/// comma, non-type tokens, an empty generic argument list, a bare
+/// annotation, a record's own `implements` clause) and every one either
+/// still produced a `type_list` child or dropped the container node
+/// entirely rather than producing this exact shape -- this fix is
+/// covered by the same product reasoning as the `superclass` precedent
+/// it mirrors, not by a constructed regression fixture.
 fn extract_type_list_edges(
     node: &OwnedNode,
     container_kind: &str,
@@ -793,6 +861,7 @@ fn extract_type_list_edges(
         return;
     };
     let Some(type_list) = container.child_by_kind("type_list") else {
+        index.incomplete_supertypes.push(subtype_name.to_string());
         return;
     };
     let (names, incomplete) = type_names_in_type_list(type_list);
@@ -872,30 +941,6 @@ fn extract_inheritance(node: &OwnedNode, subtype_name: &str, index: &mut LocalIn
     );
 }
 
-fn extract_annotations_from_modifiers(node: &OwnedNode, target_name: &str, index: &mut LocalIndex) {
-    let Some(modifiers) = node.child_by_kind("modifiers") else {
-        return;
-    };
-    for annotation_node in modifiers
-        .children
-        .iter()
-        .filter(|c| c.kind == "marker_annotation" || c.kind == "annotation")
-    {
-        let Some(name_node) = annotation_node
-            .named_children()
-            .into_iter()
-            .find(|c| c.kind == "identifier" || c.kind == "scoped_identifier")
-        else {
-            continue;
-        };
-        index.annotations.push(AnnotationRecord {
-            name: name_node.text().to_string(),
-            target_name: target_name.to_string(),
-            line: annotation_node.start_line,
-        });
-    }
-}
-
 /// Reads one `formal_parameter`/`spread_parameter` node's declared type.
 /// Verified real tree-sitter-java 0.23.5 grammar shapes: `(formal_parameter
 /// [modifiers]? type: (T) name: (identifier))` and `(spread_parameter
@@ -904,234 +949,20 @@ fn extract_annotations_from_modifiers(node: &OwnedNode, target_name: &str, index
 /// `@NonNull int x`) is skipped explicitly rather than assumed absent, so
 /// the type is "the first named child that isn't `modifiers`", never a
 /// fixed position.
+///
+/// Bug #1923 rework: also appends any C-STYLE dimensions the DECLARATOR
+/// itself carries (`void t(String a[])`, where the type field stays a
+/// plain `String` and the array-ness lives on `formal_parameter`'s own
+/// `dimensions` field per `_variable_declarator_id`'s grammar) -- a
+/// no-op for `spread_parameter`, whose own `dimensions` (if any) would
+/// live on a NESTED `variable_declarator`, never on `param_node` itself.
 pub(super) fn formal_parameter_type_name(param_node: &OwnedNode) -> Option<String> {
     let type_node = param_node
         .named_children()
         .into_iter()
         .find(|c| c.kind != "modifiers")?;
-    Some(base_name_of_type_node(type_node))
-}
-
-/// AC2: declared parameter type names (in call order) and whether the
-/// method's last parameter is variable-arity, read from its
-/// `formal_parameters` node -- the SAME node `param_count` above already
-/// reads, so this adds no second tree walk.
-fn extract_param_types_and_varargs(formal_parameters: &OwnedNode) -> (Vec<String>, bool) {
-    let mut param_types = Vec::new();
-    let mut is_varargs = false;
-    for param in formal_parameters.named_children() {
-        match param.kind.as_str() {
-            "formal_parameter" => param_types.extend(formal_parameter_type_name(param)),
-            "spread_parameter" => {
-                is_varargs = true;
-                param_types.extend(formal_parameter_type_name(param));
-            }
-            _ => {}
-        }
-    }
-    (param_types, is_varargs)
-}
-
-/// AC1/AC2 (Story #1806, S2b): returns the method's own `SymbolId` --
-/// `dispatch_node` threads it into `WalkContext.enclosing_method` for
-/// this method's children (nested invocations, local variable
-/// declarations). The symbol is allocated BEFORE the name lookup so a
-/// malformed/nameless declaration (parse-error recovery) still yields a
-/// valid symbol for its children's context -- no `Declaration` is pushed
-/// for it (never fabricated), but the symbol counter itself stays
-/// deterministic and every child still has SOME enclosing-method handle.
-fn extract_method_declaration(
-    node: &OwnedNode,
-    file_id: u32,
-    next_local: &mut u32,
-    enclosing_type: Option<&str>,
-    index: &mut LocalIndex,
-) -> SymbolId {
-    let symbol = next_symbol(file_id, next_local);
-    push_type_parameter_names(node, index);
-    let Some(name_node) = node.child_by_kind("identifier") else {
-        return symbol;
-    };
-    let name = name_node.text().to_string();
-
-    extract_annotations_from_modifiers(node, &name, index);
-
-    let formal_parameters = node.child_by_kind("formal_parameters");
-    let param_count = formal_parameters
-        .map(|p| p.named_children().len())
-        .unwrap_or(0);
-    let (param_types, is_varargs) = formal_parameters
-        .map(extract_param_types_and_varargs)
-        .unwrap_or_default();
-    index
-        .signatures
-        .insert(symbol, format!("{name}({param_count} params)"));
-    index
-        .visibilities
-        .insert(symbol, visibility_of_modifiers(node));
-
-    index.declarations.push(Declaration {
-        kind: DeclarationKind::Method,
-        name,
-        line: node.start_line,
-        symbol,
-        param_count: Some(param_count),
-        param_types,
-        is_varargs,
-    });
-
-    record_method_declaration_metadata(node, symbol, enclosing_type, formal_parameters, index);
-    symbol
-}
-
-/// Split out of `extract_method_declaration` (F5/F6, #1873/#1875 rework)
-/// to keep that function under the per-function line budget: the owner
-/// record (AC1, Story #1793 S4 -- every method-shaped declaration,
-/// including a constructor, gets one when an enclosing type is known;
-/// constructors do not participate in method-family expansion, but their
-/// owner is required when constructor invocation sites resolve by the
-/// ordinary `DeclarationKind::Method` path), the return-type record (AC2,
-/// Story #1806 S2b -- methods only, constructors have no return type at
-/// all), and per-parameter typed-name records.
-fn record_method_declaration_metadata(
-    node: &OwnedNode,
-    symbol: SymbolId,
-    enclosing_type: Option<&str>,
-    formal_parameters: Option<&OwnedNode>,
-    index: &mut LocalIndex,
-) {
-    if let Some(enclosing_type) = enclosing_type {
-        index.method_owners.push(MethodOwnerRecord {
-            method_symbol: symbol,
-            enclosing_type: enclosing_type.to_string(),
-        });
-    }
-    if node.kind == "method_declaration" {
-        if let Some(return_type) = super::java_receiver::method_return_type_name(node) {
-            index.method_return_types.push(MethodReturnTypeRecord {
-                method_symbol: symbol,
-                return_type,
-            });
-        }
-    }
-    if let Some(formal_parameters) = formal_parameters {
-        push_parameter_typed_names(formal_parameters, symbol, index);
-    }
-}
-
-/// AC1 (Story #1806, S2b): pushes one `TypedNameRecord` per parameter in
-/// `formal_parameters`, scoped to `enclosing_method` -- shared by both
-/// `method_declaration` and `constructor_declaration` (constructor
-/// parameters are just as valid a receiver-typing source as a method's).
-fn push_parameter_typed_names(
-    formal_parameters: &OwnedNode,
-    enclosing_method: SymbolId,
-    index: &mut LocalIndex,
-) {
-    for param in formal_parameters.named_children() {
-        let Some((name, declared_type)) = super::java_receiver::parameter_name_and_type(param)
-        else {
-            continue;
-        };
-        index.typed_names.push(TypedNameRecord {
-            name,
-            declared_type,
-            scope: NameScope::Local { enclosing_method },
-        });
-    }
-}
-
-fn has_modifier(modifiers: &OwnedNode, keyword: &str) -> bool {
-    modifiers.children.iter().any(|c| c.kind == keyword)
-}
-
-/// Story #1835 AC1: resolves a declaration's explicit Java access
-/// modifier off its own `modifiers` node, reusing the exact
-/// child-node-kind check `field_declaration_kind` already relies on for
-/// `static`/`final`. Absent modifiers (no `modifiers` node at all, or one
-/// present but carrying none of `public`/`protected`/`private`) map to
-/// `Visibility::Unknown`, NEVER to a restricted default -- see
-/// `Visibility`'s own doc comment (`local_index.rs`) for why: an
-/// interface/annotation-type member with no explicit modifier is
-/// implicitly `public`, and this extractor does not track "is the
-/// enclosing type an interface" context to tell that apart from a real
-/// class member's package-private default.
-fn visibility_of_modifiers(node: &OwnedNode) -> Visibility {
-    let Some(modifiers) = node.child_by_kind("modifiers") else {
-        return Visibility::Unknown;
-    };
-    if has_modifier(modifiers, "private") {
-        Visibility::Private
-    } else if has_modifier(modifiers, "protected") {
-        Visibility::Protected
-    } else if has_modifier(modifiers, "public") {
-        Visibility::Public
-    } else {
-        Visibility::Unknown
-    }
-}
-
-fn field_declaration_kind(node: &OwnedNode) -> DeclarationKind {
-    let is_constant = node
-        .child_by_kind("modifiers")
-        .map(|m| has_modifier(m, "static") && has_modifier(m, "final"))
-        .unwrap_or(false);
-    if is_constant {
-        DeclarationKind::Constant
-    } else {
-        DeclarationKind::Field
-    }
-}
-
-/// Reads `field_declaration`'s own `variable_declarator` children directly
-/// (verified real grammar output: they are DIRECT children, one per
-/// comma-separated variable in the declaration, never nested deeper) so
-/// this stays within the single bounded stack-walk in `extract` above,
-/// rather than opening a second, separate traversal per field.
-fn extract_field_declaration(
-    node: &OwnedNode,
-    file_id: u32,
-    next_local: &mut u32,
-    enclosing_type: Option<&str>,
-    index: &mut LocalIndex,
-) {
-    let kind = field_declaration_kind(node);
-    let keyword = if matches!(kind, DeclarationKind::Constant) {
-        "constant"
-    } else {
-        "field"
-    };
-    index
-        .typed_names
-        .extend(super::java_receiver::field_typed_names(
-            node,
-            enclosing_type,
-        ));
-
-    for declarator in node
-        .children
-        .iter()
-        .filter(|c| c.kind == "variable_declarator")
-    {
-        let Some(name_node) = declarator.child_by_kind("identifier") else {
-            continue;
-        };
-        let name = name_node.text().to_string();
-        let symbol = next_symbol(file_id, next_local);
-        index.signatures.insert(symbol, format!("{keyword} {name}"));
-        index
-            .visibilities
-            .insert(symbol, visibility_of_modifiers(node));
-        index.declarations.push(Declaration {
-            kind,
-            name,
-            line: node.start_line,
-            symbol,
-            param_count: None,
-            param_types: Vec::new(),
-            is_varargs: false,
-        });
-    }
+    let base = base_name_of_type_node(type_node);
+    Some(append_c_style_dimensions(base, param_node))
 }
 
 #[cfg(test)]

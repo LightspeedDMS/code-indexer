@@ -91,12 +91,12 @@ async def test_legacy_pattern_rejected_by_analyze_graph(tmp_path: Path) -> None:
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", True),
+        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
             return_value=executor,
         ),
     ):
@@ -153,24 +153,24 @@ async def test_graph_pattern_rejected_by_legacy_xray_search(tmp_path: Path) -> N
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", True),
+        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
             return_value=MagicMock(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch("asyncio.get_running_loop", return_value=loop_instance),
@@ -202,12 +202,12 @@ async def test_analyze_graph_pattern_and_evaluator_are_mutually_exclusive(
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", True),
+        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
             return_value=executor,
         ),
     ):
@@ -242,12 +242,12 @@ async def test_graph_pattern_name_and_params_resolve_and_run(tmp_path: Path) -> 
     with (
         ThreadPoolExecutor(max_workers=1) as executor,
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
             return_value=cidx_meta,
         ),
-        patch("code_indexer.server.mcp.handlers.xray._seeds_ensured", True),
+        patch("code_indexer.server.mcp.handlers.xray._infra._seeds_ensured", True),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._infra._get_xray_executor",
             return_value=executor,
         ),
         patch(

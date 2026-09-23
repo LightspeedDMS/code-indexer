@@ -456,6 +456,13 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     // Bug #1900 review round 2: the real evidence accessor -- see
     // `GraphHandle::edge_evidence`'s doc comment.
     "edge_evidence",
+    // #1924/#1925 (epic #1906): the evidence-FILTERED traversal
+    // primitives -- see `GraphHandle::callees_of_filtered`'s doc comment.
+    "callees_of_filtered",
+    "callers_of_filtered",
+    "reachable_from_filtered",
+    "reachable_to_filtered",
+    "strongly_connected_components_filtered",
 ];
 
 /// Bug #1900 (epic #1906 P2, review round 2): every `graph::reasons::*`
@@ -480,6 +487,7 @@ const REASONS_FLAG_NAMES: &[&str] = &[
     "FAMILY_TRUNCATED",
     "RECEIVER_TYPE_MATCH",
     "SAME_CLASS_OR_SUPER",
+    "RECEIVER_TYPE_MISMATCH",
 ];
 
 /// Compares struct `name` between `real_file` (labeled `real_label` in any

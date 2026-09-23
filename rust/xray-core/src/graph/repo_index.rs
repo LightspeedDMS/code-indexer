@@ -1103,6 +1103,7 @@ mod tests {
             param_count: None,
             param_types: Vec::new(),
             is_varargs: false,
+            vararg_index: None,
         });
         let alive = fused_result_fixture("Alive.java", Some(alive_index), ExtractionStatus::Completed);
         record_fused_result(&repo_root.join("Alive.java"), "Alive.java", alive, &mut acc);
