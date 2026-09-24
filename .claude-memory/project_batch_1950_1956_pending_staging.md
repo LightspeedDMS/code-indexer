@@ -19,6 +19,37 @@ has been given.
 exactly the Langfuse `requires_config` gate (`start_trace`/`end_trace`), not a
 deployment difference. `outputSchema` is confirmed absent from both payloads.
 
+**P1 BUG BACKLOG IS DOWN TO ONE: #1956.** Closed this session with front-door
+evidence on staging solo: #1922 (all 16 `Jsoup.*` facades report
+`self_edge=false`; `reachable_to` reaches the facade from both
+`HttpConnection.connect` overloads), #1952 (the true edge is restored -- 6 real
+callers, `self_caller=false`), #1923 (two of three reproductions genuinely
+fixed, the third was never a bug). `./rust-automation.sh` EXIT=0.
+
+**#1952 and #1956 split cleanly and should stay split**: #1952 was "the real
+edge is MISSING" (fixed); #1956 is "a false edge is PRESENT" (open). The decoy
+still binds with an identical caller set and `self_caller=true` -- that is
+#1956, not a #1952 regression.
+
+**#1956's condition 3 is inert for a stronger reason than its record said.**
+Measured: a class trips `has_unresolved_external_supertype` on its OWN DIRECT
+external interface, before transitivity is consulted. Nearly every real Java
+class directly implements some external interface, so any precondition phrased
+as "is this hierarchy fully resolved" is inert on most code, not just deep
+hierarchies. A curated JDK supertype table is the candidate remedy but was
+REJECTED for now: it loosens a gate that controls candidate DELETION, and is
+incomplete by construction. If ever pursued, land it on a TAG-ONLY path first.
+
+**Do not "fix" an overload that looks wrong without checking assignability.**
+`OVERLOAD_ARG_TYPE_MATCH` means arguments are COMPATIBLE with a signature, not
+that Java would SELECT it; mutually applicable overloads all legitimately carry
+it. Selection is JLS 15.12.2.5, which this binder does not implement -- now
+#1967. See [[feedback_never_assert_unverified_facts_in_briefs]].
+
+**`analyze_graph` findings can be TRUNCATED at 18** -- check `truncated` in the
+envelope before concluding a symbol was not found. This nearly produced a false
+"#1952 not reproducible" conclusion.
+
 **A CHANGELOG correction shipped in 12.71.0**: the 12.70.0 entry filed Bug #1956
 under "Fixed" and read as a completed fix. It is not one -- the narrowing pass
 needs the calling type's ancestor chain fully resolved, and one unresolved
