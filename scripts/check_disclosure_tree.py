@@ -75,6 +75,17 @@ BANNED_PATTERNS: List[Tuple[str, str, bool]] = [
     # occurrences were a genuine runtime default (the real default is
     # http://localhost:8000; every hit was illustrative doc/test text).
     ("operator-ddns-hostname", "linner.ddns.net", False),
+    # 2026-09-24 audit: real cluster topology found in two tracked files --
+    # scripts/install-cidx-server-test.sh (CoW daemon URL, NFS server, fstab
+    # export paths) and tests/unit/server/auto_update/
+    # test_cow_storage_mount_options_1510.py (fstab fixtures). Both were
+    # introduced by 90661b08, the Bug #1916 scrubbing commit itself. Scrubbed
+    # to the RFC-5737 documentation range (203.0.113.0/24), which keeps the
+    # values IP-shaped so argument-validation assertions still hold.
+    ("cluster-nfs-server-ip", "192.168.60.23", False),
+    # Same audit: a PostgreSQL host address, which additionally appeared inside
+    # a connection string carrying a password.
+    ("cluster-postgres-host-ip", "192.168.68.43", False),
 ]
 
 # ---------------------------------------------------------------------------
@@ -141,6 +152,17 @@ ALLOWLIST: Dict[str, Set[str]] = {
     },
     "operator-ddns-hostname": {
         # This script necessarily names the literal it searches for.
+        _SELF_PATH,
+    },
+    "cluster-nfs-server-ip": {
+        # This script necessarily names the literal it searches for. Same
+        # accepted tradeoff as the four patterns above: the value survives in
+        # ONE file whose entire purpose is to list what must never reappear,
+        # in exchange for a gate that blocks it everywhere else.
+        _SELF_PATH,
+    },
+    "cluster-postgres-host-ip": {
+        # As above.
         _SELF_PATH,
     },
 }

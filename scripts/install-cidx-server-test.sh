@@ -170,7 +170,7 @@ test_config_cow_daemon_backend_shape() {
         NODE_ID='staging'
         POSTGRES_DSN='postgresql://user:pass@host/db'
         CLONE_BACKEND='cow-daemon'
-        COW_DAEMON_URL='http://192.168.60.23:8081'
+        COW_DAEMON_URL='http://203.0.113.23:8081'
         COW_DAEMON_API_KEY='super-secret-key'
         NFS_MOUNT='/mnt/cow-storage'
         PORT=8000
@@ -186,7 +186,7 @@ test_config_cow_daemon_backend_shape() {
 
     echo "${output}" | grep -q '"clone_backend": "cow-daemon"' \
         && echo "${output}" | grep -q "cow_daemon" \
-        && echo "${output}" | grep -q '"daemon_url": "http://192.168.60.23:8081"' \
+        && echo "${output}" | grep -q '"daemon_url": "http://203.0.113.23:8081"' \
         && echo "${output}" | grep -q '"mount_point": "/mnt/cow-storage"'
 }
 run_test "write_config (cow-daemon backend) produces clone_backend + cow_daemon fields" \
@@ -941,11 +941,11 @@ test_fstab_entry_not_duplicated() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
-        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '192.168.60.23:/home/opuser/cow-storage' "${fstab_file}")"
+    line_count="$(grep -cF '203.0.113.23:/home/opuser/cow-storage' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     [[ "${line_count}" -eq 1 ]]
@@ -965,10 +965,10 @@ test_fstab_entry_includes_nolock() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_entry '192.168.60.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    entry_line="$(grep -F '192.168.60.23:/home/opuser/cow-storage' "${fstab_file}")"
+    entry_line="$(grep -F '203.0.113.23:/home/opuser/cow-storage' "${fstab_file}")"
     fstype="$(echo "${entry_line}" | awk '{print $3}')"
     rm -rf "${tmpdir}"
 
@@ -987,7 +987,7 @@ test_fstab_entry_dry_run_writes_nothing() {
 
     output="$(run_sourced "
         DRY_RUN=true
-        add_fstab_entry '192.168.60.23:/export' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/export' '/mnt/cow-storage' '${fstab_file}'
     ")"
 
     size="$(wc -l < "${fstab_file}")"
@@ -1122,7 +1122,7 @@ test_cluster_dry_run_end_to_end() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id staging \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:notarealpw@203.0.113.43/cidx_server" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     local file_exists=0
     [[ -f "${tmpdir}/.cidx-server/config.json" ]] && file_exists=1
@@ -1131,7 +1131,7 @@ test_cluster_dry_run_end_to_end() {
     [[ ${exit_code} -eq 0 && ${file_exists} -eq 0 ]] \
         && echo "${output}" | grep -q "Cluster mode: ENABLED" \
         && echo "${output}" | grep -q "node_id=staging" \
-        && ! echo "${output}" | grep -q "secretpw"
+        && ! echo "${output}" | grep -q "notarealpw"
 }
 run_test "Cluster --dry-run end-to-end: activates cluster mode, writes nothing, masks password" \
     test_cluster_dry_run_end_to_end
@@ -1141,11 +1141,11 @@ test_cow_daemon_dry_run_end_to_end() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id staging \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:pass@203.0.113.43/cidx_server" \
         --clone-backend cow-daemon \
-        --cow-daemon-url "http://192.168.60.23:8081" \
+        --cow-daemon-url "http://203.0.113.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
-        --nfs-server "192.168.60.23" \
+        --nfs-server "203.0.113.23" \
         --nfs-export "/home/opuser/cow-storage" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     rm -rf "${tmpdir}"
@@ -1165,9 +1165,9 @@ test_cow_local_bind_uses_bind_mount() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id node-23 \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:pass@203.0.113.43/cidx_server" \
         --clone-backend cow-daemon \
-        --cow-daemon-url "http://192.168.60.23:8081" \
+        --cow-daemon-url "http://203.0.113.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
         --cow-local-bind \
         --nfs-export "/home/opuser/cow-storage" \
