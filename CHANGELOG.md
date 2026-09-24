@@ -5,20 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.71.0] - 2026-09-24
+
+### Changed
+
+- **Bug #1961**: restructures the `analyze_graph` tool document for the agent
+  that has to use the tool rather than the maintainer auditing the binder, and
+  splits the detailed Java/Kotlin binding rules into
+  `docs/xray-graph-binder-internals.md`. Agent-visible cost falls 28.6%, from
+  85,968 to 61,403 characters. Two defects fixed in passing: the Quick Start
+  scoped `include_patterns` to `*.java` alone, which excludes Kotlin callers
+  while asking whether Java code is dead, and a worked example named a
+  third-party library and its classes.
+- **Bug #1962**: moves workflow guidance, worked examples and rationale out of
+  `inputSchema` property descriptions and into the tool bodies, for
+  `xray_search`, `xray_explore`, `search_code`, `start_trace` and `end_trace`.
+  Every session pays `tools/list` before asking anything, so that text was
+  charged to every agent before it had even chosen a tool; a body is served
+  only on request via `cidx_quick_reference`. Always-on cost across the
+  registry falls from 122,107 to 115,043 characters -- about 1,750 tokens off
+  every session, for every role. `outputSchema` is deliberately untouched: it
+  is stripped before serving, so shrinking it would save nothing.
+
+### Corrected
+
+- The **Bug #1956** entry under 12.70.0 below has been corrected. It was filed
+  under "Fixed" and read as a completed fix; it is not one. The narrowing pass
+  exists, but its third precondition requires the calling type's ancestor chain
+  to be fully resolved, and any unresolved external supertype -- a JDK
+  interface such as `Cloneable` is enough -- defeats it for every descendant.
+  On typical real-world Java the pass is therefore inert, which the issue's own
+  record states after ten attempts. #1956 remains OPEN as a substrate design
+  task. Measured on a public OSS Java fixture through the staging front door at
+  12.70.0, decoy over-binding is still observable.
+
 ## [12.70.0] - 2026-09-24
 
 ### Fixed
 
-- **Bug #1956 (P1 of epic #1906)**: a type-qualified Java call no longer
-  over-binds to a same-named method on an unrelated class, and no longer lists
-  itself as its own caller. #1952 stopped the true edge being deleted; this
-  removes the false one. A decoy is excluded only behind three independently
-  necessary proofs: the receiver resolved through an ordinary import (never a
-  same-package guess), no field anywhere in the repository shares its bare name,
-  and the calling type's ancestor chain is fully resolved. The last condition is
-  what makes the field census complete for that call site rather than merely
-  complete among analysed files. Where any proof is unavailable, the previous
-  over-binding behaviour is unchanged -- ambiguity never becomes a deletion.
+- **Bug #1956 (P1 of epic #1906)** -- PARTIAL, and inert on typical real-world
+  Java; see the correction under 12.71.0 above. Adds a narrowing pass intended
+  to stop a type-qualified Java call over-binding to a same-named method on an
+  unrelated class and listing itself as its own caller. #1952 stopped the true
+  edge being deleted; this aims at the false one. A decoy is excluded only
+  behind three independently necessary proofs: the receiver resolved through an
+  ordinary import (never a same-package guess), no field anywhere in the
+  repository shares its bare name, and the calling type's ancestor chain is
+  fully resolved. That third condition is rarely satisfiable in practice -- one
+  unresolved external supertype anywhere in the chain defeats it -- so on most
+  real repositories the previous over-binding behaviour is what you still get.
+  Ambiguity never becomes a deletion, which is why this direction is safe to
+  ship unfinished, but the issue is NOT closed.
 - **Bug #1959**: 61 tests under `tests/unit/server/auth/` failed whenever they
   ran after `tests/unit/server/web/` and passed in isolation, so the gate was
   green only because of how the suite is chunked. Two causes: `asyncio.run()`
