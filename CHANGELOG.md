@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.70.0] - 2026-09-24
+
+### Fixed
+
+- **Bug #1956 (P1 of epic #1906)**: a type-qualified Java call no longer
+  over-binds to a same-named method on an unrelated class, and no longer lists
+  itself as its own caller. #1952 stopped the true edge being deleted; this
+  removes the false one. A decoy is excluded only behind three independently
+  necessary proofs: the receiver resolved through an ordinary import (never a
+  same-package guess), no field anywhere in the repository shares its bare name,
+  and the calling type's ancestor chain is fully resolved. The last condition is
+  what makes the field census complete for that call site rather than merely
+  complete among analysed files. Where any proof is unavailable, the previous
+  over-binding behaviour is unchanged -- ambiguity never becomes a deletion.
+- **Bug #1959**: 61 tests under `tests/unit/server/auth/` failed whenever they
+  ran after `tests/unit/server/web/` and passed in isolation, so the gate was
+  green only because of how the suite is chunked. Two causes: `asyncio.run()`
+  unsets the thread's event loop on cleanup, and a fourth process-wide singleton
+  (`oidc.state_manager`) was missing from the test restore list.
+- **Bug #1953**: adds `shortest_path_to_any_filtered`, the missing filtered
+  counterpart to the path primitive, and replaces the docs' implied default with
+  the measured filtered-versus-unfiltered tradeoff -- filtering on
+  `RECEIVER_TYPE_MATCH` discards real static-import callers, so it exchanges
+  false positives for false negatives rather than simply adding precision.
+- **Bug #1954**: the Java+Kotlin fixture's cross-language target was `private`,
+  making the Kotlin call illegal, so the documented first example reported its
+  own showcase method as dead code. Provides the first working positive control
+  that Kotlin-to-Java binding produces an edge.
+- **Bug #1955**: documents the `analyze_graph` response envelope, the real
+  paging shape and the enum variants; fixes two dangling cross-references. Two
+  code defects underneath: the missing-entry-point error named a construct the
+  caller never wrote, and `cidx_quick_reference` bypassed the `requires_config`
+  gate that `tools/list` applies.
+- **Bug #1950**: jobs terminated by an orderly restart now carry a distinct
+  `interrupted` status, so `/health` converges instead of reporting `degraded`
+  indefinitely, with genuine-failure detection unchanged. Also repairs a
+  pre-existing leak this exposed: `cleanup_old_jobs` used a hardcoded
+  three-status list that omitted `completed_partial`, so those rows were never
+  evicted or retention-cleaned.
+- **Bug #1951**: per-table retention-cleanup failures now report the underlying
+  exception instead of only the table name.
+- **Bug #1892**: the elevation-gating fixture no longer performs a database
+  initialisation nothing reads, nor a full ASGI lifespan the tests do not use
+  (8.83s to 5.16s for the file).
+
 ## [12.69.0] - 2026-09-23
 
 ### Fixed
