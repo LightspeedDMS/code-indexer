@@ -52,7 +52,7 @@ from code_indexer.server.auto_update.deployment_executor import DeploymentExecut
 
 def test_upgrade_rewrites_nfs4_entry_to_nfsv3_nolock() -> None:
     content = (
-        "192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
+        "203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
@@ -62,13 +62,13 @@ def test_upgrade_rewrites_nfs4_entry_to_nfsv3_nolock() -> None:
     assert "/mnt/cow-storage nfs " in result, f"fstype must become nfs: {result!r}"
     assert "vers=3" in result
     assert "nolock" in result
-    assert "192.168.60.23:/home/opuser/cow-storage" in result
+    assert "203.0.113.23:/home/opuser/cow-storage" in result
     assert "soft" in result and "timeo=30" in result and "retrans=3" in result
 
 
 def test_upgrade_returns_none_when_already_nfsv3_nolock() -> None:
     content = (
-        "192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs "
+        "203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs "
         "_netdev,vers=3,nolock,soft,timeo=30,retrans=3 0 0\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
@@ -82,7 +82,7 @@ def test_upgrade_rewrites_when_nolock_present_but_still_nfs4() -> None:
     or adding vers=3 -- that state must still be upgraded (nolock has no
     effect on NFSv4)."""
     content = (
-        "192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
+        "203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
         "_netdev,soft,timeo=30,retrans=3,nolock 0 0\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
@@ -95,7 +95,7 @@ def test_upgrade_rewrites_when_nolock_present_but_still_nfs4() -> None:
 
 def test_upgrade_replaces_existing_vers_option() -> None:
     content = (
-        "192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
+        "203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
         "_netdev,vers=4.1,soft,timeo=30,retrans=3 0 0\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
@@ -122,7 +122,7 @@ def test_upgrade_preserves_unrelated_lines_and_comments() -> None:
     content = (
         "# /etc/fstab: static file system information.\n"
         "/dev/sda1 / ext4 defaults 0 1\n"
-        "192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
+        "203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
         "/swapfile none swap sw 0 0\n"
     )
@@ -142,7 +142,7 @@ def test_upgrade_does_not_false_match_substring_mount_point() -> None:
     """A pre-existing /mnt/cow-storage-2 entry must never be mistaken for
     /mnt/cow-storage (mirrors the installer's own substring-match guard)."""
     content = (
-        "192.168.60.23:/other /mnt/cow-storage-2 nfs4 "
+        "203.0.113.23:/other /mnt/cow-storage-2 nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
@@ -153,14 +153,14 @@ def test_upgrade_does_not_false_match_substring_mount_point() -> None:
 
 def test_upgrade_preserves_leading_whitespace_and_line_ending() -> None:
     content = (
-        "  192.168.60.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
+        "  203.0.113.23:/home/opuser/cow-storage /mnt/cow-storage nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\r\n"
     )
     result = DeploymentExecutor._upgrade_cow_storage_fstab_entry_to_nfsv3(
         content, "/mnt/cow-storage"
     )
     assert result is not None
-    assert result.startswith("  192.168.60.23:")
+    assert result.startswith("  203.0.113.23:")
     assert result.endswith("0 0\r\n")
 
 
@@ -234,7 +234,7 @@ def test_noop_when_fstab_already_nfsv3_nolock(
     mount_point = str(tmp_path / "cow-storage")
     fstab = tmp_path / "fstab"
     fstab.write_text(
-        f"192.168.60.23:/home/opuser/cow-storage {mount_point} nfs "
+        f"203.0.113.23:/home/opuser/cow-storage {mount_point} nfs "
         "_netdev,vers=3,nolock,soft,timeo=30,retrans=3 0 0\n"
     )
     config = _make_cow_config(mount_point=mount_point)
@@ -252,7 +252,7 @@ def test_rewrites_fstab_and_attempts_umount_mount_cycle(
     mount_point = str(tmp_path / "cow-storage")
     fstab = tmp_path / "fstab"
     fstab.write_text(
-        f"192.168.60.23:/home/opuser/cow-storage {mount_point} nfs4 "
+        f"203.0.113.23:/home/opuser/cow-storage {mount_point} nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     config = _make_cow_config(mount_point=mount_point)
@@ -295,7 +295,7 @@ def test_umount_failure_is_non_fatal_mount_left_untouched(
     mount_point = str(tmp_path / "cow-storage")
     fstab = tmp_path / "fstab"
     fstab.write_text(
-        f"192.168.60.23:/home/opuser/cow-storage {mount_point} nfs4 "
+        f"203.0.113.23:/home/opuser/cow-storage {mount_point} nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     config = _make_cow_config(mount_point=mount_point)
@@ -330,7 +330,7 @@ def test_mount_failure_after_successful_umount_returns_false(
     mount_point = str(tmp_path / "cow-storage")
     fstab = tmp_path / "fstab"
     fstab.write_text(
-        f"192.168.60.23:/home/opuser/cow-storage {mount_point} nfs4 "
+        f"203.0.113.23:/home/opuser/cow-storage {mount_point} nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     config = _make_cow_config(mount_point=mount_point)
@@ -364,7 +364,7 @@ def test_tee_failure_returns_false(
     mount_point = str(tmp_path / "cow-storage")
     fstab = tmp_path / "fstab"
     fstab.write_text(
-        f"192.168.60.23:/home/opuser/cow-storage {mount_point} nfs4 "
+        f"203.0.113.23:/home/opuser/cow-storage {mount_point} nfs4 "
         "_netdev,soft,timeo=30,retrans=3 0 0\n"
     )
     config = _make_cow_config(mount_point=mount_point)
