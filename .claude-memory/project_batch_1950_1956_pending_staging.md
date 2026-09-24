@@ -8,10 +8,23 @@ metadata:
   modified: 2026-09-24T15:45:31.446Z
 ---
 
-v12.70.0 is committed on `development`, merged to `staging`, and RUNNING on BOTH
+v12.71.0 is committed on `development`, merged to `staging`, and RUNNING on BOTH
 staging deployments (solo/SQLite and clustered/PostgreSQL, both confirmed
-`version: 12.70.0` through their own front doors). Production is still 12.65.0.
-Master untouched. No push-to-master authorization has been given.
+`version: 12.71.0` through their own front doors; CI green on both branches).
+Production is still 12.65.0. Master untouched. No push-to-master authorization
+has been given.
+
+**MCP surface always-on cost, measured at the front door at 12.71.0**: cluster
+147 tools / 117,624 chars; solo 145 tools / 113,443 chars. The two-tool gap is
+exactly the Langfuse `requires_config` gate (`start_trace`/`end_trace`), not a
+deployment difference. `outputSchema` is confirmed absent from both payloads.
+
+**A CHANGELOG correction shipped in 12.71.0**: the 12.70.0 entry filed Bug #1956
+under "Fixed" and read as a completed fix. It is not one -- the narrowing pass
+needs the calling type's ancestor chain fully resolved, and one unresolved
+external supertype (a JDK interface such as `Cloneable`) defeats it for every
+descendant, so it is inert on typical real-world Java. Corrected in place and
+noted under 12.71.0. Never file a partial under "Fixed" in a public changelog.
 
 **Validated through the front door on 2026-09-24** (this is real evidence, not
 local gates):
