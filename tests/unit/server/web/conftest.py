@@ -17,13 +17,19 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Generator
 
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _restore_dependency_globals():
-    """Capture and restore dependencies.* singletons around each test.
+def _restore_dependency_globals_impl() -> Generator[None, None, None]:
+    """Core generator body for `_restore_dependency_globals` below;
+    extracted so a unit test can drive it via `next()` without pytest's
+    fixture machinery (mirrors the `_impl` pattern established in the
+    tree-wide `tests/unit/server/conftest.py`) -- see
+    `tests/unit/server/web/test_oidc_state_manager_path_leak_1959.py`.
+
+    Capture and restore process-wide auth singletons around each test.
 
     Multiple chunk-4 test fixtures call create_app() inside
     patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": tmpdir}). create_app()
@@ -32,20 +38,64 @@ def _restore_dependency_globals():
     and the tmpdir is cleaned up, the still-mutated globals point at deleted
     paths, causing subsequent tests to hit OperationalError: unable to open
     database file on POST /login. Restoring the singletons isolates each test.
+
+    The same leak class hits two more process-wide singletons that a real
+    FastAPI lifespan wires to the same per-test tmpdir via set_sqlite_path():
+    code_indexer.server.app._token_blacklist (via get_token_blacklist()) and
+    code_indexer.server.auth.elevated_session_manager.elevated_session_manager.
+    Without saving/restoring their path state here too, whichever such test
+    runs last in a full suite leaves both pointing at a deleted directory,
+    and any later test that exercises them (e.g. DataRetentionScheduler's
+    cleanup, which prunes both tables) hits
+    sqlite3.OperationalError: unable to open database file.
+
+    Bug #1959: a THIRD singleton of the identical class -- the module-level
+    `code_indexer.server.auth.oidc.state_manager._configured_sqlite_path`
+    global, written by `configure_sqlite_path()` in the SAME
+    `service_init.py` block that wires the two singletons above -- was
+    missing from this fixture. Left unrestored, every subsequent
+    `StateManager()` construction anywhere in the process (all of
+    tests/unit/server/auth/oidc/ and tests/unit/server/auth/oauth/) tries
+    to open a SQLite file under a directory that no longer exists,
+    surfacing as 47 failures in the exact combined
+    `pytest tests/unit/server/web/ tests/unit/server/auth/` run Bug #1959's
+    acceptance criteria require to pass.
     """
     from code_indexer.server.auth import dependencies
+    from code_indexer.server.app import get_token_blacklist
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+    from code_indexer.server.auth.oidc import state_manager as oidc_state_manager
 
+    token_blacklist = get_token_blacklist()
     saved = {
         "user_manager": dependencies.user_manager,
         "jwt_manager": dependencies.jwt_manager,
         "oauth_manager": dependencies.oauth_manager,
         "mcp_credential_manager": dependencies.mcp_credential_manager,
+        "token_blacklist_sqlite_db_path": token_blacklist._sqlite_db_path,
+        "elevated_session_manager_db_path": elevated_session_manager._db_path,
+        "oidc_configured_sqlite_path": oidc_state_manager._configured_sqlite_path,
     }
     yield
     dependencies.user_manager = saved["user_manager"]
     dependencies.jwt_manager = saved["jwt_manager"]
     dependencies.oauth_manager = saved["oauth_manager"]
     dependencies.mcp_credential_manager = saved["mcp_credential_manager"]
+    token_blacklist._sqlite_db_path = saved["token_blacklist_sqlite_db_path"]
+    elevated_session_manager._db_path = saved["elevated_session_manager_db_path"]
+    oidc_state_manager._configured_sqlite_path = saved["oidc_configured_sqlite_path"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_dependency_globals() -> Generator[None, None, None]:
+    """Bug #1959 / prior fix: tree-scoped autouse fixture wrapping
+    `_restore_dependency_globals_impl` above. See that function's
+    docstring for the full rationale and the measured leak evidence this
+    closes.
+    """
+    yield from _restore_dependency_globals_impl()
 
 
 @pytest.fixture(autouse=True)

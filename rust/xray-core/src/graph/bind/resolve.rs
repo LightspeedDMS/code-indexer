@@ -428,7 +428,12 @@ pub(crate) fn resolve_reference(
     // again on top of it.
     let type_qualifier_confirmed =
         apply_type_qualifier_narrowing(&mut with_reasons, receiver_is_type_qualifier, receiver_type);
-    apply_same_class_or_super_narrowing(&mut with_reasons, same_class_context, type_index);
+    apply_same_class_or_super_narrowing(
+        &mut with_reasons,
+        same_class_context,
+        ref_scope.package.as_deref(),
+        type_index,
+    );
     apply_super_class_narrowing(&mut with_reasons, super_class_context, type_index);
     if !type_qualifier_confirmed {
         apply_import_context_narrowing(&mut with_reasons);

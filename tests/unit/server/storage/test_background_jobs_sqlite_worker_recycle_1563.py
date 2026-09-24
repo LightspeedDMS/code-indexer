@@ -107,7 +107,8 @@ class TestBackgroundJobsSqliteWorkerRecycle1563:
 
         dead_job = backend.get_job("job-recycled-worker")
         assert dead_job is not None
-        assert dead_job["status"] == "failed"
+        # Bug #1950: 'interrupted' (a restart artifact), not 'failed'.
+        assert dead_job["status"] == "interrupted"
         assert dead_job["error"] == "Job interrupted by server restart"
 
     def test_full_node_restart_still_reclaims_orphans(self, backend) -> None:
@@ -147,7 +148,8 @@ class TestBackgroundJobsSqliteWorkerRecycle1563:
         for job_id in ("job-orphan-1", "job-orphan-2"):
             job = backend.get_job(job_id)
             assert job is not None
-            assert job["status"] == "failed"
+            # Bug #1950: 'interrupted' (a restart artifact), not 'failed'.
+            assert job["status"] == "interrupted"
             assert job["error"] == "Job interrupted by server restart"
 
     def test_never_stamped_pid_still_reclaimed(self, backend) -> None:
@@ -172,7 +174,8 @@ class TestBackgroundJobsSqliteWorkerRecycle1563:
         assert cleaned == 1
         job = backend.get_job("job-legacy-no-pid")
         assert job is not None
-        assert job["status"] == "failed"
+        # Bug #1950: 'interrupted' (a restart artifact), not 'failed'.
+        assert job["status"] == "interrupted"
 
 
 _ARBITRARY_TEST_PID = 12345

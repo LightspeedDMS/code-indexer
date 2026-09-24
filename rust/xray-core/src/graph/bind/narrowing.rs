@@ -796,9 +796,20 @@ pub(super) fn apply_type_qualifier_narrowing(
 /// supertype evidence is recorded incomplete, narrowing is skipped
 /// entirely and the pool is kept, since `supertypes_of` may be missing
 /// the real supertype the target actually lives on.
+///
+/// Issue #1956: `caller_package` is the calling FILE's own recorded
+/// `package`. `same_class_context` is ALWAYS declared IN that same file,
+/// so it is always exactly qualifiable -- unlike `receiver_type` (see
+/// `families.rs`'s own `qualified_direct_parents` field doc for why that
+/// one stays unmigrated). The qualified check below can only WITHDRAW a
+/// tag on POSITIVE proof of a cross-package decoy, never add one and
+/// never remove a candidate from `candidates` -- see `same_class_
+/// qualified::QualifiedAncestry`'s own module doc for the full mechanics
+/// and the "ambiguity keeps the bare tag" fallback rule.
 pub(super) fn apply_same_class_or_super_narrowing(
     candidates: &mut [(DeclInfo, u16)],
     same_class_context: Option<&str>,
+    caller_package: Option<&str>,
     type_index: &super::families::TypeIndex,
 ) {
     let Some(enclosing_type) = same_class_context else {
@@ -810,8 +821,20 @@ pub(super) fn apply_same_class_or_super_narrowing(
     let mut allowed = type_index.supertypes_of(enclosing_type);
     allowed.insert(enclosing_type.to_string());
     let matching = indices_matching_enclosing_type(candidates, &allowed);
+
+    let qualified_ancestry = super::same_class_qualified::QualifiedAncestry::compute(
+        enclosing_type,
+        caller_package,
+        type_index,
+    );
     for &i in &matching {
-        candidates[i].1 |= reasons::SAME_CLASS_OR_SUPER;
+        let (decl, bits) = &mut candidates[i];
+        let bare_ancestor_name = decl.enclosing_type.as_deref().unwrap_or_default();
+        if !qualified_ancestry
+            .is_proven_cross_package_decoy(bare_ancestor_name, decl.package.as_deref())
+        {
+            *bits |= reasons::SAME_CLASS_OR_SUPER;
+        }
     }
     // TAG-ONLY, PERMANENTLY (#1910 salvage): deliberately no narrowing
     // step here at all, empty match or a non-empty subset alike -- see
@@ -966,3 +989,7 @@ pub(super) fn apply_inheritance_family_expansion(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "narrowing_same_class_qualified_tests.rs"]
+mod same_class_qualified_tests;

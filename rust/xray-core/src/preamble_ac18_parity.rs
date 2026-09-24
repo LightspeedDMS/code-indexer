@@ -463,6 +463,9 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     "reachable_from_filtered",
     "reachable_to_filtered",
     "strongly_connected_components_filtered",
+    // #1953: the filtered counterpart of `shortest_path_to_any` -- the one
+    // primitive #1953 identified as missing a filtered form.
+    "shortest_path_to_any_filtered",
 ];
 
 /// Bug #1900 (epic #1906 P2, review round 2): every `graph::reasons::*`

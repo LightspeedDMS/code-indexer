@@ -121,9 +121,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 12.69.0 shifted them another +22 (9688/10059/10540 -> 9710/10081/10562),
         # the second consecutive release to break this list -- exactly the
         # wave-through reflex #1948 warns about.
-        "CHANGELOG.md:9710",
-        "CHANGELOG.md:10081",
-        "CHANGELOG.md:10562",
+        # 12.70.0 shifted them another +45 -- the THIRD consecutive release to
+        # break this list. See #1948: key these by content, not line number.
+        "CHANGELOG.md:9755",
+        "CHANGELOG.md:10126",
+        "CHANGELOG.md:10607",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

@@ -235,8 +235,13 @@ impl CodeGraph {
 /// Walks `parent` pointers backward from `end` to `start` (inclusive of
 /// both), then reverses -- `parent` is finite (one entry per node the BFS
 /// above ever visited), so this walk terminates in at most that many
-/// steps (Rule 14).
-fn reconstruct_path(parent: &std::collections::HashMap<u32, u32>, start: u32, end: u32) -> Vec<u32> {
+/// steps (Rule 14). `pub(super)` (not private) so `ops_filtered.rs`'s
+/// `shortest_path_to_any_filtered` can reuse the IDENTICAL path
+/// reconstruction rather than a second copy (Rule 4, anti-duplication) --
+/// the only thing that differs between the unfiltered and filtered
+/// shortest-path primitives is which edges fed the BFS, never how a found
+/// path is walked back out of the `parent` map.
+pub(super) fn reconstruct_path(parent: &std::collections::HashMap<u32, u32>, start: u32, end: u32) -> Vec<u32> {
     let mut path = vec![end];
     let mut current = end;
     while current != start {

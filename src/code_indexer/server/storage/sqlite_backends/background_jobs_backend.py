@@ -21,7 +21,18 @@ logger = logging.getLogger(__name__)
 # RUNNING job) reverting a row that has already reached one of these
 # statuses via the worker's own terminal write. Tuple (not set/frozenset)
 # for deterministic SQL placeholder ordering.
-_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+#
+# Bug #1950: "interrupted" (a restart/shutdown artifact, distinct from a
+# genuine "failed") is terminal too -- mirrored in job_tracker.py and
+# postgres/background_jobs_backend.py per the same Bug #1348 sync
+# requirement.
+_TERMINAL_JOB_STATUSES = (
+    "completed",
+    "completed_partial",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
 
 
 def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
@@ -452,7 +463,14 @@ class BackgroundJobsSqliteBackend:
         self._conn_manager.execute_atomic(operation)
 
     def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
-        """Mark all running/pending jobs as failed. Called on startup."""
+        """Mark all running/pending jobs as interrupted. Called on startup.
+
+        Bug #1950: writes status='interrupted' (not 'failed') -- a row
+        still running/pending at startup was orphaned by this process's
+        own restart, a restart artifact rather than a genuine failure, so
+        it must not poison /health's get_failed_job_count() (which counts
+        ONLY status='failed', with no time window) forever.
+        """
         from datetime import datetime, timezone
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -460,7 +478,7 @@ class BackgroundJobsSqliteBackend:
 
         def operation(conn):
             cur = conn.execute(
-                "UPDATE background_jobs SET status = 'failed', error = ?, "
+                "UPDATE background_jobs SET status = 'interrupted', error = ?, "
                 "completed_at = ? WHERE status IN ('running', 'pending')",
                 (error, now_iso),
             )
@@ -706,17 +724,25 @@ class BackgroundJobsSqliteBackend:
         return deleted
 
     def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
-        """Clean up old completed/failed/cancelled jobs."""
+        """Clean up old jobs in any terminal status.
+
+        Bug #1950: uses _TERMINAL_JOB_STATUSES (completed/completed_partial/
+        failed/cancelled/interrupted) rather than a hardcoded subset -- an
+        interrupted (restart-artifact) or completed_partial row must be
+        retention-cleaned exactly like a completed/failed/cancelled one, or
+        it accumulates in the table forever.
+        """
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         cutoff_iso = cutoff_time.isoformat()
+        placeholders = ", ".join("?" for _ in _TERMINAL_JOB_STATUSES)
 
         def operation(conn):
             cursor = conn.execute(
-                """DELETE FROM background_jobs
-                   WHERE status IN ('completed', 'failed', 'cancelled')
+                f"""DELETE FROM background_jobs
+                   WHERE status IN ({placeholders})
                    AND completed_at IS NOT NULL
                    AND completed_at < ?""",
-                (cutoff_iso,),
+                (*_TERMINAL_JOB_STATUSES, cutoff_iso),
             )
             return cursor.rowcount
 
@@ -770,8 +796,9 @@ class BackgroundJobsSqliteBackend:
         On server restart, any jobs with status 'running' or 'pending' are orphaned
         because the processes that were executing them no longer exist.
 
-        This method marks them as 'failed' with an appropriate error message
-        and timestamp for audit trail.
+        Bug #1950: this method marks them as 'interrupted' (not 'failed') --
+        a restart artifact, distinct from a genuine failure -- with an
+        appropriate error message and timestamp for audit trail.
 
         Story #723: Clean Up Orphaned Jobs on Server Startup
 
@@ -817,10 +844,16 @@ class BackgroundJobsSqliteBackend:
             if not job_ids_to_fail:
                 return 0
 
+            # Bug #1950: status='interrupted' (not 'failed') -- a row
+            # whose owning worker process is provably gone was orphaned by
+            # a restart, a restart artifact rather than a genuine failure,
+            # so it must not poison /health's get_failed_job_count()
+            # (which counts ONLY status='failed', with no time window)
+            # forever.
             placeholders = ", ".join("?" for _ in job_ids_to_fail)
             cursor = conn.execute(
                 f"""UPDATE background_jobs
-                    SET status = 'failed',
+                    SET status = 'interrupted',
                         error = ?,
                         completed_at = ?
                     WHERE status IN ('running', 'pending')

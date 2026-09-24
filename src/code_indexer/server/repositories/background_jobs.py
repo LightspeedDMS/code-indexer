@@ -30,8 +30,15 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 # Bug #1256: driver-agnostic classifier shared with the INSERT-path
 # unique-violation detection in job_tracker._atomic_insert_impl (Bug
 # #1252/#1235). No circular import risk: job_tracker.py does not import
-# from this module.
-from code_indexer.server.services.job_tracker import is_active_job_unique_violation
+# from this module. Bug #1950: is_restart_interruption_error is the same
+# single-source-of-truth classifier job_tracker.py's own restart-cleanup
+# paths use, reused here so _execute_job's generic exception handler can
+# recognize a restart/shutdown-triggered failure by its distinctive error
+# message.
+from code_indexer.server.services.job_tracker import (
+    is_active_job_unique_violation,
+    is_restart_interruption_error,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -100,6 +107,12 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     RESOLVING_PREREQUISITES = "resolving_prerequisites"  # AC2: SCIP self-healing state
+    # Bug #1950: a terminal status distinct from FAILED for a job whose
+    # worker process was killed by a server restart/shutdown rather than a
+    # genuine failure -- /health's degraded computation counts ONLY
+    # status='failed' rows, so this keeps a restart artifact from
+    # poisoning that count forever while a genuine failure still trips it.
+    INTERRUPTED = "interrupted"
 
 
 class DuplicateJobError(Exception):
@@ -179,7 +192,14 @@ _MAX_OP_TYPE_SCAN = 10000
 # Rapid intermediate ticks (e.g., every chunk during indexing) are coalesced:
 # in-memory state is updated on every tick, but _persist_jobs is called at
 # most once per PROGRESS_DEBOUNCE_INTERVAL seconds for intermediate updates.
-# Terminal states (COMPLETED/FAILED/CANCELLED) always flush immediately.
+# This debounce applies ONLY to progress_callback's own ticks. Every terminal
+# transition (COMPLETED/COMPLETED_PARTIAL/FAILED/CANCELLED/INTERRUPTED --
+# Bug #1950 added the last one) is persisted by its own dedicated
+# _persist_jobs() call in _execute_job, made directly at the point the
+# status is set, entirely outside progress_callback and this debounce
+# window -- so every terminal write always flushes immediately regardless
+# of status, including a job reclassified INTERRUPTED at shutdown (see the
+# terminal_persisted/interrupted_persisted/exception_persisted call sites).
 # Cancellation checks (_check_db_cancellation) also fire on every tick.
 PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 
@@ -1386,7 +1406,13 @@ class BackgroundJobManager:
             with self._lock:
                 for job in list(self.jobs.values()):
                     if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
-                        job.status = JobStatus.FAILED
+                        # Bug #1950: INTERRUPTED (not FAILED) -- a row
+                        # still running/pending at startup was orphaned by
+                        # this process's own restart, a restart artifact
+                        # rather than a genuine failure, so it must not
+                        # poison get_failed_job_count() (which /health
+                        # reads with no time window) forever.
+                        job.status = JobStatus.INTERRUPTED
                         job.completed_at = now
                         job.error = error
                         count += 1
@@ -1807,6 +1833,7 @@ class BackgroundJobManager:
                     JobStatus.COMPLETED_PARTIAL,
                     JobStatus.CANCELLED,
                     JobStatus.FAILED,
+                    JobStatus.INTERRUPTED,  # Bug #1950
                 ):
                     if terminal_persisted:
                         with self._lock:
@@ -1861,6 +1888,15 @@ class BackgroundJobManager:
                         )
             except Exception as e:
                 error_msg = str(e)
+                # Bug #1950: a RuntimeError raised because the server is
+                # shutting down (e.g. refresh_scheduler.py's _run_popen_c()
+                # sees its `cidx index` subprocess killed by SIGTERM before
+                # BackgroundJobManager.shutdown() itself ever gets a chance
+                # to flag this job cancelled) is a restart artifact, not a
+                # genuine failure -- classify it distinctly so it does not
+                # poison /health's get_failed_job_count() (status='failed'
+                # only, no time window) forever.
+                is_restart_interruption = is_restart_interruption_error(error_msg)
 
                 with self._lock:
                     job = self.jobs[job_id]
@@ -1872,6 +1908,15 @@ class BackgroundJobManager:
                         job.error = "cancelled"
                         logging.info(
                             f"Background job {job_id} exception after cancel: {error_msg}"
+                        )
+                    elif is_restart_interruption:
+                        job.status = JobStatus.INTERRUPTED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.error = error_msg
+                        job.progress = 0
+                        logging.warning(
+                            f"Background job {job_id} interrupted by server "
+                            f"restart/shutdown: {error_msg}"
                         )
                     else:
                         job.status = JobStatus.FAILED
@@ -1887,11 +1932,18 @@ class BackgroundJobManager:
                 # (previously this branch was skipped entirely for cancelled
                 # jobs because fail_job would have mislabeled them as
                 # "failed" -- leaving JobTracker's _active_jobs entry stuck
-                # at "running" forever).
+                # at "running" forever). Bug #1950: a restart-interrupted
+                # job uses interrupt_job() -- fail_job() would mislabel it
+                # as a genuine failure in JobTracker's own persisted row too.
                 if self._job_tracker is not None:
                     try:
                         if job.cancelled:
                             self._job_tracker.cancel_job(job_id)
+                        elif is_restart_interruption:
+                            self._job_tracker.interrupt_job(
+                                job_id,
+                                error=error_msg,
+                            )
                         else:
                             self._job_tracker.fail_job(
                                 job_id,
@@ -2019,6 +2071,7 @@ class BackgroundJobManager:
                         JobStatus.COMPLETED_PARTIAL,
                         JobStatus.FAILED,
                         JobStatus.CANCELLED,
+                        JobStatus.INTERRUPTED,  # Bug #1950
                     ]
                     and job.completed_at
                     and job.completed_at < cutoff_time
