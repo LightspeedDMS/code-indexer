@@ -38,7 +38,7 @@ def _make_config(tmp_path: Path) -> ServerConfig:
     )
 
 
-def _make_trace(trace_id: str, session_id: str, user_id: str = "seba_battig") -> dict:
+def _make_trace(trace_id: str, session_id: str, user_id: str = "jane_doe") -> dict:
     return {
         "id": trace_id,
         "sessionId": session_id,
@@ -77,7 +77,7 @@ class TestLastModifiedSessionsByRepo:
         mock_client_class.return_value = mock_client
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
-        trace = _make_trace("trace-001", "session-abc", user_id="seba_battig")
+        trace = _make_trace("trace-001", "session-abc", user_id="jane_doe")
         mock_client.fetch_traces_page.side_effect = [[trace], []]
         mock_client.fetch_observations.return_value = []
 
@@ -105,7 +105,7 @@ class TestLastModifiedSessionsByRepo:
         mock_client_class.return_value = mock_client
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
-        trace = _make_trace("trace-001", "session-xyz-123", user_id="seba_battig")
+        trace = _make_trace("trace-001", "session-xyz-123", user_id="jane_doe")
         mock_client.fetch_traces_page.side_effect = [[trace], []]
         mock_client.fetch_observations.return_value = []
 
@@ -136,9 +136,9 @@ class TestLastModifiedSessionsByRepo:
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
         traces = [
-            _make_trace("trace-001", "session-aaa", user_id="seba_battig"),
-            _make_trace("trace-002", "session-bbb", user_id="seba_battig"),
-            _make_trace("trace-003", "session-ccc", user_id="seba_battig"),
+            _make_trace("trace-001", "session-aaa", user_id="jane_doe"),
+            _make_trace("trace-002", "session-bbb", user_id="jane_doe"),
+            _make_trace("trace-003", "session-ccc", user_id="jane_doe"),
         ]
         mock_client.fetch_traces_page.side_effect = [traces, []]
         mock_client.fetch_observations.return_value = []
@@ -211,7 +211,7 @@ class TestLastModifiedSessionsByRepo:
         mock_client_class.return_value = mock_client
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
-        trace = _make_trace("trace-001", "session-unchanged", user_id="seba_battig")
+        trace = _make_trace("trace-001", "session-unchanged", user_id="jane_doe")
         # Two sync cycles with the same trace (same updatedAt — will be unchanged on second pass)
         mock_client.fetch_traces_page.side_effect = [[trace], [], [trace], []]
         mock_client.fetch_observations.return_value = []
@@ -249,10 +249,10 @@ class TestLastModifiedSessionsByRepo:
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
         traces_first = [
-            _make_trace("trace-001", "session-first-a", user_id="seba_battig"),
-            _make_trace("trace-002", "session-first-b", user_id="seba_battig"),
+            _make_trace("trace-001", "session-first-a", user_id="jane_doe"),
+            _make_trace("trace-002", "session-first-b", user_id="jane_doe"),
         ]
-        trace_second = _make_trace("trace-003", "session-second", user_id="seba_battig")
+        trace_second = _make_trace("trace-003", "session-second", user_id="jane_doe")
 
         mock_client.fetch_traces_page.side_effect = [
             traces_first,
@@ -419,7 +419,7 @@ class TestReadmeGeneratorCalledFromCallback:
         mock_client_class.return_value = mock_client
         mock_client.discover_project.return_value = {"name": "Claude_Code"}
 
-        trace = _make_trace("trace-001", "session-abc", user_id="seba_battig")
+        trace = _make_trace("trace-001", "session-abc", user_id="jane_doe")
         mock_client.fetch_traces_page.side_effect = [[trace], []]
         mock_client.fetch_observations.return_value = []
 

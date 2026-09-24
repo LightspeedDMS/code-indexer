@@ -49,3 +49,5 @@ WORKFLOW: search_code returns snippet_cache_handle when result is truncated -> u
 CACHE EXPIRY: Handles expire after session ends. If handle expired, re-run the original search to get fresh handles.
 
 PAGINATION: Large cached content split into pages. Use page parameter (0-indexed) to retrieve subsequent pages.
+
+WRONG-TOOL HANDLES (Bug #1928): a handle returned by xray_search/xray_explore/xray_search_batch/analyze_graph carries a `xray-pv1-` prefix and is REJECTED here with `{"success": false, "error": "wrong_tool_for_handle"}` -- use `cidx_fetch_cached_payload` for those instead. The two tools are NOT interchangeable: this tool's `page` is 0-indexed while `cidx_fetch_cached_payload`'s is 1-indexed, so silently routing a pages-v1 handle through here would misalign every page.

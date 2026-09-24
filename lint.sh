@@ -73,6 +73,18 @@ main() {
         all_passed=false
     fi
 
+    # Bug #1916: tree-wide disclosure scan (git-tracked tree, not a diff) —
+    # the mandatory per-diff review scan cannot see a pre-existing leak or
+    # anything added after reviewers already scanned a change; this check
+    # runs against the whole tree, at every lint.sh invocation.
+    echo -e "${BLUE}Running Bug #1916 disclosure scan...${NC}"
+    if python3 scripts/check_disclosure_tree.py; then
+        echo -e "${GREEN}✅ Disclosure scan passed${NC}"
+    else
+        echo -e "${RED}❌ Disclosure scan failed${NC}"
+        all_passed=false
+    fi
+
     if $all_passed; then
         echo -e "${GREEN}🎉 All linting checks passed!${NC}"
         exit 0

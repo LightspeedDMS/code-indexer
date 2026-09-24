@@ -33,8 +33,8 @@ GOLDEN_REPOS_DIR = Path("/srv/cidx/data/golden-repos")
 UNSAFE_ALIASES = [
     "..",
     ".",
-    "../evolution",
-    "evolution/../..",
+    "../example-repo",
+    "example-repo/../..",
     "nested/alias",
     "/absolute/alias",
     "/",
@@ -66,7 +66,7 @@ def test_unsafe_alias_is_refused(alias: str) -> None:
 
 @pytest.mark.parametrize(
     "alias",
-    ["evolution", "evolution-global", "my-repo_2024.v1", "a"],
+    ["example-repo", "example-repo-global", "my-repo_2024.v1", "a"],
 )
 def test_safe_alias_still_resolves_beneath_the_temporal_root(alias: str) -> None:
     """Legitimate aliases must be UNAFFECTED -- this is a guard, not a rename."""
@@ -112,10 +112,10 @@ def test_real_directory_inside_the_container_is_still_accepted(tmp_path: Path) -
     """
     golden_repos_dir = tmp_path / "golden-repos"
     container = golden_repos_dir / SERVER_TEMPORAL_ROOT_DIR_NAME
-    existing = container / "evolution"
+    existing = container / "example-repo"
     existing.mkdir(parents=True)
 
-    assert server_temporal_index_root(golden_repos_dir, "evolution") == existing
+    assert server_temporal_index_root(golden_repos_dir, "example-repo") == existing
 
 
 def test_backslash_is_refused_even_though_posix_allows_it() -> None:

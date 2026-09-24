@@ -209,9 +209,37 @@ class TestCidxFetchCachedPayloadAuth:
 
 
 class TestXrayTruncationMessageNamesTool:
-    """_truncate_xray_result message tells user to use cidx_fetch_cached_payload."""
+    """_truncate_xray_result message tells user to use cidx_fetch_cached_payload.
 
-    def test_truncation_message_names_cidx_fetch_cached_payload(self):
+    Bug #1928 rework: _truncate_xray_result delegates to
+    xray_truncation.truncate_result_fields(), which calls REAL
+    PayloadCache.store_batch()/store() (Bug #1181 pattern: one page-store
+    batch plus a manifest row) and reads ONLY config.max_fetch_size_chars
+    (the two-budget preview_size_chars/max_fetch_size_chars split from the
+    pre-rework design is gone) -- a bare MagicMock() cache (no store_batch
+    configured) no longer exercises the real code path, so these tests use
+    a real, on-disk PayloadCache like the rest of the Bug #1928 suite
+    (tests/unit/server/mcp/test_xray_truncation_*_1928.py and its shared
+    cache_factory fixture in _xray_truncation_test_helpers.py).
+    """
+
+    def _make_cache(self, tmp_path, max_fetch_size_chars: int):
+        from code_indexer.server.cache.payload_cache import (
+            PayloadCache,
+            PayloadCacheConfig,
+        )
+
+        config = PayloadCacheConfig(
+            preview_size_chars=max_fetch_size_chars,
+            max_fetch_size_chars=max_fetch_size_chars,
+            cache_ttl_seconds=900,
+            cleanup_interval_seconds=60,
+        )
+        cache = PayloadCache(db_path=tmp_path / "payload_cache.db", config=config)
+        cache.initialize()
+        return cache
+
+    def test_truncation_message_names_cidx_fetch_cached_payload(self, tmp_path):
         """When result is truncated, cache_handle message references cidx_fetch_cached_payload."""
         from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
 
@@ -228,29 +256,26 @@ class TestXrayTruncationMessageNamesTool:
             "elapsed_seconds": 1.0,
         }
 
-        # Mock PayloadCache to return a truncated response
-        mock_truncation = {
-            "has_more": True,
-            "preview": json.dumps({"matches": large_matches})[:200],
-            "cache_handle": "test-uuid-1234",
-            "total_size": 5000,
-        }
-        mock_cache = MagicMock()
-        mock_cache.truncate_result.return_value = mock_truncation
+        # Bug #1928: a small max_fetch_size_chars forces truncation with a
+        # real PayloadCache (single budget -- no separate preview size).
+        cache = self._make_cache(tmp_path, max_fetch_size_chars=1_000)
+        try:
+            mock_app_state = MagicMock()
+            mock_app_state.payload_cache = cache
 
-        mock_app_state = MagicMock()
-        mock_app_state.payload_cache = mock_cache
+            mock_app = MagicMock()
+            mock_app.state = mock_app_state
 
-        mock_app = MagicMock()
-        mock_app.state = mock_app_state
+            mock_app_module = MagicMock()
+            mock_app_module.app = mock_app
 
-        mock_app_module = MagicMock()
-        mock_app_module.app = mock_app
-
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
-        ):
-            truncated = _truncate_xray_result(result)
+            with patch(
+                "code_indexer.server.mcp.handlers.xray._utils.app_module",
+                mock_app_module,
+            ):
+                truncated = _truncate_xray_result(result)
+        finally:
+            cache.close()
 
         # The truncation message must reference cidx_fetch_cached_payload
         truncated_str = json.dumps(truncated)
@@ -259,7 +284,7 @@ class TestXrayTruncationMessageNamesTool:
             f"so users know how to fetch the full result. Got: {truncated_str[:500]}"
         )
 
-    def test_truncation_message_included_in_truncated_result(self):
+    def test_truncation_message_included_in_truncated_result(self, tmp_path):
         """Truncated result includes a fetch_tool_hint field naming cidx_fetch_cached_payload."""
         from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
 
@@ -274,25 +299,21 @@ class TestXrayTruncationMessageNamesTool:
             "elapsed_seconds": 0.5,
         }
 
-        mock_truncation = {
-            "has_more": True,
-            "preview": "...",
-            "cache_handle": "another-uuid",
-            "total_size": 3000,
-        }
-        mock_cache = MagicMock()
-        mock_cache.truncate_result.return_value = mock_truncation
+        cache = self._make_cache(tmp_path, max_fetch_size_chars=1_000)
+        try:
+            mock_app = MagicMock()
+            mock_app.state.payload_cache = cache
 
-        mock_app = MagicMock()
-        mock_app.state.payload_cache = mock_cache
+            mock_app_module = MagicMock()
+            mock_app_module.app = mock_app
 
-        mock_app_module = MagicMock()
-        mock_app_module.app = mock_app
-
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module
-        ):
-            truncated = _truncate_xray_result(result)
+            with patch(
+                "code_indexer.server.mcp.handlers.xray._utils.app_module",
+                mock_app_module,
+            ):
+                truncated = _truncate_xray_result(result)
+        finally:
+            cache.close()
 
         assert truncated.get("has_more") is True
         # Must include a tool hint field

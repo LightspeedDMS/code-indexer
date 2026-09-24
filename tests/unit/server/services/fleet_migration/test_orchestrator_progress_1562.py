@@ -137,7 +137,7 @@ class TestRunFleetMigrationForRepoProgressCallback:
         result = run_fleet_migration_for_repo(
             refresh_scheduler=scheduler,
             sister_alias_manager=sister_alias_manager,
-            repo_alias="evolution",
+            repo_alias="example-repo",
             base_clone_path=base_clone,
             index_path=index_path,
             semantic_collection_dirs=[collection_dir],

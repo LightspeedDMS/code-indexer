@@ -120,15 +120,15 @@ class TestRegexSearchActivatedRepoAliasResolution:
             patch(_ARM_PATH, arm),
             patch(_GRM_PATH, grm),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_legacy",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_legacy",
                 return_value=mock_legacy,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._get_golden_repos_dir",
+                "code_indexer.server.mcp.handlers.search.regex_search._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._execute_regex_search",
+                "code_indexer.server.mcp.handlers.search.regex_search._execute_regex_search",
                 side_effect=_fake_execute_regex_search,
             ),
         ):

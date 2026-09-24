@@ -106,14 +106,38 @@ async def _invoke_handler(handler_name: str, repo_alias: Any) -> Dict[str, Any]:
 
     with (
         patch.object(
-            _xray_module, "_resolve_repo_path", return_value="/some/path/to/repo"
+            _xray_module._search,
+            "_resolve_repo_path",
+            return_value="/some/path/to/repo",
         ),
         patch.object(
-            _xray_module, "_get_background_job_manager", return_value=mock_bjm
+            _xray_module._explore,
+            "_resolve_repo_path",
+            return_value="/some/path/to/repo",
         ),
-        patch.object(_xray_module, "_get_job_tracker", return_value=mock_job_tracker),
         patch.object(
-            _xray_module, "_get_xray_executor", return_value=mock_xray_executor
+            _xray_module._search, "_get_background_job_manager", return_value=mock_bjm
+        ),
+        patch.object(
+            _xray_module._explore,
+            "_get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch.object(
+            _xray_module._search, "_get_job_tracker", return_value=mock_job_tracker
+        ),
+        patch.object(
+            _xray_module._explore, "_get_job_tracker", return_value=mock_job_tracker
+        ),
+        patch.object(
+            _xray_module._search,
+            "_get_xray_executor",
+            return_value=mock_xray_executor,
+        ),
+        patch.object(
+            _xray_module._explore,
+            "_get_xray_executor",
+            return_value=mock_xray_executor,
         ),
         patch("asyncio.get_running_loop") as mock_loop,
     ):

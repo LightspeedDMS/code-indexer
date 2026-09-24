@@ -79,7 +79,7 @@ def _create_unrecoverable_quarantine_row(db_path: str) -> None:
             "INSERT INTO fleet_migration_quarantine_state "
             "(golden_alias, consecutive_failure_count, failure_cause) "
             "VALUES (?, ?, ?)",
-            ("evolution", 1, "unrecoverable_corruption"),
+            ("example-repo", 1, "unrecoverable_corruption"),
         )
         conn.commit()
     finally:

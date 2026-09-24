@@ -39,7 +39,7 @@ class TestSwitchBranchGlobalAliasRejection:
     def test_switch_branch_global_alias_returns_403(self, normal_user_client):
         """Canonical -global suffix is rejected."""
         response = normal_user_client.post(
-            "/api/activated-repos/evolution-global/branch",
+            "/api/activated-repos/example-repo-global/branch",
             json={"branch_name": "main"},
         )
         assert response.status_code == 403

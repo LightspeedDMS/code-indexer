@@ -235,6 +235,31 @@ def _parse_json_string_array(value: Any) -> Any:
     return value
 
 
+def _parse_and_collapse_repo_alias(value: Any) -> Any:
+    """Parse `value` via `_parse_json_string_array`, then collapse a
+    resulting single-element list of strings to a plain string.
+
+    Issue #1902 (P9 review, three-strike anti-duplication rule): this exact
+    parse-then-collapse idiom previously existed as THREE separate inline
+    copies -- `handle_xray_search` and `handle_xray_explore` (handlers/
+    xray.py, v10.4.5 Defect 5) and `_parse_analyze_graph_request`
+    (handlers/xray_graph.py). All three callers want the identical
+    ergonomic normalization: a caller who always sends a list should see
+    the SAME unwrapped single-repo response shape a bare-string caller
+    gets, rather than a needlessly-wrapped one-element multi-repo response.
+    A GENUINELY empty string element (`[""]`) is deliberately NOT
+    collapsed -- an empty alias is never a valid single-repo target, so it
+    must keep failing the caller's own empty-alias validation instead of
+    silently becoming a truthy-looking single string.
+    """
+    parsed = _parse_json_string_array(value)
+    if isinstance(parsed, list) and len(parsed) == 1:
+        candidate = parsed[0]
+        if isinstance(candidate, str) and candidate:
+            parsed = candidate
+    return parsed
+
+
 def _coerce_int(value: Any, default: int) -> int:
     """Coerce MCP parameter to int, returning default on failure."""
     if value is None:

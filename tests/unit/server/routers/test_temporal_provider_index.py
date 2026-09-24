@@ -791,10 +791,10 @@ class TestBug1373AliasSuffixMismatch:
     _provider_temporal_index_job is invoked with the route-level alias,
     which is already the '-global' form when the admin targets the global
     repo (inline_admin_ops.py temporal job submission). Before the fix,
-    calling with "evolution-global" caused:
-      - golden_repos_metadata update with alias="evolution-global" (0 rows
-        matched -- that table is keyed by the BARE alias "evolution")
-      - global_repos update with alias_name="evolution-global-global" (0
+    calling with "example-repo-global" caused:
+      - golden_repos_metadata update with alias="example-repo-global" (0 rows
+        matched -- that table is keyed by the BARE alias "example-repo")
+      - global_repos update with alias_name="example-repo-global-global" (0
         rows matched -- double-suffixed, matches nothing)
     Both failures silently no-op, permanently misreporting enable_temporal
     as False even though the temporal index was built successfully.
@@ -812,7 +812,7 @@ class TestBug1373AliasSuffixMismatch:
         mock_grm._sqlite_backend.update_enable_temporal.return_value = True
         mock_grm.data_dir = "/tmp/bug-1373-fake-data-dir"
         stale_repo_meta = MagicMock(enable_temporal=False)
-        mock_grm.golden_repos = {"evolution": stale_repo_meta}
+        mock_grm.golden_repos = {"example-repo": stale_repo_meta}
         # Bug #1481: the cache entry is now REPLACED wholesale with the
         # fresh object returned by get_golden_repo() (reflecting the
         # backend write that just succeeded above), not patched in place.
@@ -832,17 +832,17 @@ class TestBug1373AliasSuffixMismatch:
         ):
             mock_app_module.golden_repo_manager = mock_grm
 
-            _set_enable_temporal_flag("evolution-global")
+            _set_enable_temporal_flag("example-repo-global")
 
         # golden_repos_metadata is keyed by the BARE alias -- must receive
-        # "evolution", never the suffixed input "evolution-global".
+        # "example-repo", never the suffixed input "example-repo-global".
         mock_grm._sqlite_backend.update_enable_temporal.assert_called_once_with(
-            "evolution", True
+            "example-repo", True
         )
         # global_repos is keyed by the '-global'-suffixed alias -- must
-        # receive exactly "evolution-global", never "evolution-global-global".
+        # receive exactly "example-repo-global", never "example-repo-global-global".
         mock_global_registry_instance._sqlite_backend.update_enable_temporal.assert_called_once_with(
-            "evolution-global", True
+            "example-repo-global", True
         )
         # In-memory cache (keyed bare) must reflect the update too -- full-object
         # replacement via get_golden_repo(), not the old single-field mutation
@@ -851,9 +851,10 @@ class TestBug1373AliasSuffixMismatch:
         # field -- a bare field-mutation fix would also satisfy a field-only
         # assertion, but would NOT satisfy this identity check.
         assert (
-            mock_grm.golden_repos["evolution"] is mock_grm.get_golden_repo.return_value
+            mock_grm.golden_repos["example-repo"]
+            is mock_grm.get_golden_repo.return_value
         )
-        assert mock_grm.golden_repos["evolution"].enable_temporal is True
+        assert mock_grm.golden_repos["example-repo"].enable_temporal is True
 
 
 class TestBug1481CrossNodeCacheColdRefresh:

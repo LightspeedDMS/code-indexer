@@ -38,14 +38,14 @@ run_test() {
 
 VALID_ARGS=(
     --postgres-url    "postgresql://user:pass@pg-host/cidxdb"
-    --ontap-endpoint  "100.99.60.248"
+    --ontap-endpoint  "203.0.113.10"
     --ontap-export    "/"
     --ontap-mount     "/mnt/fsx"
     --ontap-admin-user "fsxadmin"
     --ontap-admin-password "secret"
-    --ontap-svm       "sebaV2"
-    --ontap-parent-volume "seba_vol1"
-    --nfs-data-lif    "100.99.60.204"
+    --ontap-svm       "svm1"
+    --ontap-parent-volume "vol1"
+    --nfs-data-lif    "203.0.113.11"
 )
 
 # ---------------------------------------------------------------------------
@@ -68,13 +68,13 @@ test_missing_one_arg() {
     # Omit --nfs-data-lif
     output="$(bash "${JOIN_SCRIPT}" \
         --postgres-url    "postgresql://user:pass@pg-host/cidxdb" \
-        --ontap-endpoint  "100.99.60.248" \
+        --ontap-endpoint  "203.0.113.10" \
         --ontap-export    "/" \
         --ontap-mount     "/mnt/fsx" \
         --ontap-admin-user "fsxadmin" \
         --ontap-admin-password "secret" \
-        --ontap-svm       "sebaV2" \
-        --ontap-parent-volume "seba_vol1" \
+        --ontap-svm       "svm1" \
+        --ontap-parent-volume "vol1" \
         2>&1)" && exit_code=0 || exit_code=$?
     [[ ${exit_code} -ne 0 ]] && echo "${output}" | grep -q "\-\-nfs-data-lif"
 }
@@ -215,7 +215,7 @@ test_nfs_mount_in_output() {
     rm -rf "${tmpdir}"
 
     [[ ${exit_code} -eq 0 ]] \
-        && echo "${output}" | grep -q "100.99.60.204" \
+        && echo "${output}" | grep -q "203.0.113.11" \
         && echo "${output}" | grep -q "/mnt/fsx"
 }
 run_test "NFS data LIF and mount point appear in dry-run output" test_nfs_mount_in_output

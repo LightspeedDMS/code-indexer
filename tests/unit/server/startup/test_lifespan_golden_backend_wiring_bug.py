@@ -517,7 +517,7 @@ class TestDescriptionRefreshSchedulerGoldenBackendInjection:
             "langfuse-python",
             "langfuse-js",
             "langfuse-docs",
-            "evolution",
+            "example-repo",
             "requests",
             "httpx",
             "sqlalchemy",

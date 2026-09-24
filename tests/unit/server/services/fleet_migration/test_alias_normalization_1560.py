@@ -71,8 +71,8 @@ class TestNormalizeGoldenAliasStripping:
         assert normalize_golden_alias("click") == "click"
 
     def test_global_suffix_constant_matches_stripped_text(self):
-        alias = "evolution" + GLOBAL_SUFFIX
-        assert normalize_golden_alias(alias) == "evolution"
+        alias = "example-repo" + GLOBAL_SUFFIX
+        assert normalize_golden_alias(alias) == "example-repo"
 
 
 class TestNormalizeGoldenAliasExactlyOneSuffix:

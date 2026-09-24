@@ -36,17 +36,17 @@ class OntapFlexCloneClient:
         Parameters
         ----------
         endpoint:
-            Base URL or hostname of the ONTAP cluster, e.g. ``"100.99.60.248"``.
+            Base URL or hostname of the ONTAP cluster, e.g. ``"203.0.113.10"``.
             The scheme (``https://``) is prepended automatically when missing.
         username:
             ONTAP admin username, e.g. ``"fsxadmin"``.
         password:
             ONTAP admin password.
         svm_name:
-            Storage Virtual Machine name, e.g. ``"sebaV2"``.
+            Storage Virtual Machine name, e.g. ``"svm1"``.
         parent_volume:
             Name of the parent FlexVol from which clones are created,
-            e.g. ``"seba_vol1"``.
+            e.g. ``"vol1"``.
         verify_ssl:
             Whether to verify the ONTAP server's TLS certificate.  Defaults to
             ``False`` because ONTAP clusters typically use self-signed certs.

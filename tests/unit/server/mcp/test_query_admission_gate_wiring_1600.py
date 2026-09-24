@@ -342,10 +342,12 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
 
     @pytest.mark.asyncio
     async def test_search_search_code(self):
+        from code_indexer.server.mcp.handlers.search import code_search
+
         mock_search_activated = MagicMock(
             return_value={"content": [{"type": "text", "text": "{}"}]}
         )
-        with patch.object(search, "_search_activated_repo", mock_search_activated):
+        with patch.object(code_search, "_search_activated_repo", mock_search_activated):
             params = {"query_text": "hello", "repository_alias": "myrepo"}
 
             async def _denied():
@@ -358,12 +360,14 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
 
     @pytest.mark.asyncio
     async def test_search_handle_regex_search(self):
+        from code_indexer.server.mcp.handlers.search import regex_search
+
         fake_legacy = MagicMock()
         fake_legacy._resolve_repo_path.return_value = _FAKE_REPO_PATH
         mock_execute_regex = AsyncMock(return_value=([], {}, MagicMock()))
         with (
-            patch.object(search, "_get_legacy", return_value=fake_legacy),
-            patch.object(search, "_execute_regex_search", mock_execute_regex),
+            patch.object(regex_search, "_get_legacy", return_value=fake_legacy),
+            patch.object(regex_search, "_execute_regex_search", mock_execute_regex),
             patch.object(
                 _handlers_utils.app_module.app.state,
                 "golden_repos_dir",
@@ -395,7 +399,7 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             # test_xray_search_handler.py) so this test is self-contained
             # and immune to cross-test pollution of the ambient binding.
             patch.object(
-                xray,
+                xray._search,
                 "_resolve_repo_path",
                 return_value=_FAKE_REPO_PATH,
             ),
@@ -406,12 +410,15 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             # which -- for a PEP-562 lazily-constructed attribute that has
             # never been touched yet -- triggers real, unconditional
             # construction of the process-wide app singleton as a side
-            # effect of merely being patched. Patching xray's own
-            # extracted-for-mocking wrapper functions instead (mirroring
-            # test_xray_cell_limiter.py's established pattern) verifies the
-            # exact same ordering without the patch-time construction side effect.
-            patch.object(xray, "_get_job_tracker", return_value=mock_job_tracker),
-            patch.object(xray, "_get_xray_executor", return_value=MagicMock()),
+            # effect of merely being patched. Patching the owning
+            # submodule's own extracted-for-mocking wrapper functions
+            # instead (mirroring test_xray_cell_limiter.py's established
+            # pattern) verifies the exact same ordering without the
+            # patch-time construction side effect.
+            patch.object(
+                xray._search, "_get_job_tracker", return_value=mock_job_tracker
+            ),
+            patch.object(xray._search, "_get_xray_executor", return_value=MagicMock()),
         ):
             params = {
                 "repository_alias": "myrepo",
@@ -443,16 +450,18 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             # test_xray_search_handler.py) so this test is self-contained
             # and immune to cross-test pollution of the ambient binding.
             patch.object(
-                xray,
+                xray._explore,
                 "_resolve_repo_path",
                 return_value=_FAKE_REPO_PATH,
             ),
             # Bug #1693 regression note: see test_xray_handle_xray_search
-            # above -- patching xray's own extracted-for-mocking wrapper
-            # functions avoids ever touching the real, lazily-constructed
-            # process-wide app singleton.
-            patch.object(xray, "_get_job_tracker", return_value=mock_job_tracker),
-            patch.object(xray, "_get_xray_executor", return_value=MagicMock()),
+            # above -- patching the owning submodule's own
+            # extracted-for-mocking wrapper functions avoids ever touching
+            # the real, lazily-constructed process-wide app singleton.
+            patch.object(
+                xray._explore, "_get_job_tracker", return_value=mock_job_tracker
+            ),
+            patch.object(xray._explore, "_get_xray_executor", return_value=MagicMock()),
         ):
             params = {
                 "repository_alias": "myrepo",

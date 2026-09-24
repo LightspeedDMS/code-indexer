@@ -21,7 +21,7 @@ guard already established in `AutoWatchManager.start_watch`.
 
 NOTE on test isolation: this dev machine has real `.code-indexer/config.json`
 files at several ancestors of any `/tmp`-based `tmp_path` (e.g.
-`/tmp/.code-indexer`, `/home/jsbattig/.code-indexer`) from unrelated real
+`/tmp/.code-indexer`, `/home/opuser/.code-indexer`) from unrelated real
 usage, so an UNMOCKED `ConfigManager.create_with_backtrack()` call starting
 from `tmp_path` would accidentally find one of those real configs instead of
 hitting the "no config found anywhere" branch this bug is about. Each test

@@ -20,12 +20,12 @@ class TestCommitMessageMatchQuietMode:
                 "type": "commit_message",
                 "commit_hash": "c6ffd19abcd1234567890",
                 "commit_date": "2025-07-14",
-                "author_name": "Jose Sebastian Battig",
-                "author_email": "jsbattig@gmail.com",
+                "author_name": "Test Author",
+                "author_email": "author@example.com",
             },
             "temporal_context": {
                 "commit_date": "2025-07-14",
-                "author_name": "Jose Sebastian Battig",
+                "author_name": "Test Author",
             },
             "content": "Fix watch mode re-indexing already indexed files",
             "score": 0.700,
@@ -45,8 +45,8 @@ class TestCommitMessageMatchQuietMode:
             assert "0.700" in first_call_args
             assert "c6ffd19" in first_call_args
             assert "2025-07-14" in first_call_args
-            assert "Jose Sebastian Battig" in first_call_args
-            assert "jsbattig@gmail.com" in first_call_args
+            assert "Test Author" in first_call_args
+            assert "author@example.com" in first_call_args
 
             # Second call should be indented content
             second_call_args = str(calls[1])

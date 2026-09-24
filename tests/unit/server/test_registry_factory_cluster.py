@@ -388,15 +388,15 @@ def test_repos_handler_update_enable_temporal_normalizes_suffixed_alias_postgres
     as passed by _provider_temporal_index_job). In postgres mode it must
     still update golden_repos_metadata with the BARE alias and global_repos
     with exactly one '-global' suffix -- never the double-suffixed
-    "evolution-global-global" that matches no row.
+    "example-repo-global-global" that matches no row.
     """
-    backend = _make_backend_with_one_repo("evolution-global", "evolution")
+    backend = _make_backend_with_one_repo("example-repo-global", "example-repo")
 
     grm_mock = MagicMock()
     grm_mock.data_dir = str(tmp_path)
     grm_mock._sqlite_backend = MagicMock()
     grm_mock._sqlite_backend.update_enable_temporal.return_value = True
-    grm_mock.golden_repos = {"evolution": MagicMock()}
+    grm_mock.golden_repos = {"example-repo": MagicMock()}
 
     from code_indexer.server import app as app_module
 
@@ -410,7 +410,7 @@ def test_repos_handler_update_enable_temporal_normalizes_suffixed_alias_postgres
                 _set_enable_temporal_flag,
             )
 
-            _set_enable_temporal_flag("evolution-global")
+            _set_enable_temporal_flag("example-repo-global")
         finally:
             if saved_grm is not None:
                 app_module.golden_repo_manager = saved_grm
@@ -418,11 +418,11 @@ def test_repos_handler_update_enable_temporal_normalizes_suffixed_alias_postgres
                 delattr(app_module, "golden_repo_manager")
 
     grm_mock._sqlite_backend.update_enable_temporal.assert_called_once_with(
-        "evolution", True
+        "example-repo", True
     )
     assert len(backend.update_enable_temporal_calls) == 1
     alias_called, flag_called = backend.update_enable_temporal_calls[0]
-    assert alias_called == "evolution-global"
+    assert alias_called == "example-repo-global"
     assert flag_called is True
 
 

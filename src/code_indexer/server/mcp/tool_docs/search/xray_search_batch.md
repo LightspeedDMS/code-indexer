@@ -13,7 +13,7 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier(s): single string, list of strings, or JSON-encoded string array. Duplicates are de-duplicated before the matrix is built. Global-alias fallback: bare alias "evolution" promotes to "evolution-global" when the repo is globally active. Maximum 50 aliases.'
+      description: 'Repository identifier(s): single string, list of strings, or JSON-encoded string array. Duplicates are de-duplicated before the matrix is built. Global-alias fallback: bare alias "example-repo" promotes to "example-repo-global" when the repo is globally active. Maximum 50 aliases.'
     scans:
       type: array
       description: 'Array of scan bundles (REQUIRED, non-empty, max 50). Each bundle drives one Phase-1 + Phase-2 pass per resolved repository. See bundle schema below.'
@@ -129,7 +129,7 @@ Limits:
 
 Aliases are resolved before submitting the job:
 - Direct resolution attempted first.
-- Global-alias fallback: bare alias "evolution" -> "evolution-global" when globally active and user does not have it directly activated.
+- Global-alias fallback: bare alias "example-repo" -> "example-repo-global" when globally active and user does not have it directly activated.
 - Unresolvable aliases become `error_level="repo"` entries in errors[].
 - If ALL aliases fail: synchronous error `no_repositories_resolved`.
 - If SOME aliases fail: job is submitted over the resolved subset; partial=true.
@@ -205,13 +205,17 @@ Progress advances once per REPO processed (not per cell, not per file). With 4 r
 
 ## Large Result Caching
 
-When the combined result exceeds the inline threshold (~2000 chars), the full JSON is stored in PayloadCache and the response includes:
+When the combined `matches[]`/`errors[]`/`evaluation_errors[]` JSON exceeds the server's single payload character budget (Web UI `payload_max_fetch_size_chars`, default 5000 chars), the FULL set is stored in PayloadCache as a series of whole-entry pages and the response includes:
 - `cache_handle`: opaque handle for paged retrieval.
 - `has_more: true`, `truncated: true`.
-- `matches[]`, `errors[]`, `evaluation_errors[]`: first 3 entries inline for quick inspection.
+- `total_pages: <int>`: number of independently-fetchable cache pages the full content was split across.
+- `inline_entry_truncated: true`: present only in the rare case where the single first entry alone exceeds the budget; it is then adaptively shrunk (string/list fields capped) for THIS inline response ONLY -- the cached copy stays whole and unmodified.
+- `matches[]`, `errors[]`, `evaluation_errors[]`: as many WHOLE leading entries as fit the character budget inline -- a genuine character-budget-driven prefix, never a fixed count of 3, and never a partially-cut entry (unless `inline_entry_truncated` is set).
 - `fetch_tool_hint`: instructions to call `cidx_fetch_cached_payload`.
 
-Cached payload is serialized JSON paged by CHARACTER count. Fetch it via `cidx_fetch_cached_payload(cache_handle, page)` and parse the returned `content` string as JSON.
+Each cache page is stored as its OWN independent row and holds whole, unmodified entries -- an entry that alone exceeds the budget gets its own, necessarily oversized, page rather than being cut. Fetch every page via `cidx_fetch_cached_payload(cache_handle, page)` for `page` from 1 through `total_pages`; each page is returned WHOLE and unsliced regardless of the server's CURRENT `payload_max_fetch_size_chars` setting (a config change between store and fetch cannot corrupt or misalign a page), and parses standalone as `{"matches": [...], "errors": [...], "evaluation_errors": [...]}`. Concatenate every page's arrays, in page order, to reconstruct the full result exactly, in original order.
+
+**Cache degradation and failure** (Bug #1928 final round): `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the batch run already produced, alongside the failure -- only `matches[]`/`errors[]`/`evaluation_errors[]` are genuinely undeliverable.
 
 ## Cancellation
 

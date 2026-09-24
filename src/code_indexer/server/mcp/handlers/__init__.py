@@ -139,9 +139,34 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
+                # Issue #1935: search.py was split into the search/ package;
+                # each child now bare-imports its own helpers from _utils
+                # (same pattern as scip.py, guides.py, etc. above), so each
+                # must be registered here too or patch.object(handlers, ...)
+                # silently stops reaching the real call site.
+                "code_indexer.server.mcp.handlers.search._shared",
+                "code_indexer.server.mcp.handlers.search.omni",
+                "code_indexer.server.mcp.handlers.search.memory_retrieval",
+                "code_indexer.server.mcp.handlers.search.repo_search",
+                "code_indexer.server.mcp.handlers.search.temporal_search",
+                "code_indexer.server.mcp.handlers.search.code_search",
+                "code_indexer.server.mcp.handlers.search.regex_search",
+                "code_indexer.server.mcp.handlers.search.cached_content",
                 "code_indexer.server.mcp.handlers.depmap",
                 "code_indexer.server.mcp.handlers.memory",
                 "code_indexer.server.mcp.handlers.xray",
+                # Issue #1935: xray.py was split into the xray/ package;
+                # each child bare-imports its own helpers from _utils (same
+                # pattern as search.* above), so each must be registered
+                # here too or patch.object(handlers, ...) silently stops
+                # reaching the real call site.
+                "code_indexer.server.mcp.handlers.xray._infra",
+                "code_indexer.server.mcp.handlers.xray._search",
+                "code_indexer.server.mcp.handlers.xray._explore",
+                "code_indexer.server.mcp.handlers.xray._dump_ast",
+                "code_indexer.server.mcp.handlers.xray._cached_payload",
+                "code_indexer.server.mcp.handlers.xray._store_pattern",
+                "code_indexer.server.mcp.handlers.xray._cancel_job",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if (

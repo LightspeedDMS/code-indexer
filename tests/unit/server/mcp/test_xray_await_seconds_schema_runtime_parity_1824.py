@@ -51,10 +51,22 @@ _SERVER_ROOT = (
     / "server"
 )
 TOOL_DOCS_SEARCH_DIR = _SERVER_ROOT / "mcp" / "tool_docs" / "search"
-XRAY_HANDLER_PY = _SERVER_ROOT / "mcp" / "handlers" / "xray.py"
+# Issue #1935 Part 2: handlers/xray.py was split into the handlers/xray/
+# package (per-tool submodules). The await_seconds source-comment history
+# this test pins now spans multiple files (top-of-file provenance comment
+# in __init__.py, the validator itself in _search_validation.py, reused
+# by both handle_xray_search's _search.py and handle_xray_explore's
+# _explore.py) -- read and concatenate every .py file in the package
+# rather than one flat file.
+XRAY_HANDLER_PACKAGE_DIR = _SERVER_ROOT / "mcp" / "handlers" / "xray"
 
 XRAY_EXPLORE_MD = TOOL_DOCS_SEARCH_DIR / "xray_explore.md"
 XRAY_SEARCH_BATCH_MD = TOOL_DOCS_SEARCH_DIR / "xray_search_batch.md"
+
+# Issue #1935 Part 2 (P2-4): how close a "Bug #1070" mention must be to
+# its anchor to count as "adjacent" rather than a coincidental, unrelated
+# mention elsewhere in the same file.
+_ADJACENCY_WINDOW_CHARS = 400
 
 
 def _load_tool_registry() -> Dict[str, Any]:
@@ -338,17 +350,46 @@ def test_xray_handler_source_comments_have_consistent_await_seconds_history() ->
     stale, superseded v10.3.2 (30 -> 10) note left over from before the
     cap was raised to 120 and then lowered again by Bug #1070.
     """
-    source = XRAY_HANDLER_PY.read_text(encoding="utf-8")
+    source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(XRAY_HANDLER_PACKAGE_DIR.glob("*.py"))
+    )
     assert "to 10 in v10.3.2" not in source, (
-        "handlers/xray.py still carries the stale 'Cap lowered from 30 to "
+        "handlers/xray/ still carries the stale 'Cap lowered from 30 to "
         "10 in v10.3.2' comment next to the await_seconds validation -- "
         "that transition predates, and does not match, the CURRENT 45.0 "
         "cap (Bug #1070, 120.0 -> 45.0)."
     )
-    bug_1070_mentions = source.count("Bug #1070")
-    assert bug_1070_mentions >= 3, (
-        f"expected the top-of-file provenance comment PLUS a consistent "
-        f"'Bug #1070' reference near both the xray_search and xray_explore "
-        f"await_seconds validation blocks (>= 3 total mentions), found "
-        f"{bug_1070_mentions}"
-    )
+
+    def _assert_bug_1070_adjacent_to(filename: str, anchor: str) -> None:
+        """A whole-package `count("Bug #1070") >= N` is vacuous once the
+        package contains other, UNRELATED "Bug #1070" mentions (Issue
+        #1935 Part 2, coordinator review P2-4) -- this instead anchors on
+        a string UNIQUE to the code being guarded (a constant name or a
+        specific error-message literal) and requires "Bug #1070" within
+        `_ADJACENCY_WINDOW_CHARS` of it.
+        """
+        text = (XRAY_HANDLER_PACKAGE_DIR / filename).read_text(encoding="utf-8")
+        anchor_pos = text.find(anchor)
+        assert anchor_pos != -1, f"{filename} must contain {anchor!r}"
+        window = text[
+            max(0, anchor_pos - _ADJACENCY_WINDOW_CHARS) : anchor_pos
+            + _ADJACENCY_WINDOW_CHARS
+        ]
+        assert "Bug #1070" in window, (
+            f"{filename} must carry a 'Bug #1070' comment directly "
+            f"adjacent to (within {_ADJACENCY_WINDOW_CHARS} chars of) "
+            f"{anchor!r} -- none found."
+        )
+
+    # _infra.py: the shared top-of-file provenance comment, anchored on
+    # the unique _AWAIT_SECONDS_MIN constant-definition line.
+    _assert_bug_1070_adjacent_to("_infra.py", "_AWAIT_SECONDS_MIN")
+    # _search.py / _explore.py: each handler's own inline validation
+    # comment, anchored on the unique validation error message text
+    # (Issue #1935's pure-move rebuild folded _validate_search_
+    # await_seconds back into each handler inline, matching HEAD -- there
+    # is no longer a separate shared validator function to inspect
+    # instead).
+    _assert_bug_1070_adjacent_to("_search.py", "await_seconds must be a number")
+    _assert_bug_1070_adjacent_to("_explore.py", "await_seconds must be a number")

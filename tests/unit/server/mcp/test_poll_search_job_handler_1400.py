@@ -61,6 +61,9 @@ class TestHandlePollSearchJobDelegatesToCoreLogic:
         """Proves the handler actually composes read_temporal_snapshot +
         poll_temporal_job_status, not just short-circuiting to not_found."""
         from code_indexer.server.mcp.handlers import search as search_module
+        from code_indexer.server.mcp.handlers.search import (
+            cached_content as cached_content_module,
+        )
 
         mock_bgm = MagicMock()
         mock_bgm.get_job_status.return_value = {"status": "completed"}
@@ -81,12 +84,12 @@ class TestHandlePollSearchJobDelegatesToCoreLogic:
                 mock_bgm,
             ),
             patch.object(
-                search_module,
+                cached_content_module,
                 "read_temporal_snapshot",
                 return_value=fake_snapshot,
             ),
             patch.object(
-                search_module,
+                cached_content_module,
                 "_get_access_filtering_service",
                 return_value=MagicMock(
                     is_admin_user=lambda u: False,

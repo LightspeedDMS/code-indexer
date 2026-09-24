@@ -186,7 +186,7 @@ class TestMcpHandlerThreadsAliasIntoRegexSearchService:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search.get_config_service"
+                "code_indexer.server.mcp.handlers.search.regex_search.get_config_service"
             ) as mock_get_config_service,
             patch(
                 "code_indexer.global_repos.regex_search.RegexSearchService",

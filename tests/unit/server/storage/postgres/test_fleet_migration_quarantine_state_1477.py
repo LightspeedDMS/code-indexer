@@ -258,7 +258,7 @@ class TestGoldenRepoMetadataPostgresBackendFleetMigrationQuarantine:
                 "generic",
             ),
             (
-                "evolution",
+                "example-repo",
                 1,
                 "sig-e",
                 "2026-01-03T00:00:00",
@@ -273,7 +273,7 @@ class TestGoldenRepoMetadataPostgresBackendFleetMigrationQuarantine:
 
         assert len(rows) == 2
         assert rows[0]["golden_alias"] == "click"
-        assert rows[1]["golden_alias"] == "evolution"
+        assert rows[1]["golden_alias"] == "example-repo"
         select_calls = [
             c for c in cursor.execute.call_args_list if "SELECT" in str(c[0][0]).upper()
         ]

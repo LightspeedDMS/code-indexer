@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
@@ -305,6 +305,62 @@ class PayloadCache:
         self._conn_manager.execute_atomic(_do_batch_insert)
         return handles
 
+    def store_batch_with_keys(self, items: List[Tuple[str, str]]) -> None:
+        """Store multiple (handle, content) pairs -- handles PRE-ASSIGNED
+        by the caller -- in ONE atomic transaction sharing a single
+        timestamp/TTL, PROPAGATING any write failure.
+
+        Bug #1928 (round 3, P1 -- Codex REJECT): a page-set write (e.g.
+        xray_truncation's N whole-entry pages plus a pages-v1 manifest
+        that references their handles) must be all-or-nothing and share
+        one expiry window. Unlike store_batch() above (which generates
+        its own UUID4 handles and, on the PG backend, silently swallows a
+        write failure via a warning log), this method:
+          - accepts pre-assigned handles so a manifest referencing other
+            entries' handles can be built BEFORE any write happens and
+            then submitted together with them in the SAME batch;
+          - delegates to `_backend.store_batch_strict()` (never
+            `store_batch()`) so a backend write failure is never
+            swallowed;
+          - on the plain-SQLite path (no `_backend`), uses the same
+            `execute_atomic()` transaction (rolls back and re-raises on
+            any failure) `store_batch()` already relies on.
+
+        Args:
+            items: List of (handle, content) pairs. Empty list is a no-op.
+
+        Raises:
+            RuntimeError: not initialized (plain-SQLite path).
+            Whatever the underlying backend/connection raises on failure
+                (never swallowed).
+        """
+        if not items:
+            return
+
+        ttl = self.config.cache_ttl_seconds
+
+        if self._backend is not None:
+            preview_size = self.config.preview_size_chars
+            entries = [(h, c, c[:preview_size], ttl) for h, c in items]
+            self._backend.store_batch_strict(entries)
+            return
+
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        now = time.time()
+        rows = [(h, c, now, len(c)) for h, c in items]
+
+        def _do_batch_insert_with_keys(conn: sqlite3.Connection) -> None:
+            conn.executemany(
+                """
+                INSERT INTO payload_cache (handle, content, created_at, total_size)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        self._conn_manager.execute_atomic(_do_batch_insert_with_keys)
+
     def store_with_key(self, key: str, content: str) -> None:
         """Store content with explicit key.
 
@@ -371,6 +427,50 @@ class PayloadCache:
             row = cursor.fetchone()
         return row[0] > 0 if row else False
 
+    def retrieve_full(self, handle: str) -> str:
+        """Return the COMPLETE stored content for handle, bypassing the
+        `max_fetch_size_chars` char-window slicing `retrieve()` applies.
+
+        Bug #1928: a caller that stores its OWN pre-chunked pages (each
+        page a whole PayloadCache row) needs to read a page back EXACTLY
+        as stored, regardless of what `max_fetch_size_chars` is
+        configured to at fetch time (which may differ from what it was
+        at store time -- e.g. after a Web UI config change or a
+        restart). `retrieve()`'s windowing would otherwise re-slice
+        already-complete page content using the CURRENT config, silently
+        corrupting it. Both backends already fetch the full row before
+        `retrieve()` slices it (see that method below) -- this simply
+        skips the slicing step; it has IDENTICAL memory/IO cost AND
+        IDENTICAL TTL semantics to `retrieve()`: the `_backend` (PG)
+        path independently verifies TTL inside `_backend.retrieve()`;
+        the SQLite path, exactly like `retrieve()` below, does NOT
+        independently check TTL -- it relies on the background
+        `cleanup_expired()` thread to have already deleted a stale row,
+        so a handle whose entry has not yet been swept could still be
+        read (unchanged from `retrieve()`'s own existing behavior).
+
+        Raises:
+            CacheNotFoundError: If handle not found (row missing/already
+                evicted by cleanup for SQLite; missing OR TTL-expired for
+                the PG `_backend` path).
+        """
+        if self._backend is not None:
+            row = self._backend.retrieve(handle)
+            if row is None:
+                raise CacheNotFoundError(f"Cache handle not found: {handle}")
+            return cast(str, row["content"])
+
+        if self._conn_manager is None:
+            raise RuntimeError("PayloadCache not initialized - call initialize() first")
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT content FROM payload_cache WHERE handle = ?", (handle,)
+            )
+            sqlite_row = cursor.fetchone()
+        if sqlite_row is None:
+            raise CacheNotFoundError(f"Cache handle not found: {handle}")
+        return cast(str, sqlite_row[0])
+
     def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
         """Retrieve cached content by handle with pagination.
 
@@ -426,13 +526,13 @@ class PayloadCache:
                 "SELECT content, total_size FROM payload_cache WHERE handle = ?",
                 (handle,),
             )
-            row = cursor.fetchone()
+            sqlite_row = cursor.fetchone()
 
-        if row is None:
+        if sqlite_row is None:
             raise CacheNotFoundError(f"Cache handle not found: {handle}")
 
-        content = row[0]
-        total_size = row[1]
+        content = sqlite_row[0]
+        total_size = sqlite_row[1]
         page_size = self.config.max_fetch_size_chars
 
         # Calculate pagination

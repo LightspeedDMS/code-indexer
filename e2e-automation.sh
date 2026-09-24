@@ -259,7 +259,7 @@ reset_test_environment() {
 
     # --- Step 2: prune old pytest temp dirs (keep newest PYTEST_DIRS_TO_KEEP) ---
     local pruned=0
-    local pytest_base="/tmp/pytest-of-${USER:-jsbattig}"
+    local pytest_base="/tmp/pytest-of-${USER:-$(whoami)}"
     if [[ -d "$pytest_base" ]]; then
         # List pytest-NN dirs sorted newest-first, skip the N newest, remove the rest
         local dirs_to_remove=()

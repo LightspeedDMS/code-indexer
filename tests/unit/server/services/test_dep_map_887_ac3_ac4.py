@@ -34,27 +34,27 @@ class TestNormalizeIdentifierPureFunction:
 
     def test_lowercases_mixed_case(self) -> None:
         fn = import_hygiene_symbol("normalize_identifier")
-        result, modified = fn("Evolution")
-        assert result == "evolution"
+        result, modified = fn("Example-Repo")
+        assert result == "example-repo"
         assert modified is True
 
     def test_already_lowercase_unchanged(self) -> None:
         fn = import_hygiene_symbol("normalize_identifier")
-        result, modified = fn("evolution")
-        assert result == "evolution"
+        result, modified = fn("example-repo")
+        assert result == "example-repo"
         assert modified is False
 
     def test_strips_backticks_and_lowercases(self) -> None:
         fn = import_hygiene_symbol("normalize_identifier")
-        result, modified = fn("`Evolution`")
-        assert result == "evolution"
+        result, modified = fn("`Example-Repo`")
+        assert result == "example-repo"
         assert modified is True
 
     def test_backtick_wrapped_lowercase_reports_modified(self) -> None:
         """Backtick-wrapped all-lowercase: stripped → modified (backtick removed)."""
         fn = import_hygiene_symbol("normalize_identifier")
-        result, modified = fn("`evolution`")
-        assert result == "evolution"
+        result, modified = fn("`example-repo`")
+        assert result == "example-repo"
         assert modified is True
 
     def test_empty_string_unchanged(self) -> None:
@@ -78,12 +78,12 @@ class TestAC3ParserIntegration:
         write_domains_json(
             d,
             [
-                {"name": "Evolution", "description": "d", "participating_repos": []},
+                {"name": "Example-Repo", "description": "d", "participating_repos": []},
                 {"name": "Other", "description": "d", "participating_repos": []},
             ],
         )
-        (d / "Evolution.md").write_text(
-            "---\nname: Evolution\n---\n"
+        (d / "Example-Repo.md").write_text(
+            "---\nname: Example-Repo\n---\n"
             "## Cross-Domain Connections\n\n"
             "### Outgoing Dependencies\n\n"
             "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
@@ -103,7 +103,7 @@ class TestAC3ParserIntegration:
             "### Incoming Dependencies\n\n"
             "| External Repo | Depends On | Source Domain | Type | Why | Evidence |\n"
             "|---|---|---|---|---|---|\n"
-            "| repo-e | repo-o | Evolution | Code-level | why | evidence |\n",
+            "| repo-e | repo-o | Example-Repo | Code-level | why | evidence |\n",
             encoding="utf-8",
         )
 
@@ -117,8 +117,8 @@ class TestAC3ParserIntegration:
         )
         # The specific normalized edge must be present
         pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
-        assert ("evolution", "other") in pairs, (
-            f"Expected normalized edge ('evolution','other'), got: {pairs}"
+        assert ("example-repo", "other") in pairs, (
+            f"Expected normalized edge ('example-repo','other'), got: {pairs}"
         )
         for edge in edges:
             assert edge["source_domain"] == edge["source_domain"].lower(), (

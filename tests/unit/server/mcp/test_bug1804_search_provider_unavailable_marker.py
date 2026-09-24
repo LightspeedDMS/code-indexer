@@ -95,7 +95,7 @@ def _enter_global_search_helper_patches(stack: ExitStack) -> None:
     reach the SUT without unrelated collaborators erroring out first."""
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._apply_rerank_and_filter",
+            "code_indexer.server.mcp.handlers.search.repo_search._apply_rerank_and_filter",
             side_effect=lambda results, params, req_limit, alias, user: (
                 results,
                 _make_rerank_meta(),
@@ -104,28 +104,30 @@ def _enter_global_search_helper_patches(stack: ExitStack) -> None:
     )
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._load_category_map",
+            "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
             return_value={},
         )
     )
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._get_wiki_enabled_repos",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_wiki_enabled_repos",
             return_value=set(),
         )
     )
     stack.enter_context(
-        patch("code_indexer.server.mcp.handlers.search._enrich_results_with_category")
+        patch(
+            "code_indexer.server.mcp.handlers.search.repo_search._enrich_results_with_category"
+        )
     )
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._compute_effective_limit",
+            "code_indexer.server.mcp.handlers.search.repo_search._compute_effective_limit",
             side_effect=lambda req, user: req,
         )
     )
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._compute_rerank_limit",
+            "code_indexer.server.mcp.handlers.search.repo_search._compute_rerank_limit",
             side_effect=lambda params, req, eff: eff,
         )
     )
@@ -141,14 +143,14 @@ def _enter_global_repo_prereqs(
 
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._resolve_global_repo_target",
+            "code_indexer.server.mcp.handlers.search.repo_search._resolve_global_repo_target",
             return_value=(repo_entry, target_path, None),
         )
     )
     _enter_global_search_helper_patches(stack)
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._get_query_tracker",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_query_tracker",
             return_value=None,
         )
     )
@@ -224,12 +226,12 @@ def _enter_activated_repo_prereqs(stack: ExitStack, tmp_path: Path) -> MagicMock
 
     stack.enter_context(
         patch(
-            "code_indexer.server.mcp.handlers.search._load_category_map",
+            "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
             return_value={},
         )
     )
     mock_cfg_svc = stack.enter_context(
-        patch("code_indexer.server.mcp.handlers.search.get_config_service")
+        patch("code_indexer.server.mcp.handlers.search.repo_search.get_config_service")
     )
     mock_mem_cfg = MagicMock()
     mock_mem_cfg.memory_retrieval_enabled = False

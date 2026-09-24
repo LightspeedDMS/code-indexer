@@ -355,6 +355,63 @@ def test_graph_mode_evaluator_missing_analyze_graph_is_still_rejected() -> None:
     assert result.error_code == "missing_entry_point"
 
 
+def test_missing_entry_point_names_the_actual_missing_construct_not_evaluate_node() -> (
+    None
+):
+    """Bug #1955 defect 5: an evaluator defining only `fn collect_facts`
+    (no `fn analyze_graph`, no `fn evaluate_node`) is rejected as
+    `missing_entry_point`, but the response's `offending_construct` was
+    hardcoded to `"evaluate_node"` -- a construct this user never wrote at
+    all. The user is one step from graph mode (they have collect_facts);
+    the actually-missing piece is `analyze_graph`, and the error must name
+    that, never the unrelated legacy entry point.
+    """
+    code = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }\n"
+    result = validate_rust_evaluator(code)
+    assert result.ok is False
+    assert result.error_code == "missing_entry_point"
+    assert result.offending_construct == "analyze_graph", (
+        f"user wrote collect_facts but not analyze_graph -- offending_construct must name "
+        f"analyze_graph, the construct actually missing, not {result.offending_construct!r}"
+    )
+
+
+def test_missing_entry_point_names_collect_facts_when_only_analyze_graph_is_defined() -> (
+    None
+):
+    """Mirror of the test above: an evaluator defining only `fn
+    analyze_graph` (no `fn collect_facts`, no `fn evaluate_node`) --
+    exactly the shape #1955 measured live -- must name `collect_facts` as
+    the offending construct, not `evaluate_node`.
+    """
+    code = (
+        "fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult "
+        "{ GraphResult::default() }\n"
+    )
+    result = validate_rust_evaluator(code)
+    assert result.ok is False
+    assert result.error_code == "missing_entry_point"
+    assert result.offending_construct == "collect_facts", (
+        f"user wrote analyze_graph but not collect_facts -- offending_construct must name "
+        f"collect_facts, the construct actually missing, not {result.offending_construct!r}"
+    )
+
+
+def test_missing_entry_point_names_evaluate_node_when_neither_graph_function_is_defined() -> (
+    None
+):
+    """When the source defines NEITHER graph-mode function at all (e.g. an
+    empty/unrelated snippet), the legacy entry point `evaluate_node`
+    remains the correct, honest fallback name -- there is no partial graph-
+    mode construct to point at instead.
+    """
+    code = "fn something_unrelated() -> u32 { 42 }\n"
+    result = validate_rust_evaluator(code)
+    assert result.ok is False
+    assert result.error_code == "missing_entry_point"
+    assert result.offending_construct == "evaluate_node"
+
+
 # ---------------------------------------------------------------------------
 # Tests: forbidden constructs (parametrized)
 # ---------------------------------------------------------------------------

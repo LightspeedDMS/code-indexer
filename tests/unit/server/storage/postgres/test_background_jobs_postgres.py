@@ -911,7 +911,10 @@ class TestCleanupOldJobs:
     def test_cleanup_old_jobs_sql_targets_terminal_statuses(self):
         """
         When cleanup_old_jobs() is called
-        Then the DELETE SQL targets completed, failed, and cancelled statuses.
+        Then the DELETE SQL's bound params target every terminal status:
+        completed, completed_partial, failed, cancelled, interrupted
+        (Bug #1950 -- the status list is parameterized via %s placeholders,
+        not interpolated as literals into the SQL text).
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
@@ -922,10 +925,13 @@ class TestCleanupOldJobs:
 
         backend.cleanup_old_jobs()
 
-        sql, _ = cur.execute.call_args[0]
-        assert "completed" in sql
-        assert "failed" in sql
-        assert "cancelled" in sql
+        sql, params = cur.execute.call_args[0]
+        assert sql.count("%s") == len(params)
+        assert "completed" in params
+        assert "completed_partial" in params
+        assert "failed" in params
+        assert "cancelled" in params
+        assert "interrupted" in params
 
 
 # ---------------------------------------------------------------------------
@@ -1000,10 +1006,13 @@ class TestGetJobStats:
 
 
 class TestCleanupOrphanedJobsOnStartup:
-    def test_cleanup_orphaned_marks_running_and_pending_as_failed(self):
+    def test_cleanup_orphaned_marks_running_and_pending_as_interrupted(self):
         """
         When cleanup_orphaned_jobs_on_startup() is called
-        Then the UPDATE SQL targets 'running' and 'pending' statuses.
+        Then the UPDATE SQL targets 'running' and 'pending' statuses and
+        writes status='interrupted' (Bug #1950: a restart artifact,
+        DISTINCT from 'failed', so /health's get_failed_job_count() never
+        counts it).
 
         Bug #1563: the pid-liveness check (_owning_worker_process_is_alive)
         is real, unmocked logic -- only the psycopg driver plumbing is
@@ -1028,7 +1037,7 @@ class TestCleanupOrphanedJobsOnStartup:
         sql, params = cur.execute.call_args[0]
         assert "running" in sql
         assert "pending" in sql
-        assert "failed" in sql
+        assert "interrupted" in sql
         assert "Job interrupted by server restart" in params
 
     def test_cleanup_orphaned_returns_zero_when_no_orphans(self):

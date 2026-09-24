@@ -5,10 +5,213 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.72.0] - 2026-09-24
+
+### Fixed
+
+- **Bug #1962 follow-up**: restores the literal inline-wait ceiling phrasing in
+  `xray_search.md` and `xray_explore.md`. Relocating the `await_seconds` prose
+  out of `inputSchema` in 12.71.0 rephrased "up to 45 seconds" to "capped at
+  45 seconds"; the fact stayed correct but two parity guards assert the literal
+  string, since Bug #1070 lowered that ceiling from 120.0 and a doc still
+  claiming the old value would have callers request a window the server
+  rejects. The docs are fixed and the guards left strict.
+
+### Added
+
+- **Bug #1968**: three negative-control tests pinning that a real
+  `PermissionError` during golden-repo cleanup still reports failure, still
+  logs, and still creates exactly one `.corrupt-*` quarantine directory. They
+  guard the boundary that the originally-proposed #1968 fix would have crossed
+  -- treating `FileNotFoundError` as success would have masked an
+  unsynchronised-removal race rather than fixing it. No production code
+  changed; see #1968 for the locking analysis.
+
+### Validated
+
+- Full regression suite green on this tree: `rust-automation.sh`,
+  `fast-automation.sh`, `server-fast-automation.sh` (20,942 passed across all
+  six chunks) and `e2e-automation.sh` all six phases (55 / 6 / 306 / 107 / 22 /
+  13 passed), with zero non-allowlisted entries from the Story #1122 post-E2E
+  log-audit gate.
+
+## [12.71.0] - 2026-09-24
+
+### Changed
+
+- **Bug #1961**: restructures the `analyze_graph` tool document for the agent
+  that has to use the tool rather than the maintainer auditing the binder, and
+  splits the detailed Java/Kotlin binding rules into
+  `docs/xray-graph-binder-internals.md`. Agent-visible cost falls 28.6%, from
+  85,968 to 61,403 characters. Two defects fixed in passing: the Quick Start
+  scoped `include_patterns` to `*.java` alone, which excludes Kotlin callers
+  while asking whether Java code is dead, and a worked example named a
+  third-party library and its classes.
+- **Bug #1962**: moves workflow guidance, worked examples and rationale out of
+  `inputSchema` property descriptions and into the tool bodies, for
+  `xray_search`, `xray_explore`, `search_code`, `start_trace` and `end_trace`.
+  Every session pays `tools/list` before asking anything, so that text was
+  charged to every agent before it had even chosen a tool; a body is served
+  only on request via `cidx_quick_reference`. Always-on cost across the
+  registry falls from 122,107 to 115,043 characters -- about 1,750 tokens off
+  every session, for every role. `outputSchema` is deliberately untouched: it
+  is stripped before serving, so shrinking it would save nothing.
+
+### Corrected
+
+- The **Bug #1956** entry under 12.70.0 below has been corrected. It was filed
+  under "Fixed" and read as a completed fix; it is not one. The narrowing pass
+  exists, but its third precondition requires the calling type's ancestor chain
+  to be fully resolved, and any unresolved external supertype -- a JDK
+  interface such as `Cloneable` is enough -- defeats it for every descendant.
+  On typical real-world Java the pass is therefore inert, which the issue's own
+  record states after ten attempts. #1956 remains OPEN as a substrate design
+  task. Measured on a public OSS Java fixture through the staging front door at
+  12.70.0, decoy over-binding is still observable.
+
+## [12.70.0] - 2026-09-24
+
+### Fixed
+
+- **Bug #1956 (P1 of epic #1906)** -- PARTIAL, and inert on typical real-world
+  Java; see the correction under 12.71.0 above. Adds a narrowing pass intended
+  to stop a type-qualified Java call over-binding to a same-named method on an
+  unrelated class and listing itself as its own caller. #1952 stopped the true
+  edge being deleted; this aims at the false one. A decoy is excluded only
+  behind three independently necessary proofs: the receiver resolved through an
+  ordinary import (never a same-package guess), no field anywhere in the
+  repository shares its bare name, and the calling type's ancestor chain is
+  fully resolved. That third condition is rarely satisfiable in practice -- one
+  unresolved external supertype anywhere in the chain defeats it -- so on most
+  real repositories the previous over-binding behaviour is what you still get.
+  Ambiguity never becomes a deletion, which is why this direction is safe to
+  ship unfinished, but the issue is NOT closed.
+- **Bug #1959**: 61 tests under `tests/unit/server/auth/` failed whenever they
+  ran after `tests/unit/server/web/` and passed in isolation, so the gate was
+  green only because of how the suite is chunked. Two causes: `asyncio.run()`
+  unsets the thread's event loop on cleanup, and a fourth process-wide singleton
+  (`oidc.state_manager`) was missing from the test restore list.
+- **Bug #1953**: adds `shortest_path_to_any_filtered`, the missing filtered
+  counterpart to the path primitive, and replaces the docs' implied default with
+  the measured filtered-versus-unfiltered tradeoff -- filtering on
+  `RECEIVER_TYPE_MATCH` discards real static-import callers, so it exchanges
+  false positives for false negatives rather than simply adding precision.
+- **Bug #1954**: the Java+Kotlin fixture's cross-language target was `private`,
+  making the Kotlin call illegal, so the documented first example reported its
+  own showcase method as dead code. Provides the first working positive control
+  that Kotlin-to-Java binding produces an edge.
+- **Bug #1955**: documents the `analyze_graph` response envelope, the real
+  paging shape and the enum variants; fixes two dangling cross-references. Two
+  code defects underneath: the missing-entry-point error named a construct the
+  caller never wrote, and `cidx_quick_reference` bypassed the `requires_config`
+  gate that `tools/list` applies.
+- **Bug #1950**: jobs terminated by an orderly restart now carry a distinct
+  `interrupted` status, so `/health` converges instead of reporting `degraded`
+  indefinitely, with genuine-failure detection unchanged. Also repairs a
+  pre-existing leak this exposed: `cleanup_old_jobs` used a hardcoded
+  three-status list that omitted `completed_partial`, so those rows were never
+  evicted or retention-cleaned.
+- **Bug #1951**: per-table retention-cleanup failures now report the underlying
+  exception instead of only the table name.
+- **Bug #1892**: the elevation-gating fixture no longer performs a database
+  initialisation nothing reads, nor a full ASGI lifespan the tests do not use
+  (8.83s to 5.16s for the file).
+
+## [12.69.0] - 2026-09-23
+
+### Fixed
+
+- **Bug #1952 (P1 of epic #1906)**: a type-qualified Java call no longer loses
+  its edge to the type it names. In jsoup, all three `StringUtil.normaliseWhitespace(...)`
+  call sites were attributed to the unrelated `TextNode.normaliseWhitespace`,
+  one of them as a phantom self-edge, and `StringUtil.normaliseWhitespace`
+  listed none of its real callers. Root cause: the exclusive type-qualifier
+  narrow is gated behind #1922's whole-file safety check, which declines on any
+  file whose class carries an `extends`/`implements` clause -- nearly every real
+  Java class. The reference then fell through to import-context narrowing, a
+  heuristic for unqualified bare names, which deleted the candidate the source
+  had explicitly named. A candidate carrying `RECEIVER_TYPE_MATCH` is now never
+  deleted by that pass; the surviving set is a strict superset of the previous
+  one, so it can only ever delete fewer candidates. Over-binding is unchanged
+  and still acceptable -- only the deletion of a true edge is fixed.
+
+  Known gap: `QUALIFIED_NAME` tagging is gated behind the same file-safety
+  check, so on a repository whose classes use inheritance the bit is expected to
+  remain unset. Acceptance criterion 3 of #1952 is not met by this release.
+
+## [12.68.0] - 2026-09-23
+
+### Fixed
+
+- **X-Ray graph correctness (epic #1906)**: a type-qualified call `Type.m()` now
+  binds to the named type instead of the caller's own same-named method
+  (#1922); overload evidence bits reflect argument types, and argument-type
+  evidence never removes a candidate (#1923); calls on a receiver whose
+  declared type lives outside the repository carry a receiver-mismatch bit
+  (#1924); receiver narrowing no longer keeps the wrong-owner candidate
+  (#1925); `is_definitely_dead_code` no longer reports private utilities as
+  dead (#1926); caller attribution uses the lexical enclosing method rather
+  than a nearest-preceding-declaration heuristic (#1930); nested and fully
+  qualified type qualifiers bind under the same soundness guards (#1931);
+  signatures, distinct callers, anonymous owners and user line numbers are
+  accurate (#1929, #1937).
+
+  The governing rule throughout: missing or negative evidence never deletes a
+  candidate. Over-binding is the safe direction, because deletion produces
+  confidently wrong `dead=true` verdicts.
+
+- **#1927**: the served `analyze_graph` description carries the evaluator
+  contract, and its examples are compiled by a test rather than asserted to
+  work.
+- **#1928**: X-Ray result paging returns whole entries in independently
+  parseable pages, instead of truncating a message mid-value.
+- **#1932, #1933**: two load-sensitive server tests made deterministic.
+- **#1947**: the two app-singleton recovery tests carry an explicit timeout
+  sized to their measured cost; they construct a real FastAPI app singleton,
+  which is the scenario they exist to reproduce.
+
+### Changed
+
+- **#1934, #1935, #1936**: five modules that were far over the 1,000-line limit
+  are split into focused packages -- `compiler.rs`, `kotlin.rs`,
+  `sqlite_backends.py` (8,745 lines), `protocols.py`, and the `search`, `xray`
+  and `xray_graph` MCP handlers. All are pure moves, verified function-by-
+  function against the previous revision; the Rust compile-cache identity is
+  byte-identical before and after.
+
 ## [12.65.0] - 2026-09-17
 
 ### Fixed
 
+- **Bug #1898 (P1 of epic #1906)**: the X-Ray graph binder's narrowing passes
+  (`apply_arity_narrowing`, `apply_receiver_type_narrowing`, `apply_same_class_or_super_
+  narrowing`, `apply_super_class_narrowing`) silently kept the ENTIRE bare-name candidate
+  pool whenever no candidate matched the call's known arity/receiver type/enclosing
+  context, fabricating edges to unrelated in-repo declarations for calls whose real
+  target is external (e.g. `connection.close()` binding to an unrelated `Something.
+  close(int)`) or statically qualified on a known type (`TimeUtil.parse(x)` fanning out
+  to 165 unrelated `parse` methods repo-wide). `apply_arity_narrowing` now hard-empties
+  when the call's argument count is known and no in-repo declaration accepts it -- this
+  half was never implicated in any of four straight review rounds. `apply_same_class_or_
+  super_narrowing` is deliberately kept soft (an unqualified call may legitimately
+  resolve against a lexically enclosing type or a static import, neither of which this
+  binder's inheritance substrate can see). Receiver-type narrowing went through four
+  review rounds (round 2: rejecting `var`/generic-type-parameter pseudo-types and
+  resolving field-access fallbacks via a repo-wide unanimous-only index rather than
+  guessing; round 4: tiering resolved types `Positive`/`Advisory` and hard-emptying only
+  on `Positive` evidence) before round 4's OWN review found the tiered hard-empty design
+  itself unsound two ways: `Positive` evidence is not closed-world either (locals are
+  keyed `(method, name)` while Java scopes by block, so two same-named locals in
+  different blocks of one method collide), and neither tier ever guarded narrowing to a
+  non-empty WRONG subset. `apply_receiver_type_narrowing` is consequently now TAG-ONLY --
+  it marks a matching candidate's `RECEIVER_TYPE_MATCH` reason bit but never removes a
+  candidate from the set, empty match or not, Positive evidence or Advisory. Hard
+  receiver-type narrowing (exclusive binding to a statically-qualified type, and
+  discriminating a same-arity external receiver from an in-repo same-named method) is
+  deferred to issue #1910, which can design a genuinely closed-world evidence substrate
+  (and also owns widening `apply_same_class_or_super_narrowing`'s `allowed` set to the
+  caller's lexical nest); see `docs/xray-architecture.md`'s candidate-admission section
+  for the full before/after contract.
 - **Bug #1896 (P1, regression from #1894)**: `write_json_atomic` preserved a config
   file's permission mode but not its ownership. When the root auto-updater rewrote the
   server's bootstrap `config.json` through the helper, `mkstemp` + `os.replace` created a
@@ -2409,7 +2612,7 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 
 - **#1377** (priority-1): `HNSWIndexCache`/`FTSIndexCache._enforce_size_limit()` evicted the ENTIRE cache (including the just-loaded entry itself) whenever a single index exceeded the per-worker cap, since LRU always evicts oldest-first and the newest entry (with nowhere to go) was evicted last -- destroying every other repo's cached indexes for zero benefit and making oversized indexes permanently uncacheable. Individually-oversized entries are now evicted first and in isolation, before normal LRU runs on the remainder. Directly explains production temporal-query timeouts and non-growing memory usage on repos with large quarterly shards.
 - **#1374**: the memory governor's `swap_forces_red` heuristic forced and HELD the RED band on swap-in rate alone, with no corroboration from actual memory usage -- pinning RED for days on hosts with abundant free memory, forcing `evict_after_use` on every temporal quarter-shard. Now requires `used_pct >= yellow_pct` too, while preserving Bug #1225's legitimate death-spiral guard.
-- **#1373**: `enable_temporal` never persisted after a successful temporal index build because `_set_enable_temporal_flag()` received an already-`-global`-suffixed alias and double-suffixed it (`evolution-global-global`) for one DB write path while under-suffixing the other -- both silently no-op'd. Alias normalization is now unconditional and unambiguous (a bare golden-repo alias can never itself end in `-global`); the silent no-op is now a loud ERROR.
+- **#1373**: `enable_temporal` never persisted after a successful temporal index build because `_set_enable_temporal_flag()` received an already-`-global`-suffixed alias and double-suffixed it (`example-repo-global-global`) for one DB write path while under-suffixing the other -- both silently no-op'd. Alias normalization is now unconditional and unambiguous (a bare golden-repo alias can never itself end in `-global`); the silent no-op is now a loud ERROR.
 - **#1376**: a null `temporal.active_embedder` in a repo's `config.json` failed pydantic validation for the WHOLE `Config` model, so even completely unrelated non-temporal queries hard-errored. `active_embedder` is now `Optional[str]`; an invalid temporal section degrades to disabled-temporal with a de-duplicated warning instead of invalidating the whole config.
 - **#1378**: temporal indexing's progress bar/ETA and the `X/Y commits` counter used different denominators -- the temporal indexer reset its progress to per-shard values every quarter, and separately `MultiThreadedProgressManager`/`AggregateProgressDisplay` only set Rich's internal `task.total` on the first tick, freezing the bar/ETA at whatever the first quarter reported (observed: bar pegged at 100% with 174/8008 commits actually done). Both now consistently use the whole-run total.
 - **#1369**: `ClaudeInvoker`'s shared frontmatter-stripping logic (discarding everything before the first `---` line) had zero legitimate consumers across any flow routed through it, but actively corrupted self-monitoring scan JSON payloads whenever Claude's trailing prose happened to contain a markdown horizontal rule. Removed entirely as dead/harmful code.
@@ -2705,7 +2908,7 @@ This is a standalone abstraction only -- no production call site is rewired yet;
 ## [11.16.0] - 2026-07-01
 
 ### Fixed
-- **#1264 (P1): Temporal projection-matrix self-heal is now applied at the `upsert_points` write chokepoint, closing the gap left by #1242.** The #1242 self-heal (v11.8.0) only repaired shards enumerated by the `index_commits` prep loop, but the actual crash lives in a separate module: `FilesystemVectorStore.upsert_points()` routes each point to its per-quarter shard by commit date and calls `ProjectionMatrixManager.load_matrix()`, which raised a bare `FileNotFoundError` when a shard's `projection_matrix.npy` was missing. Any shard the prep loop did not revisit (old-history quarters, lazily-touched shards) still hard-crashed every golden-repo refresh -- observed in production for `evolution-global` (2009Q4), `genai-talk2db-global` (2025Q4), and `mobile-global` (2026Q2). The fix wraps the `load_matrix` call: on a missing matrix it reuses the existing `_ensure_shard_has_projection_matrix()` helper (copy-from-base or deterministic regenerate -- no duplicated logic), evicts the stale matrix-cache entry, and retries the load once; a genuinely nonexistent collection still raises loudly (anti-silent-failure). Validated by real-path reproduction against the exact production stack trace: crash at the pre-fix commit, clean self-heal at HEAD, index remains queryable.
+- **#1264 (P1): Temporal projection-matrix self-heal is now applied at the `upsert_points` write chokepoint, closing the gap left by #1242.** The #1242 self-heal (v11.8.0) only repaired shards enumerated by the `index_commits` prep loop, but the actual crash lives in a separate module: `FilesystemVectorStore.upsert_points()` routes each point to its per-quarter shard by commit date and calls `ProjectionMatrixManager.load_matrix()`, which raised a bare `FileNotFoundError` when a shard's `projection_matrix.npy` was missing. Any shard the prep loop did not revisit (old-history quarters, lazily-touched shards) still hard-crashed every golden-repo refresh -- observed in production across three repositories, on shards from 2009Q4, 2025Q4 and 2026Q2. The fix wraps the `load_matrix` call: on a missing matrix it reuses the existing `_ensure_shard_has_projection_matrix()` helper (copy-from-base or deterministic regenerate -- no duplicated logic), evicts the stale matrix-cache entry, and retries the load once; a genuinely nonexistent collection still raises loudly (anti-silent-failure). Validated by real-path reproduction against the exact production stack trace: crash at the pre-fix commit, clean self-heal at HEAD, index remains queryable.
 - **#1264 (hardening): The shared `_ensure_shard_has_projection_matrix()` helper now writes the projection matrix atomically (temp file in the same directory + `os.replace`) for both the copy-from-base and regenerate branches.** Because #1264 makes the helper reachable from the temporal parallel-worker write path, two workers first-writing the same missing-matrix shard concurrently could otherwise hit a torn-read window; the atomic rename closes it. Both the #1242 prep-loop path and the #1264 chokepoint path benefit from the single shared change.
 
 ## [11.15.0] - 2026-07-01
@@ -3597,7 +3800,7 @@ Staging-hardening bundle — seven fixes caught by the staging canary (cluster +
 ## [10.91.11] - 2026-06-03
 
 ### Fixed
-- Bug #1046 (extension): v10.91.10 added symlink resolution but only accepted paths under `mount_point`. On the CoW daemon host node (cluster node 23) the `golden-repos` symlink target is under `daemon_storage_path` directly (`/home/jsbattig/cow-storage/golden-repos`) — the bind-mount alias of the same XFS filesystem reached via the symlinked source rather than the mount point. v10.91.10 still rejected these resolved paths. v10.91.11 extends `_translate_to_daemon_path` to accept paths resolving under EITHER `mount_point` (translate to daemon-local form) OR `daemon_storage_path` (already in daemon-local form, return as-is).
+- Bug #1046 (extension): v10.91.10 added symlink resolution but only accepted paths under `mount_point`. On the CoW daemon host node (cluster node 23) the `golden-repos` symlink target is under `daemon_storage_path` directly (`/home/opuser/cow-storage/golden-repos`) — the bind-mount alias of the same XFS filesystem reached via the symlinked source rather than the mount point. v10.91.10 still rejected these resolved paths. v10.91.11 extends `_translate_to_daemon_path` to accept paths resolving under EITHER `mount_point` (translate to daemon-local form) OR `daemon_storage_path` (already in daemon-local form, return as-is).
 
 ### Tests
 - Added 2 regression-guard tests to `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py`:
@@ -3608,7 +3811,7 @@ Staging-hardening bundle — seven fixes caught by the staging canary (cluster +
 ## [10.91.10] - 2026-06-03
 
 ### Fixed
-- Bug #1046: `CowDaemonBackend._translate_to_daemon_path` (`clone_backend.py:315-335`) rejected the `golden_repos_dir` symlink path with `"is not under mount_point '/mnt/cow-storage' — cannot translate to daemon view"`, blocking every cluster activation after the Bug #1044 wiring fix made this code path reachable. Root cause: literal string `startswith` comparison with no symlink resolution; staging's `golden_repos_dir` is intentionally a symlink (`/home/jsbattig/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos`) to satisfy the XFS-reflink-same-filesystem constraint. Added `os.path.realpath()` resolution before the mount-point prefix check; the resolved path is now used for both the comparison and the daemon-side path computation.
+- Bug #1046: `CowDaemonBackend._translate_to_daemon_path` (`clone_backend.py:315-335`) rejected the `golden_repos_dir` symlink path with `"is not under mount_point '/mnt/cow-storage' — cannot translate to daemon view"`, blocking every cluster activation after the Bug #1044 wiring fix made this code path reachable. Root cause: literal string `startswith` comparison with no symlink resolution; staging's `golden_repos_dir` is intentionally a symlink (`/home/opuser/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos`) to satisfy the XFS-reflink-same-filesystem constraint. Added `os.path.realpath()` resolution before the mount-point prefix check; the resolved path is now used for both the comparison and the daemon-side path computation.
 
 ### Tests
 - New regression-guard suite `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py` (3 tests using real `os.symlink()` under `tmp_path` — zero mocking of the symlink layer per Anti-Mock rule). Test 1 confirmed RED before fix; all 3 pass after.
@@ -3662,7 +3865,7 @@ Staging-hardening bundle — seven fixes caught by the staging canary (cluster +
 ## [10.89.0] - 2026-06-02
 
 ### Added (Story #1039)
-- Per-handler bare-to-global alias fallback for 31 read-only MCP handlers. When a dep-map analysis Claude subagent passes a bare repo alias (e.g. `evolution`) instead of the `-global`-suffixed form (`evolution-global`), and the user does not have that repo in their own activated-repo list, the handler transparently promotes the alias to `evolution-global` if the golden repo is globally active. Eliminates the 445 daily "Repository not found for user admin" errors that Claude dep-map subagents were generating.
+- Per-handler bare-to-global alias fallback for 31 read-only MCP handlers. When a dep-map analysis Claude subagent passes a bare repo alias (e.g. `example-repo`) instead of the `-global`-suffixed form (`example-repo-global`), and the user does not have that repo in their own activated-repo list, the handler transparently promotes the alias to `example-repo-global` if the golden repo is globally active. Eliminates the 445 daily "Repository not found for user admin" errors that Claude dep-map subagents were generating.
 - New `_global_fallback.py` helper module (`server/mcp/handlers/`) with `try_global_fallback(alias, golden_repo_manager) -> str | None`.
 - New `user_has_activated_repo(username, alias) -> bool` method on `ActivatedRepoManager` for pre-check membership test.
 - New `is_globally_active(alias) -> bool` method on `GoldenRepoManager` delegating to `GlobalActivator`.
@@ -4012,7 +4215,7 @@ User reported building six xray evaluators in one session before discovering `st
 ## v10.65.0 (2026-05-28) -- Non-root Auto-Updater Rust Toolchain Fix
 
 ### Fixed
-- Auto-updater `_ensure_rust_toolchain()` now uses `sudo mkdir -p` and `sudo chown -R` to create `/opt/rust` instead of direct `Path.mkdir()`. The auto-updater runs as a non-root user on staging (e.g. `jsbattig`), so creating `/opt/rust` without sudo fails with `PermissionError: [Errno 13]`, crashing the entire deployment.
+- Auto-updater `_ensure_rust_toolchain()` now uses `sudo mkdir -p` and `sudo chown -R` to create `/opt/rust` instead of direct `Path.mkdir()`. The auto-updater runs as a non-root user on staging (e.g. `opuser`), so creating `/opt/rust` without sudo fails with `PermissionError: [Errno 13]`, crashing the entire deployment.
 
 ## v10.64.0 (2026-05-28) -- RUSTUP_HOME Systemd Service Fix
 
@@ -5256,7 +5459,7 @@ sudo systemctl restart cidx-server
 
 ### Operator helpers
 
-- **NEW `scripts/setup-codex-npm-prefix.sh`**: idempotent operator helper that resolves the EACCES failure observed on hosts where the system npm prefix (`/usr/local/lib/node_modules`) is not writable by the auto-updater's effective user. Detects current npm prefix; if it's a system path (`/usr`, `/usr/local`, `/opt`), switches to a user-writable `~/.npm-global` prefix via `npm config set prefix`; ensures `~/.bashrc` exports the new bin dir on PATH; runs `npm install -g @openai/codex`; verifies via `codex --version`. Prints a final summary block with the exact `Environment="PATH=..."` line operators need to add to the cidx-server systemd unit so the server process can find the binary. Once the systemd PATH is updated and cidx-server restarted, the auto-updater's Story #845 step 6.7 will find npm + the user-writable prefix on subsequent runs and `_ensure_codex_cli_installed` succeeds without WARNING. 5 unit tests (`tests/unit/scripts/test_setup_codex_npm_prefix.py`) using PATH-shimmed npm/codex binaries to avoid real network/host pollution. Manual E2E confirmed: ran on staging where v9.23.5 step 6.7 had failed `[DEPLOY-GENERAL-144] EACCES`; script installed Codex 0.125.0 to `/home/jsbattig/.npm-global/bin/codex` cleanly.
+- **NEW `scripts/setup-codex-npm-prefix.sh`**: idempotent operator helper that resolves the EACCES failure observed on hosts where the system npm prefix (`/usr/local/lib/node_modules`) is not writable by the auto-updater's effective user. Detects current npm prefix; if it's a system path (`/usr`, `/usr/local`, `/opt`), switches to a user-writable `~/.npm-global` prefix via `npm config set prefix`; ensures `~/.bashrc` exports the new bin dir on PATH; runs `npm install -g @openai/codex`; verifies via `codex --version`. Prints a final summary block with the exact `Environment="PATH=..."` line operators need to add to the cidx-server systemd unit so the server process can find the binary. Once the systemd PATH is updated and cidx-server restarted, the auto-updater's Story #845 step 6.7 will find npm + the user-writable prefix on subsequent runs and `_ensure_codex_cli_installed` succeeds without WARNING. 5 unit tests (`tests/unit/scripts/test_setup_codex_npm_prefix.py`) using PATH-shimmed npm/codex binaries to avoid real network/host pollution. Manual E2E confirmed: ran on staging where v9.23.5 step 6.7 had failed `[DEPLOY-GENERAL-144] EACCES`; script installed Codex 0.125.0 to `/home/opuser/.npm-global/bin/codex` cleanly.
 
 ### Follow-up still required
 - Operator must update the cidx-server systemd unit `Environment="PATH=..."` line to prepend `${HOME}/.npm-global/bin` (or the chosen prefix's `/bin`), then `systemctl daemon-reload + systemctl restart cidx-server`. The script's summary block prints the exact line to use. A future version may extend the script with a `--update-cidx-server-systemd` flag to automate this step.
@@ -6806,7 +7009,7 @@ PostgreSQL backends only loaded when storage_mode="postgres" in config.json.
 
 ### Bug Fixes
 
-- fix: FTS search crashes with ValueError on queries containing colons, parentheses, or brackets (Bug #357). Queries like `com.cdk.recreation:SomeClass`, `std::vector`, `foo(bar)`, `test[0]` caused Tantivy parse errors that propagated as QUERY-MIGRATE error bursts (3 log entries per repository). Added Phase 2 to sanitize_fts_query() that escapes Tantivy syntax characters (colon to space, strip `()[]{}`) before boolean operator validation. Defense-in-depth wrapper around _build_search_query() catches any remaining parse errors and returns empty results with a warning instead of propagating ValueError.
+- fix: FTS search crashes with ValueError on queries containing colons, parentheses, or brackets (Bug #357). Queries like `com.example.app:SomeClass`, `std::vector`, `foo(bar)`, `test[0]` caused Tantivy parse errors that propagated as QUERY-MIGRATE error bursts (3 log entries per repository). Added Phase 2 to sanitize_fts_query() that escapes Tantivy syntax characters (colon to space, strip `()[]{}`) before boolean operator validation. Defense-in-depth wrapper around _build_search_query() catches any remaining parse errors and returns empty results with a warning instead of propagating ValueError.
 
 ## v9.3.92
 
@@ -8514,7 +8717,7 @@ PostgreSQL backends only loaded when storage_mode="postgres" in config.json.
 ### Fixed
 
 - **Versioned Directory Full Reindex on Refresh** (Bug #85) - Fixed bug where golden repository refresh with temporal indexing (CoW clones) triggered unnecessary full reindexing instead of incremental updates:
-  - Root cause: `config_fixer.py` determined `project_id` from directory name (e.g., `"v_1769727231"`), while `file_identifier.py` used git remote origin (e.g., `"evolution"`), causing mismatch in `should_force_full_index()`
+  - Root cause: `config_fixer.py` determined `project_id` from directory name (e.g., `"v_1769727231"`), while `file_identifier.py` used git remote origin (e.g., `"example-repo"`), causing mismatch in `should_force_full_index()`
   - Solution: Made `FileIdentifier.get_project_id()` the single source of truth; `ConfigurationValidator.detect_correct_project_name()` now delegates to it
   - API change: `FileIdentifier._get_project_id()` renamed to `get_project_id()` (public API)
   - Refresh operations now correctly perform incremental indexing (minutes instead of hours)

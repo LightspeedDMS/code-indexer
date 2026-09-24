@@ -36,7 +36,7 @@ from code_indexer.server.services.temporal_worker import (
 
 USERNAME = "alice"
 ACTIVATED_ALIAS = "myclone"
-GOLDEN_ALIAS = "evolution"
+GOLDEN_ALIAS = "example-repo"
 MANAGER_MODULE = "code_indexer.server.repositories.activated_repo_manager"
 
 

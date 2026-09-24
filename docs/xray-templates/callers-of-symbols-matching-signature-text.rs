@@ -19,9 +19,46 @@
 // `callers_of` reads the POST-CAP candidate arena, so a matched symbol
 // can legitimately have zero callers even when it is referenced --
 // counted as `matched_with_zero_callers`, not conflated with "no match".
+// Bug #1929 item 2: `callers_of` returns each DISTINCT caller EXACTLY
+// ONCE, never one entry per call site -- `callers_reported` (and the
+// per-caller findings this template emits) is therefore a count of
+// distinct callers, not call sites, even when a caller invokes the
+// matched symbol from several places in its own body.
 //
-// `SIGNATURE_TEXT` below is a caller-supplied placeholder -- edit it to
-// the substring you actually want to match before running this template.
+// Bug #1904 / #1929 item 1: a bound Method's `signature_for()` carries
+// its declaring type and, where fully known, its real parameter type
+// names -- `"Owner.name(ParamType, ...)"`, e.g.
+// `"TimeUtil.parse(XMLGregorianCalendar)"`. A varargs parameter renders
+// with its REAL per-language spelling (Java `char...`, always last;
+// Kotlin `vararg Int`, at whatever position it actually occupies --
+// Kotlin allows `vararg` anywhere, unlike Java), never a bare type name
+// indistinguishable from a genuine one-arg overload. An anonymous or
+// enum-constant-body class's `Owner` renders as
+// `Enclosing$<anon@L<line>:<file_id>:<byte>>` -- the enclosing type's
+// real name and the anon body's own real source line, human-chaseable.
+// It still falls back to an arity-only tail -- `"Owner.name(N params)"`,
+// or bare `"name(N params)"` when even the declaring type is unknown --
+// whenever the extractor could not read every parameter's type or could
+// not determine the enclosing type (never a fabricated guess). It NEVER
+// carries annotations: a business-domain substring like `"Repository"`
+// or `"Service"` can only match when a symbol's OWN bare name or
+// declaring type happens to contain it -- it can never match an
+// annotation (`@Repository`) alone. A zero-match census therefore
+// proves nothing about whether repositories/services exist in the
+// target codebase -- only that none of their NAMES contain your chosen
+// substring.
+//
+// `SIGNATURE_TEXT` below is a caller-supplied PLACEHOLDER, deliberately
+// defaulted to `"("` -- the one character present in EVERY shape above
+// (widened or fallback) and in no type/field/package signature, so this
+// template always produces a REAL, non-zero census out of the box on
+// any ordinary repository with at least one callable symbol. That
+// default proves the template's wiring end to end; it matches EVERY
+// method/constructor and is NOT a meaningful filter on its own. Replace
+// it with the actual substring you care about (a declaring-type or
+// naming fragment your OWN codebase's methods actually use, e.g.
+// `"Repository."` to match every method declared ON a type whose bare
+// name is `Repository`) before drawing any conclusion from the results.
 fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
     Vec::new()
 }
@@ -102,7 +139,7 @@ fn record_match(g: &GraphHandle<'_>, d: u32, signature: &str, signature_text: &s
 
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
-    const SIGNATURE_TEXT: &str = "Repository";
+    const SIGNATURE_TEXT: &str = "(";
     let mut census = scan_signature_matches(g, SIGNATURE_TEXT);
     result.findings.push(ReduceFinding {
         pattern: "signature_match_census".to_string(),

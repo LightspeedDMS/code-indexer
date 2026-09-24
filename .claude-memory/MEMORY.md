@@ -5,6 +5,7 @@
 - [feedback_never_claim_ready_without_staging_e2e.md](feedback_never_claim_ready_without_staging_e2e.md) - green gates are not evidence; drive the NEW capability through staging
 - [feedback_everything_always_ends_with_staging.md](feedback_everything_always_ends_with_staging.md) - broken staging access is a blocker to raise, never a reason to stop at local gates
 - [feedback_grep_absence_is_not_evidence.md](feedback_grep_absence_is_not_evidence.md) - zero hits proves a spelling absent, not a capability missing
+- [feedback_never_assert_unverified_facts_in_briefs.md](feedback_never_assert_unverified_facts_in_briefs.md) - verify every premise before writing it into a brief or an issue; an issue's own repro can be wrong
 - [feedback_probe_in_service_execution_context.md](feedback_probe_in_service_execution_context.md) - probe as the SERVICE user with the unit's PATH/HOME; an SSH login's user-site silently shadows the real install
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - never full-re-index evolution: hours + embedder cost; restore from copies
 - [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - verify zero vector_*.json on all 3 envs before chunk/temporal work (#1528)
@@ -24,6 +25,7 @@
 - [feedback_sole_developer_own_all_code.md](feedback_sole_developer_own_all_code.md) - sole developer across sessions — never call code "not ours"
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - no module-level dicts for cross-request state — PayloadCache or shared DB
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - bootstrap/systemd/PATH changes need BOTH installer and auto-updater self-heal
+- [feedback_self_upgrading_deployer_runs_old_code.md](feedback_self_upgrading_deployer_runs_old_code.md) - the auto-updater runs OLD in-memory code on the deploy that installs a deploy-time fix; validate the transitional deploy
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - prefer installing the dependency over install-footprint purity
 - [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - subagents act directly; never spawn nested Task/Agent calls
 - [feedback_subagent_committed_against_explicit_instruction.md](feedback_subagent_committed_against_explicit_instruction.md) - verify via git log; never trust a subagent's self-report on commits
@@ -92,6 +94,7 @@
 ## Architectural Invariants
 - [project_eks_is_eventual_deployment_target.md](project_eks_is_eventual_deployment_target.md) - containerized EKS is the target; no DRBD/Pacemaker/EFS
 - [project_verify_both_staging_environments.md](project_verify_both_staging_environments.md) - verify BOTH clustered (postgres) and solo (SQLite) staging
+- [feedback_staging_solo_is_a_separate_host.md](feedback_staging_solo_is_a_separate_host.md) - always test staging solo too; prove "solo" from the host's config (storage_mode), never from docs -- .local-testing §1 is stale (it's a cluster node)
 - [project_query_is_everything.md](project_query_is_everything.md) - query capability is core value; never break it
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - reranker fires after RRF coalescing, before truncation
 - [project_description_refresh_tracking_split_brain.md](project_description_refresh_tracking_split_brain.md) - fixed in #1100; scheduler uses the registry tracking backend
@@ -107,6 +110,7 @@
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
 - [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)
+- [project_batch_1950_1956_pending_staging.md](project_batch_1950_1956_pending_staging.md) - six-issue batch after v12.69.0; NOT done until driven through both staging front doors
 - [project_release_1873_1876_overnight_state.md](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 overnight #1873/#1875/#1876/#1886 release — read first after a reset
 - [project_backlog_session_paused_2026_08_27.md](project_backlog_session_paused_2026_08_27.md) - resume state for the backlog sweep paused 2026-08-27 — read this first
 - [project_backlog_session_paused_for_vm_migration.md](project_backlog_session_paused_for_vm_migration.md) - superseded by the 2026-08-27 entry above

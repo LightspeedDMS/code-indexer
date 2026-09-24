@@ -6,8 +6,8 @@ Tests verify that commit message quiet mode displays:
 2. Score (0.602, 0.598, ...)
 3. Commit hash (first 7 characters)
 4. Commit date (2025-11-02)
-5. Author name (Seba Battig)
-6. Author email (<seba.battig@lightspeeddms.com>)
+5. Author name (Jane Doe)
+6. Author email (<jane.doe@example.com>)
 7. ENTIRE commit message content (all lines, indented)
 8. Blank line separator between results
 
@@ -42,12 +42,12 @@ class TestTemporalCommitMessageQuietModeComplete:
             "type": "commit_message",
             "commit_hash": "237d7361234567890abcdef",
             "commit_date": "2025-11-02",
-            "author_name": "Seba Battig",
-            "author_email": "seba.battig@lightspeeddms.com",
+            "author_name": "Jane Doe",
+            "author_email": "jane.doe@example.com",
         }
         mock_result_1.temporal_context = {
             "commit_date": "2025-11-02",
-            "author_name": "Seba Battig",
+            "author_name": "Jane Doe",
         }
 
         mock_result_2 = Mock()
@@ -57,12 +57,12 @@ class TestTemporalCommitMessageQuietModeComplete:
             "type": "commit_message",
             "commit_hash": "fc86e71abcdef1234567890",
             "commit_date": "2025-10-30",
-            "author_name": "Seba Battig",
-            "author_email": "seba.battig@lightspeeddms.com",
+            "author_name": "Jane Doe",
+            "author_email": "jane.doe@example.com",
         }
         mock_result_2.temporal_context = {
             "commit_date": "2025-10-30",
-            "author_name": "Seba Battig",
+            "author_name": "Jane Doe",
         }
 
         mock_result_3 = Mock()
@@ -76,12 +76,12 @@ watch mode and HNSW index building using file locking mechanisms."""
             "type": "commit_message",
             "commit_hash": "c035b1f9876543210fedcba",
             "commit_date": "2025-10-27",
-            "author_name": "Seba Battig",
-            "author_email": "seba.battig@lightspeeddms.com",
+            "author_name": "Jane Doe",
+            "author_email": "jane.doe@example.com",
         }
         mock_result_3.temporal_context = {
             "commit_date": "2025-10-27",
-            "author_name": "Seba Battig",
+            "author_name": "Jane Doe",
         }
 
         mock_temporal_results = Mock()
@@ -134,7 +134,7 @@ watch mode and HNSW index building using file locking mechanisms."""
 
         # Verify Result 1: ALL metadata and content
         assert (
-            "1. 0.602 [Commit 237d736] (2025-11-02) Seba Battig <seba.battig@lightspeeddms.com>"
+            "1. 0.602 [Commit 237d736] (2025-11-02) Jane Doe <jane.doe@example.com>"
             in output
         )
         assert (
@@ -144,14 +144,14 @@ watch mode and HNSW index building using file locking mechanisms."""
 
         # Verify Result 2: ALL metadata and content
         assert (
-            "2. 0.598 [Commit fc86e71] (2025-10-30) Seba Battig <seba.battig@lightspeeddms.com>"
+            "2. 0.598 [Commit fc86e71] (2025-10-30) Jane Doe <jane.doe@example.com>"
             in output
         )
         assert "   feat: add daemon mode indicator to status command" in output
 
         # Verify Result 3: Multi-line commit message with ALL lines indented
         assert (
-            "3. 0.565 [Commit c035b1f] (2025-10-27) Seba Battig <seba.battig@lightspeeddms.com>"
+            "3. 0.565 [Commit c035b1f] (2025-10-27) Jane Doe <jane.doe@example.com>"
             in output
         )
         assert "   plan: HNSW watch staleness coordination with file locking" in output

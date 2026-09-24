@@ -123,13 +123,13 @@ class TestHealthRecoversWhenDedupWasSoleDegradationSource:
 class TestHealthStaysDegradedWhenUnrelatedFailurePersists:
     def test_dedup_reason_removed_but_unrelated_failure_remains(self, tmp_path):
         service, db_path = _make_service_with_active_dedup_row(tmp_path)
-        _add_unrelated_unrecoverable_failure(db_path, "evolution")
+        _add_unrelated_unrecoverable_failure(db_path, "example-repo")
 
         status_before, reasons_before = service._calculate_overall_status(
             {}, _system_info(), []
         )
         assert status_before == HealthStatus.DEGRADED
-        unrelated_reason = next(r for r in reasons_before if "evolution" in r)
+        unrelated_reason = next(r for r in reasons_before if "example-repo" in r)
 
         with closing(GoldenRepoMetadataSqliteBackend(db_path)) as clearing_backend:
             clearing_backend.clear_all_dedup_states(_CLEAR_ALL_REASON)

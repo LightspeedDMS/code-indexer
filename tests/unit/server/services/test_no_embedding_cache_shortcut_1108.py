@@ -303,11 +303,15 @@ class TestCallerLayersThreadKwarg:
         )
 
     def test_mcp_handler_search_threads_kwarg(self):
-        source = _read_source("server/mcp/handlers/search.py")
+        # Issue #1935: handlers/search.py was split into the handlers/search/
+        # package; the coalesced_query_embedding() calls that thread this
+        # kwarg now live in handlers/search/memory_retrieval.py.
+        source = _read_source("server/mcp/handlers/search/memory_retrieval.py")
         assert _has_kwarg_in_call(
             source, "coalesced_query_embedding", "no_embedding_cache_shortcut"
         ), (
-            "handlers/search.py must pass no_embedding_cache_shortcut= to coalesced_query_embedding"
+            "handlers/search/memory_retrieval.py must pass no_embedding_cache_shortcut= "
+            "to coalesced_query_embedding"
         )
 
     def test_temporal_search_service_threads_kwarg(self):

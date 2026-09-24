@@ -138,4 +138,15 @@ async def test_granted_slot_is_acquired_once_and_released_once(
     mock_run.assert_called_once()
     granting_limiter.acquire.assert_called_once()
     granting_limiter.release.assert_called_once()
-    assert result == fake_backend_result
+    # Bug #1907: `_run_analyze_graph_pipeline` now UNCONDITIONALLY attaches
+    # the two new candidate-collection counters (both zero here -- no
+    # include/exclude patterns were passed, so nothing was excluded) plus
+    # the top-level languages list, on top of whatever the (mocked) backend
+    # returned -- assert the ENRICHED shape, not the bare backend result.
+    expected_result = dict(fake_backend_result)
+    expected_result["degradation"] = {
+        "files_excluded_with_extractor": 0,
+        "files_excluded_without_extractor": 0,
+    }
+    expected_result["languages_excluded_with_extractor"] = []
+    assert result == expected_result

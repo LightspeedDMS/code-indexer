@@ -4,7 +4,7 @@
 //! done for `bind/resolve.rs` -> `bind/resolve_tests.rs`.
 
 use super::*;
-use crate::graph::extract::local_index::ArgShape;
+use crate::graph::extract::local_index::{ArgShape, Visibility};
 use std::path::Path;
 
 fn extract_source(source: &str) -> LocalIndex {
@@ -35,6 +35,26 @@ fn extracts_ordinary_static_and_wildcard_imports() {
     assert_eq!(index.imports[0].kind, ImportKind::Ordinary);
     assert_eq!(index.imports[1].kind, ImportKind::Static);
     assert_eq!(index.imports[2].kind, ImportKind::Wildcard);
+}
+
+/// Issue #1915: `import static pkg.Util.*;` is a STATIC-ON-DEMAND import
+/// -- both wildcard (imports every member) AND static (only static
+/// members) -- which is neither an ordinary `Wildcard` (a package-level
+/// `import pkg.*;`, whose `path` is a bare package) nor a single-member
+/// `Static` import (`import static pkg.Util.helper;`, whose `path` ends
+/// in the MEMBER name). Before the fix, `extract_imports` tested
+/// `is_wildcard` before `is_static` and classified this as plain
+/// `Wildcard`, discarding the static-ness entirely. `path` must be the
+/// declaring CLASS's own dotted path (`"pkg.Util"`, never truncated to
+/// the bare package `"pkg"` and never including the trailing `*`) -- the
+/// exact shape `import_reasons` (`bind/resolve.rs`) needs to resolve a
+/// candidate's `(enclosing_type, package)` against it.
+#[test]
+fn extracts_static_on_demand_import_as_static_wildcard_kind_with_the_declaring_class_path() {
+    let index = extract_source("import static pkg.Util.*;\nclass Foo {}\n");
+    assert_eq!(index.imports.len(), 1);
+    assert_eq!(index.imports[0].kind, ImportKind::StaticWildcard);
+    assert_eq!(index.imports[0].path, "pkg.Util");
 }
 
 #[test]
@@ -495,9 +515,265 @@ fn attributes_methods_to_their_immediately_enclosing_type_including_nested_class
     );
 }
 
+/// Bug #1929 item 3: an anonymous/enum-body class's method owner must
+/// render as something a human can chase -- the enclosing type's real
+/// name plus the anonymous body's own REAL source line -- never the
+/// previous opaque `<anon:{file_id_hash}:{byte_offset}>` (two large
+/// numbers with zero human meaning, reported live as e.g.
+/// `<anon:918273645:42>.read(...)` against a real-world enum whose every
+/// constant overrides `read()` in its own anonymous body -- exactly this
+/// fixture's shape).
+#[test]
+fn anonymous_enum_constant_body_method_owner_renders_the_enclosing_type_and_a_real_line() {
+    let index = extract_source(
+        "enum LexerState {\n    Data {\n        void read() {}\n    };\n}\n",
+    );
+    let read_decl = index.declaration_named("read").unwrap();
+    let owner = index
+        .method_owners
+        .iter()
+        .find(|o| o.method_symbol == read_decl.symbol)
+        .map(|o| o.enclosing_type.clone())
+        .expect("anonymous enum-constant body method must still carry an owner record");
+    assert!(
+        owner.starts_with("LexerState$<anon@L2:"),
+        "owner must start with the enclosing type's real name and the anon body's own real \
+         source line (2, where `Data {{` begins): got {owner}"
+    );
+    assert!(
+        !owner.contains("<anon:"),
+        "the old opaque `<anon:hash:byte>` shape must be gone: got {owner}"
+    );
+}
+
+/// Bug #1929 rework item 5: two anonymous bodies on the SAME source
+/// line (`new Object() { void run() {} }; new Object() { void run()
+/// {} };`, differing only by byte offset) must synthesize DISTINCT
+/// names -- a collision here would silently merge two unrelated
+/// anonymous types' supertype evidence in the repo-wide `TypeIndex`
+/// (`graph::bind::families::supertypes_of`). Java never pushes a real
+/// `Declaration` for an anonymous body itself (only Kotlin's `object_
+/// literal` does; see `anonymous_body_context`'s own doc comment), so
+/// this observes the marker via `method_owners`' `enclosing_type` on
+/// each anon body's own `run` method -- the same observation point
+/// `anonymous_enum_constant_body_method_owner_renders_the_enclosing_
+/// type_and_a_real_line` above already uses.
+#[test]
+fn two_anonymous_bodies_on_the_same_source_line_synthesize_distinct_names() {
+    let index = extract_source(
+        "class Outer {\n    void m() {\n        Object x = new Object() { void run() {} }; Object y = new Object() { void run() {} };\n    }\n}\n",
+    );
+    let run_decls: Vec<&Declaration> = index
+        .declarations
+        .iter()
+        .filter(|d| d.kind == DeclarationKind::Method && d.name == "run")
+        .collect();
+    assert_eq!(
+        run_decls.len(),
+        2,
+        "fixture sanity: two anonymous bodies' `run` methods must both extract: got {} \
+         declarations",
+        run_decls.len()
+    );
+    let owner_of = |symbol: SymbolId| {
+        index
+            .method_owners
+            .iter()
+            .find(|o| o.method_symbol == symbol)
+            .map(|o| o.enclosing_type.clone())
+            .expect("each anonymous body's method must carry an owner record")
+    };
+    let owner_a = owner_of(run_decls[0].symbol);
+    let owner_b = owner_of(run_decls[1].symbol);
+    assert_ne!(
+        owner_a, owner_b,
+        "two anonymous bodies on the SAME line must synthesize DISTINCT owner names (the byte \
+         offset must disambiguate them): got {owner_a:?} vs {owner_b:?}"
+    );
+}
+
+/// Bug #1929 rework item 5: the SAME source (same line number) parsed
+/// under two DIFFERENT `file_id`s must synthesize DISTINCT anon names --
+/// the whole point of keeping `file_id` in the marker after the
+/// human-readable prefix (global uniqueness across the whole analysed
+/// repo, never just "unique within one file").
+#[test]
+fn the_same_line_number_in_two_different_files_synthesizes_distinct_anon_names() {
+    let source = "class Outer {\n    void m() {\n        Object x = new Object() { void run() {} };\n    }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Sample.java");
+    std::fs::write(&path, source).unwrap();
+    let root = crate::scanner::parse_file(&path).unwrap();
+
+    let index_a = JavaExtractor.extract(&root, 1);
+    let index_b = JavaExtractor.extract(&root, 2);
+
+    let owner_of_run = |index: &LocalIndex| -> String {
+        let run_decl = index
+            .declarations
+            .iter()
+            .find(|d| d.kind == DeclarationKind::Method && d.name == "run")
+            .expect("anonymous body's run method must be extracted");
+        index
+            .method_owners
+            .iter()
+            .find(|o| o.method_symbol == run_decl.symbol)
+            .map(|o| o.enclosing_type.clone())
+            .expect("anonymous body's method must carry an owner record")
+    };
+    let owner_a = owner_of_run(&index_a);
+    let owner_b = owner_of_run(&index_b);
+    assert_ne!(
+        owner_a, owner_b,
+        "the SAME line number extracted under two different file_ids must synthesize DISTINCT \
+         anon owner names (file_id must disambiguate across files): got {owner_a:?} vs {owner_b:?}"
+    );
+}
+
 #[test]
 fn symbol_ids_carry_the_given_file_id() {
     let index = extract_source("class First {}\n");
     let decl = index.declaration_named("First").unwrap();
     assert_eq!((decl.symbol >> 32) as u32, 7);
+}
+
+/// #1910 prerequisite 3 (round4-findings.md finding 3): a Java 21 switch
+/// case pattern binding (`case Target handle ->`) must be recorded as a
+/// real local `TypedNameRecord`, wired through `dispatch_node`'s
+/// `"type_pattern"` arm -- the exact shape that fell through to
+/// `resolve_receiver_type`'s open-world fallback substrate before this
+/// fix.
+#[test]
+fn extracts_switch_case_type_pattern_as_a_typed_name() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source(
+        "class First {\n    void run(Object o) {\n        switch (o) {\n            case Target handle -> handle.helper();\n            default -> {}\n        }\n    }\n}\n",
+    );
+    let run_method = index.declaration_named("run").unwrap();
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("switch case type-pattern binding must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Local {
+            enclosing_method: run_method.symbol
+        }
+    );
+}
+
+/// #1910 prerequisite 3: a Java 21 record-pattern deconstruction
+/// component (`Target handle` inside `Wrapper(Target handle)`) must ALSO
+/// be recorded, wired through `dispatch_node`'s `"record_pattern_
+/// component"` arm -- at any nesting depth, with no per-level special
+/// casing, since the generic tree walk visits every descendant
+/// regardless of depth.
+#[test]
+fn extracts_record_pattern_component_as_a_typed_name() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source(
+        "class First {\n    void run(Object o) {\n        if (o instanceof Wrapper(Target handle)) {\n            handle.helper();\n        }\n    }\n}\n",
+    );
+    let run_method = index.declaration_named("run").unwrap();
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("record pattern component binding must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Local {
+            enclosing_method: run_method.symbol
+        }
+    );
+}
+
+/// #1910 prerequisite 3: a record's own COMPONENTS (`record Wrapper(Target
+/// handle) {}`) behave as implicit fields visible throughout every one of
+/// the record's own methods (including its compact constructor) -- they
+/// must be recorded as FIELD-scope typed names on the record's own type,
+/// exactly like an ordinary `field_declaration`, closing the gap where a
+/// compact constructor referencing its own component previously had NO
+/// typed-name evidence at all.
+#[test]
+fn extracts_record_components_as_field_scope_typed_names() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source("record Wrapper(Target handle) {\n}\n");
+    let record = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "handle")
+        .expect("a record's own component must be recorded as a typed name");
+    assert_eq!(record.declared_type, "Target");
+    assert_eq!(
+        record.scope,
+        NameScope::Field {
+            enclosing_type: "Wrapper".to_string()
+        }
+    );
+}
+
+/// #1910 prerequisite 3: an enum's own CONSTANTS (`enum Color { RED }`)
+/// are effectively `public static final` instances of the enum type
+/// itself, referenceable as a bare name from any of the enum's own
+/// methods (and, via a static import, from anywhere) -- they must be
+/// recorded as FIELD-scope typed names on the enum's own type so a bare
+/// reference to one never falls through to the open-world static-type-
+/// name fallback and misresolves against an unrelated in-repo type that
+/// coincidentally shares the constant's name.
+#[test]
+fn extracts_enum_constants_as_field_scope_typed_names() {
+    use crate::graph::extract::local_index::NameScope;
+
+    let index = extract_source("enum Color {\n    RED, GREEN\n}\n");
+    let red = index
+        .typed_names
+        .iter()
+        .find(|t| t.name == "RED")
+        .expect("an enum constant must be recorded as a typed name");
+    assert_eq!(red.declared_type, "Color");
+    assert_eq!(
+        red.scope,
+        NameScope::Field {
+            enclosing_type: "Color".to_string()
+        }
+    );
+}
+
+/// #1922: a lambda parameter bound in a STATIC field initializer has NO
+/// enclosing method at all, so it is absent from `typed_names` entirely
+/// -- `all_local_binding_names` is the flat, context-independent
+/// substrate that still records it.
+#[test]
+fn all_local_binding_names_records_a_lambda_parameter_bound_in_a_field_initializer() {
+    let index = extract_source(
+        "import java.util.function.Consumer;\nclass First {\n    static final Consumer<String> C = Svc -> Svc.trim();\n}\n",
+    );
+    assert!(
+        index
+            .all_local_binding_names
+            .iter()
+            .any(|n| n == "Svc"),
+        "the lambda parameter Svc, bound in a static field initializer, must be recorded"
+    );
+}
+
+/// #1922: a record's own component list shares the IDENTICAL
+/// `formal_parameters` -> `formal_parameter` grammar shape a method's
+/// parameters use, but a component is a FIELD (an implicit accessor),
+/// never a local/parameter binding -- `all_local_binding_names` must
+/// never record it.
+#[test]
+fn all_local_binding_names_excludes_a_records_own_component_list() {
+    let index = extract_source("record Point(int Svc, int y) {}\n");
+    assert!(
+        !index.all_local_binding_names.iter().any(|n| n == "Svc"),
+        "a record component is a field, never a local/parameter binding"
+    );
 }

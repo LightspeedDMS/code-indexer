@@ -124,7 +124,7 @@ class TestGatingSitePresence:
 
     def test_site3_memory_handler_gated(self):
         """handlers/search.py _compute_memory_query_vector must be gated via coalesced_query_embedding."""
-        src = _read("code_indexer/server/mcp/handlers/search.py")
+        src = _read("code_indexer/server/mcp/handlers/search/memory_retrieval.py")
         assert "coalesced_query_embedding" in src, (
             "handlers/search.py must gate memory embedding via coalesced_query_embedding "
             "(from server/services/governed_call.py)"
@@ -163,7 +163,7 @@ class TestFaultInjectionFactoryWiring:
         The factory is retrieved via _get_http_client_factory() (with an AttributeError
         guard for test environments) and passed as http_client_factory= to the client.
         """
-        src = _read("code_indexer/server/mcp/handlers/search.py")
+        src = _read("code_indexer/server/mcp/handlers/search/memory_retrieval.py")
         # Factory is fetched and then passed separately (AttributeError guard refactor).
         assert "_get_http_client_factory()" in src, (
             "handlers/search.py must call _get_http_client_factory() to obtain the factory"
@@ -262,7 +262,7 @@ class TestExecuteWithBackoffWiring:
 
     def test_site3_memory_handler_uses_governed_query_embedding(self):
         """handlers/search.py _compute_memory_query_vector must delegate to coalesced_query_embedding."""
-        src = _read("code_indexer/server/mcp/handlers/search.py")
+        src = _read("code_indexer/server/mcp/handlers/search/memory_retrieval.py")
         assert "coalesced_query_embedding" in src, (
             "handlers/search.py must call coalesced_query_embedding() from governed_call.py"
         )
@@ -426,7 +426,7 @@ class TestFactoryGuardLogLevel:
 
     def test_search_handler_factory_guard_logs_warning(self):
         """handlers/search.py factory guard must use logger.warning, not logger.debug."""
-        src = _read("code_indexer/server/mcp/handlers/search.py")
+        src = _read("code_indexer/server/mcp/handlers/search/memory_retrieval.py")
         # Split on "except AttributeError" to isolate the actual exception handler block
         # (not comments that contain the word "AttributeError").
         sections = src.split("except AttributeError")

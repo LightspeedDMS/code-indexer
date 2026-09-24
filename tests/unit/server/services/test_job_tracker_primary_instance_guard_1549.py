@@ -84,7 +84,8 @@ class TestJobTrackerLegacyPathRespectsPrimaryInstanceFlag:
 
         job = fresh_tracker.get_job("genuine-orphan")
         assert job is not None
-        assert job.status == "failed"
+        # Bug #1950: 'interrupted' (a restart artifact), not 'failed'.
+        assert job.status == "interrupted"
         assert count == 1
 
 

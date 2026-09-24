@@ -69,7 +69,7 @@ class TestSearchActivatedRepoQueryTrackerWiring:
 
             with (
                 patch(
-                    "code_indexer.server.mcp.handlers.search._apply_rerank_and_filter",
+                    "code_indexer.server.mcp.handlers.search.repo_search._apply_rerank_and_filter",
                     return_value=(
                         [],
                         {
@@ -81,15 +81,15 @@ class TestSearchActivatedRepoQueryTrackerWiring:
                     ),
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search._run_memory_retrieval",
+                    "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
                     return_value=None,
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search._load_category_map",
+                    "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                     return_value={},
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search.get_config_service"
+                    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
                 ) as mock_cfg_svc,
             ):
                 mock_mem_cfg = MagicMock()

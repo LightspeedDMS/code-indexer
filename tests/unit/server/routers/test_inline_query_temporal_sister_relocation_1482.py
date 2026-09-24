@@ -68,7 +68,7 @@ from code_indexer.services.temporal.temporal_search_service import (
 )
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-REPO_ALIAS = "evolution"
+REPO_ALIAS = "example-repo"
 EMBEDDER = "voyage-context-4"
 SHARD_NAME = "code-indexer-temporal-voyage_context_4-2024Q1"
 
@@ -233,10 +233,10 @@ def _sandboxed_temporal_repo(tmp_path, monkeypatch):
     # guards, now against the fixed-path mechanism).
     _build_fixed_root_shard(
         server_temporal_index_root(golden_repos_dir, REPO_ALIAS),
-        "evolution:commit:c0:0",
+        "example-repo:commit:c0:0",
     )
 
-    # Register the GOLDEN-REPO alias ("evolution-global" -> clone path).
+    # Register the GOLDEN-REPO alias ("example-repo-global" -> clone path).
     aliases_dir = golden_repos_dir / "aliases"
     alias_manager = AliasManager(str(aliases_dir))
     alias_manager.create_alias(f"{REPO_ALIAS}-global", str(codebase_dir))

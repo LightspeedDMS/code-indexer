@@ -79,11 +79,11 @@ def base_patches():
     """
     with (
         patch(
-            "code_indexer.server.mcp.handlers.search._get_golden_repos_dir",
+            "code_indexer.server.mcp.handlers.search.regex_search._get_golden_repos_dir",
             return_value="/tmp/test",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search.api_metrics_service"
+            "code_indexer.server.mcp.handlers.search.regex_search.api_metrics_service"
         ) as mock_metrics,
     ):
         yield mock_metrics
@@ -100,12 +100,14 @@ def success_path_patches(base_patches, mock_legacy, mock_search_result, rerank_m
     """
     with (
         patch(
-            "code_indexer.server.mcp.handlers.search._get_legacy",
+            "code_indexer.server.mcp.handlers.search.regex_search._get_legacy",
             return_value=mock_legacy,
         ),
-        patch("code_indexer.server.mcp.handlers.search.get_config_service"),
         patch(
-            "code_indexer.server.mcp.handlers.search._execute_regex_search",
+            "code_indexer.server.mcp.handlers.search.regex_search.get_config_service"
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.search.regex_search._execute_regex_search",
             new_callable=AsyncMock,
             return_value=([], rerank_meta, mock_search_result),
         ),
@@ -199,15 +201,15 @@ class TestOmniRegexSearchIncrementsMetricPerRepo:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._expand_wildcard_patterns",
+                "code_indexer.server.mcp.handlers.search.regex_search._expand_wildcard_patterns",
                 side_effect=lambda aliases, user: aliases,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._filter_errors_for_user",
+                "code_indexer.server.mcp.handlers.search.regex_search._filter_errors_for_user",
                 return_value={},
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._format_omni_response",
+                "code_indexer.server.mcp.handlers.search.regex_search._format_omni_response",
                 return_value={
                     "success": True,
                     "results": [],

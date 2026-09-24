@@ -59,6 +59,28 @@ pub struct CodeGraphBuilder {
     /// the predicate must treat as unproven (undecidable), never as
     /// license to report `Some(true)`.
     kinds: HashMap<u32, DeclarationKind>,
+    /// Bug #1900 (epic #1906 P5): per-symbol DECLARATION location -- a
+    /// `(file_string_id, line)` pair, where `file_string_id` is an id into
+    /// this SAME builder's shared `strings` table (see `intern_string`).
+    /// Deliberately keyed by the declaration's OWN file+line, never a
+    /// `Reference`'s call-site coordinates (`Reference.file`/`.line`,
+    /// which name where a symbol was CALLED FROM, not where it is
+    /// declared) -- see `CodeGraph::location_for`'s doc comment for the
+    /// full rationale. A dense id absent here reads back as `None` via
+    /// `CodeGraph::location_for`, the same "absent means unknown" contract
+    /// `signatures`/`visibilities`/`kinds` already use.
+    locations: HashMap<u32, (u32, u32)>,
+    /// Bug #1926: the set of dense symbol ids
+    /// `CodeGraph::is_definitely_dead_code` must treat as "provably
+    /// non-instantiable" (a class's sole private no-arg constructor)
+    /// regardless of `Visibility` or referenced-bit state. A SEPARATE
+    /// per-symbol fact from `visibilities`, deliberately never folded into
+    /// it -- see `graph::extract::local_index::LocalIndex::non_
+    /// instantiable_constructors`'s own doc comment for why widening
+    /// `Visibility` itself was rejected. Analytical data like `visibilities`/
+    /// `kinds`: callers MUST attach it unconditionally regardless of budget
+    /// pressure. A dense id absent here is simply not in the set.
+    non_instantiable_constructors: std::collections::HashSet<u32>,
 }
 
 #[cfg(test)]
@@ -112,6 +134,8 @@ impl CodeGraphBuilder {
             signatures: HashMap::new(),
             visibilities: HashMap::new(),
             kinds: HashMap::new(),
+            locations: HashMap::new(),
+            non_instantiable_constructors: std::collections::HashSet::new(),
         }
     }
 
@@ -158,6 +182,24 @@ impl CodeGraphBuilder {
         self.kinds.insert(dense_symbol_id, kind);
     }
 
+    /// Bug #1900 (epic #1906 P5): attaches `dense_symbol_id`'s DECLARATION
+    /// location -- `file_string_id` (an id already returned by
+    /// `intern_string` on THIS builder) and its 1-based `line`. Mirrors
+    /// `add_visibility`/`add_kind`'s sparse-map-keyed-by-dense-id shape.
+    pub fn add_location(&mut self, dense_symbol_id: u32, file_string_id: u32, line: u32) {
+        self.locations.insert(dense_symbol_id, (file_string_id, line));
+    }
+
+    /// Bug #1926: marks `dense_symbol_id` as a
+    /// provably non-instantiable constructor (a class's sole private
+    /// no-arg constructor). Mirrors `add_visibility`/`add_kind`'s
+    /// unconditional-attach contract -- see the field doc on `non_
+    /// instantiable_constructors` above for why this is a SEPARATE fact
+    /// from `Visibility`.
+    pub fn add_non_instantiable_constructor(&mut self, dense_symbol_id: u32) {
+        self.non_instantiable_constructors.insert(dense_symbol_id);
+    }
+
     /// Interns a symbol NAME string, returning its dense id in the shared
     /// string table (see `super::super::string_table::StringTable`).
     pub fn intern_string(&mut self, s: &str) -> u32 {
@@ -202,6 +244,8 @@ impl CodeGraphBuilder {
             self.signatures,
             self.visibilities,
             self.kinds,
+            self.locations,
+            self.non_instantiable_constructors,
         )
     }
 }

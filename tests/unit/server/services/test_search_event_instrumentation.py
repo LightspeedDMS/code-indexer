@@ -140,7 +140,8 @@ def wire_config_service(monkeypatch):
     cfg.get_config.return_value.memory_retrieval_config.memory_retrieval_enabled = False
     cfg.get_config.return_value.rerank_config = None
     cfg.get_config.return_value.node_id = "test-node"
-    monkeypatch.setattr(sh, "get_config_service", lambda: cfg)
+    monkeypatch.setattr(sh.code_search, "get_config_service", lambda: cfg)
+    monkeypatch.setattr(sh.repo_search, "get_config_service", lambda: cfg)
     return cfg
 
 
@@ -155,7 +156,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         raw = sh.search_code(_params(), _make_user("alice"))
@@ -176,7 +177,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         wire_app_module.semantic_query_manager.query_user_repositories.side_effect = (
             RuntimeError("index gone")
@@ -193,7 +194,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         long_q = "é" * 700
@@ -207,7 +208,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         wire_app_module.semantic_query_manager.query_user_repositories.return_value = (
             _qm_result(0)
@@ -222,7 +223,9 @@ class TestEnqueueContract:
         """search_code must not raise when writer is unavailable."""
         import code_indexer.server.mcp.handlers.search as sh
 
-        monkeypatch.setattr(sh, "_get_search_event_writer", lambda: None, raising=False)
+        monkeypatch.setattr(
+            sh.code_search, "_get_search_event_writer", lambda: None, raising=False
+        )
 
         raw = sh.search_code(_params(), _make_user("alice"))
         # Must return a dict (either MCP wrapper or error response) without raising
@@ -240,7 +243,7 @@ class TestContextVarLifecycle:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         captured: list = []
@@ -270,7 +273,7 @@ class TestContextVarLifecycle:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         sh.search_code(_params(), _make_user("alice"))
@@ -701,7 +704,7 @@ class TestEmbeddingMetadataInRecord:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         # FTS does not call coalesced_query_embedding — ctx fields remain None
         wire_app_module.semantic_query_manager.query_user_repositories.return_value = (

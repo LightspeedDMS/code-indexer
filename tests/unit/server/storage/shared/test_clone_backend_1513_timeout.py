@@ -4,7 +4,7 @@ timeout, so a lost/dropped response from the CoW Storage Daemon hangs the caller
 forever instead of failing loudly.
 
 Production symptom (staging cluster, reproduced twice on a large golden repo
-"evolution"): repository activation stuck at progress=40% ("Cloning repository")
+"example-repo"): repository activation stuck at progress=40% ("Cloning repository")
 indefinitely. cidx-server's log showed `CowDaemonBackend: creating clone at
 path ...` with no follow-up line ever. `ss -tnp` showed the HTTP connection to
 the CoW daemon stuck in CLOSE-WAIT — the daemon side closed the connection, but

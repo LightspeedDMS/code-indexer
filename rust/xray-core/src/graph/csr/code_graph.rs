@@ -16,6 +16,37 @@ use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
 
+/// Bug #1900 (epic #1906 P2): the single distinction `CodeGraph::edge_reason`
+/// promises -- whether the `(from, to)` edge is backed by at least one call
+/// site where `to` was the ONLY surviving candidate (`SoleCandidate`) or
+/// every contributing call site offered several candidates
+/// (`MultipleCandidates`). This is the exact mechanism the cycle-precision
+/// bug (#1899) needs to filter a finding (an SCC, a reachability path) down
+/// to a trustworthy CANDIDATE-SET SHAPE.
+///
+/// Review round 2 (BLOCKING P2): this tier is renamed from
+/// `Unambiguous`/`Ambiguous` to `SoleCandidate`/`MultipleCandidates` because
+/// it is, and always was, a COUNT of surviving candidates -- never a claim
+/// about whether the evidence backing that candidate is actually TRUE.
+/// `Unambiguous` invited exactly that misreading: a call site can have
+/// exactly one surviving candidate that is still a fabrication (e.g. a
+/// same-named `put(2 params)` landed on via `SAME_PACKAGE`/`ARITY_MATCH`
+/// alone, with no `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`), and this
+/// enum alone cannot tell that apart from a provably-correct single
+/// candidate. `edge_evidence` (below) is the accessor that carries the
+/// REAL evidence bits for that judgment -- this enum answers a narrower,
+/// honestly-named question: "how many candidates survived at the strongest
+/// contributing call site", nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeReason {
+    /// At least one reference resolving `from` to `to` had exactly one
+    /// surviving candidate in its window.
+    SoleCandidate,
+    /// Every reference resolving `from` to `to` had more than one
+    /// surviving candidate in its window.
+    MultipleCandidates,
+}
+
 /// Immutable, query-only whole-repository code graph. The only way to
 /// build one is `CodeGraphBuilder::build` -- there is no public
 /// constructor here that could assemble an internally-inconsistent graph
@@ -46,6 +77,18 @@ pub struct CodeGraph {
     /// `kind_for`'s doc comment for why that MUST be treated as unproven,
     /// never as license to report a symbol dead.
     kinds: HashMap<u32, DeclarationKind>,
+    /// Bug #1900 (epic #1906 P5): per-symbol DECLARATION location -- a
+    /// `(file_string_id, line)` pair into the shared `strings` table below.
+    /// See `location_for`'s doc comment for why this is keyed by the
+    /// declaration's own file+line, never a `Reference`'s call-site
+    /// coordinates.
+    locations: HashMap<u32, (u32, u32)>,
+    /// Bug #1926: dense symbol ids `is_definitely_
+    /// dead_code` must treat as provably non-instantiable (a class's sole
+    /// private no-arg constructor) -- a SEPARATE fact from `visibilities`,
+    /// never a rewrite of it. See `CodeGraphBuilder`'s own field doc for
+    /// the full rationale.
+    non_instantiable_constructors: std::collections::HashSet<u32>,
     /// Dual-review defect M2 fix: CSR forward adjacency (callees), built
     /// ONCE here rather than re-scanned per query -- see `super::adjacency`
     /// module docs for why `callees_of`/`strongly_connected_components`
@@ -54,6 +97,23 @@ pub struct CodeGraph {
     /// M2 fix: CSR reverse adjacency (callers), same rationale as
     /// `forward_index`.
     reverse_index: super::adjacency::AdjacencyIndex,
+    /// #1924/#1925: a SECOND reverse adjacency index that DOES carry
+    /// per-occurrence evidence, built LAZILY (on the first call to a
+    /// filtered CALLERS-direction primitive) rather than unconditionally
+    /// at `from_parts` time -- see `reverse_evidence`'s own doc comment
+    /// and `AdjacencyIndex::build_reverse_with_evidence`'s for the full
+    /// rationale (the O(in-degree x caller out-degree) query cost this
+    /// replaces, and the ~30.6 MB/analyze-child memory cost it now pays
+    /// only when actually used).
+    reverse_evidence_index: std::sync::OnceLock<super::adjacency::AdjacencyIndex>,
+    /// #1924/#1925 (P3): test-only work-count instrumentation, incremented
+    /// once per REAL invocation of the `reverse_evidence_index.get_or_init`
+    /// closure -- proves the lazy build happens AT MOST ONCE across many
+    /// `callers_of_filtered`/`reachable_to_filtered` queries on the same
+    /// `CodeGraph`, without relying on wall-clock timing. Absent from a
+    /// non-test build entirely (zero size, zero cost).
+    #[cfg(test)]
+    reverse_evidence_build_count: std::sync::atomic::AtomicUsize,
 }
 
 impl CodeGraph {
@@ -75,6 +135,8 @@ impl CodeGraph {
         signatures: HashMap<u32, String>,
         visibilities: HashMap<u32, Visibility>,
         kinds: HashMap<u32, DeclarationKind>,
+        locations: HashMap<u32, (u32, u32)>,
+        non_instantiable_constructors: std::collections::HashSet<u32>,
     ) -> Self {
         let forward_index = super::adjacency::AdjacencyIndex::build_forward(symbols.len(), &references, &candidates);
         let reverse_index = super::adjacency::AdjacencyIndex::build_reverse(symbols.len(), &references, &candidates);
@@ -89,8 +151,13 @@ impl CodeGraph {
             signatures,
             visibilities,
             kinds,
+            locations,
+            non_instantiable_constructors,
             forward_index,
             reverse_index,
+            reverse_evidence_index: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            reverse_evidence_build_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -127,6 +194,53 @@ impl CodeGraph {
     /// reads `Visibility::Unknown`: no evidence, so no confident verdict.
     pub fn kind_for(&self, dense_symbol_id: u32) -> Option<DeclarationKind> {
         self.kinds.get(&dense_symbol_id).copied()
+    }
+
+    /// Bug #1926: true when `dense_symbol_id` was
+    /// recorded as a class's sole private no-arg constructor -- the
+    /// standard Java non-instantiable-utility-class idiom. Consulted by
+    /// `is_definitely_dead_code` ALONGSIDE (never instead of) the ordinary
+    /// visibility check: this never changes what `visibility_for` reports
+    /// for the same symbol, which stays truthfully `Private`.
+    pub fn is_non_instantiable_constructor(&self, dense_symbol_id: u32) -> bool {
+        self.non_instantiable_constructors.contains(&dense_symbol_id)
+    }
+
+    /// Bug #1900 (epic #1906 P5): this symbol's DECLARATION file path and
+    /// 1-based line, or `None` if extraction never recorded one. This is
+    /// DELIBERATELY distinct from any `Reference`'s `file`/`line` fields
+    /// (`Reference.file` is a one-way SHA-256-derived hash, not even
+    /// resolvable to a path string, and in any case names a CALL SITE, not
+    /// a declaration) -- every production graph-mode finding today ships a
+    /// bare `name(N params)` string with no way to chase it to source; this
+    /// is the accessor that closes that gap. Returns a `&str` borrowed from
+    /// the shared string table, with a lifetime tied to `&self`, never an
+    /// owned `String` -- mirrors `resolve_string`/`signature_for`'s exact
+    /// contract.
+    ///
+    /// Review round 2 (BLOCKING P3): uses the CHECKED `try_resolve`, never
+    /// the panicking `resolve`. `thunk_location_for_raw` (`csr::mod::handle`)
+    /// is an FFI thunk reached from a dylib-supplied `GraphHandle` on
+    /// caller-controlled input (a corrupt or hand-crafted `--graph-in` file
+    /// whose `file_string_id` is outside the decoded string table) --
+    /// ADR-002 Defect 2 exists precisely so a panic can never cross that
+    /// boundary, exactly like `try_resolve_symbol`/`try_resolve_string`
+    /// already do for every other GraphHandle-reachable resolution. Returns
+    /// `None` on an out-of-range `file_string_id` rather than panicking.
+    pub fn location_for(&self, dense_symbol_id: u32) -> Option<(&str, usize)> {
+        let &(file_string_id, line) = self.locations.get(&dense_symbol_id)?;
+        let path = self.strings.try_resolve(file_string_id)?;
+        Some((path, line as usize))
+    }
+
+    /// Bug #1900: crate-internal UNRESOLVED counterpart to `location_for`,
+    /// returning the raw `(file_string_id, line)` pair as stored rather
+    /// than resolving `file_string_id` through the string table. Exists so
+    /// `csr::wire`'s writer can serialize this section directly off the
+    /// same ids `write_strings` already wrote, without re-interning or
+    /// re-resolving a `&str` it would immediately have to look back up.
+    pub(super) fn raw_location_for(&self, dense_symbol_id: u32) -> Option<(u32, u32)> {
+        self.locations.get(&dense_symbol_id).copied()
     }
 
     /// AC6 step 1: this symbol's cached AC2 signature line, or `None` if
@@ -296,6 +410,16 @@ impl CodeGraph {
     /// Extracting field/constant references is deliberate future work: it
     /// requires scope-aware handling of locals, parameters, implicit
     /// `this`-field reads, and static imports, and is outside this narrowing.
+    ///
+    /// Bug #1926: a class's sole, no-arg, private
+    /// constructor (`is_non_instantiable_constructor`) is the standard Java
+    /// idiom for an intentionally non-instantiable utility class --
+    /// "unreferenced" is the INTENDED state there, not evidence of dead
+    /// code, so it is excluded from the `Some(true)` verdict below even
+    /// though it is genuinely `Private`. This is a SEPARATE fact from
+    /// `Visibility` (which stays truthfully `Private` for such a
+    /// constructor, unaffected by this exception) -- see `CodeGraphBuilder`'s
+    /// own field doc comment for why a `Visibility` rewrite was rejected.
     pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
         if self.is_symbol_referenced(dense_symbol_id) {
             return Some(false);
@@ -306,10 +430,126 @@ impl CodeGraph {
         if !matches!(self.kind_for(dense_symbol_id), Some(DeclarationKind::Method | DeclarationKind::Type)) {
             return None;
         }
+        if self.is_non_instantiable_constructor(dense_symbol_id) {
+            return None;
+        }
         if self.visibility_for(dense_symbol_id).is_provably_not_externally_visible() {
             return Some(true);
         }
         None
+    }
+
+    /// Bug #1900 (epic #1906 P2): whether the `(from, to)` edge is backed
+    /// by at least one call site where `to` was the reference's ONLY
+    /// candidate (`Some(EdgeReason::SoleCandidate)`), every contributing
+    /// call site offered several candidates
+    /// (`Some(EdgeReason::MultipleCandidates)`), or `from` never targets
+    /// `to` at all (`None`). See `EdgeReason`'s doc comment for why this is
+    /// a COUNT-based tier only, never a truth/provenance claim -- use
+    /// `edge_evidence` for the latter.
+    ///
+    /// Complexity (review round 2 correction): O(out-degree of `from`) via
+    /// the precomputed forward adjacency index -- never an O(edges) scan of
+    /// `references()`. This is cheap for what an evaluator actually does
+    /// with it: querying a handful of edges along a PATH (a reachability
+    /// hop chain, typically a few hops) or the members of ONE SCC. It is
+    /// NOT cheap to call once per edge while annotating every edge in the
+    /// graph -- doing that for every node's out-edges is O(sum of
+    /// out-degree^2), not O(edges): a single hub with a large out-degree
+    /// dominates that sum on its own (measured ~0.55ns/edge-pair; a 100k
+    /// out-degree hub alone costs ~5.5s under that usage pattern).
+    pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+        self.forward_index
+            .ambiguous_for_edge(from, to)
+            .map(|ambiguous| if ambiguous { EdgeReason::MultipleCandidates } else { EdgeReason::SoleCandidate })
+    }
+
+    /// Bug #1900 (epic #1906 P2, review round 2): the REAL evidence
+    /// accessor `edge_reason` cannot provide -- the bitwise-OR of
+    /// `graph::reasons::*` bits across every candidate that contributed the
+    /// `(from, to)` edge. `None` when `from` never targets `to` at all;
+    /// `Some(0)` when it does but no candidate ever set an evidence bit
+    /// (an edge built from a bare `Candidate::new(sym, 0)`, which real
+    /// binder output never produces but a hand-built graph could). This is
+    /// what lets an evaluator require e.g. `RECEIVER_TYPE_MATCH` or
+    /// `UNIQUE_NAME_IN_REPO` before trusting a hop, rather than trusting
+    /// `edge_reason`'s candidate COUNT alone -- the fabricated-edge case
+    /// the review proved (a same-named overload landed on by
+    /// `SAME_PACKAGE`/`ARITY_MATCH` alone, reported `SoleCandidate` despite
+    /// being wrong) is exactly what this closes: `edge_evidence` on that
+    /// same pair carries no `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO`
+    /// bit, so a caller checking for either can tell the two cases apart.
+    ///
+    /// Same complexity profile and caveat as `edge_reason` above: O(out-
+    /// degree of `from`), cheap for a path or an SCC member scan, NOT for
+    /// annotating every edge in the graph.
+    pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+        self.forward_index.evidence_for_edge(from, to)
+    }
+
+    /// #1924/#1925 (epic #1906): the evidence-FILTERED counterpart of
+    /// `callees_of` -- every callee of `dense_symbol_id` reached by AT
+    /// LEAST ONE edge OCCURRENCE whose OWN `edge_evidence` satisfies
+    /// `(bits & required_bits) == required_bits && (bits & forbidden_bits)
+    /// == 0` -- see `AdjacencyIndex::filtered_edges_of`'s own doc comment
+    /// for why this checks each occurrence independently rather than
+    /// merging a target's evidence across occurrences first (a real edge
+    /// and a separate fabricated edge to the same target must not cancel
+    /// each other out). `required_bits: 0, forbidden_bits: 0` reaches the
+    /// same SET of targets as `callees_of`, DEDUPLICATED -- `callees_of`
+    /// itself returns one entry PER OCCURRENCE (duplicates included) in
+    /// raw CSR order, so do not assume identical `Vec` length or order
+    /// between the two, only the same underlying target set. O(out-degree
+    /// of `dense_symbol_id`) via `AdjacencyIndex::filtered_edges_of` -- ONE
+    /// pass over the forward CSR slice, never a per-callee `edge_evidence`
+    /// call (which would reintroduce the O(out-degree^2) shape Bug #1900
+    /// M2 already fixed for the unfiltered primitive). This is what lets an
+    /// evaluator (via `GraphHandle`) analyse the "strong subgraph" directly
+    /// -- e.g. requiring `RECEIVER_TYPE_MATCH` and forbidding `RECEIVER_
+    /// TYPE_MISMATCH` to drop the #1924/#1925 fabricated-receiver edges
+    /// from its own reachability/SCC analysis, without this binder ever
+    /// deleting them from the raw graph itself.
+    pub fn callees_of_filtered(&self, dense_symbol_id: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        self.forward_index.filtered_edges_of(dense_symbol_id, required_bits, forbidden_bits)
+    }
+
+    /// #1924/#1925: the evidence-FILTERED counterpart of `callers_of`, same
+    /// per-occurrence/dedup contract as `callees_of_filtered` above.
+    /// Delegates to `reverse_evidence()`'s own `filtered_edges_of` -- an
+    /// index built LAZILY, on the FIRST call to this method or `reachable_
+    /// to_filtered` on this `CodeGraph`, then reused for every subsequent
+    /// filtered-callers query. O(in-degree of `dense_symbol_id`) per call
+    /// after that first build (same complexity class as `callees_of_
+    /// filtered`), replacing a prior implementation whose per-query cost
+    /// scaled with each caller's own out-degree instead. See `reverse_
+    /// evidence`'s own doc comment for why the lazy build (not an
+    /// unconditional one, matching the forward index) is deliberate; see
+    /// `code_graph_edge_tests.rs`'s perf-shape test for the work-count
+    /// proof.
+    pub fn callers_of_filtered(&self, dense_symbol_id: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+        self.reverse_evidence().filtered_edges_of(dense_symbol_id, required_bits, forbidden_bits)
+    }
+
+    /// #1924/#1925: builds (on first call) or returns the cached `reverse_
+    /// evidence_index` -- a SECOND reverse adjacency index that DOES carry
+    /// per-occurrence evidence, unlike `reverse_index` (which stays
+    /// evidence-free, per Bug #1900 round 3's ~30.6 MB/analyze-child
+    /// memory rationale, since `callers_of`/`reachable_to` never needed
+    /// evidence at all). Built from THIS graph's own `references`/
+    /// `candidates` -- the same source `forward_index`/`reverse_index`
+    /// were built from in `from_parts` -- so it is byte-for-byte
+    /// consistent with them, just computed lazily instead of eagerly.
+    /// `OnceLock::get_or_init` is safe to call from `&self` (interior
+    /// mutability): every caller of a filtered CALLERS-direction primitive
+    /// on the same `CodeGraph` shares ONE build, never rebuilding per
+    /// call -- the `#[cfg(test)]` increment below only ever runs inside
+    /// the closure, i.e. only on the real first build.
+    fn reverse_evidence(&self) -> &super::adjacency::AdjacencyIndex {
+        self.reverse_evidence_index.get_or_init(|| {
+            #[cfg(test)]
+            self.reverse_evidence_build_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::adjacency::AdjacencyIndex::build_reverse_with_evidence(self.symbols.len(), &self.references, &self.candidates)
+        })
     }
 
     /// Dual-review defect D1 fix: records that `repo_index::build_repo_graph`
@@ -337,419 +577,8 @@ impl CodeGraph {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::builder::CodeGraphBuilder;
-    use super::super::candidate::Candidate;
-    use crate::graph::bind::depth::BinderDepth;
-    use crate::graph::identity::make_symbol_id;
-    use crate::graph::reasons;
-
-    /// End-to-end wiring test: build a small graph through the real
-    /// builder, then verify every query surface (`references`,
-    /// `candidates_for`, `resolve_symbol`, `resolve_string`,
-    /// `is_ambiguous`/`is_unresolved` read through the graph) agrees with
-    /// what was built -- not just each piece in isolation.
-    #[test]
-    fn graph_round_trips_references_candidates_symbols_and_strings() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(3);
-
-        let foo_symbol = make_symbol_id(1, 0);
-        let bar_symbol = make_symbol_id(1, 1);
-        let foo_dense = builder.intern_symbol(foo_symbol);
-        let bar_dense = builder.intern_symbol(bar_symbol);
-        let foo_name = builder.intern_string("Foo");
-
-        // Reference 0: ambiguous call resolved to two candidates.
-        builder.add_reference(
-            10,
-            1,
-            5,
-            0,
-            &[
-                Candidate::new(foo_dense, reasons::SAME_FILE),
-                Candidate::new(bar_dense, reasons::SAME_PACKAGE),
-            ],
-        );
-        // Reference 1: exact, single candidate.
-        builder.add_reference(11, 1, 6, 0, &[Candidate::new(foo_dense, reasons::UNIQUE_NAME_IN_REPO)]);
-        // Reference 2: out-of-repo call, empty candidate set.
-        builder.add_reference(12, 1, 7, 0, &[]);
-
-        builder.set_binder_depths(vec![BinderDepth::new("java")]);
-
-        let graph = builder.build();
-
-        assert_eq!(graph.references().len(), 3);
-        assert_eq!(graph.binder_depths(), &[BinderDepth::new("java")]);
-
-        let ref0 = graph.references()[0];
-        assert!(ref0.is_ambiguous());
-        assert!(!ref0.is_unresolved());
-        let ref0_candidates = graph.candidates_for(&ref0);
-        assert_eq!(ref0_candidates.len(), 2);
-        assert_eq!(graph.resolve_symbol(ref0_candidates[0].symbol()), foo_symbol);
-        assert_eq!(graph.resolve_symbol(ref0_candidates[1].symbol()), bar_symbol);
-
-        let ref1 = graph.references()[1];
-        assert!(!ref1.is_ambiguous());
-        assert!(!ref1.is_unresolved());
-        assert_eq!(graph.candidates_for(&ref1).len(), 1);
-
-        let ref2 = graph.references()[2];
-        assert!(ref2.is_unresolved());
-        assert!(graph.candidates_for(&ref2).is_empty());
-
-        assert_eq!(graph.resolve_string(foo_name), "Foo");
-    }
-
-    /// AC7: `strongly_connected_components` (in `super::ops`) needs to
-    /// enumerate every interned symbol's dense id from OUTSIDE this
-    /// module, where `self.symbols` is private -- this accessor is the
-    /// seam that lets it do so without exposing the `SymbolTable` type
-    /// itself.
-    #[test]
-    fn symbol_count_reports_the_number_of_distinct_interned_symbols() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        builder.intern_symbol(make_symbol_id(1, 0));
-        builder.intern_symbol(make_symbol_id(1, 1));
-        // Interning the SAME symbol again must not inflate the count.
-        builder.intern_symbol(make_symbol_id(1, 0));
-
-        let graph = builder.build();
-        assert_eq!(graph.symbol_count(), 2);
-    }
-
-    /// AC7: `graph::csr::wire::write_graph_file` (next) needs to enumerate
-    /// every interned string from OUTSIDE this module (where `self.strings`
-    /// is private) to serialize the mmap-handoff wire format -- this
-    /// accessor is that seam, mirroring `symbol_count` above exactly.
-    #[test]
-    fn string_count_reports_the_number_of_distinct_interned_strings() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        builder.intern_string("Foo");
-        builder.intern_string("Bar");
-        // Interning the SAME string again must not inflate the count.
-        builder.intern_string("Foo");
-
-        let graph = builder.build();
-        assert_eq!(graph.string_count(), 2);
-    }
-
-    /// AC6: `CodeGraphBuilder` records the completeness state, the
-    /// decoupled referenced-bit, and a per-symbol cached signature line;
-    /// `CodeGraph` surfaces all three as real query methods, plus a
-    /// reverse `dense_id_for` lookup and the `is_definitely_dead_code`
-    /// dead-code-tier gate AC6 requires.
-    #[test]
-    fn budget_outcome_fields_round_trip_through_the_builder() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let live_symbol = make_symbol_id(1, 0);
-        let dead_symbol = make_symbol_id(1, 1);
-        let live_dense = builder.intern_symbol(live_symbol);
-        let dead_dense = builder.intern_symbol(dead_symbol);
-
-        builder.mark_referenced(live_dense);
-        builder.add_signature(live_dense, "run()".to_string());
-        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
-
-        let graph = builder.build();
-
-        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
-        assert!(graph.is_symbol_referenced(live_dense));
-        assert!(!graph.is_symbol_referenced(dead_dense));
-        assert_eq!(graph.signature_for(live_dense), Some("run()"));
-        assert_eq!(graph.signature_for(dead_dense), None);
-        assert_eq!(graph.dense_id_for(live_symbol), Some(live_dense));
-        assert_eq!(graph.dense_id_for(make_symbol_id(9, 9)), None);
-
-        // Referenced -> never dead, regardless of completeness.
-        assert_eq!(graph.is_definitely_dead_code(live_dense), Some(false));
-        // Unreferenced + IndexBudgetExceeded -> suppressed (None), never
-        // a false "definitely dead" verdict.
-        assert_eq!(graph.is_definitely_dead_code(dead_dense), None);
-    }
-
-    /// Dual-review defect D1 (Critical): the pre-fix guard was an
-    /// allowlist-of-one (`== IndexBudgetExceeded`) where the story's own
-    /// docs demand an allowlist of exactly ONE good state (`!= Complete`
-    /// suppresses everything else). `RepoIndexIncomplete` (repo-level
-    /// indexing gaps: `max_files` truncation, parse errors, extractor
-    /// panics, unreadable source files -- see `repo_index::build_repo_graph`)
-    /// is the DISCRIMINATING case a wrong `== IndexBudgetExceeded` guard
-    /// would miss: it is non-`Complete` but not `IndexBudgetExceeded`,
-    /// so the old guard fell through to `Some(true)` -- a confident
-    /// "definitely dead" verdict from a partially-indexed repository.
-    #[test]
-    fn is_definitely_dead_code_suppresses_the_dead_code_tier_for_every_non_complete_state() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let dead_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
-        let graph = builder.build();
-
-        assert_eq!(
-            graph.is_definitely_dead_code(dead_symbol),
-            None,
-            "an unreferenced symbol in a RepoIndexIncomplete graph must be suppressed (None), \
-             never a confident Some(true) 'definitely dead' verdict"
-        );
-    }
-
-    /// `downgrade_completeness` must set the reason exactly once (from the
-    /// default `Complete`) and never clobber an already-recorded, more
-    /// specific reason with a later, less specific one.
-    #[test]
-    fn downgrade_completeness_sets_reason_once_but_never_clobbers_an_existing_one() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        builder.intern_symbol(make_symbol_id(1, 0));
-        let mut graph = builder.build();
-        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::Complete);
-
-        graph.downgrade_completeness(crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
-        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
-
-        // A second, different reason must NOT overwrite the first.
-        graph.downgrade_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
-        assert_eq!(
-            graph.completeness(),
-            crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete,
-            "the first-recorded degradation reason must win"
-        );
-    }
-
-    /// Defect 2 (ADR-002 GraphHandle FFI fix): `try_resolve_symbol`/
-    /// `try_resolve_string` are the checked counterparts to
-    /// `resolve_symbol`/`resolve_string` -- they must delegate to
-    /// `SymbolTable::try_resolve`/`StringTable::try_resolve` and return
-    /// `None` on an out-of-range id, never panic. The panicking
-    /// `resolve_symbol`/`resolve_string` are unchanged and still covered by
-    /// `graph_round_trips_references_candidates_symbols_and_strings` above.
-    #[test]
-    fn try_resolve_symbol_and_try_resolve_string_are_checked_never_panicking_counterparts() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let foo_symbol = make_symbol_id(1, 0);
-        let foo_dense = builder.intern_symbol(foo_symbol);
-        let foo_name_id = builder.intern_string("Foo");
-        let graph = builder.build();
-
-        assert_eq!(graph.try_resolve_symbol(foo_dense), Some(foo_symbol));
-        assert_eq!(graph.try_resolve_symbol(u32::MAX), None, "an out-of-range dense id must return None, never panic");
-
-        assert_eq!(graph.try_resolve_string(foo_name_id), Some("Foo"));
-        assert_eq!(graph.try_resolve_string(u32::MAX), None, "an out-of-range string id must return None, never panic");
-    }
-
-    /// Bug #1833 AC1 (discriminating regression test -- MUST fail on
-    /// unmodified code, not just on a contrived input): a `Complete` graph
-    /// carries NO visibility or entry-point data anywhere in the CSR arena
-    /// (`SymbolId`, `Candidate`, `Reference`, `Declaration` all lack any
-    /// modifier field -- verified by inspection before writing this test).
-    /// So an unreferenced symbol here is exactly the shape of a library's
-    /// public API symbol on a real repo: zero in-repo callers BY
-    /// CONSTRUCTION, not because it is provably unreachable. Reporting
-    /// `Some(true)` ("definitely dead") for it is a false certainty the
-    /// graph cannot back up -- confirmed live on jsoup-global (Bug #1833:
-    /// 1296/3147 symbols wrongly flagged, including documented public API
-    /// like `Connection.contentType`). A test using a symbol some OTHER
-    /// signal proves private would pass today on the pre-fix code too and
-    /// prove nothing; this one does not smuggle in any such signal.
-    #[test]
-    fn is_definitely_dead_code_does_not_claim_certainty_for_an_unreferenced_symbol_with_no_visibility_evidence() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let library_api_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        // Completeness defaults to `Complete` -- the exact condition under
-        // which the pre-fix code fell through to `Some(true)`.
-        let graph = builder.build();
-
-        assert_eq!(
-            graph.is_definitely_dead_code(library_api_symbol),
-            None,
-            "an unreferenced symbol on a Complete graph must be reported as undecidable (None) \
-             when the graph holds no evidence the symbol is unreachable from OUTSIDE the repo -- \
-             claiming Some(true) here is exactly Bug #1833's false 'definitely dead' verdict"
-        );
-    }
-
-    /// Story #1835 AC4 (RED against unmodified code -- `CodeGraphBuilder`
-    /// has no `add_visibility` method yet, so this fails to compile): the
-    /// CENTRAL discriminating test for the whole story. On a SINGLE
-    /// `Complete` graph, an unreferenced PRIVATE symbol must yield
-    /// `Some(true)` (a real, provable dead-code verdict) while an
-    /// unreferenced PUBLIC symbol in that SAME graph must stay `None`
-    /// (Bug #1833's conservative behavior, unchanged for anything the
-    /// visibility bit cannot prove safe). A test exercising only one of
-    /// the two directions would prove nothing -- the whole point of this
-    /// story is that the function now tells them apart.
-    #[test]
-    fn is_definitely_dead_code_distinguishes_unreferenced_private_from_unreferenced_public_on_a_complete_graph() {
-        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
-
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let unreferenced_private = builder.intern_symbol(make_symbol_id(1, 0));
-        let unreferenced_public = builder.intern_symbol(make_symbol_id(1, 1));
-        builder.add_visibility(unreferenced_private, Visibility::Private);
-        builder.add_visibility(unreferenced_public, Visibility::Public);
-        // Bug #1858: both symbols here represent methods, so they carry a
-        // tracked-reference kind -- real production code always attaches
-        // one (see `budget_bind::intern_declarations_and_attach_signatures`),
-        // and without it `is_definitely_dead_code` now correctly stays
-        // undecidable regardless of visibility.
-        builder.add_kind(unreferenced_private, DeclarationKind::Method);
-        builder.add_kind(unreferenced_public, DeclarationKind::Method);
-        // Completeness defaults to `Complete`.
-        let graph = builder.build();
-
-        assert_eq!(
-            graph.is_definitely_dead_code(unreferenced_private),
-            Some(true),
-            "an unreferenced PRIVATE symbol is provably unreachable from outside the repo -- \
-             this is the true positive Bug #1833's fix gave up and this story restores"
-        );
-        assert_eq!(
-            graph.is_definitely_dead_code(unreferenced_public),
-            None,
-            "an unreferenced PUBLIC symbol stays undecidable -- external callers are invisible \
-             to this repo's graph by construction, exactly Bug #1833's jsoup Connection/Response case"
-        );
-    }
-
-    /// Bug #1858: field reads are not represented by inbound reference edges,
-    /// so an unreferenced private field must not be classified as definitely
-    /// dead. Keep the unreferenced private method in the same test so this
-    /// remains discriminating: tracked declaration kinds still get the dead
-    /// verdict. Turn 7 (codex) proved this RED against unmodified code using
-    /// only `add_visibility` -- `add_kind` did not exist yet. Turn 8 (claude)
-    /// extends it in place with real `add_kind` calls now that the
-    /// declaration-kind channel exists; this must STILL be red at this point
-    /// (`is_definitely_dead_code` does not consult kind yet -- that is turn
-    /// 9's job), for the identical reason as before.
-    #[test]
-    fn is_definitely_dead_code_does_not_claim_unreferenced_private_field_is_dead() {
-        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
-
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        // Intended field: its source-level read cannot become an inbound edge
-        // with the current extractor, so the graph sees no reference here.
-        let private_field = builder.intern_symbol(make_symbol_id(1, 0));
-        // Intended method: genuinely unreferenced and tracked by the graph.
-        let private_method = builder.intern_symbol(make_symbol_id(1, 1));
-        builder.add_visibility(private_field, Visibility::Private);
-        builder.add_visibility(private_method, Visibility::Private);
-        builder.add_kind(private_field, DeclarationKind::Field);
-        builder.add_kind(private_method, DeclarationKind::Method);
-        let graph = builder.build();
-
-        assert_eq!(graph.is_definitely_dead_code(private_field), None);
-        assert_eq!(graph.is_definitely_dead_code(private_method), Some(true));
-    }
-
-    /// Bug #1858: `kind_for` must report back exactly the `DeclarationKind`
-    /// attached via `add_kind` on a normal (non-degraded) build -- the
-    /// baseline round trip every other `kind_for` test builds on.
-    #[test]
-    fn kind_for_returns_the_declared_kind_after_a_normal_build() {
-        use crate::graph::extract::local_index::DeclarationKind;
-
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let field_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        let method_symbol = builder.intern_symbol(make_symbol_id(1, 1));
-        builder.add_kind(field_symbol, DeclarationKind::Field);
-        builder.add_kind(method_symbol, DeclarationKind::Method);
-        let graph = builder.build();
-
-        assert_eq!(graph.kind_for(field_symbol), Some(DeclarationKind::Field));
-        assert_eq!(graph.kind_for(method_symbol), Some(DeclarationKind::Method));
-    }
-
-    /// Bug #1858 safe-default contract, half 1: a genuinely BUDGET-EXCEEDED
-    /// build must still retain declaration kinds, exactly like
-    /// `visibilities` (never dropped like `signatures`) -- otherwise a
-    /// degraded build would silently lose the evidence that keeps a
-    /// tracked-reference kind (e.g. Method) eligible for its existing
-    /// `Some(true)` verdict, an unrelated regression this bug must not
-    /// introduce. `set_completeness` here simulates the degraded state
-    /// directly on the builder, mirroring
-    /// `budget_outcome_fields_round_trip_through_the_builder` above --
-    /// `kinds` has no separate "drop under budget" code path to simulate
-    /// (unlike `signatures`, which `bind_with_budget` explicitly skips
-    /// writing), so retention is verified as a direct, unconditional
-    /// consequence of `add_kind` always being called.
-    #[test]
-    fn kind_for_is_retained_under_a_simulated_budget_exceeded_build() {
-        use crate::graph::extract::local_index::DeclarationKind;
-
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let method_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        builder.add_kind(method_symbol, DeclarationKind::Method);
-        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
-        let graph = builder.build();
-
-        assert_eq!(
-            graph.completeness(),
-            crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded
-        );
-        assert_eq!(
-            graph.kind_for(method_symbol),
-            Some(DeclarationKind::Method),
-            "declaration kind must survive a budget-exceeded build, mirroring visibility \
-             retention, so a degraded build never loses the evidence a tracked-reference kind \
-             needs to keep its existing dead-code verdict"
-        );
-    }
-
-    /// Bug #1858 safe-default contract, half 2: a symbol with NO kind
-    /// evidence at all (never passed to `add_kind`) must read back as
-    /// `None`, never fabricate a kind. This is the entry-absent case,
-    /// distinct from the budget-exceeded-but-present case above --
-    /// `is_definitely_dead_code` must treat this exactly as "unproven",
-    /// never as license to report `Some(true)`.
-    #[test]
-    fn kind_for_returns_none_for_a_symbol_with_no_kind_evidence() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let unknown_kind_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        let graph = builder.build();
-
-        assert_eq!(
-            graph.kind_for(unknown_kind_symbol),
-            None,
-            "a symbol never passed to add_kind must read back as None, never a fabricated kind"
-        );
-    }
-
-    /// Bug #1833 AC2/AC3/AC4: on a library-shaped graph, raw reference
-    /// evidence remains queryable independently of the conservative
-    /// definitely-dead verdict. The referenced symbol is still known live,
-    /// while both unreferenced symbols are undecidable rather than falsely
-    /// classified as dead. This makes `definitely_dead < unreferenced`
-    /// structural for the current visibility-blind graph representation.
-    #[test]
-    fn library_graph_under_reports_dead_code_without_aliasing_raw_references() {
-        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
-        let referenced_symbol = builder.intern_symbol(make_symbol_id(1, 0));
-        let unreferenced_api_a = builder.intern_symbol(make_symbol_id(1, 1));
-        let unreferenced_api_b = builder.intern_symbol(make_symbol_id(1, 2));
-        builder.mark_referenced(referenced_symbol);
-
-        let graph = builder.build();
-
-        let unreferenced = (0..graph.symbol_count() as u32)
-            .filter(|&dense_id| !graph.is_symbol_referenced(dense_id))
-            .count();
-        let definitely_dead = (0..graph.symbol_count() as u32)
-            .filter(|&dense_id| graph.is_definitely_dead_code(dense_id) == Some(true))
-            .count();
-
-        assert_eq!(unreferenced, 2);
-        assert_eq!(definitely_dead, 0);
-        assert!(definitely_dead < unreferenced);
-
-        // AC3: the public raw query still reports the actual reference bit.
-        assert!(graph.is_symbol_referenced(referenced_symbol));
-        assert!(!graph.is_symbol_referenced(unreferenced_api_a));
-        assert!(!graph.is_symbol_referenced(unreferenced_api_b));
-        // AC4: positive in-repo evidence remains Some(false).
-        assert_eq!(graph.is_definitely_dead_code(referenced_symbol), Some(false));
-        // The two queries are deliberately not synonyms for unreferenced API.
-        assert_eq!(graph.is_definitely_dead_code(unreferenced_api_a), None);
-        assert_eq!(graph.is_definitely_dead_code(unreferenced_api_b), None);
-    }
-}
+#[path = "code_graph_tests.rs"]
+mod tests;
+#[cfg(test)]
+#[path = "code_graph_edge_tests.rs"]
+mod edge_tests;

@@ -28,10 +28,10 @@ class TestTryGlobalFallback:
         )
 
         grm = self._make_grm(is_globally_active=True)
-        result = try_global_fallback("evolution", grm)
+        result = try_global_fallback("example-repo", grm)
 
-        assert result == "evolution-global"
-        grm.is_globally_active.assert_called_once_with("evolution")
+        assert result == "example-repo-global"
+        grm.is_globally_active.assert_called_once_with("example-repo")
 
     def test_bare_alias_not_globally_active_returns_none(self):
         """Bare alias whose golden repo is NOT globally active -> returns None."""
@@ -40,7 +40,7 @@ class TestTryGlobalFallback:
         )
 
         grm = self._make_grm(is_globally_active=False)
-        result = try_global_fallback("evolution", grm)
+        result = try_global_fallback("example-repo", grm)
 
         assert result is None
 
@@ -51,7 +51,7 @@ class TestTryGlobalFallback:
         )
 
         grm = self._make_grm(is_globally_active=True)
-        result = try_global_fallback("evolution-global", grm)
+        result = try_global_fallback("example-repo-global", grm)
 
         assert result is None
         grm.is_globally_active.assert_not_called()
@@ -98,10 +98,10 @@ class TestUserHasActivatedRepo:
             ActivatedRepoManager,
         )
 
-        arm = self._make_arm(["evolution", "other-repo"])
+        arm = self._make_arm(["example-repo", "other-repo"])
         # Temporarily bind the method and call it directly
         result = ActivatedRepoManager.user_has_activated_repo(
-            arm, "testuser", "evolution"
+            arm, "testuser", "example-repo"
         )
 
         assert result is True
@@ -115,7 +115,7 @@ class TestUserHasActivatedRepo:
 
         arm = self._make_arm(["other-repo"])
         result = ActivatedRepoManager.user_has_activated_repo(
-            arm, "testuser", "evolution"
+            arm, "testuser", "example-repo"
         )
 
         assert result is False

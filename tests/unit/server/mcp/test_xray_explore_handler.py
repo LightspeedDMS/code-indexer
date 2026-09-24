@@ -66,23 +66,23 @@ def _xray_single_repo_env(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/fake/repo/path",
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
         ) as mock_validate,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
@@ -252,7 +252,7 @@ class TestXrayExploreHandlerMaxDebugNodesValidation:
         """max_debug_nodes=0 is rejected with max_debug_nodes_out_of_range."""
         user = _make_user(UserRole.NORMAL_USER)
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(
@@ -264,7 +264,7 @@ class TestXrayExploreHandlerMaxDebugNodesValidation:
         """max_debug_nodes=1000 is above maximum 500 and is rejected."""
         user = _make_user(UserRole.NORMAL_USER)
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(
@@ -294,7 +294,7 @@ class TestXrayExploreHandlerMaxDebugNodesValidation:
         """max_debug_nodes=501 is above maximum 500 and is rejected."""
         user = _make_user(UserRole.NORMAL_USER)
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(
@@ -306,7 +306,7 @@ class TestXrayExploreHandlerMaxDebugNodesValidation:
         """max_debug_nodes=-1 is rejected with max_debug_nodes_out_of_range."""
         user = _make_user(UserRole.NORMAL_USER)
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(
@@ -320,11 +320,11 @@ class TestXrayExploreHandlerMaxDebugNodesValidation:
         mock_bjm = MagicMock()
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
                 return_value="/some/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -359,11 +359,11 @@ class TestXrayExploreHandlerPreFlightValidation:
                 MagicMock(activated_repo_manager=None, golden_repo_manager=None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
                 return_value="/some/path",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
         ):
@@ -388,7 +388,7 @@ class TestXrayExploreHandlerSharedParamValidation:
         params = {**VALID_PARAMS, "search_target": "fulltext"}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(params, user)
@@ -402,7 +402,7 @@ class TestXrayExploreHandlerSharedParamValidation:
         params = {**VALID_PARAMS, "timeout_seconds": 5}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(params, user)
@@ -416,7 +416,7 @@ class TestXrayExploreHandlerSharedParamValidation:
         params = {**VALID_PARAMS, "max_results": 0}
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value="/some/path",
         ):
             result = await _import_handler()(params, user)
@@ -465,7 +465,7 @@ class TestXrayExploreHandlerRepoResolution:
         user = _make_user(UserRole.NORMAL_USER)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
             return_value=None,
         ):
             result = await _import_handler()(VALID_PARAMS.copy(), user)

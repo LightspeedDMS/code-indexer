@@ -67,7 +67,7 @@ class TestClearAllDedupStatesRoundTrip:
         )
         record_dedup_outcome(
             manager,
-            "evolution",
+            "example-repo",
             duplicate_groups=2,
             records_before=20,
             records_deleted=2,
@@ -81,7 +81,7 @@ class TestClearAllDedupStatesRoundTrip:
         assert cleared_count == 2
         # Prove the rows were ACTUALLY cleared through the real backend
         # (not merely that a count was returned).
-        for alias in ("click", "evolution"):
+        for alias in ("click", "example-repo"):
             state = get_dedup_state(manager, alias)
             assert state is not None
             assert state["cleared_at"] is not None

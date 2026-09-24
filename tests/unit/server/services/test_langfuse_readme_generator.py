@@ -53,7 +53,7 @@ def _make_repo(tmp_path: Path, sessions: dict) -> Path:
         ...
     }
     """
-    repo = tmp_path / "langfuse_Claude_Code_seba_battig"
+    repo = tmp_path / "langfuse_Claude_Code_jane_doe"
     for session_id, files in sessions.items():
         session_dir = repo / session_id
         for fname, trace_input, ts in files:
@@ -578,7 +578,7 @@ class TestAtomicWrite:
 class TestEdgeCases:
     def test_empty_session_folder(self, tmp_path):
         """Session folder exists but has no JSON files."""
-        repo = tmp_path / "langfuse_Claude_Code_seba_battig"
+        repo = tmp_path / "langfuse_Claude_Code_jane_doe"
         (repo / "session-empty").mkdir(parents=True)
 
         generator = LangfuseReadmeGenerator()

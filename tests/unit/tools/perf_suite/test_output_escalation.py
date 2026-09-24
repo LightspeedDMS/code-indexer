@@ -180,12 +180,12 @@ class TestWriteEscalationResults:
             results=results,
             started_at=started_at,
             finished_at=finished_at,
-            server_url="http://192.168.60.20:8000",
+            server_url="http://203.0.113.20:8000",
             concurrency_levels=[1],
         )
 
         data = json.loads(output_file.read_text())
-        assert "192.168.60.20" not in data["metadata"]["server_url"]
+        assert "203.0.113.20" not in data["metadata"]["server_url"]
         assert "<server>" in data["metadata"]["server_url"]
 
     def test_scenarios_is_dict_not_list(self, tmp_path):

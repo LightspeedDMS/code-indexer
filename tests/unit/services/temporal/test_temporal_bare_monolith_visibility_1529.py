@@ -41,7 +41,7 @@ from code_indexer.services.temporal.temporal_server_paths import (
 from code_indexer.services.temporal.temporal_status import get_temporal_repo_status
 
 BARE_MONOLITH_NAME = "code-indexer-temporal"
-REPO_ALIAS = "evolution"
+REPO_ALIAS = "example-repo"
 VECTOR_DIM = 4
 
 

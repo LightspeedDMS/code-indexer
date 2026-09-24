@@ -3,9 +3,9 @@
 //! `Type::name`, `expr::name`, `super::name`, `Type::new`). A private
 //! method used only through a method reference therefore has zero inbound
 //! edges and satisfies `is_definitely_dead_code` exactly, so `analyze_graph`
-//! reports live code as definitely dead (confirmed live on production repo
-//! `parts-order-api-global`: 18 of 20 dead-code findings were method-
-//! reference call sites like `.map(this::parsePrice)`).
+//! reports live code as definitely dead (confirmed live on a production
+//! Java repository: 18 of 20 dead-code findings were method-reference call
+//! sites like `.map(this::parseValue)`).
 //!
 //! Root cause: `rust/xray-core/src/graph/extract/java.rs`'s node-walk
 //! `match` (`dispatch_node`) dispatches `"method_invocation"`,

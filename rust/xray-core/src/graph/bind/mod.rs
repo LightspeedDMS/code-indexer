@@ -28,17 +28,22 @@ pub mod depth;
 mod families;
 mod name_index;
 mod narrowing;
+mod receiver_mismatch;
 mod receiver;
+mod receiver_qualified;
+mod receiver_type_qualifier;
 mod resolve;
+mod same_class_qualified;
 mod scope;
 
 pub use admission::{
-    bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, PreBindStats, PreparedBind,
+    bind_with_admission_gate, finish_bind, prepare_bind, BindOutcome, BindTimeFacts, PreBindStats,
+    PreparedBind,
 };
 
 use crate::graph::budget::IndexBudget;
 use crate::graph::csr::CodeGraph;
-use crate::graph::extract::local_index::LocalIndex;
+use crate::graph::extract::local_index::{ArgShape, LocalIndex};
 use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
 use depth::{
@@ -48,7 +53,7 @@ use depth::{
 };
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
-use resolve::resolve_reference;
+use resolve::{enclosing_symbol_for_site, resolve_reference, target_kind_for_ref};
 use scope::build_file_scope;
 
 pub use budget_bind::{bind_with_budget, bind_with_budget_and_completeness};
@@ -91,32 +96,60 @@ fn resolve_site(
     file: &FileForBind,
     scope: &scope::FileScope,
     arg_count: Option<usize>,
-    arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+    arg_shapes: &[ArgShape],
+    arg_known_types: &[Option<String>],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     receiver_type: Option<&str>,
+    receiver_type_is_positive: bool,
     same_class_context: Option<&str>,
     super_class_context: Option<&str>,
     caller_top_level: Option<&str>,
     index_is_complete: bool,
+    receiver_is_type_qualifier: bool,
+    receiver_is_direct_parameter: bool,
+    receiver_type_is_qualified_non_java_lang: bool,
+    file_has_unresolved_external_supertype: bool,
+    site_enclosing_method: Option<SymbolId>,
+    caller_enclosing_type: Option<&str>,
 ) -> PendingReference {
-    let candidates = resolve_reference(
+    let is_java_file = file.language == "java";
+    let mut candidates = resolve_reference(
         name,
         ref_kind,
         file.file_id,
         scope,
         arg_count,
         arg_shapes,
+        arg_known_types,
         name_index,
         type_index,
         receiver_type,
+        receiver_type_is_positive,
         same_class_context,
         super_class_context,
         caller_top_level,
         index_is_complete,
+        receiver_is_type_qualifier,
+        receiver_is_direct_parameter,
+        receiver_type_is_qualified_non_java_lang,
+        file_has_unresolved_external_supertype,
+    );
+    // #1956: the safe-exclusion half of #1952 -- applied one layer above
+    // `resolve_reference` itself (rather than threaded through that
+    // function's own signature) so its many existing direct unit-test
+    // callers stay untouched. See `receiver_qualified`'s own module doc
+    // for the full three-condition soundness argument.
+    receiver_qualified::apply_receiver_qualified_type_narrowing(
+        &mut candidates,
+        receiver_type,
+        caller_enclosing_type,
+        is_java_file,
+        &scope.imports,
+        type_index,
     );
     PendingReference {
-        from: enclosing_symbol(&file.index, file.file_id, line),
+        from: enclosing_symbol_for_site(&file.index, file.file_id, line, site_enclosing_method),
         file: file.file_id,
         line: line as u32,
         kind: ref_kind,
@@ -169,30 +202,138 @@ fn any_family_truncated(candidates: &[(DeclInfo, u16)]) -> bool {
         .any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
 }
 
+/// #1898 round 4 (epic #1906, mandate item 3) + #1910 round 6 (finding 5,
+/// the mis-narrow counter): `name`'s exact bare-name pool SIZE (every
+/// same-named declaration of `ref_kind`'s target kind, repo-wide, BEFORE
+/// any narrowing pass runs). Reused by every one of `resolve_all_
+/// references`'s three per-site loops to compute BOTH the "narrowed to
+/// zero candidates" counter (pool non-empty, final candidate count zero)
+/// AND the NEW "narrowed to a non-empty strict subset" counter (pool
+/// non-empty, final count non-empty but strictly SMALLER than the pool) --
+/// Rule 4, anti-duplication, rather than two copies of the same lookup.
+fn bare_name_pool_size(name_index: &RepoNameIndex, ref_kind: u8, name: &str) -> usize {
+    name_index.lookup(name, target_kind_for_ref(ref_kind)).len()
+}
+
+/// #1910 salvage (P3, Rule 4 anti-duplication): the SAME "did this
+/// reference get mis-narrowed" accounting was copy-pasted once per
+/// resolution loop in `resolve_all_references` below (invocations, type
+/// references, constructions) -- pure counting, no behavior change from
+/// extracting it into one function. `pool_size == 0` means an ordinary
+/// out-of-repo reference, never counted by either counter (see
+/// `resolve_all_references`'s own doc comment for the full rationale).
+fn record_narrowing_outcome(
+    candidate_count: usize,
+    pool_size: usize,
+    narrowed_to_zero_count: &mut usize,
+    narrowed_to_nonempty_strict_subset_count: &mut usize,
+) {
+    if pool_size == 0 {
+        return;
+    }
+    if candidate_count == 0 {
+        *narrowed_to_zero_count += 1;
+    } else if candidate_count < pool_size {
+        *narrowed_to_nonempty_strict_subset_count += 1;
+    }
+}
+
+/// #1910 salvage (P3): `bare_name_pool_size` performs a `RepoNameIndex::
+/// lookup` (allocates a `Vec`) for every single reference across all three
+/// resolution loops, even though its result can only ever CHANGE the
+/// narrowing-outcome counters when the reference did NOT take the AC4
+/// Level 5 unique-name-in-repo shortcut. A shortcut-admitted candidate
+/// set is tagged `reasons::UNIQUE_NAME_IN_REPO` and is BY DEFINITION a
+/// singleton drawn from a pool of exactly 1 (`try_unique_name_shortcut`'s
+/// own `pool.len() != 1` precondition) -- so its pool size and final
+/// candidate count are always equal (1 == 1), and neither counter can
+/// ever fire for it. Skipping the lookup entirely for that case is a
+/// pure performance short-circuit, not a behavior change: a
+/// shortcut-admitted reference never contributed to either counter
+/// before this change either.
+fn took_unique_name_shortcut(candidates: &[(DeclInfo, u16)]) -> bool {
+    candidates
+        .iter()
+        .any(|(_, bits)| bits & reasons::UNIQUE_NAME_IN_REPO != 0)
+}
+
 /// Resolves every invocation/type-reference/construction site across
 /// EVERY file in `files` into `PendingReference`s, and returns them
 /// alongside the total candidate count (needed to reserve the CSR arena's
-/// single allocation up front, AC5) and whether ANY reference's
+/// single allocation up front, AC5), whether ANY reference's
 /// inheritance-family expansion was truncated by `families::
 /// MAX_FAMILY_SIZE` -- the signal `admission::prepare_bind`/`finish_bind`
 /// use to set `AnalysisCompleteness::ResolutionAmbiguous` at the
-/// whole-graph level.
+/// whole-graph level -- and (#1898 round 4, epic #1906 mandate item 3)
+/// how many references were genuinely NARROWED TO ZERO candidates: a
+/// reference whose bare-name pool was non-empty (a real same-named
+/// declaration exists somewhere in the repo) but whose FINAL candidate
+/// set came back empty, i.e. every narrowing pass legitimately excluded
+/// every same-named candidate (external receiver, wrong arity, wrong
+/// enclosing type/hierarchy, ...). Deliberately distinct from an
+/// out-of-repo reference (bare-name pool ALSO empty -- never counted
+/// here, that is simply "this repo declares no such name at all", not a
+/// narrowing outcome). This is the observability gap #1898's own report
+/// named as having let three rounds of narrowing regressions survive a
+/// green 531-test suite: #1897 (a sibling story in this same epic) wires
+/// this number into `analyze_graph`'s completeness reporting; this
+/// function's job is only to produce it.
+///
+/// #1910 round 6 (finding 5, round4-findings.md's own remediation item 5,
+/// never built until now): ALSO returns how many references were
+/// genuinely narrowed to a non-empty STRICT SUBSET of their bare-name
+/// pool -- a DIFFERENT mis-narrow outcome `narrowed_to_zero_count` is
+/// structurally blind to (it only ever increments on a final count of
+/// EXACTLY zero). Both round-6 findings were wrong-non-empty-subset
+/// deletions (a real edge deleted, a fabricated one kept, final count
+/// staying non-zero throughout) that `narrowed_to_zero_count` reported as
+/// zero for both. This counter makes that class of mis-narrow visible
+/// without a reviewer hand-building fixtures every round.
 fn resolve_all_references(
     files: &[FileForBind],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
     index_is_complete: bool,
-) -> (Vec<PendingReference>, usize, bool) {
+) -> (Vec<PendingReference>, usize, bool, usize, usize) {
     let mut pending = Vec::new();
     let mut total_candidates = 0usize;
     let mut family_truncated_anywhere = false;
+    let mut narrowed_to_zero_count = 0usize;
+    // #1910 round 6, finding 5: the mis-narrow counter `narrowed_to_zero_
+    // count` is blind to -- see this function's own doc comment above.
+    let mut narrowed_to_nonempty_strict_subset_count = 0usize;
     for file in files {
         let scope = build_file_scope(&file.index);
         // AC1/AC2 (Story #1806, S2b): the file's declared-type substrate
         // (locals/fields/params) -- built once per file, mirroring
         // `scope`'s own per-file construction, since every invocation in
         // this file's receiver-type resolution reads from it.
-        let typed_names = receiver::FileTypedNames::build(&file.index.typed_names);
+        let typed_names = receiver::FileTypedNames::build(&file.index.typed_names)
+            .with_all_local_binding_names(&file.index.all_local_binding_names)
+            .with_parameter_bindings(&file.index.parameter_typed_names)
+            .with_qualified_non_java_lang_parameters(&file.index.qualified_non_java_lang_parameter_types);
+        // #1922: computed ONCE per file, not per call site -- neither
+        // check depends on which specific invocation is being resolved.
+        // See `receiver_type_qualifier::file_is_safe_for_type_qualifier_narrowing`'s own
+        // doc comment for exactly what this guards against: an invisible
+        // inherited field could be declared on ANY supertype anywhere in
+        // this file (a same-file type sharing the real supertype's bare
+        // name, a sibling nested class's own child, an anonymous class
+        // body, or an excluded/Kotlin supertype), so hard-narrowing is
+        // disabled for the whole file whenever any type in it carries any
+        // extends/implements clause at all, or a static wildcard import
+        // that could bring an unnamed field into scope.
+        let file_safe_for_type_qualifier_narrowing = file.language == "java"
+            && receiver_type_qualifier::file_is_safe_for_type_qualifier_narrowing(&file.index, &scope.imports);
+        // #1924 (p24): computed ONCE per file, not per call site -- true
+        // when ANY type declared anywhere in this file has an unresolved
+        // external supertype, regardless of nesting depth relative to a
+        // given call site. See `receiver_mismatch::file_has_unresolved_
+        // external_supertype`'s own doc comment for why this replaced a
+        // narrower per-call-site check that only looked at the immediate
+        // enclosing type and its top-level ancestor.
+        let file_has_unresolved_external_supertype =
+            receiver_mismatch::file_has_unresolved_external_supertype(&file.index.type_nesting, type_index);
         for site in &file.index.invocations {
             // AC1 (Story #1806, S2b): resolves the call's receiver to a
             // declared type, if the evidence exists -- `None` (never a
@@ -210,7 +351,13 @@ fn resolve_all_references(
             // muddying AC5's distinct-evidence-path design even though it
             // would not change which candidates survive (both passes
             // compute the identical allowed-types set in that case).
-            let receiver_type = match &site.receiver {
+            // Round 4 (#1898 epic #1906): the resolved type now carries
+            // its own evidence TIER (`receiver::ReceiverEvidence`) --
+            // `.type_name()`/`.is_positive()` below feed `resolve_site`'s
+            // two separate params, so the full pipeline can tell a real
+            // `TypedNameRecord` lookup hit apart from an open-world
+            // fallback GUESS (see `ReceiverEvidence`'s own doc comment).
+            let receiver_evidence = match &site.receiver {
                 crate::graph::extract::local_index::ReceiverExpr::Identifier(_)
                 | crate::graph::extract::local_index::ReceiverExpr::Chained { .. } => {
                     receiver::resolve_receiver_type(
@@ -222,10 +369,135 @@ fn resolve_all_references(
                         type_index,
                     )
                 }
+                // #1931: a DOTTED qualifier (`Outer.Inner`, `com.example.
+                // Target`) resolved via its own, separate resolver --
+                // `resolve_dotted_qualifier_type` never chain-follows and
+                // needs `name_index` for its fully-qualified rule, unlike
+                // `resolve_receiver_type` above (see that function's own
+                // doc comment for why a `DottedQualifier` reached as a
+                // `Chained` base is deliberately out of scope). This call
+                // is UNCONDITIONAL -- unaffected by `file_safe_for_type_
+                // qualifier_narrowing` below -- exactly mirroring how
+                // `resolve_receiver_type` above also runs regardless of
+                // that flag: the resulting evidence only ever feeds the
+                // TAG-ONLY `RECEIVER_TYPE_MATCH` pipeline (`apply_
+                // receiver_type_narrowing`, never deletes) here; it is
+                // ONLY `receiver_is_type_qualifier` below (the actual
+                // HARD-narrow trigger) that is gated on file safety.
+                crate::graph::extract::local_index::ReceiverExpr::DottedQualifier(segments) => {
+                    receiver_type_qualifier::resolve_dotted_qualifier_type(
+                        segments,
+                        &typed_names,
+                        type_index,
+                        name_index,
+                        &scope.imports,
+                    )
+                }
                 crate::graph::extract::local_index::ReceiverExpr::None
                 | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper
                 | crate::graph::extract::local_index::ReceiverExpr::Super
-                | crate::graph::extract::local_index::ReceiverExpr::Other => None,
+                | crate::graph::extract::local_index::ReceiverExpr::Other => {
+                    receiver::ReceiverEvidence::None
+                }
+            };
+            let receiver_type = receiver_evidence.type_name().map(|t| t.to_string());
+            let receiver_type_is_positive = receiver_evidence.is_positive();
+            // #1924/#1925: true ONLY for a DIRECT (non-chained) `Identifier`
+            // receiver whose `(enclosing_method, name)` is a CONFIRMED
+            // formal parameter -- never a block-scoped local, a field, or a
+            // chained call's derived type. See `LocalIndex::parameter_
+            // typed_names`'s own doc comment for why this is strictly
+            // narrower than "receiver_type_is_positive" alone: a
+            // `TypedNameRecord` lookup hit can be a genuine PARAMETER or an
+            // ordinary LOCAL VARIABLE declared later in the same method,
+            // indistinguishable by `(enclosing_method, name)` key alone
+            // (#1919) -- `RECEIVER_TYPE_MISMATCH` tagging (`bind::receiver_
+            // mismatch`) must see only the former.
+            let receiver_is_direct_parameter = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => site
+                    .enclosing_method
+                    .is_some_and(|enclosing_method| typed_names.is_parameter_binding(enclosing_method, name)),
+                _ => false,
+            };
+            // #1924 (p12): true ONLY for that SAME direct-parameter
+            // receiver, when its declared type was written with an
+            // explicit qualifier other than `java.lang` -- see
+            // `LocalIndex::qualified_non_java_lang_parameter_types`'s own
+            // doc comment. `RECEIVER_TYPE_MISMATCH` tagging must never fire
+            // when this is true: the closed-world assumption behind it
+            // only applies to the REAL `java.lang` type.
+            let receiver_type_is_qualified_non_java_lang = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => site
+                    .enclosing_method
+                    .is_some_and(|enclosing_method| typed_names.is_disqualified_by_type_qualifier(enclosing_method, name)),
+                _ => false,
+            };
+            // #1922: is this call DEFINITELY qualified by a type
+            // reference -- see `receiver::is_definite_type_qualifier`'s
+            // own doc comment for exactly what evidence this does and
+            // does NOT rule out (same-file/captured local, parameter,
+            // field including interface constants, single-member static
+            // import; NOT wildcard static imports or multi-level nested
+            // qualifiers). Only a direct `Identifier` receiver qualifies
+            // (a `Chained` receiver's own type is inferred via return-type
+            // chaining, not a bare qualifier the source itself wrote).
+            // `narrowing::apply_type_qualifier_narrowing` never treats a
+            // `false`/unresolved/unmatched result as proof of absence --
+            // it only ever narrows on a POSITIVE, confirmed match, never
+            // clears to empty -- so this flag being wrong in the
+            // conservative direction (missing a real type qualifier) costs
+            // evidence precision only, never an edge.
+            //
+            // JAVA ONLY, deliberately: `is_definite_type_qualifier`'s "no
+            // local/field evidence anywhere" conclusion is only as good as
+            // `typed_names`, and the Kotlin extractor NEVER populates
+            // `typed_names` at all (`kotlin.rs`'s own module doc: "receiver-
+            // type substrate ... explicitly OUT of scope -- this extractor
+            // never populates typed_names"). For a Kotlin file, an
+            // uppercase-named Kotlin property/`val`/object receiver would
+            // be structurally indistinguishable from a genuine type
+            // reference -- there is no evidence gap analogous to Java's
+            // captured-local case (`has_any_local_binding`) to close it
+            // with. Gating on `file.language == "java"` preserves this
+            // tool's own documented guarantee (`analyze_graph.md`'s Kotlin
+            // scope-limits paragraph): a Kotlin qualified call's evidence
+            // quality is reduced, but it must never lose its edge outright.
+            //
+            // ALSO gated on `file_safe_for_type_qualifier_narrowing`
+            // (#1922): even for a Java file, an uppercase
+            // identifier clearing every OTHER guard can still be a real
+            // field access INHERITED from a supertype this binder cannot
+            // see into (outside the analyzed set, or Kotlin), or shadowed
+            // by a static wildcard import -- see that flag's own
+            // computation above for the full rationale.
+            let receiver_is_type_qualifier = if file_safe_for_type_qualifier_narrowing {
+                match &site.receiver {
+                    crate::graph::extract::local_index::ReceiverExpr::Identifier(name) => {
+                        receiver_type_qualifier::is_definite_type_qualifier(
+                            name,
+                            site.enclosing_type.as_deref(),
+                            site.enclosing_method,
+                            &typed_names,
+                            type_index,
+                            &scope.imports,
+                        )
+                    }
+                    // #1931: a dotted qualifier's own resolver already
+                    // embeds every guard `is_definite_type_qualifier`
+                    // enforces (first-segment shadowing, known field,
+                    // static import) as an intrinsic part of proving
+                    // POSITIVE resolution -- there is no separate
+                    // "structurally a type reference but unresolved"
+                    // state to represent here, unlike the bare-identifier
+                    // case, so `is_positive()` alone is the complete
+                    // answer.
+                    crate::graph::extract::local_index::ReceiverExpr::DottedQualifier(_) => {
+                        receiver_evidence.is_positive()
+                    }
+                    _ => false,
+                }
+            } else {
+                false
             };
             // AC3 (Story #1806, S2b): "unqualified calls resolve against
             // the enclosing class and its supertypes first" -- applies
@@ -255,7 +527,41 @@ fn resolve_all_references(
                 .enclosing_type
                 .as_deref()
                 .and_then(|type_name| type_index.top_level_of(type_name));
-            let r = resolve_site(
+            // Bug #1923 (AC2): resolves the KNOWN declared type of every
+            // `ArgShape::Identifier`/`SelfReference` argument at this call
+            // site, one entry per `site.arg_shapes` -- `None` for every
+            // other shape (no evidence this pass can resolve at all).
+            // `receiver::resolve_argument_identifier_type` restricts
+            // itself to POSITIVE evidence only (see its own doc comment),
+            // and `SelfReference`'s type is definitionally the call's own
+            // `enclosing_type`, exactly like `ReceiverExpr::None`/
+            // `SelfOrSuper` already resolve for a receiver.
+            let arg_known_types: Vec<Option<String>> = site
+                .arg_shapes
+                .iter()
+                .map(|shape| match shape {
+                    ArgShape::Identifier(name) => receiver::resolve_argument_identifier_type(
+                        name,
+                        site.enclosing_type.as_deref(),
+                        site.enclosing_method,
+                        &typed_names,
+                        type_index,
+                    ),
+                    ArgShape::SelfReference => site.enclosing_type.clone(),
+                    // Bug #1923 (P1): a Cast/Constructor shape
+                    // already carries its own known type name directly
+                    // from extraction -- no bind-time lookup needed, and
+                    // (unlike Identifier) no positive-vs-advisory
+                    // evidence tier to choose between. Feeding it through
+                    // the SAME tag-only mechanism as Identifier/`this`
+                    // keeps a named-type cast's evidence out of any
+                    // bare-name EXCLUSION path entirely, while still
+                    // letting it earn the tag.
+                    ArgShape::Cast(t) | ArgShape::Constructor(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect();
+            let mut r = resolve_site(
                 &site.callee_name,
                 REF_KIND_INVOCATION,
                 site.line,
@@ -263,16 +569,65 @@ fn resolve_all_references(
                 &scope,
                 site.arg_count,
                 &site.arg_shapes,
+                &arg_known_types,
                 name_index,
                 type_index,
                 receiver_type.as_deref(),
+                receiver_type_is_positive,
                 same_class_context,
                 super_class_context,
                 caller_top_level,
                 index_is_complete,
+                receiver_is_type_qualifier,
+                receiver_is_direct_parameter,
+                receiver_type_is_qualified_non_java_lang,
+                file_has_unresolved_external_supertype,
+                site.enclosing_method,
+                site.enclosing_type.as_deref(),
             );
+            // Bug #1952 (P1 of epic #1906): `QUALIFIED_NAME` (reasons bit 7)
+            // was never set anywhere in this binder (the issue's own
+            // census: 0 of 14,674 edges in a real repo) -- there was simply
+            // no call site that tagged it. Purely additive evidence, never
+            // exclusionary (mirrors every sibling reasons-bit tag in
+            // `narrowing.rs`): whenever this call's receiver is a
+            // structurally definite, WHOLE-FILE-SAFETY-CONFIRMED type
+            // qualifier (`receiver_is_type_qualifier` -- the same flag that
+            // gates `apply_type_qualifier_narrowing`'s own exclusive
+            // hard-narrow, computed above), every surviving candidate that
+            // already carries `RECEIVER_TYPE_MATCH` (i.e. is the qualifier's
+            // own resolved owner) additionally earns `QUALIFIED_NAME` --
+            // giving a consumer a way to filter specifically on "the source
+            // itself wrote an explicit type-qualified call that resolved
+            // here", strictly stronger than `RECEIVER_TYPE_MATCH` alone.
+            // Deliberately reuses the ALREADY file-safety-gated flag rather
+            // than a looser, ungated structural check: `receiver_is_type_
+            // qualifier` is `false` whenever the call site's own file
+            // carries any supertype evidence at all (#1922's own shadowing
+            // guard), so this tag is never applied to a call this binder
+            // could not itself rule out as a shadowed-field access -- see
+            // `apply_import_context_narrowing`'s own doc comment (this same
+            // issue) for why the TRUE edge must still survive even when
+            // that gate declines to fire.
+            if receiver_is_type_qualifier {
+                for (_, bits) in r.candidates.iter_mut() {
+                    if *bits & reasons::RECEIVER_TYPE_MATCH != 0 {
+                        *bits |= reasons::QUALIFIED_NAME;
+                    }
+                }
+            }
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_INVOCATION, &site.callee_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
+            }
             pending.push(r);
         }
         for site in &file.index.type_references {
@@ -284,16 +639,34 @@ fn resolve_all_references(
                 &scope,
                 None,
                 &[],
+                &[],
                 name_index,
                 type_index,
                 None,
+                false,
                 None,
                 None,
                 None,
                 index_is_complete,
+                false,
+                false,
+                false,
+                false,
+                site.enclosing_method,
+                None,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_TYPE_REFERENCE, &site.type_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
+            }
             pending.push(r);
         }
         for site in &file.index.constructions {
@@ -305,20 +678,44 @@ fn resolve_all_references(
                 &scope,
                 None,
                 &[],
+                &[],
                 name_index,
                 type_index,
                 None,
+                false,
                 None,
                 None,
                 None,
                 index_is_complete,
+                false,
+                false,
+                false,
+                false,
+                site.enclosing_method,
+                None,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
+            if !took_unique_name_shortcut(&r.candidates) {
+                let pool_size =
+                    bare_name_pool_size(name_index, REF_KIND_CONSTRUCTION, &site.type_name);
+                record_narrowing_outcome(
+                    r.candidates.len(),
+                    pool_size,
+                    &mut narrowed_to_zero_count,
+                    &mut narrowed_to_nonempty_strict_subset_count,
+                );
+            }
             pending.push(r);
         }
     }
-    (pending, total_candidates, family_truncated_anywhere)
+    (
+        pending,
+        total_candidates,
+        family_truncated_anywhere,
+        narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
+    )
 }
 
 /// Full-rebuild-only binder entry point (AC4). Consumes `files` by value
@@ -333,497 +730,5 @@ pub fn bind(files: Vec<FileForBind>) -> CodeGraph {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::depth::LEVEL_0_BARE_NAME;
-    use super::*;
-    use crate::graph::confidence::Confidence;
-    use crate::graph::extract::local_index::{Declaration, DeclarationKind, InvocationSite};
-
-    fn method_decl(
-        name: &str,
-        file_id: u32,
-        local: u32,
-        param_count: Option<usize>,
-    ) -> Declaration {
-        Declaration {
-            kind: DeclarationKind::Method,
-            name: name.to_string(),
-            line: 1,
-            symbol: crate::graph::identity::make_symbol_id(file_id, local),
-            param_count,
-            param_types: Vec::new(),
-            is_varargs: false,
-        }
-    }
-
-    fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite {
-            callee_name: name.to_string(),
-            line: 10,
-            arg_count,
-            arg_shapes: Vec::new(),
-            receiver: crate::graph::extract::local_index::ReceiverExpr::None,
-            enclosing_type: None,
-            enclosing_method: None,
-        }
-    }
-
-    fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
-        FileForBind {
-            file_id,
-            language: language.to_string(),
-            index,
-        }
-    }
-
-    /// Whole-pipeline regression guard: every candidate `bind()` ever
-    /// produces must have `confidence()` exactly equal to
-    /// `Confidence::derive(reasons())` -- never set independently.
-    #[test]
-    fn every_candidate_bind_produces_has_confidence_matching_derive_of_its_reasons() {
-        let mut file_a = LocalIndex::new();
-        file_a
-            .declarations
-            .push(method_decl("uniqueOne", 1, 0, None));
-        file_a
-            .declarations
-            .push(method_decl("shared", 1, 1, Some(1)));
-        file_a.invocations.push(invocation("uniqueOne", Some(0)));
-        file_a.invocations.push(invocation("shared", Some(1)));
-        file_a.invocations.push(invocation("neverDeclared", None));
-
-        let mut file_b = LocalIndex::new();
-        file_b
-            .declarations
-            .push(method_decl("shared", 2, 0, Some(2)));
-
-        let graph = bind(vec![file(1, "java", file_a), file(2, "java", file_b)]);
-
-        let mut checked_any = false;
-        for reference in graph.references() {
-            for candidate in graph.candidates_for(reference) {
-                checked_any = true;
-                assert_eq!(
-                    candidate.confidence(),
-                    Confidence::derive(candidate.reasons())
-                );
-            }
-        }
-        assert!(checked_any, "test fixture produced no candidates to check");
-    }
-
-    /// AC4: `BinderDepth` must report Java's REAL levels and must NOT
-    /// claim any depth for a language with no declarations/references.
-    #[test]
-    fn binder_depth_reports_real_levels_for_java_and_claims_none_for_an_empty_language() {
-        let mut file_a = LocalIndex::new();
-        file_a
-            .declarations
-            .push(method_decl("uniqueOne", 1, 0, None));
-        file_a.invocations.push(invocation("uniqueOne", Some(0)));
-
-        let graph = bind(vec![
-            file(1, "java", file_a),
-            file(2, "text", LocalIndex::new()),
-        ]);
-
-        let java_depth = graph
-            .binder_depths()
-            .iter()
-            .find(|d| d.language == "java")
-            .unwrap();
-        assert!(java_depth.reached(LEVEL_0_BARE_NAME));
-        assert!(java_depth.reached(LEVEL_5_UNIQUE_NAME));
-
-        let text_depth = graph
-            .binder_depths()
-            .iter()
-            .find(|d| d.language == "text")
-            .unwrap();
-        assert_eq!(
-            text_depth.levels_reached, 0,
-            "a language with no declarations/references must claim no depth"
-        );
-    }
-
-    /// A sentinel local-symbol index for a file's package declaration --
-    /// mirrors the pattern `resolve.rs`'s own `package_decl` helper uses.
-    const PACKAGE_DECL_LOCAL_ID: u32 = 999;
-
-    fn package_decl(file_id: u32, name: &str) -> Declaration {
-        Declaration {
-            kind: DeclarationKind::Package,
-            name: name.to_string(),
-            line: 1,
-            symbol: crate::graph::identity::make_symbol_id(file_id, PACKAGE_DECL_LOCAL_ID),
-            param_count: None,
-            param_types: Vec::new(),
-            is_varargs: false,
-        }
-    }
-
-    /// AC1 fixture: interface Repo (pkg.a) + implementor Impl (pkg.b);
-    /// the caller shares pkg.a, so import-context narrowing alone would
-    /// collapse the call to Repo.save alone -- family expansion must add
-    /// Impl.save back. Mirrors `resolve.rs`'s own family-expansion test
-    /// fixture, assembled as real `FileForBind`s for the full `bind()`
-    /// pipeline.
-    fn family_expansion_fixture_files() -> Vec<FileForBind> {
-        use crate::graph::extract::local_index::{
-            InheritanceKind, InheritanceRecord, MethodOwnerRecord,
-        };
-        use crate::graph::identity::make_symbol_id;
-        const INTERFACE_FILE_ID: u32 = 10;
-        const IMPL_FILE_ID: u32 = 11;
-        const CALLER_FILE_ID: u32 = 12;
-        const SAVE_METHOD_LOCAL: u32 = 1;
-
-        let mut interface_file = LocalIndex::new();
-        interface_file
-            .declarations
-            .push(package_decl(INTERFACE_FILE_ID, "pkg.a"));
-        interface_file.declarations.push(method_decl(
-            "save",
-            INTERFACE_FILE_ID,
-            SAVE_METHOD_LOCAL,
-            Some(0),
-        ));
-        interface_file.interface_names.push("Repo".to_string());
-        interface_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: make_symbol_id(INTERFACE_FILE_ID, SAVE_METHOD_LOCAL),
-            enclosing_type: "Repo".to_string(),
-        });
-
-        let mut impl_file = LocalIndex::new();
-        impl_file
-            .declarations
-            .push(package_decl(IMPL_FILE_ID, "pkg.b"));
-        impl_file.declarations.push(method_decl(
-            "save",
-            IMPL_FILE_ID,
-            SAVE_METHOD_LOCAL,
-            Some(0),
-        ));
-        impl_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: make_symbol_id(IMPL_FILE_ID, SAVE_METHOD_LOCAL),
-            enclosing_type: "Impl".to_string(),
-        });
-        impl_file.inheritance.push(InheritanceRecord {
-            kind: InheritanceKind::Implements,
-            subtype_name: "Impl".to_string(),
-            supertype_name: "Repo".to_string(),
-            line: 1,
-        });
-
-        let mut caller = LocalIndex::new();
-        caller
-            .declarations
-            .push(package_decl(CALLER_FILE_ID, "pkg.a"));
-        caller.invocations.push(invocation("save", Some(0)));
-
-        vec![
-            file(INTERFACE_FILE_ID, "java", interface_file),
-            file(IMPL_FILE_ID, "java", impl_file),
-            file(CALLER_FILE_ID, "java", caller),
-        ]
-    }
-
-    /// AC2 fixture: two `process` overloads distinguished only by
-    /// declared parameter type, called with a discriminating literal.
-    fn overload_discrimination_fixture_files() -> Vec<FileForBind> {
-        use crate::graph::extract::local_index::ArgShape;
-        use crate::graph::identity::make_symbol_id;
-        const STRING_OVERLOAD_FILE_ID: u32 = 20;
-        const INT_OVERLOAD_FILE_ID: u32 = 21;
-        const CALLER_FILE_ID: u32 = 22;
-
-        fn overload_decl(file_id: u32, param_type: &str) -> Declaration {
-            Declaration {
-                kind: DeclarationKind::Method,
-                name: "process".to_string(),
-                line: 1,
-                symbol: make_symbol_id(file_id, 0),
-                param_count: Some(1),
-                param_types: vec![param_type.to_string()],
-                is_varargs: false,
-            }
-        }
-
-        let mut string_overload = LocalIndex::new();
-        string_overload
-            .declarations
-            .push(overload_decl(STRING_OVERLOAD_FILE_ID, "String"));
-        let mut int_overload = LocalIndex::new();
-        int_overload
-            .declarations
-            .push(overload_decl(INT_OVERLOAD_FILE_ID, "int"));
-        let mut caller = LocalIndex::new();
-        caller.invocations.push(InvocationSite {
-            callee_name: "process".to_string(),
-            line: 10,
-            arg_count: Some(1),
-            arg_shapes: vec![ArgShape::StringLiteral],
-            receiver: crate::graph::extract::local_index::ReceiverExpr::None,
-            enclosing_type: None,
-            enclosing_method: None,
-        });
-
-        vec![
-            file(STRING_OVERLOAD_FILE_ID, "java", string_overload),
-            file(INT_OVERLOAD_FILE_ID, "java", int_overload),
-            file(CALLER_FILE_ID, "java", caller),
-        ]
-    }
-
-    /// AC4 (Story #1793, S4): Java's `BinderDepth` must reach the NEW
-    /// levels 3 (inheritance-family expansion) and 4 (overload
-    /// discrimination) once real evidence for each is produced, exercised
-    /// end-to-end through the real `bind()` pipeline.
-    #[test]
-    fn binder_depth_reaches_levels_3_and_4_for_java_via_family_expansion_and_overload_discrimination(
-    ) {
-        use super::depth::{LEVEL_3_INHERITANCE_FAMILY, LEVEL_4_OVERLOAD_DISCRIMINATION};
-
-        let mut files = family_expansion_fixture_files();
-        files.extend(overload_discrimination_fixture_files());
-        let graph = bind(files);
-
-        let java_depth = graph
-            .binder_depths()
-            .iter()
-            .find(|d| d.language == "java")
-            .expect("java depth must be present: both fixtures declare java files");
-        assert!(
-            java_depth.reached(LEVEL_3_INHERITANCE_FAMILY),
-            "family expansion evidence must reach level 3"
-        );
-        assert!(
-            java_depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION),
-            "overload-shape evidence must reach level 4"
-        );
-    }
-
-    /// AC3 (Story #1806, S2b): Java's `BinderDepth` must reach the NEW
-    /// level 7 (same-class-or-super resolution) once real evidence is
-    /// produced, exercised end-to-end through the real `bind()` pipeline.
-    #[test]
-    fn binder_depth_reaches_level_7_for_java_via_same_class_or_super_resolution() {
-        use super::depth::LEVEL_7_SAME_CLASS_OR_SUPER;
-        use crate::graph::extract::local_index::{
-            InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr,
-        };
-
-        const BASE_FILE_ID: u32 = 30;
-        const OTHER_FILE_ID: u32 = 31;
-        const CALLER_FILE_ID: u32 = 32;
-
-        let mut base_file = LocalIndex::new();
-        base_file
-            .declarations
-            .push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
-        base_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
-            enclosing_type: "Base".to_string(),
-        });
-        base_file.inheritance.push(InheritanceRecord {
-            kind: InheritanceKind::Extends,
-            subtype_name: "Sub".to_string(),
-            supertype_name: "Base".to_string(),
-            line: 1,
-        });
-
-        let mut other_file = LocalIndex::new();
-        other_file
-            .declarations
-            .push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
-        other_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
-            enclosing_type: "Other".to_string(),
-        });
-
-        let mut caller = LocalIndex::new();
-        caller.invocations.push(InvocationSite {
-            callee_name: "helper".to_string(),
-            line: 10,
-            arg_count: Some(0),
-            arg_shapes: Vec::new(),
-            receiver: ReceiverExpr::None,
-            enclosing_type: Some("Sub".to_string()),
-            enclosing_method: None,
-        });
-
-        let graph = bind(vec![
-            file(BASE_FILE_ID, "java", base_file),
-            file(OTHER_FILE_ID, "java", other_file),
-            file(CALLER_FILE_ID, "java", caller),
-        ]);
-
-        let java_depth = graph
-            .binder_depths()
-            .iter()
-            .find(|d| d.language == "java")
-            .unwrap();
-        assert!(
-            java_depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER),
-            "same-class-or-super evidence must reach level 7"
-        );
-    }
-
-    /// AC5 (Story #1806, S2b) regression guard: a bare call's resolved
-    /// candidate must carry `SAME_CLASS_OR_SUPER` but NEVER
-    /// `RECEIVER_TYPE_MATCH` -- the two are distinct evidence PATHS, and
-    /// `Confidence::derive` checks `RECEIVER_TYPE_MATCH` first, so a bare
-    /// call incorrectly carrying both would misreport as `ReceiverType`
-    /// confidence instead of the correct `SameClassOrSuper`.
-    #[test]
-    fn bare_call_marks_only_same_class_or_super_never_receiver_type_match() {
-        use crate::graph::extract::local_index::{
-            InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr,
-        };
-        use crate::graph::reasons;
-
-        const BASE_FILE_ID: u32 = 60;
-        const OTHER_FILE_ID: u32 = 61;
-        const CALLER_FILE_ID: u32 = 62;
-
-        let mut base_file = LocalIndex::new();
-        base_file
-            .declarations
-            .push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
-        base_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
-            enclosing_type: "Base".to_string(),
-        });
-        base_file.inheritance.push(InheritanceRecord {
-            kind: InheritanceKind::Extends,
-            subtype_name: "Sub".to_string(),
-            supertype_name: "Base".to_string(),
-            line: 1,
-        });
-
-        let mut other_file = LocalIndex::new();
-        other_file
-            .declarations
-            .push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
-        other_file.method_owners.push(MethodOwnerRecord {
-            method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
-            enclosing_type: "Other".to_string(),
-        });
-
-        let mut caller = LocalIndex::new();
-        caller.invocations.push(InvocationSite {
-            callee_name: "helper".to_string(),
-            line: 10,
-            arg_count: Some(0),
-            arg_shapes: Vec::new(),
-            receiver: ReceiverExpr::None,
-            enclosing_type: Some("Sub".to_string()),
-            enclosing_method: None,
-        });
-
-        let graph = bind(vec![
-            file(BASE_FILE_ID, "java", base_file),
-            file(OTHER_FILE_ID, "java", other_file),
-            file(CALLER_FILE_ID, "java", caller),
-        ]);
-
-        let reference = graph
-            .references()
-            .iter()
-            .find(|r| r.kind == REF_KIND_INVOCATION)
-            .expect("the bare call must produce a reference");
-        let candidates = graph.candidates_for(reference);
-        assert_eq!(candidates.len(), 1, "Other.helper must be excluded");
-        let reasons_bits = candidates[0].reasons();
-        assert_ne!(
-            reasons_bits & reasons::SAME_CLASS_OR_SUPER,
-            0,
-            "bare call must carry SAME_CLASS_OR_SUPER"
-        );
-        assert_eq!(
-            reasons_bits & reasons::RECEIVER_TYPE_MATCH,
-            0,
-            "bare call must NEVER also carry RECEIVER_TYPE_MATCH"
-        );
-    }
-
-    /// Shared fixture helper: a file declaring ONE method named
-    /// `"doSomething"`, owned by `enclosing_type` -- factored out of
-    /// `binder_depth_reaches_level_6_for_java_via_receiver_type_resolution`
-    /// below, whose two candidate files (`Foo`, `Other`) both need exactly
-    /// this shape.
-    fn owned_do_something_file(file_id: u32, enclosing_type: &str) -> LocalIndex {
-        use crate::graph::extract::local_index::MethodOwnerRecord;
-
-        let mut index = LocalIndex::new();
-        index
-            .declarations
-            .push(method_decl("doSomething", file_id, 0, Some(0)));
-        index.method_owners.push(MethodOwnerRecord {
-            method_symbol: crate::graph::identity::make_symbol_id(file_id, 0),
-            enclosing_type: enclosing_type.to_string(),
-        });
-        index
-    }
-
-    /// AC1 (Story #1806, S2b): Java's `BinderDepth` must reach the NEW
-    /// level 6 (receiver-type resolution) once real evidence is produced,
-    /// exercised end-to-end through the real `bind()` pipeline: a caller
-    /// method declares local `obj` of type `Foo`, then calls
-    /// `obj.doSomething()` -- resolved via `obj`'s declared type.
-    #[test]
-    fn binder_depth_reaches_level_6_for_java_via_receiver_type_resolution() {
-        use super::depth::LEVEL_6_RECEIVER_TYPE;
-        use crate::graph::extract::local_index::{NameScope, ReceiverExpr, TypedNameRecord};
-
-        const FOO_FILE_ID: u32 = 40;
-        const OTHER_FILE_ID: u32 = 41;
-        const CALLER_FILE_ID: u32 = 42;
-        const CALLER_METHOD_LOCAL: u32 = 0;
-
-        let foo_file = owned_do_something_file(FOO_FILE_ID, "Foo");
-        let other_file = owned_do_something_file(OTHER_FILE_ID, "Other");
-
-        let caller_method_symbol =
-            crate::graph::identity::make_symbol_id(CALLER_FILE_ID, CALLER_METHOD_LOCAL);
-        let mut caller = LocalIndex::new();
-        caller.declarations.push(method_decl(
-            "run",
-            CALLER_FILE_ID,
-            CALLER_METHOD_LOCAL,
-            Some(0),
-        ));
-        caller.typed_names.push(TypedNameRecord {
-            name: "obj".to_string(),
-            declared_type: "Foo".to_string(),
-            scope: NameScope::Local {
-                enclosing_method: caller_method_symbol,
-            },
-        });
-        caller.invocations.push(InvocationSite {
-            callee_name: "doSomething".to_string(),
-            line: 10,
-            arg_count: Some(0),
-            arg_shapes: Vec::new(),
-            receiver: ReceiverExpr::Identifier("obj".to_string()),
-            enclosing_type: Some("Caller".to_string()),
-            enclosing_method: Some(caller_method_symbol),
-        });
-
-        let graph = bind(vec![
-            file(FOO_FILE_ID, "java", foo_file),
-            file(OTHER_FILE_ID, "java", other_file),
-            file(CALLER_FILE_ID, "java", caller),
-        ]);
-
-        let java_depth = graph
-            .binder_depths()
-            .iter()
-            .find(|d| d.language == "java")
-            .unwrap();
-        assert!(
-            java_depth.reached(LEVEL_6_RECEIVER_TYPE),
-            "receiver-type evidence must reach level 6"
-        );
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

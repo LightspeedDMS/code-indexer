@@ -372,6 +372,27 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         (builder.build(), crate::graph::user_facts::FactIndex::new())
     }
 
+    /// Bug #1901 front-door proof: a real 2-hop caller chain (`P` calls `X`,
+    /// `X` calls `M`) compiled and run through a REAL dylib's `analyze_graph`
+    /// -- proves `reachable_to` reaches its transitive callers through the
+    /// ACTUAL FFI boundary (not just the in-process `CodeGraph`/`GraphHandle`
+    /// unit coverage in `graph/csr/ops.rs`/`graph/csr/mod.rs`), and that the
+    /// dense ids it returns resolve back to the correct real `SymbolId`s.
+    fn caller_chain_graph() -> crate::graph::csr::CodeGraph {
+        use crate::graph::csr::builder::CodeGraphBuilder;
+        use crate::graph::csr::candidate::Candidate;
+        use crate::graph::identity::make_symbol_id;
+        use crate::graph::reasons;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+        let p = builder.intern_symbol(make_symbol_id(1, 0)); // P
+        let x = builder.intern_symbol(make_symbol_id(1, 1)); // X
+        let m = builder.intern_symbol(make_symbol_id(1, 2)); // M
+        builder.add_reference(p, 1, 1, 0, &[Candidate::new(x, reasons::SAME_FILE)]); // P calls X
+        builder.add_reference(x, 1, 2, 0, &[Candidate::new(m, reasons::SAME_FILE)]); // X calls M
+        builder.build()
+    }
+
     /// Story #1792 (S3, AC3/AC4): a genuinely CROSS-FILE graph -- A (file 1)
     /// calls B (file 2), and B carries a cached AC2 signature line. This is
     /// the fixture the signature-captioning test below needs: unlike
@@ -646,6 +667,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let _callees = g.callees_of(u32::MAX);
     let _callers = g.callers_of(u32::MAX);
     let _reachable = g.reachable_from(&[u32::MAX], 10);
+    let _reachable_to = g.reachable_to(&[u32::MAX], 10);
     let _shortest = g.shortest_path_to_any(u32::MAX, &[u32::MAX], 10);
     let _scc = g.strongly_connected_components();
     let symbol_was_none = g.resolve_symbol(u32::MAX).is_none();
@@ -669,6 +691,56 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             1,
             "resolve_symbol/resolve_string must both have returned None for the out-of-range id, \
              proving they discriminate gracefully rather than panicking"
+        );
+    }
+
+    /// Bug #1901 front-door proof: `reachable_to` reaches its real
+    /// transitive callers through the ACTUAL FFI boundary -- a real
+    /// compiled `analyze_graph` running against `caller_chain_graph`'s
+    /// `P -> X -> M` call chain must find P and X as M's transitive
+    /// callers, resolved back to the exact real `SymbolId`s the fixture
+    /// interned (never a dense id leaking out unresolved, never a symbol
+    /// silently missing/extra).
+    #[test]
+    fn reachable_to_finds_transitive_callers_through_a_real_compiled_dylib() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let graph = caller_chain_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        // M is the 3rd symbol interned by `caller_chain_graph` (P=0, X=1,
+        // M=2) -- CodeGraphBuilder assigns dense ids in intern order, so
+        // this literal is exactly M's real dense id.
+        let evaluator_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    for dense in g.reachable_to(&[2u32], 100) {
+        if let Some(sym) = g.resolve_symbol(dense) {
+            result.refine.push(sym);
+        }
+    }
+    result
+}
+"#;
+        let evaluator = compile_and_load_graph(evaluator_code, dir.path());
+        let outer = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)");
+        let result = outer.expect("reachable_to must not panic or corrupt the heap through a real compiled dylib");
+
+        let mut got = result.refine.clone();
+        got.sort_unstable();
+        let mut expected = vec![graph.resolve_symbol(0), graph.resolve_symbol(1), graph.resolve_symbol(2)];
+        expected.sort_unstable();
+        assert_eq!(
+            got, expected,
+            "reachable_to(M, 100) through the real FFI boundary must return exactly {{P, X, M}} -- \
+             M's real transitive callers, root-inclusive"
         );
     }
 
@@ -2047,13 +2119,26 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             assert_eq!(parse_template_counter(&census.message, "no_path"), 8);
         }
 
+        // Bug #1904 follow-up: the shipped template's default
+        // `SIGNATURE_TEXT` is now `"("`, which matches every
+        // method-shaped signature in `six_use_case_test_graph()` (all 8
+        // of its `DeclarationKind::Method` symbols use `"name(...)"`
+        // text; its 2 `Type` symbols use `"class Name"`, containing no
+        // paren) -- not just the single `order_repository`/"Repository"
+        // match the old default happened to produce. `raw_delete_row`
+        // and the 2-node `cycle_a`/`cycle_b` cycle are the only 3 matched
+        // symbols with a real caller; the other 5 matched methods
+        // (`delete_user_account`, `ping_check`, `get_once`,
+        // `never_called`, `public_api_symbol`) are never referenced by
+        // anything in this fixture.
         fn assert_caller_signature_controls(findings: &[ReduceFinding]) {
             let census = findings
                 .iter()
                 .find(|f| f.pattern == "signature_match_census")
                 .expect("must emit signature_match_census");
-            assert_eq!(parse_template_counter(&census.message, "matched"), 1);
-            assert_eq!(parse_template_counter(&census.message, "callers"), 1);
+            assert_eq!(parse_template_counter(&census.message, "matched"), 8);
+            assert_eq!(parse_template_counter(&census.message, "matched_with_zero_callers"), 5);
+            assert_eq!(parse_template_counter(&census.message, "callers"), 3);
             assert!(
                 findings.iter().any(|f| f.pattern == "caller_of_signature_match"),
                 "missing true positive caller_of_signature_match: {:?}", findings
@@ -2168,12 +2253,95 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             .expect("caller template must emit a census");
         assert_eq!(result.findings[0].pattern, "signature_match_census");
         assert_eq!(parse_template_counter(&census.message, "scanned"), 10);
-        assert_eq!(parse_template_counter(&census.message, "matched"), 1);
+        // Bug #1904 follow-up: the shipped default is now `"("`, matching
+        // every method-shaped signature (8 of the fixture's 10 symbols;
+        // the 2 `class Name`-shaped `Type` symbols never match) -- see
+        // `assert_caller_signature_controls`'s doc comment for the exact
+        // per-symbol breakdown this recomputes.
+        assert_eq!(parse_template_counter(&census.message, "matched"), 8);
         assert_eq!(parse_template_counter(&census.message, "missing_signature"), 0);
-        assert_eq!(parse_template_counter(&census.message, "matched_with_zero_callers"), 0);
+        assert_eq!(parse_template_counter(&census.message, "matched_with_zero_callers"), 5);
         assert_eq!(parse_template_counter(&census.message, "unresolved_targets"), 0);
         assert_eq!(parse_template_counter(&census.message, "unresolved_callers"), 0);
-        assert_eq!(parse_template_counter(&census.message, "callers"), 1);
+        assert_eq!(parse_template_counter(&census.message, "callers"), 3);
+    }
+
+    /// Bug #1904 (P2): the SHIPPED template's own default must produce a
+    /// real, non-zero match on an ORDINARY repository -- not a hand-tuned
+    /// `CodeGraphBuilder` fixture built to make the test pass. Built
+    /// through the REAL extraction/binding pipeline
+    /// (`build_repo_graph`), on a NEUTRAL Java fixture whose methods are
+    /// plainly named (`ExampleService.run()`/`ExampleService.parse(String)`
+    /// -- the exact shape the bug report itself used to demonstrate the
+    /// old default's zero-match failure), never a repo hand-crafted to
+    /// contain the word "Repository".
+    #[test]
+    fn caller_template_shipped_default_matches_a_realistic_ordinary_java_repo() {
+        use crate::graph::budget::IndexBudget;
+        use crate::graph::repo_index::{build_repo_graph, RepoIndexOptions};
+        use crate::graph::user_facts::{FactCollector, UserFact};
+        use tempfile::TempDir;
+
+        struct NoOpCollector;
+        impl FactCollector for NoOpCollector {
+            fn collect_facts(&self, _root: &OwnedNode, _file: &str, _index: &crate::graph::extract::local_index::LocalIndex) -> Vec<UserFact> {
+                Vec::new()
+            }
+        }
+
+        const EXAMPLE_SERVICE: &str = r#"package com.example.app;
+
+public class ExampleService {
+    public String run(String raw) {
+        return parse(raw);
+    }
+
+    private String parse(String raw) {
+        return raw.trim();
+    }
+}
+"#;
+        let repo_dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(repo_dir.path().join("com/example/app")).unwrap();
+        std::fs::write(repo_dir.path().join("com/example/app/ExampleService.java"), EXAMPLE_SERVICE).unwrap();
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let repo_result = build_repo_graph(
+            repo_dir.path(),
+            &["com/example/app/ExampleService.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&repo_result.graph);
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        let dir = TempDir::new().unwrap();
+        let evaluator = compile_and_load_graph(
+            template_source("callers-of-symbols-matching-signature-text"),
+            dir.path(),
+        );
+        let result = evaluator.call_analyze_graph(&graph_handle, &facts_handle).unwrap().unwrap();
+        let census = result
+            .findings
+            .iter()
+            .find(|finding| finding.pattern == "signature_match_census")
+            .expect("caller template must emit a census");
+        let matched = parse_template_counter(&census.message, "matched");
+        assert!(
+            matched >= 1,
+            "the SHIPPED template's own default SIGNATURE_TEXT must match at least one real \
+             symbol on this ordinary repository out of the box (census: {}); a zero-match \
+             default on real code is exactly the #1904 symptom this fix closes",
+            census.message
+        );
+        assert!(
+            result.findings.iter().any(|f| f.pattern == "caller_of_signature_match"),
+            "must report at least one REAL caller_of_signature_match finding on this ordinary \
+             repository: {:?}",
+            result.findings
+        );
     }
 
     #[test]

@@ -730,7 +730,7 @@ class TestCowDaemonBackendCreateClone:
             mount_point="/mnt/cow-storage",
             poll_interval_seconds=1,
             timeout_seconds=30,
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
         backend = CowDaemonBackend(
             config=config, visibility_waiter=_noop_visibility_waiter
@@ -753,10 +753,10 @@ class TestCowDaemonBackendCreateClone:
         assert result == "/mnt/cow-storage/.versioned/langfuse_alias/v_123"
         body = mock_req.post.call_args[1]["json"]
         # source + dest translated to daemon-local storage path, dest still canonical.
-        assert body["source_path"] == "/home/jsbattig/cow-storage/langfuse_alias"
+        assert body["source_path"] == "/home/opuser/cow-storage/langfuse_alias"
         assert (
             body["dest_path"]
-            == "/home/jsbattig/cow-storage/.versioned/langfuse_alias/v_123"
+            == "/home/opuser/cow-storage/.versioned/langfuse_alias/v_123"
         )
         assert body["namespace"] == "langfuse_alias"
 
@@ -1255,9 +1255,9 @@ class TestCowDaemonBackendSanitizeIdentifier:
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
         result = CowDaemonBackend._sanitize_identifier(
-            "langfuse_Claude_Code_seba.battig_lightspeeddms.com-global"
+            "langfuse_Claude_Code_jane.doe_example.com-global"
         )
-        assert result == "langfuse_Claude_Code_seba_battig_lightspeeddms_com-global"
+        assert result == "langfuse_Claude_Code_jane_doe_example_com-global"
 
     def test_sanitize_leaves_safe_chars_untouched(self):
         """_sanitize_identifier does not change alphanumeric, hyphen, or underscore."""
@@ -1277,16 +1277,16 @@ class TestCowDaemonBackendSanitizeIdentifier:
         """Issue #1465: _sanitize_identifier must strip '@' from email usernames.
 
         Real cluster usernames are email addresses (e.g.
-        'Seba.Battig@lightspeeddms.com'). The daemon rejects namespace/name
+        'Jane.Doe@example.com'). The daemon rejects namespace/name
         values containing '@' with HTTP 400 VALIDATION_ERROR. Prior to the
         fix, _sanitize_identifier only replaced '.', leaving '@' intact and
         breaking activation fleet-wide for every email-style username.
         """
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
-        result = CowDaemonBackend._sanitize_identifier("Seba.Battig@lightspeeddms.com")
+        result = CowDaemonBackend._sanitize_identifier("Jane.Doe@example.com")
         assert "@" not in result
-        assert result == "Seba_Battig_lightspeeddms_com"
+        assert result == "Jane_Doe_example_com"
 
     def test_sanitize_replaces_plus_sign(self):
         """_sanitize_identifier strips '+' (valid in email plus-addressing)."""
@@ -1298,7 +1298,7 @@ class TestCowDaemonBackendSanitizeIdentifier:
     @pytest.mark.parametrize(
         "alias",
         [
-            "Seba.Battig@lightspeeddms.com",
+            "Jane.Doe@example.com",
             "seba+test@example.com",
             "user name@example.com",
             "user@sub.example.co.uk",
@@ -1392,11 +1392,11 @@ class TestCowDaemonBackendCreateCloneAtPath:
         with patch.dict(sys.modules, {"requests": mock_req}):
             backend.create_clone_at_path(
                 "/mnt/nfs/cidx/src/repo",
-                "/mnt/nfs/cidx/seba.battig/myclone",
+                "/mnt/nfs/cidx/jane.doe/myclone",
             )
 
         body = mock_req.post.call_args[1]["json"]
-        assert body["namespace"] == "seba_battig"
+        assert body["namespace"] == "jane_doe"
 
     def test_create_clone_at_path_sanitizes_name_from_dest_path(self):
         """create_clone_at_path derives name from dest_path basename, sanitized."""
@@ -1496,23 +1496,23 @@ class TestCowDaemonBackendTranslateFromDaemonPath:
             mount_point="/mnt/cow-storage",
             poll_interval_seconds=1,
             timeout_seconds=30,
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
         return CowDaemonBackend(config=config)
 
     def test_translate_from_daemon_path_strips_daemon_prefix_and_adds_mount_point(self):
-        """Daemon absolute path /home/jsbattig/cow-storage/ns/name -> /mnt/cow-storage/ns/name."""
+        """Daemon absolute path /home/opuser/cow-storage/ns/name -> /mnt/cow-storage/ns/name."""
         backend = self._make_backend_with_translation()
         result = backend._translate_from_daemon_path(
-            "/home/jsbattig/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+            "/home/opuser/cow-storage/langfuse_Claude_Code_jane_doe/v_123"
         )
-        assert result == "/mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+        assert result == "/mnt/cow-storage/langfuse_Claude_Code_jane_doe/v_123"
 
     def test_translate_from_daemon_path_handles_path_without_leading_slash(self):
-        """Daemon returns path without leading slash (e.g. 'home/jsbattig/cow-storage/ns/name')."""
+        """Daemon returns path without leading slash (e.g. 'home/opuser/cow-storage/ns/name')."""
         backend = self._make_backend_with_translation()
         result = backend._translate_from_daemon_path(
-            "home/jsbattig/cow-storage/myns/v_456"
+            "home/opuser/cow-storage/myns/v_456"
         )
         assert result == "/mnt/cow-storage/myns/v_456"
 
@@ -1537,7 +1537,7 @@ class TestCowDaemonBackendPathTranslation:
             mount_point="/mnt/cow-storage",
             poll_interval_seconds=1,
             timeout_seconds=30,
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
 
     def test_create_clone_at_path_translates_paths_when_daemon_storage_path_set(self):
@@ -1560,10 +1560,10 @@ class TestCowDaemonBackendPathTranslation:
             )
 
         body = mock_req.post.call_args[1]["json"]
-        assert body["source_path"] == "/home/jsbattig/cow-storage/golden-repos/myrepo"
+        assert body["source_path"] == "/home/opuser/cow-storage/golden-repos/myrepo"
         assert (
             body["dest_path"]
-            == "/home/jsbattig/cow-storage/golden-repos/myrepo/.versioned/ns/v_123"
+            == "/home/opuser/cow-storage/golden-repos/myrepo/.versioned/ns/v_123"
         )
 
     def test_create_clone_at_path_identity_translation_when_daemon_storage_path_equals_mount_point(
@@ -1667,14 +1667,14 @@ class TestCowDaemonBackendTranslateToDaemonPathGuard:
         (no raise) — the guard only fires on the unconfigured case."""
         backend = self._make_backend(
             mount_point="/mnt/cow-storage",
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
 
         result = backend._translate_to_daemon_path(
             "/mnt/cow-storage/.versioned/ns/v_123"
         )
 
-        assert result == "/home/jsbattig/cow-storage/.versioned/ns/v_123"
+        assert result == "/home/opuser/cow-storage/.versioned/ns/v_123"
 
 
 class TestBug1337GoldenReposSymlinkTranslation:
@@ -1710,7 +1710,7 @@ class TestBug1337GoldenReposSymlinkTranslation:
         config = replace(
             _make_cow_config(),
             mount_point=str(mount_point),
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
         backend = CowDaemonBackend(
             config=config, visibility_waiter=_noop_visibility_waiter
@@ -1719,7 +1719,7 @@ class TestBug1337GoldenReposSymlinkTranslation:
         golden_path = str(golden_repos_dir / "myrepo")
         result = backend._translate_to_daemon_path(golden_path)
 
-        assert result == "/home/jsbattig/cow-storage/golden-repos/myrepo"
+        assert result == "/home/opuser/cow-storage/golden-repos/myrepo"
 
     def test_plain_golden_repos_dir_outside_cow_tree_raises(self, tmp_path):
         """Bug #1337 repro: golden_repos_dir is a PLAIN directory (never
@@ -1736,7 +1736,7 @@ class TestBug1337GoldenReposSymlinkTranslation:
         config = replace(
             _make_cow_config(),
             mount_point="/mnt/cow-storage",
-            daemon_storage_path="/home/jsbattig/cow-storage",
+            daemon_storage_path="/home/opuser/cow-storage",
         )
         backend = CowDaemonBackend(
             config=config, visibility_waiter=_noop_visibility_waiter

@@ -28,8 +28,12 @@ def test_graph_selector_double_star_matches_root_level_java(tmp_path: Path) -> N
     repo_root.mkdir()
     _build_java_tree(repo_root)
 
-    paths, truncated = _collect_graph_candidate_files(
-        repo_root, ["**/*.java"], [], max_files=100
+    paths, truncated, _with_ext, _without_ext, _langs = _collect_graph_candidate_files(
+        repo_root,
+        ["**/*.java"],
+        [],
+        max_files=100,
+        extractor_extensions={"java": "Java"},
     )
 
     assert truncated is False
@@ -41,8 +45,12 @@ def test_graph_selector_src_star_does_not_match_nested_java(tmp_path: Path) -> N
     repo_root.mkdir()
     _build_java_tree(repo_root)
 
-    paths, truncated = _collect_graph_candidate_files(
-        repo_root, ["src/*.java"], [], max_files=100
+    paths, truncated, _with_ext, _without_ext, _langs = _collect_graph_candidate_files(
+        repo_root,
+        ["src/*.java"],
+        [],
+        max_files=100,
+        extractor_extensions={"java": "Java"},
     )
 
     assert truncated is False
@@ -54,8 +62,12 @@ def test_graph_selector_test_exclude_covers_maven_test_tree(tmp_path: Path) -> N
     repo_root.mkdir()
     _build_java_tree(repo_root)
 
-    paths, truncated = _collect_graph_candidate_files(
-        repo_root, ["**/*.java"], ["*/test/*"], max_files=100
+    paths, truncated, _with_ext, _without_ext, _langs = _collect_graph_candidate_files(
+        repo_root,
+        ["**/*.java"],
+        ["*/test/*"],
+        max_files=100,
+        extractor_extensions={"java": "Java"},
     )
 
     assert truncated is False

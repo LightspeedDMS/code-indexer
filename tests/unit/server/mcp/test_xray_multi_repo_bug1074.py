@@ -120,27 +120,47 @@ def _patched_xray_env_multi(
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value=_FAKE_REPO_PATH,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            return_value=_FAKE_REPO_PATH,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
             return_value=mock_job_tracker,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            return_value=mock_job_tracker,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
             return_value=mock_xray_executor,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            return_value=mock_xray_executor,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
         ) as mock_validate,
+        patch(
+            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+        ) as mock_validate_explore,
         patch("asyncio.get_running_loop") as mock_loop,
     ):
         mock_validate.return_value = MagicMock(ok=True)
+        mock_validate_explore.return_value = MagicMock(ok=True)
         mock_loop.return_value.run_in_executor.side_effect = lambda *a, **kw: next(
             future_iter
         )

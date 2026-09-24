@@ -79,7 +79,10 @@ class TestBackgroundJobManagerConstructionRespectsPrimaryInstanceFlag:
         try:
             job = backend.get_job("live-running-job")
             assert job is not None
-            assert job["status"] == "failed"
+            # Bug #1950: reclaimed to 'interrupted' (a restart artifact),
+            # DISTINCT from 'failed', so /health's get_failed_job_count()
+            # never counts it.
+            assert job["status"] == "interrupted"
             assert job["error"] == "Job interrupted by server restart"
         finally:
             manager.shutdown()
@@ -162,7 +165,8 @@ class TestFailOrphanedJobsRespectsPrimaryInstanceFlag:
 
             job = backend.get_job("genuine-refresh-orphan")
             assert job is not None
-            assert job["status"] == "failed"
+            # Bug #1950: 'interrupted' (a restart artifact), not 'failed'.
+            assert job["status"] == "interrupted"
             assert job["error"] == "Orphaned by server restart"
         finally:
             manager.shutdown()
@@ -218,12 +222,12 @@ class TestFailOrphanedJobsInMemoryMarkingRespectsPrimaryInstanceFlag:
         finally:
             manager.shutdown()
 
-    def test_default_primary_instance_still_marks_in_memory_jobs_failed(
+    def test_default_primary_instance_still_marks_in_memory_jobs_interrupted(
         self, empty_backend
     ) -> None:
         """Regression: the default (is_primary_instance=True) must still
-        mark genuinely orphaned in-memory jobs FAILED -- this guard must
-        never weaken true orphan detection."""
+        mark genuinely orphaned in-memory jobs INTERRUPTED (Bug #1950) --
+        this guard must never weaken true orphan detection."""
         from code_indexer.server.repositories.background_jobs import (
             BackgroundJob,
             BackgroundJobManager,
@@ -249,7 +253,9 @@ class TestFailOrphanedJobsInMemoryMarkingRespectsPrimaryInstanceFlag:
 
             count = manager.fail_orphaned_jobs()
 
-            assert manager.jobs["genuine-in-memory-orphan"].status == JobStatus.FAILED
+            assert (
+                manager.jobs["genuine-in-memory-orphan"].status == JobStatus.INTERRUPTED
+            )
             assert count >= 1
         finally:
             manager.shutdown()

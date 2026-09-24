@@ -181,10 +181,14 @@ class TestNullExecutingNodeOrphanBug1512:
     def test_stuck_running_null_node_row_is_reclaimed_by_cleanup(
         self, background_jobs_table_1512
     ) -> None:
-        """cleanup_orphaned_jobs_on_startup() must reclaim (fail) a
-        'running' row with executing_node=NULL, run from a node that never
-        owned it -- proving the NULL-owner row is no longer permanently
-        unreachable."""
+        """cleanup_orphaned_jobs_on_startup() must reclaim a 'running' row
+        with executing_node=NULL, run from a node that never owned it --
+        proving the NULL-owner row is no longer permanently unreachable.
+
+        Bug #1950: the reclaimed status is 'interrupted' (a restart
+        artifact), NOT 'failed' -- /health's get_failed_job_count() must
+        never count this reclaim as a genuine failure.
+        """
         dsn = background_jobs_table_1512
         backend, pool = _make_backend_and_pool(dsn)
         try:
@@ -197,7 +201,7 @@ class TestNullExecutingNodeOrphanBug1512:
             assert count == 1
             job = backend.get_job(job_id)
             assert job is not None
-            assert job["status"] == "failed"
+            assert job["status"] == "interrupted"
         finally:
             pool.close()
 

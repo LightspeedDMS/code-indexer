@@ -71,7 +71,7 @@ class TestDefectDQuarantineUnrecoverableMutualExclusivity:
     ) -> None:
         backend = _make_backend(tmp_path)
         golden = _FakeGoldenRepoManager({}, sqlite_backend=backend)
-        alias = "evolution"
+        alias = "example-repo"
 
         _seed_failures_then_unrecoverable(golden, alias)
 

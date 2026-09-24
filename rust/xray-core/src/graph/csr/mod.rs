@@ -16,11 +16,12 @@ mod adjacency;
 pub mod builder;
 pub mod code_graph;
 pub mod ops;
+pub mod ops_filtered;
 pub mod wire;
 mod wire_cursor;
 
 pub use candidate::Candidate;
-pub use code_graph::CodeGraph;
+pub use code_graph::{CodeGraph, EdgeReason};
 pub use reference::Reference;
 pub use builder::CodeGraphBuilder;
 pub use handle::GraphHandle;
@@ -65,7 +66,8 @@ pub use handle::GraphHandle;
 /// (Rule 4, anti-duplication) and would be a larger, unrequested redesign
 /// than this ABI slice calls for (Rule 9, anti-divergent-creativity).
 pub mod handle {
-    use super::code_graph::CodeGraph;
+    use super::code_graph::{CodeGraph, EdgeReason};
+    use crate::graph::extract::local_index::{DeclarationKind, Visibility};
     use crate::graph::identity::SymbolId;
     use std::marker::PhantomData;
 
@@ -103,6 +105,10 @@ pub mod handle {
         callees_of_fn: fn(*const (), u32) -> Vec<u32>,
         callers_of_fn: fn(*const (), u32) -> Vec<u32>,
         reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+        /// Bug #1901: the CALLERS-direction counterpart of
+        /// `reachable_from_fn` -- see `GraphHandle::reachable_to` for the
+        /// full rationale.
+        reachable_to_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
         shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
         strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
         resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
@@ -114,6 +120,42 @@ pub mod handle {
         signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
         symbol_count_fn: fn(*const ()) -> usize,
         dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
+        /// Bug #1900 (epic #1906 P5): raw `(ptr, len, line)` parts of a
+        /// symbol's declaration location -- see `GraphHandle::location_for`
+        /// for why a bare `fn` pointer cannot return a borrowed `&str`
+        /// directly here, mirroring `signature_for_raw_fn` exactly.
+        location_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize, usize)>,
+        /// Bug #1900: exposes `CodeGraph::kind_for` -- see
+        /// `GraphHandle::declaration_kind`.
+        declaration_kind_fn: fn(*const (), u32) -> Option<DeclarationKind>,
+        /// Bug #1900: exposes `CodeGraph::visibility_for` -- see
+        /// `GraphHandle::visibility_of`.
+        visibility_of_fn: fn(*const (), u32) -> Visibility,
+        /// Bug #1900: exposes `CodeGraph::edge_reason` -- see
+        /// `GraphHandle::edge_reason`.
+        edge_reason_fn: fn(*const (), u32, u32) -> Option<EdgeReason>,
+        /// Bug #1900 (review round 2): exposes `CodeGraph::edge_evidence` --
+        /// see `GraphHandle::edge_evidence`.
+        edge_evidence_fn: fn(*const (), u32, u32) -> Option<u16>,
+        /// #1924/#1925 (epic #1906): exposes `CodeGraph::callees_of_filtered`
+        /// -- see `GraphHandle::callees_of_filtered`.
+        callees_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::callers_of_filtered` -- see
+        /// `GraphHandle::callers_of_filtered`.
+        callers_of_filtered_fn: fn(*const (), u32, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::reachable_from_filtered` -- see
+        /// `GraphHandle::reachable_from_filtered`.
+        reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::reachable_to_filtered` -- see
+        /// `GraphHandle::reachable_to_filtered`.
+        reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
+        /// #1924/#1925: exposes `CodeGraph::strongly_connected_components_
+        /// filtered` -- see `GraphHandle::strongly_connected_components_
+        /// filtered`.
+        strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
+        /// #1953: exposes `CodeGraph::shortest_path_to_any_filtered` -- see
+        /// `GraphHandle::shortest_path_to_any_filtered`.
+        shortest_path_to_any_filtered_fn: fn(*const (), u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -136,6 +178,12 @@ pub mod handle {
 
     fn thunk_reachable_from(ctx: CtxPtr, roots: &[u32], max_depth: usize) -> Vec<u32> {
         graph_from_ctx(ctx).reachable_from(roots, max_depth)
+    }
+
+    /// Bug #1901: thunk for `reachable_to` -- mirrors `thunk_reachable_from`
+    /// exactly, delegating to `CodeGraph::reachable_to`.
+    fn thunk_reachable_to(ctx: CtxPtr, targets: &[u32], max_depth: usize) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_to(targets, max_depth)
     }
 
     fn thunk_shortest_path_to_any(ctx: CtxPtr, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
@@ -192,6 +240,68 @@ pub mod handle {
         graph_from_ctx(ctx).dense_id_for(symbol)
     }
 
+    /// Bug #1900: raw-parts thunk for `location_for` -- mirrors
+    /// `thunk_signature_for_raw` exactly.
+    fn thunk_location_for_raw(ctx: CtxPtr, dense_id: u32) -> Option<(*const u8, usize, usize)> {
+        let (path, line) = graph_from_ctx(ctx).location_for(dense_id)?;
+        Some((path.as_ptr(), path.len(), line))
+    }
+
+    fn thunk_declaration_kind(ctx: CtxPtr, dense_id: u32) -> Option<DeclarationKind> {
+        graph_from_ctx(ctx).kind_for(dense_id)
+    }
+
+    fn thunk_visibility_of(ctx: CtxPtr, dense_id: u32) -> Visibility {
+        graph_from_ctx(ctx).visibility_for(dense_id)
+    }
+
+    fn thunk_edge_reason(ctx: CtxPtr, from: u32, to: u32) -> Option<EdgeReason> {
+        graph_from_ctx(ctx).edge_reason(from, to)
+    }
+
+    /// Bug #1900 (review round 2): thunk for `edge_evidence` -- mirrors
+    /// `thunk_edge_reason` exactly.
+    fn thunk_edge_evidence(ctx: CtxPtr, from: u32, to: u32) -> Option<u16> {
+        graph_from_ctx(ctx).edge_evidence(from, to)
+    }
+
+    /// #1924/#1925: thunk for `callees_of_filtered`.
+    fn thunk_callees_of_filtered(ctx: CtxPtr, symbol: u32, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).callees_of_filtered(symbol, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `callers_of_filtered`.
+    fn thunk_callers_of_filtered(ctx: CtxPtr, symbol: u32, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).callers_of_filtered(symbol, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `reachable_from_filtered`.
+    fn thunk_reachable_from_filtered(ctx: CtxPtr, roots: &[u32], max_depth: usize, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_from_filtered(roots, max_depth, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `reachable_to_filtered`.
+    fn thunk_reachable_to_filtered(ctx: CtxPtr, targets: &[u32], max_depth: usize, required: u16, forbidden: u16) -> Vec<u32> {
+        graph_from_ctx(ctx).reachable_to_filtered(targets, max_depth, required, forbidden)
+    }
+
+    /// #1924/#1925: thunk for `strongly_connected_components_filtered`.
+    fn thunk_strongly_connected_components_filtered(ctx: CtxPtr, required: u16, forbidden: u16) -> Vec<Vec<u32>> {
+        graph_from_ctx(ctx).strongly_connected_components_filtered(required, forbidden)
+    }
+
+    /// #1953: thunk for `shortest_path_to_any_filtered`.
+    fn thunk_shortest_path_to_any_filtered(
+        ctx: CtxPtr,
+        from: u32,
+        targets: &[u32],
+        max_depth: usize,
+        required: u16,
+        forbidden: u16,
+    ) -> Option<Vec<u32>> {
+        graph_from_ctx(ctx).shortest_path_to_any_filtered(from, targets, max_depth, required, forbidden)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -203,6 +313,7 @@ pub mod handle {
                 callees_of_fn: thunk_callees_of,
                 callers_of_fn: thunk_callers_of,
                 reachable_from_fn: thunk_reachable_from,
+                reachable_to_fn: thunk_reachable_to,
                 shortest_path_to_any_fn: thunk_shortest_path_to_any,
                 strongly_connected_components_fn: thunk_strongly_connected_components,
                 resolve_symbol_fn: thunk_resolve_symbol,
@@ -212,6 +323,17 @@ pub mod handle {
                 signature_for_raw_fn: thunk_signature_for_raw,
                 symbol_count_fn: thunk_symbol_count,
                 dense_id_for_fn: thunk_dense_id_for,
+                location_for_raw_fn: thunk_location_for_raw,
+                declaration_kind_fn: thunk_declaration_kind,
+                visibility_of_fn: thunk_visibility_of,
+                edge_reason_fn: thunk_edge_reason,
+                edge_evidence_fn: thunk_edge_evidence,
+                callees_of_filtered_fn: thunk_callees_of_filtered,
+                callers_of_filtered_fn: thunk_callers_of_filtered,
+                reachable_from_filtered_fn: thunk_reachable_from_filtered,
+                reachable_to_filtered_fn: thunk_reachable_to_filtered,
+                strongly_connected_components_filtered_fn: thunk_strongly_connected_components_filtered,
+                shortest_path_to_any_filtered_fn: thunk_shortest_path_to_any_filtered,
                 _graph: PhantomData,
             }
         }
@@ -226,6 +348,17 @@ pub mod handle {
 
         pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
             (self.reachable_from_fn)(self.ctx, roots, max_depth)
+        }
+
+        /// Bug #1901: the CALLERS-direction counterpart of `reachable_from`
+        /// -- "how much of the codebase can a change to `targets` affect" is
+        /// the transitive CALLERS closure, the direction `reachable_from`
+        /// cannot express (it follows `callees_of`, "what the roots depend
+        /// on"). Same bounded-BFS semantics as `reachable_from`
+        /// (root-inclusive, monotonic, convergent) -- see
+        /// `CodeGraph::reachable_to`'s doc comment for the full rationale.
+        pub fn reachable_to(&self, targets: &[u32], max_depth: usize) -> Vec<u32> {
+            (self.reachable_to_fn)(self.ctx, targets, max_depth)
         }
 
         pub fn shortest_path_to_any(&self, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
@@ -305,6 +438,111 @@ pub mod handle {
             // for at least `'graph`, which outlives `&self`.
             Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
         }
+
+        /// Bug #1900 (epic #1906 P5): this symbol's DECLARATION file path
+        /// and 1-based line (`CodeGraph::location_for`), or `None` if
+        /// extraction never recorded one. Returns a `&str` borrowed from
+        /// the graph's shared string table, with a lifetime tied to
+        /// `&self`, never an owned `String` -- mirrors `resolve_string`/
+        /// `signature_for`'s exact contract.
+        pub fn location_for(&self, dense_id: u32) -> Option<(&str, usize)> {
+            let (ptr, len, line) = (self.location_for_raw_fn)(self.ctx, dense_id)?;
+            // SAFETY: identical to `resolve_string`/`signature_for` above --
+            // `ptr`/`len` come from `CodeGraph::location_for`'s own `&str`
+            // (via `thunk_location_for_raw`), guaranteed valid UTF-8 and
+            // alive for at least `'graph`, which outlives `&self`.
+            Some((unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }, line))
+        }
+
+        /// Bug #1900: this symbol's extracted `DeclarationKind`
+        /// (`CodeGraph::kind_for`), or `None` if the extractor never
+        /// recorded one -- see that method's doc comment for why `None`
+        /// must be read as "unproven", never as license to report a symbol
+        /// dead. Lets an evaluator implementing the "unwired components"
+        /// use case filter findings by declaration kind, which was
+        /// previously unreachable from `GraphHandle` even though the
+        /// dead-code predicate already consults it internally.
+        pub fn declaration_kind(&self, dense_id: u32) -> Option<DeclarationKind> {
+            (self.declaration_kind_fn)(self.ctx, dense_id)
+        }
+
+        /// Bug #1900: this symbol's declared `Visibility`
+        /// (`CodeGraph::visibility_for`), defaulting to `Visibility::Unknown`
+        /// when the extractor recorded no modifier evidence -- see that
+        /// method's doc comment for why `Unknown` is always the safe
+        /// default, never a restricted one.
+        pub fn visibility_of(&self, dense_id: u32) -> Visibility {
+            (self.visibility_of_fn)(self.ctx, dense_id)
+        }
+
+        /// Bug #1900 (epic #1906 P2): whether the `(from, to)` edge is
+        /// backed by at least one call site where `to` was the reference's
+        /// ONLY candidate (`Some(EdgeReason::SoleCandidate)`), every
+        /// contributing call site offered several candidates
+        /// (`Some(EdgeReason::MultipleCandidates)`), or `from` never
+        /// targets `to` at all (`None`) -- a COUNT-based tier only, never a
+        /// truth/provenance claim (see `edge_evidence` for that). See
+        /// `CodeGraph::edge_reason`'s doc comment for the full rationale
+        /// and complexity guarantee: O(out-degree of `from`), cheap for a
+        /// path or an SCC member scan, NOT for annotating every edge in
+        /// the graph.
+        pub fn edge_reason(&self, from: u32, to: u32) -> Option<EdgeReason> {
+            (self.edge_reason_fn)(self.ctx, from, to)
+        }
+
+        /// Bug #1900 (epic #1906 P2, review round 2): the REAL evidence
+        /// accessor -- the bitwise-OR of `graph::reasons::*` bits across
+        /// every candidate that contributed the `(from, to)` edge, or
+        /// `None` if `from` never targets `to` at all. See
+        /// `CodeGraph::edge_evidence`'s doc comment for the full rationale
+        /// (this is what lets an evaluator require e.g.
+        /// `RECEIVER_TYPE_MATCH`/`UNIQUE_NAME_IN_REPO` before trusting a
+        /// hop, rather than trusting `edge_reason`'s candidate count
+        /// alone) and the same complexity caveat as `edge_reason` above.
+        pub fn edge_evidence(&self, from: u32, to: u32) -> Option<u16> {
+            (self.edge_evidence_fn)(self.ctx, from, to)
+        }
+
+        /// #1924/#1925 (epic #1906): the evidence-FILTERED counterpart of
+        /// `callees_of` -- see `CodeGraph::callees_of_filtered`'s doc
+        /// comment for the exact filter contract and complexity guarantee.
+        pub fn callees_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callees_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of `callers_of`
+        /// -- see `CodeGraph::callers_of_filtered`'s doc comment.
+        pub fn callers_of_filtered(&self, symbol: u32, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.callers_of_filtered_fn)(self.ctx, symbol, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of
+        /// `reachable_from` -- see `CodeGraph::reachable_from_filtered`'s
+        /// doc comment.
+        pub fn reachable_from_filtered(&self, roots: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_from_filtered_fn)(self.ctx, roots, max_depth, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of
+        /// `reachable_to` -- see `CodeGraph::reachable_to_filtered`'s doc
+        /// comment.
+        pub fn reachable_to_filtered(&self, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Vec<u32> {
+            (self.reachable_to_filtered_fn)(self.ctx, targets, max_depth, required_bits, forbidden_bits)
+        }
+
+        /// #1924/#1925: the evidence-FILTERED counterpart of `strongly_
+        /// connected_components` -- see `CodeGraph::strongly_connected_
+        /// components_filtered`'s doc comment.
+        pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
+            (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
+        }
+
+        /// #1953: the evidence-FILTERED counterpart of
+        /// `shortest_path_to_any` -- see `CodeGraph::shortest_path_to_any_
+        /// filtered`'s doc comment.
+        pub fn shortest_path_to_any_filtered(&self, from: u32, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Option<Vec<u32>> {
+            (self.shortest_path_to_any_filtered_fn)(self.ctx, from, targets, max_depth, required_bits, forbidden_bits)
+        }
     }
 
     #[cfg(test)]
@@ -365,6 +603,18 @@ pub mod handle {
             assert_eq!(via_handle, via_graph);
             assert_eq!(via_handle, vec![a, b, c, d]);
             assert_eq!(handle.reachable_from(&[a], 0), vec![a]);
+
+            // Bug #1901: `reachable_to` must delegate to `CodeGraph::reachable_to`
+            // exactly like `reachable_from` above -- queried from D backward
+            // over the SAME fixture (A->B, A->C, B->D, C->D, D->A cycle),
+            // it must find every transitive caller.
+            let mut via_handle_to = handle.reachable_to(&[d], 100);
+            via_handle_to.sort_unstable();
+            let mut via_graph_to = graph.reachable_to(&[d], 100);
+            via_graph_to.sort_unstable();
+            assert_eq!(via_handle_to, via_graph_to);
+            assert_eq!(via_handle_to, vec![a, b, c, d]);
+            assert_eq!(handle.reachable_to(&[d], 0), vec![d]);
 
             assert_eq!(
                 handle.shortest_path_to_any(a, &[d], 100),
@@ -479,6 +729,226 @@ pub mod handle {
             assert_eq!(handle.signature_for(with_sig), graph.signature_for(with_sig));
             assert_eq!(handle.signature_for(without_sig), None, "a symbol with no cached signature must return None, never panic or fabricate one");
             assert_eq!(handle.signature_for(u32::MAX), None, "an out-of-range dense id must return None, never panic");
+        }
+
+        /// Bug #1900 (epic #1906 P5): `location_for` must be reachable
+        /// through the ONLY surface a graph-mode evaluator ever receives,
+        /// delegating byte-for-byte to `CodeGraph::location_for`. `RED
+        /// against unmodified code`: `GraphHandle` has no `location_for`
+        /// method yet, so this fails to compile.
+        #[test]
+        fn location_for_delegates_to_the_real_graph_and_returns_none_when_absent() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let with_location = builder.intern_symbol(make_symbol_id(6, 0));
+            let without_location = builder.intern_symbol(make_symbol_id(6, 1));
+            let file_string_id = builder.intern_string("com/example/Handle.java");
+            builder.add_location(with_location, file_string_id, 9);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.location_for(with_location), Some(("com/example/Handle.java", 9)));
+            assert_eq!(handle.location_for(with_location), graph.location_for(with_location));
+            assert_eq!(handle.location_for(without_location), None, "a symbol with no location must return None, never fabricate one");
+        }
+
+        /// Bug #1900: `declaration_kind`/`visibility_of` must be reachable
+        /// through `GraphHandle` and agree EXACTLY with the values
+        /// `CodeGraph::is_definitely_dead_code` consults internally for the
+        /// SAME dense id -- an evaluator implementing the documented
+        /// "unwired components" use case for a specific declaration kind
+        /// currently cannot filter by kind at all. `RED against unmodified
+        /// code`: neither method exists on `GraphHandle` yet.
+        #[test]
+        fn declaration_kind_and_visibility_of_agree_with_what_is_definitely_dead_code_consults() {
+            use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let unreferenced_private_method = builder.intern_symbol(make_symbol_id(7, 0));
+            builder.add_kind(unreferenced_private_method, DeclarationKind::Method);
+            builder.add_visibility(unreferenced_private_method, Visibility::Private);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.declaration_kind(unreferenced_private_method), Some(DeclarationKind::Method));
+            assert_eq!(handle.declaration_kind(unreferenced_private_method), graph.kind_for(unreferenced_private_method));
+            assert_eq!(handle.visibility_of(unreferenced_private_method), Visibility::Private);
+            assert_eq!(handle.visibility_of(unreferenced_private_method), graph.visibility_for(unreferenced_private_method));
+            // The predicate these two values back: Method + Private on an
+            // unreferenced symbol is exactly the one case that proves dead.
+            assert_eq!(graph.is_definitely_dead_code(unreferenced_private_method), Some(true));
+        }
+
+        /// Bug #1900: `edge_reason` must be reachable through `GraphHandle`,
+        /// delegating byte-for-byte to `CodeGraph::edge_reason`. `RED
+        /// against unmodified code`: `GraphHandle` has no `edge_reason`
+        /// method yet.
+        #[test]
+        fn edge_reason_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+            let caller = builder.intern_symbol(make_symbol_id(8, 0));
+            let target = builder.intern_symbol(make_symbol_id(8, 1));
+            builder.add_reference(caller, 8, 1, 0, &[Candidate::new(target, reasons::UNIQUE_NAME_IN_REPO)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.edge_reason(caller, target), graph.edge_reason(caller, target));
+            assert_eq!(handle.edge_reason(caller, target), Some(EdgeReason::SoleCandidate));
+            assert_eq!(handle.edge_reason(caller, 999), None);
+        }
+
+        /// Bug #1900 (epic #1906 P2, review round 2): `edge_evidence` must be
+        /// reachable through `GraphHandle`, delegating byte-for-byte to
+        /// `CodeGraph::edge_evidence` -- the real evidence-bit accessor
+        /// `edge_reason` alone cannot provide. `RED against unmodified
+        /// code`: `GraphHandle` has no `edge_evidence` method yet.
+        #[test]
+        fn edge_evidence_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+            let caller = builder.intern_symbol(make_symbol_id(9, 0));
+            let target = builder.intern_symbol(make_symbol_id(9, 1));
+            builder.add_reference(caller, 9, 1, 0, &[Candidate::new(target, reasons::SAME_PACKAGE | reasons::ARITY_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.edge_evidence(caller, target), graph.edge_evidence(caller, target));
+            assert_eq!(handle.edge_evidence(caller, target), Some(reasons::SAME_PACKAGE | reasons::ARITY_MATCH));
+            assert_eq!(handle.edge_evidence(caller, 999), None, "a pair with no edge at all must report None through the handle too");
+        }
+
+        /// #1924/#1925: `callees_of_filtered`/`callers_of_filtered` must be
+        /// reachable through `GraphHandle`, delegating byte-for-byte to
+        /// their `CodeGraph` counterparts. `caller` has two callees:
+        /// `matched` (RECEIVER_TYPE_MATCH only) and `mismatched`
+        /// (RECEIVER_TYPE_MATCH | RECEIVER_TYPE_MISMATCH).
+        #[test]
+        fn callees_of_filtered_and_callers_of_filtered_delegate_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+            let caller = builder.intern_symbol(make_symbol_id(12, 0));
+            let matched = builder.intern_symbol(make_symbol_id(12, 1));
+            let mismatched = builder.intern_symbol(make_symbol_id(12, 2));
+            builder.add_reference(caller, 12, 1, 0, &[Candidate::new(matched, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(
+                caller,
+                12,
+                2,
+                0,
+                &[Candidate::new(mismatched, reasons::RECEIVER_TYPE_MATCH | reasons::RECEIVER_TYPE_MISMATCH)],
+            );
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(
+                handle.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                graph.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH)
+            );
+            assert_eq!(
+                handle.callees_of_filtered(caller, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                vec![matched]
+            );
+            assert_eq!(
+                handle.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                graph.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH)
+            );
+            assert_eq!(
+                handle.callers_of_filtered(matched, reasons::RECEIVER_TYPE_MATCH, reasons::RECEIVER_TYPE_MISMATCH),
+                vec![caller]
+            );
+        }
+
+        /// #1924/#1925: `reachable_from_filtered`/`reachable_to_filtered`/
+        /// `strongly_connected_components_filtered` must be reachable
+        /// through `GraphHandle`, delegating byte-for-byte to their
+        /// `CodeGraph` counterparts. Reuses the diamond-plus-cycle fixture
+        /// `reachable_from_and_shortest_path_and_scc_delegate_to_the_real_
+        /// graph` above builds, tagging every edge `RECEIVER_TYPE_MATCH`.
+        #[test]
+        fn reachable_from_filtered_and_reachable_to_filtered_and_scc_filtered_delegate_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(5);
+            let a = builder.intern_symbol(make_symbol_id(13, 0));
+            let b = builder.intern_symbol(make_symbol_id(13, 1));
+            let c = builder.intern_symbol(make_symbol_id(13, 2));
+            let d = builder.intern_symbol(make_symbol_id(13, 3));
+            builder.add_reference(a, 13, 1, 0, &[Candidate::new(b, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(a, 13, 2, 0, &[Candidate::new(c, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(b, 13, 3, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(c, 13, 4, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(d, 13, 5, 0, &[Candidate::new(a, reasons::RECEIVER_TYPE_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            let mut via_handle = handle.reachable_from_filtered(&[a], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_handle.sort_unstable();
+            let mut via_graph = graph.reachable_from_filtered(&[a], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_graph.sort_unstable();
+            assert_eq!(via_handle, via_graph);
+            assert_eq!(via_handle, vec![a, b, c, d]);
+
+            let mut via_handle_to = handle.reachable_to_filtered(&[d], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_handle_to.sort_unstable();
+            let mut via_graph_to = graph.reachable_to_filtered(&[d], 100, reasons::RECEIVER_TYPE_MATCH, 0);
+            via_graph_to.sort_unstable();
+            assert_eq!(via_handle_to, via_graph_to);
+            assert_eq!(via_handle_to, vec![a, b, c, d]);
+
+            let mut via_handle_scc = handle.strongly_connected_components_filtered(reasons::RECEIVER_TYPE_MATCH, 0);
+            let mut via_graph_scc = graph.strongly_connected_components_filtered(reasons::RECEIVER_TYPE_MATCH, 0);
+            for comp in via_handle_scc.iter_mut().chain(via_graph_scc.iter_mut()) {
+                comp.sort_unstable();
+            }
+            via_handle_scc.sort();
+            via_graph_scc.sort();
+            assert_eq!(via_handle_scc, via_graph_scc);
+            assert_eq!(via_handle_scc.len(), 1, "a-b-d, a-c-d, d-a form one strongly connected component");
+
+            // An empty mask must reach the SAME SET of nodes as the unfiltered
+            // primitive -- compared as sorted sets, never raw Vec equality:
+            // `callees_of_filtered` merges per-target evidence via a HashMap
+            // internally (see `AdjacencyIndex::filtered_edges_of`), whose
+            // iteration order is not guaranteed to match `callees_of`'s CSR
+            // build order, even though the CONTENT is identical.
+            let mut empty_mask = handle.reachable_from_filtered(&[a], 100, 0, 0);
+            let mut unfiltered_from = handle.reachable_from(&[a], 100);
+            empty_mask.sort_unstable();
+            unfiltered_from.sort_unstable();
+            assert_eq!(empty_mask, unfiltered_from);
+        }
+
+        /// #1953: `shortest_path_to_any_filtered` must be reachable through
+        /// `GraphHandle`, delegating byte-for-byte to
+        /// `CodeGraph::shortest_path_to_any_filtered`. Reuses the same
+        /// diamond-plus-cycle fixture as the test above (every edge tagged
+        /// RECEIVER_TYPE_MATCH), so filtering with an empty mask must
+        /// reproduce the unfiltered result exactly.
+        #[test]
+        fn shortest_path_to_any_filtered_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(5);
+            let a = builder.intern_symbol(make_symbol_id(14, 0));
+            let b = builder.intern_symbol(make_symbol_id(14, 1));
+            let c = builder.intern_symbol(make_symbol_id(14, 2));
+            let d = builder.intern_symbol(make_symbol_id(14, 3));
+            builder.add_reference(a, 14, 1, 0, &[Candidate::new(b, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(a, 14, 2, 0, &[Candidate::new(c, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(b, 14, 3, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(c, 14, 4, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(d, 14, 5, 0, &[Candidate::new(a, reasons::RECEIVER_TYPE_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0),
+                graph.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0)
+            );
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0),
+                handle.shortest_path_to_any(a, &[d], 100),
+                "an empty forbidden mask (with the only evidence bit present required) must reproduce \
+                 the unfiltered result over this fixture"
+            );
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 1, reasons::RECEIVER_TYPE_MATCH, 0),
+                None,
+                "D is 2 hops away, beyond max_depth=1"
+            );
         }
     }
 }

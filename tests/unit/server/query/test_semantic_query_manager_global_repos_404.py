@@ -26,7 +26,7 @@ from code_indexer.server.query.semantic_query_manager import (
 # ---------------------------------------------------------------------------
 
 GLOBAL_REPO_ALIAS = "cidx-query-e2e-test-7f3a9b2c-global"
-GLOBAL_REPO_URL = "https://github.com/jsbattig/tries.git"
+GLOBAL_REPO_URL = "https://github.com/example-org/tries.git"
 
 
 @pytest.fixture

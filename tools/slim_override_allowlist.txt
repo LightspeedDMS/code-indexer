@@ -4,3 +4,4 @@ xray_search
 xray_explore
 search_code
 regex_search
+analyze_graph

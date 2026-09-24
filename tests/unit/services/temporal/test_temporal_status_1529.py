@@ -34,7 +34,7 @@ from code_indexer.services.temporal.temporal_status import (
 )
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-REPO_ALIAS = "evolution"
+REPO_ALIAS = "example-repo"
 EMBEDDER = "voyage_code_3"
 VECTOR_SIZE = 8
 

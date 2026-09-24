@@ -3,13 +3,17 @@ name: analyze_graph
 category: search
 required_permission: query_repos
 tl_dr: "Multi-file, whole-repository graph analysis -- builds a real CSR reference graph across every file in the repo, then runs your Rust evaluator's fn analyze_graph over the whole graph. Use for cross-file questions single-file AST search (xray_search) cannot answer: dead code, unreachable/unwired components, layering violations, endpoint-to-sink reachability, blast radius."
-slim_description: "Whole-repository graph-mode code analysis: builds a real cross-file reference graph, then runs your Rust evaluator's fn collect_facts (per-file) and fn analyze_graph (whole-graph reduce) against it. Answers cross-file questions xray_search cannot: dead code, unwired components, layering violations, endpoint-to-sink reachability, blast radius. Surfaces AnalysisCompleteness honestly via fact_graph_complete and degradation counters."
+slim_description: "Whole-repository graph-mode analysis (Java + Kotlin): builds a real cross-file reference graph, then compiles and runs your Rust evaluator's `fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact>` (per-file) and `fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult` (whole-graph reduce); an optional third `fn refine` re-examines flagged symbols with real source access. Answers cross-file questions xray_search cannot: dead code, unwired components, layering violations, reachability, blast radius -- honestly, via fact_graph_complete. Full contract and examples: cidx_quick_reference(tool=\"analyze_graph\")."
 inputSchema:
   type: object
   properties:
     repository_alias:
-      type: string
-      description: 'Repository identifier to analyze. Use list_global_repos to see available repositories.'
+      oneOf:
+      - type: string
+      - type: array
+        items:
+          type: string
+      description: 'Repository identifier(s) to analyze. String for a single repository; array of strings to analyze several. JSON-encoded string arrays (e.g. ''["repo-a","repo-b"]'') are also accepted and parsed as arrays. Use list_global_repos to see available repositories. NOTE: several repositories are analyzed ONE AT A TIME, each against its own graph -- this is NOT a union graph, and dense symbol ids are per-repository, so they never mean anything across repositories. A multi-repository request returns a different envelope: {mode: "multi_repo", repositories: [...], results: {alias: <single-repo result>}, errors: [{repository_alias, error, message}]}, with ok true only when every repository succeeded. A single string, or a one-element array, returns the ordinary single-repository shape.'
     evaluator_code:
       type: string
       description: 'Inline Rust graph evaluator defining TWO REQUIRED functions: fn collect_facts(...) and fn analyze_graph(...). Mutually exclusive with pattern_name. Both functions must be defined together; graph evaluators must not define fn evaluate_node. The same Rust security whitelist as xray_search applies.'
@@ -24,7 +28,7 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include in the graph (e.g. ["*.java"]). These patterns DO narrow what is read into the graph. PASS ["*.java"] -- the graph extractor is Java-only, so on any mixed-language repository an empty list pulls in every other file, inflates the files_with_unsupported_language degradation counter, and makes fact_graph_complete: true unreachable. Empty list means include all files.'
+      description: 'Glob patterns for files to include in the graph (e.g. ["*.java", "*.kt"]). These patterns DO narrow what is read into the graph. PASS ["*.java", "*.kt", "*.kts"] -- the graph extractor covers Java and Kotlin, so on a repository holding other languages an empty list pulls in every other file, inflates the files_with_unsupported_language degradation counter, and makes fact_graph_complete: true unreachable. NEVER narrow to one of the two on a mixed Java/Kotlin repository: excluding the other language does not make its absence safe, it only hides it -- a Java method called solely from Kotlin then has no inbound edge and can be reported definitely dead. Empty list means include all files.'
       default: []
     exclude_patterns:
       type: array
@@ -34,10 +38,14 @@ inputSchema:
       default: []
     timeout_seconds:
       type: integer
-      description: 'Wall-clock timeout in seconds for the WHOLE pipeline (repo-alias resolution, file collection, evaluator compile, --build-graph, --analyze-graph). Range 10..600. Default 120.'
+      description: 'Wall-clock timeout in seconds for the WHOLE pipeline (repo-alias resolution, file collection, evaluator compile, --build-graph, --analyze-graph, and --refine when refine=true). Range 10..600. Default 120.'
       minimum: 10
       maximum: 600
       default: 120
+    refine:
+      type: boolean
+      description: 'Opt-in: when true AND your analyze_graph populated a non-empty GraphResult.refine, runs the optional refine phase as a THIRD subprocess -- a real per-file AST pass over exactly the files a flagged symbol belongs to (never the whole repo), with FULL access to both the file''s OwnedNode and the whole GraphHandle/FactsHandle simultaneously, which analyze_graph alone cannot provide (it never receives file source). Use this when a finding needs source-level detail (the actual method body, a specific line, an AST-derived risk signal) that dense ids and cached signatures cannot carry. Deliberately NOT the default: it re-opens the timeout_seconds budget (a genuine second traversal, on top of build+analyze) and costs real time at fleet scale, so it only runs when you explicitly ask AND there is something to refine -- refine=true against an evaluator that never populates GraphResult.refine spawns nothing. See the refine_status/refine_findings output fields for the response shape, and fn refine in the "Optional third function" section of the full reference (cidx_quick_reference(tool="analyze_graph")) for how to write one.'
+      default: false
     await_seconds:
       type: number
       description: 'Reserved for future async job-polling parity with xray_search. Currently accepted but INERT: analyze_graph always runs synchronously to completion or until timeout_seconds -- it never returns a bare {job_id}. Do not rely on this parameter changing behavior yet.'
@@ -51,13 +59,13 @@ outputSchema:
   properties:
     ok:
       type: boolean
-      description: 'True when the graph pipeline completed without an error. This includes status="ran_ok" and the server-derived status="no_supported_files" (all candidate files were unsupported languages). False for every error path (validation, missing repo, build failure, timeout, internal error) -- check `error` for the reason.'
+      description: 'True when the graph pipeline completed without an error. This includes status="ran_ok" and the server-derived status="no_supported_files" (no candidate file reached a supported-language extractor, AND none had a genuine parse error -- see "no_supported_files status" below for the exact two-condition rule). False for every error path (validation, missing repo, build failure, timeout, internal error) -- check `error` for the reason.'
     error:
       type: object
-      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, xray_evaluator_validation_failed, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch).'
+      description: 'Present iff ok=false. Shape: {error_type, error_message} for pipeline-level failures (ValidationError, BinaryNotFound, CompileError, GraphBuildError, XRayCliError, Timeout, InternalError), or a synchronous rejection shape {error, message} for input-validation failures (invalid_params, auth_required, evaluator_code_required, repository_alias_required, include_patterns_invalid, exclude_patterns_invalid, timeout_seconds_invalid, refine_invalid, xray_evaluator_validation_failed, xray_cell_queue_timeout, repository_not_found, no_candidate_files, mutually_exclusive_params, pattern_mode_mismatch). One rejection applies only when you pass SEVERAL repositories and is refused up front before any repository is touched: `repo_count_cap_exceeded` (more repositories than the server''s omni cap allows). Two more error codes are multi-repo-ONLY but are NEVER a top-level rejection -- each surfaces per-repository inside that repository''s own `errors[]` entry. Every `errors[]` entry carries a non-empty `message`, but `error` itself is NOT always a string code: for a real compile/build/analyze failure it is the SAME `{error_type, error_message}` OBJECT the pipeline-level shape above uses, and `message` is synthesized from it when the underlying failure carries no top-level message of its own -- always check `error`''s type before treating it as a bare code string. The two multi-repo-only codes: `multi_repo_deadline_exceeded` (this repository was never started because a BETWEEN-REPOSITORY ADMISSION GATE observed the request''s elapsed wall clock already at or past the server''s 600s threshold before this repository''s turn came up -- earlier repositories'' real results are preserved; split the request into smaller batches and retry the remainder. This is an admission gate, not a hard ceiling on total request time: the repository that was ALREADY RUNNING when the gate last passed is not itself time-bounded by this threshold and can still take substantially longer) and `multi_repo_pipeline_exception` (an unhandled error was raised while analyzing this specific repository; other repositories in the same request are unaffected; the message never includes server-internal detail such as filesystem paths). Note `timeout_seconds` is PER REPOSITORY, not shared across them.'
     status:
       type: string
-      description: 'The real --analyze-graph ChildReport status, OR the server-derived "no_supported_files": "ran_ok" (your analyze_graph executed), "no_supported_files" (ok=true, but every candidate file was an unsupported language -- see "no_supported_files status" below), "absent" (evaluator does not export analyze_graph -- should not happen given evaluator_code validation), "load_failed" (dylib failed to load), "graph_invalid" (the built graph file was corrupt), "panicked" (your analyze_graph panicked -- caught, never crashes the server).'
+      description: 'The real --analyze-graph ChildReport status, OR the server-derived "no_supported_files": "ran_ok" (your analyze_graph executed), "no_supported_files" (ok=true, but no candidate file reached a supported-language extractor AND none had a genuine parse error -- see "no_supported_files status" below for the exact two-condition rule; a candidate set with even ONE genuine parse error keeps "ran_ok" regardless of how many other files were unsupported-language), "absent" (evaluator does not export analyze_graph -- should not happen given evaluator_code validation), "load_failed" (dylib failed to load), "graph_invalid" (the built graph file was corrupt), "panicked" (your analyze_graph panicked -- caught, never crashes the server).'
     findings:
       type: array
       description: 'Your analyze_graph function''s GraphResult.findings -- a list of ReduceFinding {pattern, message, involved, signatures}. involved is the ordered chain of SymbolIds the finding''s path walks through (single element for a simple flag, multi-element for a reachability/blast-radius path). signatures[i] is involved[i]''s cached signature line, parallel to involved.'
@@ -65,31 +73,100 @@ outputSchema:
         type: object
     refine:
       type: array
-      description: 'SymbolIds your analyze_graph flagged via GraphResult.refine for a follow-up per-file look (S3''s refine phase). Currently informational only -- this tool does not yet invoke --refine automatically.'
+      description: 'SymbolIds your analyze_graph flagged via GraphResult.refine for a follow-up per-file look. Always populated (or empty) regardless of the refine request parameter -- this is analyze_graph''s own output, not the refine pass''s output (see refine_findings for that). Pass refine: true to actually run the follow-up pass over these symbols'' files.'
       items:
         type: integer
+    refine_status:
+      type: string
+      description: 'Whether/how the opt-in refine phase ran: "not_requested" (the refine request parameter was false/omitted -- the default), "skipped_empty_refine_set" (refine: true was passed but GraphResult.refine was empty -- nothing to refine, so no subprocess ran), "skipped_no_matching_files" (refine''s flagged symbols resolved to no file in the candidate set -- should not happen against a graph built from that same set, but reported honestly rather than silently), "skipped_analysis_failed" (analyze_graph itself did not succeed, so refine was never attempted), "skipped_timeout" (the request''s timeout_seconds budget was already exhausted by build+analyze, so refine was skipped rather than started with no time left), "absent" (the compiled evaluator does not export fn refine -- refine is OPTIONAL, this is not an error), "ran" (refine executed; check refine_findings), "error" (a real refine failure -- see refine_error; the primary analyze_graph result above is unaffected and still reflects ok=true).'
+    refine_findings:
+      type: array
+      description: 'Present only when refine_status is "ran": the flattened per-file findings your fn refine callback returned, each {pattern, file, line, snippet} (mirrors xray_search''s own finding shape) -- file is the repo-relative path fn refine actually ran against. Empty (but refine_status still "ran") is a legitimate outcome: your refine callback simply found nothing in the narrowed file set. Capped at 500 entries total; see refine_findings_truncated.'
+      items:
+        type: object
+    refine_files_examined:
+      type: integer
+      description: 'Present only when refine_status is "ran": the number of DISTINCT files refine actually re-parsed -- the narrowed intersection of (files a flagged GraphResult.refine symbol belongs to) with (the same driver-matched candidate file set the build/analyze phases already used), never the whole repository.'
+    refine_findings_truncated:
+      type: boolean
+      description: 'Present and true only when refine_findings was capped at 500 entries -- more real findings existed than were returned inline.'
+    refine_error:
+      type: string
+      description: 'Present only when refine_status is "error": a sanitized description of why the refine subprocess itself failed (never a raw exception or a server-internal path). The primary analyze_graph result is unaffected either way -- a refine failure degrades gracefully rather than failing the whole request.'
     fact_graph_complete:
       type: boolean
-      description: 'THE honesty signal this tool exists to provide. True only when the graph build hit NO degradation (no truncation, no parse errors, no extractor/collector panics, no read errors, no index-budget trip, no unsupported-language files). False means the graph is INCOMPLETE -- an empty findings[] in that case means "the index was too incomplete to trust a negative", NOT "nothing was found". Always check this before treating an empty findings[] as a clean bill of health, especially for dead-code-style analyses (see "Directional asymmetry" below). NOTE: since the graph extractor currently supports JAVA ONLY, this will be false for any repo containing non-Java candidate files -- see files_with_unsupported_language under degradation.'
+      description: 'THE honesty signal this tool exists to provide. True only when the graph build hit NO degradation (no truncation, no parse errors, no extractor/collector panics, no read errors, no index-budget trip, no unsupported-language files). False means the graph is INCOMPLETE -- an empty findings[] in that case means "the index was too incomplete to trust a negative", NOT "nothing was found". Always check this before treating an empty findings[] as a clean bill of health, especially for dead-code-style analyses (see "Directional asymmetry" below). NOTE: since the graph extractor currently supports JAVA AND KOTLIN ONLY, this will be false for any repo containing candidate files in other languages -- see files_with_unsupported_language under degradation. When false, check completeness_reasons for the specific named cause(s) (one or more of repo_index_incomplete, index_budget_exceeded, resolution_ambiguous) instead of inferring a reason from the degradation counters alone -- a build can be degraded by more than one cause at once, and completeness_reasons lists every one that applied.'
     build_status:
       type: string
       description: '"ok" on a successful build, or the specific failure: "repo_root_invalid", "load_failed", "file_id_collision", "graph_write_failed", "facts_write_failed". Present even on some overall failures so a caller can distinguish a build-time problem from an analyze-time one.'
     degradation:
       type: object
-      description: 'The 7 real degradation counters from the build, verbatim -- never masked with a default. Keys: files_with_parse_errors, unreadable_or_unsupported_files, files_with_read_errors, files_with_extractor_panics, files_with_collector_panics, files_with_unsupported_language, truncated_by_max_files. files_with_unsupported_language counts files with a RECOGNIZED source-language extension for which the graph engine has no extractor yet (currently every language except Java) -- distinct from unreadable_or_unsupported_files (a genuinely unsupported/no extension). Any missing/None value under a "ok" build_status indicates malformed data, not a clean build.'
+      description: 'The 10 real degradation counters/flags from the build, verbatim -- never masked with a default. Keys: files_with_parse_errors, unreadable_or_unsupported_files, files_with_read_errors, files_with_extractor_panics, files_with_collector_panics, files_with_unsupported_language, truncated_by_max_files, index_budget_exceeded, files_excluded_with_extractor, files_excluded_without_extractor. files_with_unsupported_language counts files with a RECOGNIZED source-language extension for which the graph engine has no extractor yet (currently every language except Java and Kotlin) -- distinct from unreadable_or_unsupported_files (a genuinely unsupported/no extension). index_budget_exceeded is true iff completeness_reasons (see below) contains "index_budget_exceeded" -- a direct boolean for this one particularly actionable condition, alongside the full list at the top level. files_excluded_with_extractor counts a DIFFERENT thing from files_with_unsupported_language: a file that was never even a candidate because include_patterns/exclude_patterns excluded it BEFORE the Rust build ever saw it, even though its language DOES have a graph extractor -- a nonzero value here always forces fact_graph_complete: false, since that file could have contributed a real call edge had it been read. files_excluded_without_extractor counts the same kind of pre-candidate exclusion but for a file whose language has NO extractor either way (e.g. a stray README.md) -- excluding it never affects completeness, since including it would not have produced a real call edge regardless. See languages_excluded_with_extractor below for which languages a nonzero files_excluded_with_extractor names. Any missing/None value under a "ok" build_status indicates malformed data, not a clean build.'
+    completeness_reasons:
+      type: array
+      items:
+        type: string
+      description: 'The lossless list of every completeness condition that held for this build. Unlike fact_graph_complete (a single boolean) or any one degradation counter, a build can be degraded by MORE THAN ONE independent cause at once (e.g. an index-budget trip AND a repo-level read error) -- this field lists every one that applied, never just whichever one a first-write-wins internal collapse happened to keep. Values that can appear today: "repo_index_incomplete" (the file set itself was incomplete before binding -- truncation, an extractor panic, a read error, a genuine parse error, or an unsupported-language file), "index_budget_exceeded" (the repo-wide raw-candidate-count ceiling was breached -- see candidate_count/candidate_budget_limit below), "resolution_ambiguous" (an inheritance-family expansion was capped). An empty list means the build was fully complete (fact_graph_complete: true). Three further values are reserved on the underlying engine enum for a future slice and cannot appear here today -- their absence is not evidence they are impossible in general, only that this build did not trip them.'
+    candidate_count:
+      type: integer
+      description: 'The raw candidate-edge total the index budget ladder measured this build against.'
+    candidate_budget_limit:
+      type: integer
+      description: 'The configured ceiling candidate_count is measured against (currently 2,000,000). Compare the two to judge how far over budget a build was, and therefore how much narrowing include_patterns/exclude_patterns would need to bring it back in budget.'
+    truncated_by_max_files:
+      type: boolean
+      description: 'Top-level convenience mirror of degradation.truncated_by_max_files, OR-ed with a Python-side candidate-file-collection cap (50,000 files, applied before any file ever reaches the Rust build) that Rust itself never sees and therefore cannot report inside degradation. In the one scenario where the Python-side cap is what actually truncated the request, this top-level field is true while degradation.truncated_by_max_files stays false (Rust''s own counter, verbatim, unaffected by a cut it never observed) -- always prefer this top-level field to judge whether the FILE SET was truncated for any reason; degradation.truncated_by_max_files tells you only whether Rust''s own --build-graph step independently truncated it. Either cause also pushes "repo_index_incomplete" onto completeness_reasons and sets fact_graph_complete: false.'
+    languages_excluded_with_extractor:
+      type: array
+      items:
+        type: string
+      description: 'The sorted, deduplicated list of language names (e.g. ["Kotlin"]) that had at least one file excluded by include_patterns/exclude_patterns BEFORE it ever became a graph candidate, where that language DOES have a real graph extractor. Names WHICH language went unread, not merely that something did -- pair with degradation.files_excluded_with_extractor for the count. Always empty when that counter is zero. A nonzero entry here always means fact_graph_complete: false and "repo_index_incomplete" in completeness_reasons for this same reason.'
     cached:
       type: boolean
       description: 'True when the evaluator .so was served from the compile cache instead of freshly compiled.'
     compile_ms:
       type: integer
       description: 'Milliseconds spent compiling the evaluator (0 on a cache hit).'
+    cache_handle:
+      type: string
+      description: 'Present (non-null) only when findings/refine were truncated for size. Opaque handle for retrieving the FULL, uncapped findings[]/refine[] via the cidx_fetch_cached_payload MCP tool. Null when the result fit inline (see truncated).'
+    has_more:
+      type: boolean
+      description: 'True iff findings/refine were truncated (synonym for truncated) -- more data exists beyond what is inlined here.'
+    truncated:
+      type: boolean
+      description: 'True when the combined findings[]/refine[] JSON exceeded the server''s single payload character budget (Web UI payload_max_fetch_size_chars, default 5000 chars) and was truncated to a whole-entry inline prefix; false when the full arrays are inline. See "Result truncation and paging" below for the exact contract.'
+    total_pages:
+      type: integer
+      description: 'Present only when truncated is true: the number of independently-fetchable cache pages the full findings[]/refine[] content was split across (each page a whole-entry slice, never a partially-cut entry). Pass page=1..total_pages to cidx_fetch_cached_payload to retrieve every page.'
+    inline_entry_truncated:
+      type: boolean
+      description: 'True only in the rare case where the SINGLE FIRST entry (across findings then refine, in that order) alone exceeds the character budget -- it is then adaptively shrunk (string/list fields capped) for THIS inline preview only, never mutating what is stored under cache_handle, where it remains whole and unmodified. Absent or false in the ordinary case (the inline prefix is one or more UNMODIFIED whole entries).'
+    fetch_tool_hint:
+      type: string
+      description: 'Present only when truncated is true: human-readable guidance naming the cidx_fetch_cached_payload MCP tool and describing its independently-parseable-page format (see below).'
 ---
 
-Whole-repository, multi-file graph analysis. `xray_search` inspects one file's AST at a time -- it structurally cannot answer "is this method called from anywhere in the OTHER files of this repo?" `analyze_graph` builds a REAL cross-file reference graph (CSR arena, receiver-type resolution, inheritance-family expansion) spanning every indexed file, then runs your evaluator's `fn analyze_graph` as a single whole-graph reduce over it.
+## When to use / supported languages
 
-**Language support: JAVA ONLY.** The graph extractor that populates each file's declarations currently implements exactly one language, Java. Every other engine-supported language (Python, TypeScript, JavaScript, Go, C#, Kotlin, etc.) has no graph extractor yet -- files in those languages parse fine but contribute zero declarations to the graph, and are counted via the `files_with_unsupported_language` degradation counter. A repository containing any non-Java candidate file will never report `fact_graph_complete: true`. Scope `include_patterns` to `["*.java"]` (or restrict the repo) to get a genuinely complete graph today.
+Whole-repository, multi-file graph analysis. `xray_search` inspects one file's AST at a time and cannot answer "is this method called from anywhere else in this repo?" `analyze_graph` builds a REAL cross-file reference graph (CSR arena, receiver-type resolution, inheritance-family expansion) over every indexed file, then runs your evaluator's `fn analyze_graph` as a single whole-graph reduce. Use it for cross-file questions `xray_search` cannot answer: dead code, unreachable/unwired components, layering violations, endpoint-to-sink reachability, blast radius.
 
-## Quick Start
+**Language support: JAVA and KOTLIN (`.kt`/`.kts`) only.** Java and Kotlin bind to EACH OTHER (a Kotlin call to a Java method, and a Java call to a Kotlin function, both produce edges), so a mixed repo is analysed as one graph. Every other language (Python, TypeScript, JavaScript, Go, C#, etc.) has no graph extractor yet: those files parse but contribute zero declarations, are counted in `files_with_unsupported_language`, and make `fact_graph_complete: true` unreachable for that repo. On a mixed-language repository scope `include_patterns` to `["*.java", "*.kt", "*.kts"]` to get a genuinely complete graph -- NEVER to just one of the two on a mixed Java/Kotlin repo: dropping one language does not remove its calls, it only hides them (a Java method called only from Kotlin then looks dead). Kotlin extraction has no receiver-type substrate, so Kotlin hops never carry `RECEIVER_TYPE_MATCH` -- this costs evidence QUALITY only, never an edge. Full binder internals (exact Java hard-narrowing preconditions, Kotlin operator-convention extraction list, a Kotlin one-line-object-literal parse limitation): `docs/xray-graph-binder-internals.md` (maintainer reference; nothing there is needed to write or interpret an evaluator -- everything required lives on this page).
+
+## Trust boundaries
+
+Six things to check before trusting a result. Each has its full explanation in ONE place below (named in parentheses) plus a matching one-line warning at the hazardous primitive/field itself.
+
+- **Empty findings on an incomplete graph proves nothing.** Check `fact_graph_complete`/`degradation` before treating `findings: []` as clean, especially for dead-code-style analyses (full explanation: "Response envelope and completeness" below).
+- **A `*_filtered` empty result proves no negative, never "unreachable".** `required_bits` filtering UNDER-counts: a real call with no matching evidence bit (e.g. an unqualified call) is silently excluded (full explanation: "Evidence interpretation: filtered vs unfiltered" below).
+- **`EdgeReason::SoleCandidate` does not mean an edge is real.** It only means one repo declaration matched by name+arity -- a call on an external/JDK receiver can report `SoleCandidate` too, because the binder never saw its real type (full explanation: `g.edge_reason` in "GraphHandle / FactsHandle API" below).
+- **No bit combination proves an UNQUALIFIED hop.** Treat `edge_evidence` as a ranking to cite, never a proof; verify with `location_for`/`signature_for` before acting (full explanation: `g.edge_evidence` in "GraphHandle / FactsHandle API" below).
+- **`is_definitely_dead_code` ignores `fact_graph_complete` and runtime/reflective use.** `Some(true)` on a degraded graph looks identical to `Some(true)` on a complete one, and can still be falsified by reflection, JNI, or dependency injection (full explanation: "Response envelope and completeness" below).
+- **`ok: true` can coexist with `status: "no_supported_files"`.** Nothing failed, but there was nothing this tool could look at -- treat it the same as `fact_graph_complete: false` (full explanation: "Response envelope and completeness" below).
+
+One more, about reading `strongly_connected_components()` rather than about a single result: it walks the POST-CAP candidate arena (a possible cycle among proposed candidates, not a confirmed one), and returns a self-recursive method as a SINGLETON, so a `component.len() > 1` filter alone misses ALL self-recursion (full explanation: "Task-to-primitive table and runnable templates" below).
+
+## Minimal request + compiling two-function evaluator
 
 Find symbols with no reference anywhere in the repository (dead code):
 
@@ -97,72 +174,13 @@ Find symbols with no reference anywhere in the repository (dead code):
 {
   "repository_alias": "backend-global",
   "evaluator_code": "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n    Vec::new()\n}\nfn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n    let mut result = GraphResult::default();\n    let mut i: u32 = 0;\n    while i < 100000 {\n        match g.resolve_symbol(i) {\n            None => break,\n            Some(sym) => {\n                if g.is_definitely_dead_code(i) == Some(true) {\n                    let sig = g.signature_for(i).unwrap_or(\"\").to_string();\n                    result.findings.push(ReduceFinding {\n                        pattern: \"dead_code\".to_string(),\n                        message: sig.clone(),\n                        involved: vec![sym],\n                        signatures: vec![sig],\n                    });\n                }\n            }\n        }\n        i += 1;\n    }\n    result\n}",
-  "include_patterns": ["*.java"]
+  "include_patterns": ["*.java", "*.kt", "*.kts"]
 }
 ```
 
-## Indexing scope vs finding scope
+`include_patterns` names ALL Java AND Kotlin extensions (`*.java`, `*.kt`, `*.kts`) -- omitting `*.kt`/`*.kts` on a mixed repo would exclude Kotlin callers while asking whether Java code is dead, producing a false dead-code answer for anything called only from Kotlin.
 
-**`include_patterns`/`exclude_patterns` DO narrow which files are read into the graph.** By default (both empty) indexing covers the whole repository; passing `include_patterns: ["*.java"]` restricts indexing to just the matching files (this is the recommended usage on a mixed-language repo -- see "Language support" above: an empty `include_patterns` on such a repo pulls in every non-Java file too, inflating `files_with_unsupported_language` and making `fact_graph_complete: true` unreachable).
-
-What patterns do NOT narrow is which files can appear as the *target* of a resolved reference. A reference from an included file to a symbol declared in an EXCLUDED file still resolves as "external to the graph", which is a real, meaningful signal your evaluator can act on; it is never silently dropped. So narrowing `include_patterns` shrinks what gets indexed and searched, but a symbol outside that scope can still be correctly identified as an external dependency rather than vanishing from the analysis.
-
-## Glob Pattern Semantics
-
-`include_patterns`/`exclude_patterns` use the exact same selector as `regex_search` and
-`xray_search` (`PathPatternMatcher`, gitignore-style globs) -- a pattern produces the same file set
-here as it would for either of those tools:
-
-- `*` does not cross `/` when the pattern has a trailing suffix -- `src/*.java` matches only
-  `src/Foo.java`, never `src/sub/Foo.java`. Same for both `include_patterns` and
-  `exclude_patterns`.
-- A BARE trailing `*` with no suffix (e.g. `src/*`) behaves DIFFERENTLY depending on which list
-  it is used in (verified directly against the shared selector, both directions):
-  - As `include_patterns`, `src/*` matches only files directly under `src/` by name --
-    `src/Foo.java`, never `src/sub/Foo.java` or `src/sub/sub2/Foo.java` (ripgrep `-g` reference
-    semantics: a directory match never implies "and everything under it" for an include).
-  - As `exclude_patterns`, `src/*` instead excludes the WHOLE subtree -- `src/Foo.java`,
-    `src/sub/Foo.java`, and `src/sub/sub2/Foo.java` are all dropped (gitignore containment
-    semantics: excluding a directory excludes everything inside it).
-  Use `src/**` to deliberately INCLUDE the whole subtree (matches at every depth under `src/`,
-  including direct children).
-- A pattern with no `/` at all (e.g. `*.java`) matches the basename at any depth: `Foo.java`,
-  `src/Foo.java`, and `src/sub/Foo.java` all match. Same for both `include_patterns` and
-  `exclude_patterns`.
-- A trailing-slash directory marker (e.g. `src/tests/`) selects that directory's CONTENTS in
-  BOTH `include_patterns` and `exclude_patterns` -- including when the marker itself also
-  carries a wildcard (e.g. `src/*/` selects files under any direct subdirectory of `src/`,
-  never a file directly in `src/` itself; `*/tests/` selects any `tests/` directory's contents
-  at any depth). See `regex_search`'s tool docs for the full trailing-slash / leading `*/`
-  reference -- the underlying matcher is shared, so those rules apply here unchanged.
-- Brace groups are supported (e.g. `*.{java,kt}`), capped at 64 expanded variants per pattern.
-
-See `regex_search`'s tool docs for the full semantics reference (leading `*/` any-depth rewriting,
-trailing-`/` directory markers -- root-anchored only when MULTI-segment, e.g. `src/main/`; a
-SINGLE-segment marker like `docs/` or `tests*/` matches at any depth -- bare-token ambiguity
-handling) -- the underlying matcher is shared, so those rules apply here unchanged.
-
-## Running a stored graph pattern
-
-`pattern_name` resolves a previously stored evaluator from the X-Ray pattern library instead of inlining `evaluator_code` (mutually exclusive with it). Resolution tries the REPOSITORY-SPECIFIC scope first (`cidx-meta/xray-patterns/{repository_alias}/{pattern_name}.yaml`), then falls back to the cross-repo `__any__` scope (`cidx-meta/xray-patterns/__any__/{pattern_name}.yaml`) -- a repo-specific pattern always takes precedence over a same-named `__any__` pattern.
-
-A stored pattern declares its own `execution_mode` (`"legacy"` for `xray_search`-style single-file evaluators, or `"graph"` for the two-function `collect_facts`/`analyze_graph` contract this tool requires). `analyze_graph` checks the declared mode BEFORE preparing the evaluator code; a pattern authored for `xray_search` cannot be run here.
-
-`pattern_params` supplies optional typed overrides for the pattern's declared parameters, using the exact same substitution semantics `xray_search` uses for its own stored patterns: each resolved value is injected as a Rust `const` declaration prepended to the evaluator source before compilation. Ignored unless `pattern_name` is also supplied.
-
-Error codes specific to pattern resolution:
-
-- `mutually_exclusive_params` -- both `pattern_name` and `evaluator_code` were supplied; provide exactly one.
-- `pattern_mode_mismatch` -- the stored pattern's declared `execution_mode` is not `"graph"` (this includes a legacy pattern predating `execution_mode`, which is treated as non-graph).
-- `pattern_not_found` -- `pattern_name` does not exist in either the repository-specific scope or `__any__`.
-- `invalid_pattern_params` -- `pattern_params` was supplied as a TRUTHY, non-empty JSON value that is not an object (e.g. a non-empty array like `["a"]` or a non-empty string like `"foo"`); rejected before any per-parameter validation runs, so this never surfaces alongside `unknown_parameter`/`parameter_type_mismatch`. An EMPTY array (`[]`), empty string (`""`), or any other falsy value is indistinguishable from omitting `pattern_params` entirely -- it is treated as absent (defaults to no overrides) and never reaches this check. Response: `{"error": "invalid_pattern_params", "message": "invalid_pattern_params: pattern_params must be a dict, got <type>"}`.
-- `path_traversal_rejected` -- `repository_alias` (used as the pattern-resolution scope) or `pattern_name` contains `/`, `\`, or `..`. Checked before the filesystem lookup, so it takes priority over `pattern_not_found` for the same request. Response: `{"error": "path_traversal_rejected", "message": "path_traversal_rejected: <field> '<value>' contains path traversal sequences"}`, where `<field>` is `repo_alias` or `pattern_name`.
-
-(`unknown_parameter` and `parameter_type_mismatch` can also surface from `pattern_params` validation, mirroring `xray_search`'s own stored-pattern parameter errors.)
-
-## Two-function evaluator contract (ADR-001)
-
-Unlike `xray_search`'s single `fn evaluate_node`, graph mode uses two cooperating functions:
+Unlike `xray_search`'s single `fn evaluate_node`, graph mode uses two cooperating REQUIRED functions:
 
 ```rust
 // REQUIRED: runs once per file, BEFORE the graph is built. Collects
@@ -182,11 +200,13 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-ADR-001 fixes execution modes at exactly two: legacy (`fn evaluate_node`, used by `xray_search`) and graph (`fn collect_facts` + `fn analyze_graph`, used here). Do not define `fn evaluate_node` alongside these two -- a mixed-mode evaluator is rejected at compile time with a `CompileError`. Defining only ONE of `collect_facts`/`analyze_graph` is rejected the same way ("Graph mode requires BOTH collect_facts and analyze_graph -- one is missing").
+`collect_facts`'s `node` parameter, like `refine`'s (see "Optional `refine`" below), is the SAME `OwnedNode` type `xray_search`'s `fn evaluate_node` receives -- see `xray_search`'s tool doc, "OwnedNode reference" section, for the full accessor table (`text()`, `start_line`, `named_children()`, `child_by_kind`, `has_descendant_of_kind`, `descendants_of_kind`).
 
-### UserFact struct (collect_facts output)
+Execution modes are fixed at exactly two: legacy (`fn evaluate_node`, used by `xray_search`) and graph (`fn collect_facts` + `fn analyze_graph`, used here). Do not define `fn evaluate_node` alongside these two -- a genuine MIXED-mode evaluator reaches the Rust compiler and is rejected there with a real `CompileError`. Defining only ONE of `collect_facts`/`analyze_graph` is caught EARLIER, by a Python-side pre-compile gate, and returns `{"error": "xray_evaluator_validation_failed", "error_code": "missing_entry_point", "offending_construct": "analyze_graph" | "collect_facts", ...}` with no `ok` field at all -- see "Errors and multi-repo results" below for both error shapes in full.
 
-```rust
+## Required structs
+
+```rust,fragment
 pub struct UserFact {
     pub kind: String,           // e.g. "deprecated", "todo"
     pub line: usize,            // 1-based line number
@@ -195,9 +215,7 @@ pub struct UserFact {
 }
 ```
 
-### GraphResult / ReduceFinding (analyze_graph output)
-
-```rust
+```rust,fragment
 pub struct GraphResult {
     pub findings: Vec<ReduceFinding>,
     pub refine: Vec<SymbolId>,  // symbols flagged for a future per-file follow-up look
@@ -211,33 +229,103 @@ pub struct ReduceFinding {
 }
 ```
 
-### GraphHandle reference
+`facts.for_symbol`/`facts.for_custom` (below) return the `UserFact`s your `collect_facts` attributed; `analyze_graph` returns a `GraphResult` built from `ReduceFinding`s.
+
+## GraphHandle / FactsHandle API
 
 | Method | Signature | Description |
 |--------|-----------|--------------|
-| `g.callees_of(symbol)` | `(u32) -> Vec<u32>` | Dense ids this symbol calls. |
-| `g.callers_of(symbol)` | `(u32) -> Vec<u32>` | Dense ids that call this symbol. |
-| `g.reachable_from(roots, max_depth)` | `(&[u32], usize) -> Vec<u32>` | Every dense id reachable from `roots` within `max_depth` hops -- the primitive for blast-radius/reachability analysis. |
-| `g.shortest_path_to_any(from, targets, max_depth)` | `(u32, &[u32], usize) -> Option<Vec<u32>>` | Shortest call-graph path from `from` to any of `targets` -- use this to report the PATH for a reachability finding (directional asymmetry, see below). |
-| `g.strongly_connected_components()` | `() -> Vec<Vec<u32>>` | Cycle detection -- useful for layering-violation / package-cycle analysis. |
+| `g.callees_of(symbol)` | `(u32) -> Vec<u32>` | Dense ids this symbol calls. Each DISTINCT callee once, even when reached from several call sites -- `.len()` is "how many distinct things does this call". |
+| `g.callers_of(symbol)` | `(u32) -> Vec<u32>` | Dense ids that call this symbol. Each DISTINCT caller once -- `.len()` is "how many distinct callers", never a call-site count. |
+| `g.reachable_from(roots, max_depth)` | `(&[u32], usize) -> Vec<u32>` | Every dense id reachable from `roots` within `max_depth` hops via CALLEES -- "what do `roots` depend on". Root-inclusive, monotonic, convergent. |
+| `g.reachable_to(targets, max_depth)` | `(&[u32], usize) -> Vec<u32>` | Mirror of `reachable_from` over the REVERSE graph: every dense id that can reach `targets` via CALLERS (the usual blast-radius question). Root-inclusive, monotonic, convergent. **Can OVER-count**: two unrelated symbols can report an identical count when a same-named, same-arity method exists elsewhere and this binder could not rule it out -- see "Evidence interpretation" below. |
+| `g.callees_of_filtered(symbol, required_bits, forbidden_bits)` | `(u32, u16, u16) -> Vec<u32>` | Evidence-FILTERED `callees_of`: keeps a callee when at least one contributing edge occurrence satisfies `(bits & required_bits) == required_bits && (bits & forbidden_bits) == 0`. `required_bits: 0, forbidden_bits: 0` reaches the same SET as `callees_of` (order may differ). Never mutates the raw graph -- `callees_of` on the same symbol is unaffected. |
+| `g.callers_of_filtered(symbol, required_bits, forbidden_bits)` | `(u32, u16, u16) -> Vec<u32>` | Evidence-FILTERED `callers_of`, same filter contract. |
+| `g.reachable_from_filtered(roots, max_depth, required_bits, forbidden_bits)` | `(&[u32], usize, u16, u16) -> Vec<u32>` | Evidence-FILTERED `reachable_from` -- only crosses edges satisfying the filter. See "Evidence interpretation" below for the cost. |
+| `g.reachable_to_filtered(targets, max_depth, required_bits, forbidden_bits)` | `(&[u32], usize, u16, u16) -> Vec<u32>` | Evidence-FILTERED `reachable_to`, same contract and tradeoff. |
+| `g.strongly_connected_components_filtered(required_bits, forbidden_bits)` | `(u16, u16) -> Vec<Vec<u32>>` | Evidence-FILTERED `strongly_connected_components` -- a cycle counts only if every edge in it satisfies the filter. Suppresses a cycle fabricated from weak/mismatched evidence, but can just as easily suppress a REAL cycle closed only by an unqualified or static-import call. |
+| `g.shortest_path_to_any(from, targets, max_depth)` | `(u32, &[u32], usize) -> Option<Vec<u32>>` | Shortest call-graph path from `from` to any of `targets` -- ship this as the `involved` chain for a reachability finding. |
+| `g.shortest_path_to_any_filtered(from, targets, max_depth, required_bits, forbidden_bits)` | `(u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>` | Evidence-FILTERED version -- every returned hop satisfies the filter. `None` does NOT prove unreachability, only that no filtered path was found within `max_depth`; cross-check with the unfiltered form. |
+| `g.strongly_connected_components()` | `() -> Vec<Vec<u32>>` | Cycle detection over the POST-CAP candidate arena. A multi-node component is a POSSIBLE cycle among proposed candidates, NOT a confirmed source-level reference cycle -- verify against source before reporting. A self-recursive method comes back as a SINGLETON, so `component.len() > 1` misses ALL self-recursion -- test `g.callees_of(d).contains(&d)`. |
 | `g.resolve_symbol(dense_id)` | `(u32) -> Option<u64>` | Dense id to real global `SymbolId`. |
 | `g.symbol_count()` | `() -> usize` | Exact number of symbols; dense ids are in `0..g.symbol_count()`. |
 | `g.dense_id_for(symbol)` | `(u64) -> Option<u32>` | Reverse lookup from a real global `SymbolId` to its dense id. |
 | `g.resolve_string(string_id)` | `(u32) -> Option<&str>` | Interned string lookup. |
 | `g.is_symbol_referenced(dense_id)` | `(u32) -> bool` | True if ANY inbound edge exists, regardless of graph completeness. |
-| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = the symbol has an inbound reference edge. `Some(true)` = unreferenced, its declaration kind is `Method` or `Type`, and its visibility is provably `Private`. `None` = every other case: `Public`, `Protected`, or `Unknown` visibility, and every `Field`, `Constant`, `Package`, or unknown-kind symbol. Java extraction creates inbound edges for direct calls, method references, `new` expressions, explicit `this(...)`/`super(...)` constructor invocations, `Type::new`, and annotation usages (an edge to the annotation type's declaration); it preserves plausible overload and varargs targets. `super` calls bind only to a KNOWN, recorded superclass edge; the conservative "no evidence" fallback applies only when a class has NEITHER an `extends` NOR an `implements` clause (e.g. implicit `java.lang.Object`, never tracked) -- a class with no `extends` but a real `implements` clause still narrows against its recorded interfaces. With neither clause, `super.m()` falls into the same "no supertype evidence" case as a genuine extraction gap, so it can still self-loop when the enclosing type's own method is the sole matching candidate. Java-private candidates from a different known top-level type are excluded. **This predicate does NOT consult `fact_graph_complete`** -- it returns `Some(true)` on an incomplete graph exactly as it would on a complete one. Field and constant reads therefore cannot produce `Some(true)`: those declaration kinds are outside the predicate's allowlist, regardless of whether their reads are represented by graph edges. A `Some(true)` for an allowed private `Method` or `Type` can still be falsified by reflection, JNI, dependency injection, or other runtime behavior invisible to the graph. |
-| `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature line, for reporting. |
+| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = has an inbound reference edge. `Some(true)` = unreferenced, AND declaration kind is `Method` or `Type`, AND visibility is provably `Private`. `None` = every other case: `Public`/`Protected`/`Unknown` visibility, and every `Field`/`Constant`/`Package`/unknown-kind symbol. **Does NOT consult `fact_graph_complete`** -- check completeness yourself before trusting a `Some(true)`; it can also still be falsified by reflection, JNI, or dependency injection even for an allowed kind. Two known false-positive suppressions keep a sole private no-arg constructor (the non-instantiable-utility-class idiom) and a JUnit5 `@MethodSource`-referenced method out of `Some(true)`, without changing their reported `Private` visibility -- exact edge-creating constructs and suppression mechanics: `docs/xray-graph-binder-internals.md`. |
+| `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature, for reporting AND substring matching. For a method: `Owner.name(ParamType, ...)` (bare, generic-stripped param types), e.g. `TimeUtil.parse(XMLGregorianCalendar)`; falls back to `Owner.name(N params)` when parameter types weren't fully captured, and to `name(...)` with no owner for a Kotlin top-level function. A varargs parameter renders with its real per-language spelling (Java trailing `...`, always last; Kotlin leading `vararg` at its actual position, NOT always last) -- exact rendering rules: `docs/xray-graph-binder-internals.md`. An anonymous/enum-constant-body class's `Owner` renders as `Enclosing$<anon@L<line>:<file_id>:<byte>>` (human-chaseable prefix; suffix only for uniqueness, never parse it). No annotations, no return type, no modifiers. |
+| `g.location_for(dense_id)` | `(u32) -> Option<(&str, usize)>` | The DECLARATION's own repo-relative file path and 1-based line -- not a call site's. `None` when no location was recorded. Use it so every finding you report can be chased to source. |
+| `g.declaration_kind(dense_id)` | `(u32) -> Option<DeclarationKind>` | The same kind `is_definitely_dead_code` consults, so filtering by kind cannot drift from the predicate. |
+| `g.visibility_of(dense_id)` | `(u32) -> Visibility` | Declared visibility, also as the dead-code predicate sees it. |
+| `g.edge_reason(from, to)` | `(u32, u32) -> Option<EdgeReason>` | How many candidates a contributing reference had -- a COUNT, not a verdict. `SoleCandidate` = at least one contributing reference matched exactly ONE repo declaration by name+arity. `MultipleCandidates` = every contributing reference matched several. `None` = no such edge. **`SoleCandidate` does NOT mean the edge is real**: a call on an external/JDK receiver whose name+arity happen to match one repo declaration reports `SoleCandidate` too, because the binder never saw the receiver's real type -- use `edge_evidence` to tell those apart. |
+| `g.edge_evidence(from, to)` | `(u32, u32) -> Option<u16>` | Reason bits the binder recorded, ORed across every contributing reference -- test against the mirrored constants; this is what to audit a hop with. `RECEIVER_TYPE_MATCH`: strongest bit (receiver's declared type resolved and matched the candidate's owner); tag-only (never removes a candidate); proves the OWNER, never the OVERLOAD; absence proves nothing (an unqualified call has no receiver to check). `UNIQUE_NAME_IN_REPO`: only one in-repo declaration has this name+arity -- true for an unqualified call whether or not the real target is in-repo. `OVERLOAD_ARG_TYPE_MATCH`: means the call's arguments are COMPATIBLE with this signature -- NOT that this is the overload Java would select. When several overloads are mutually applicable, ALL of them legitimately carry this bit: a call `find(query, this)` from a class declared `class ExampleNode extends BaseNode implements Iterable<ExampleNode>` matches BOTH `find(String, ExampleNode)` and `find(String, Iterable)`, and both are correct evidence, because the receiver really is an `Iterable`. Choosing between them is Java's most-specific-method rule (JLS 15.12.2.5), which this binder does NOT implement -- so a symbol carrying this bit is a candidate, never a resolved target, and the count of symbols carrying it is not the number of real calls. Tag-only for a named argument type (this binder cannot generally prove two type NAMES are unrelated); DOES filter for a provably-incompatible LITERAL argument, Java callees only. `RECEIVER_TYPE_MISMATCH`: real evidence a candidate is unrelated when set, under narrow preconditions -- exact four conditions: `docs/xray-graph-binder-internals.md`; pair with `forbidden_bits: RECEIVER_TYPE_MISMATCH` to drop these. **No bit combination proves a hop for an unqualified call** -- treat evidence as a ranking, cite `location_for` per hop, and have a human confirm anything you would act on. Constants: `SAME_FILE`, `SAME_PACKAGE`, `ARITY_MATCH`, `OVERLOAD_ARG_TYPE_MATCH`, `RECEIVER_TYPE_MATCH`, `RECEIVER_TYPE_MISMATCH`, `UNIQUE_NAME_IN_REPO`, `QUALIFIED_NAME`, `STATIC_IMPORT`, `SAME_CLASS_OR_SUPER`, and others -- all usable unqualified in evaluator code. |
 
-### FactsHandle reference
+```rust,fragment
+pub enum DeclarationKind { Type, Method, Field, Constant, Package }
+pub enum Visibility { Public, Protected, Private, Unknown }
+```
+
+Both enums derive `Debug` (and `Clone, Copy, PartialEq, Eq`), so `format!("{:?}", kind)` / `format!("{:?}", vis)` renders the bare variant name -- e.g. `"Method"`, `"Private"` -- with no wrapping (never `"Some(Method)"`; unwrap the `Option` from `declaration_kind` first).
+
+**Root kinds matter, and picking the wrong one fails silently.** `Type`/`Package`/`Field` nodes typically carry no outbound edges, so `reachable_from` on a class-level root usually returns the root alone, with nothing indicating the root kind was unsuitable -- pass METHOD dense ids to `reachable_from`/`reachable_to`. ("Typically", not "never": a call inside a field/property initializer with no enclosing method is the one exception -- it attributes to the nearest-preceding declaration, which can land on that Field, or on the Type when the Type is nearest.)
+
+`FactsHandle` reference:
 
 | Method | Signature | Description |
 |--------|-----------|--------------|
 | `facts.for_symbol(symbol_id)` | `(u64) -> Vec<UserFact>` | Facts your `collect_facts` attributed to this symbol's enclosing declaration. |
 | `facts.for_custom(name)` | `(&str) -> Vec<UserFact>` | Facts attributed to a `custom_key` (non-symbol key) instead. |
 
-## AnalysisCompleteness: the honesty contract
+## Evidence interpretation: filtered vs unfiltered
 
-The whole point of this tool is that a caller can tell "no findings" apart from "the index was too incomplete to trust a negative". **Always check `fact_graph_complete` and `degradation` before treating an empty `findings[]` as a clean result** -- especially for dead-code-style analyses. **`is_definitely_dead_code` does NOT gate itself on completeness** -- it returns `Some(true)` on a degraded graph exactly as it would on a complete one, so an evaluator that only checks `== Some(true)` WILL emit false positives when the graph is incomplete. The completeness check is yours to apply: read `fact_graph_complete` and `degradation` yourself, and surface `fact_graph_complete=false` to the human rather than presenting either an empty list as "verified clean" or a populated list as "verified dead".
+Every `*_filtered` primitive (`callees_of_filtered`/`callers_of_filtered`/`reachable_from_filtered`/`reachable_to_filtered`/`strongly_connected_components_filtered`/`shortest_path_to_any_filtered`) requires at least one evidence bit (typically `RECEIVER_TYPE_MATCH`) on every edge it walks. That is a real, OPPOSITE-direction tradeoff against its unfiltered sibling, never an unconditional improvement -- there is no default to reach for, and neither form is "precise" or "exact": both are approximations of the true call graph, wrong in different directions.
+
+- **Unfiltered is a SUPERSET of the truth.** It can attribute a call to a same-named, same-arity method on an unrelated owner whenever the caller's receiver type could not be resolved -- a false POSITIVE.
+- **`*_filtered` is a SUBSET of the truth.** Requiring `RECEIVER_TYPE_MATCH` throws out every call with no receiver evidence to test -- an unqualified call reached through a static import, a call on an inherited/dynamically-dispatched receiver, or any call an extraction gap left untyped. Those are REAL calls, not weak evidence -- filtering on the bit discards them by construction, a false NEGATIVE. **An absent or reduced filtered result never proves "no such caller" / "unreachable"; it proves only "no caller carried the required evidence bit".**
+
+Measured example: one method had six real callers -- three explicitly type-qualified, three UNQUALIFIED via static imports. The UNFILTERED `reachable_to`/`callers_of` found all six, correctly. `callers_of_filtered(sym, RECEIVER_TYPE_MATCH, 0)` found only the three qualified callers -- the three static-import callers vanished, because a static-import call carries no receiver to type-check at all. Meanwhile an unrelated, same-name, same-arity method with ZERO real callers was reported by the UNFILTERED primitive as having the IDENTICAL six callers -- every one a false positive; filtered on `RECEIVER_TYPE_MATCH` correctly reported zero for it. So for the real target, unfiltered is exactly right and filtered under-reports by three; for the unrelated decoy, unfiltered is entirely wrong and filtered is exactly right -- neither primitive is "the correct one" in general.
+
+Pick based on which mistake costs more:
+
+- **Cannot afford to MISS a real caller** (deleting code, changing a signature, "is this safe to remove"): use UNFILTERED, then verify each hit with `location_for`/`signature_for` -- a false positive is cheap to rule out by reading one call site; a false negative silently breaks something.
+- **Cannot afford to ACT on a false hit** (a security finding, a reported cycle, anything a human acts on without re-reading the whole call graph): use `*_filtered`, and say plainly the result may be INCOMPLETE -- an absent finding is never a clearance.
+- **Run both and compare.** Identical sets are a strong confidence signal (the name is unambiguous in this codebase). A large gap between them means the name is shared across owners, or reached only through evidence-free call shapes (unqualified / static-import / dynamic dispatch) -- treat that gap itself as the finding, and read the actual call sites before reporting anything either way.
+
+`shortest_path_to_any_filtered` follows the SAME asymmetry: `None` means only "no strong-evidence path was found within `max_depth`", never a proof the target is unreachable -- cross-check with the unfiltered form before reporting non-reachability.
+
+## Response envelope and completeness
+
+Every response is a flat JSON object carrying the keys below. This is the FULL envelope -- the tool's `tools/list` entry itself does not currently publish an `outputSchema`, so this table (not the frontmatter this file is generated from) is the authoritative reader-visible list.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `ok` | bool | True when the pipeline completed without error (includes the honest `no_supported_files` status). False on every error path -- check `error`. |
+| `error` | object, present iff `ok=false` | `{error_type, error_message}` for a pipeline failure, or `{error, message}` for an input-validation/multi-repo rejection. Full error-code list: this tool's `inputSchema`/`outputSchema` frontmatter (readable via the source `.md` file), and "Errors and multi-repo results" below. |
+| `status` | string | `"ran_ok"` \| `"no_supported_files"` \| `"absent"` \| `"load_failed"` \| `"graph_invalid"` \| `"panicked"` -- see "no_supported_files status" below. |
+| `findings` | array of `ReduceFinding` | Your `analyze_graph`'s output. |
+| `refine` | array of `SymbolId` (int) | Symbols your `analyze_graph` flagged via `GraphResult.refine` -- always populated (or empty) regardless of the `refine` request parameter. |
+| `refine_status` | string | `"not_requested"` \| `"skipped_empty_refine_set"` \| `"skipped_no_matching_files"` \| `"skipped_analysis_failed"` \| `"skipped_timeout"` \| `"absent"` \| `"ran"` \| `"error"` -- see "Optional `refine`" below. |
+| `refine_findings` | array, present when `refine_status="ran"` | Flattened `{pattern, file, line, snippet}` findings your `fn refine` returned. |
+| `refine_files_examined` | int, present when `refine_status="ran"` | Distinct files `refine` actually re-parsed (the narrowed intersection, never the whole repo). |
+| `refine_findings_truncated` | bool | True only when `refine_findings` was capped at 500 entries. |
+| `refine_error` | string, present when `refine_status="error"` | Sanitized description of why the refine subprocess failed. |
+| `fact_graph_complete` | bool | THE honesty signal -- false means the graph build was degraded; see below. |
+| `build_status` | string | `"ok"` \| `"repo_root_invalid"` \| `"load_failed"` \| `"file_id_collision"` \| `"graph_write_failed"` \| `"facts_write_failed"`. |
+| `degradation` | object | The 10 raw degradation counters/flags from the build -- full key list and meanings: `outputSchema.degradation` in this file's frontmatter. |
+| `completeness_reasons` | array of strings | Every completeness condition that held: `"repo_index_incomplete"` \| `"index_budget_exceeded"` \| `"resolution_ambiguous"`. Empty means fully complete. |
+| `candidate_count` / `candidate_budget_limit` | int / int | The raw candidate-edge total the index-budget ladder measured, and its configured ceiling (currently 2,000,000). |
+| `truncated_by_max_files` | bool | Top-level file-set truncation flag -- may be true even when `degradation.truncated_by_max_files` is false (a Python-side pre-Rust file-collection cap); always prefer this field. |
+| `languages_excluded_with_extractor` | array of strings | Language names (e.g. `["Kotlin"]`) with at least one file excluded by `include_patterns`/`exclude_patterns` before it ever became a candidate, where that language DOES have a graph extractor. |
+| `cached` | bool | True when the evaluator `.so` was served from the compile cache. |
+| `compile_ms` | int | Milliseconds spent compiling the evaluator (0 on a cache hit). |
+| `cache_handle` | string, nullable | Opaque handle for `cidx_fetch_cached_payload` when `findings`/`refine` were truncated for size; null otherwise. |
+| `has_more` | bool | True iff `findings`/`refine` were truncated (synonym for `truncated`). |
+| `truncated` | bool | True when the combined `findings[]`/`refine[]` JSON exceeded the payload character budget; see "Truncation and paging" below. |
+| `total_pages` | int, present when `truncated=true` | Number of cache pages the full content was split across. |
+| `inline_entry_truncated` | bool | True only when even the single first entry alone exceeded the budget and was adaptively shrunk for the inline preview ONLY. |
+| `fetch_tool_hint` | string, present when `truncated=true` | Human-readable guidance naming `cidx_fetch_cached_payload`. |
+
+**The whole point of this tool is that a caller can tell "no findings" apart from "the index was too incomplete to trust a negative".** Always check `fact_graph_complete` and `degradation` before treating an empty `findings[]` as a clean result -- especially for dead-code-style analyses. **`is_definitely_dead_code` does NOT gate itself on completeness** -- it returns `Some(true)` on a degraded graph exactly as it would on a complete one, so an evaluator that only checks `== Some(true)` WILL emit false positives when the graph is incomplete. The completeness check is yours to apply: read `fact_graph_complete` and `degradation` yourself, and surface `fact_graph_complete=false` to the human rather than presenting either an empty list as "verified clean" or a populated list as "verified dead".
 
 ```json
 {
@@ -260,11 +348,11 @@ The whole point of this tool is that a caller can tell "no findings" apart from 
 
 The response above means "your evaluator found nothing dead, but 2 files had real parse errors -- this is NOT a verified-clean result."
 
-## no_supported_files status
+### `no_supported_files` status
 
-Most repositories on this server are NOT Java (Vue/Spring Boot, .NET/Angular, Node/Lambda, Kotlin/Jetty), and the graph extractor is Java-only. Running `analyze_graph` against one of them previously returned `ok: true, status: "ran_ok", findings: []` -- a response that reads as a clean bill of health when in fact the analysis had nothing to analyse at all. The unsupported files were counted only inside `degradation.files_with_unsupported_language`, which the caller had to know to go read.
+Many repositories on this server are neither Java nor Kotlin (Vue/Spring Boot, .NET/Angular, Node/Lambda), and the graph extractor covers only those two. Running `analyze_graph` against one of them previously returned `ok: true, status: "ran_ok", findings: []` -- a response that reads as a clean bill of health when in fact the analysis had nothing to analyse at all.
 
-When EVERY candidate file (after `include_patterns`/`exclude_patterns`) is an unsupported language, `status` is `"no_supported_files"` instead of `"ran_ok"`. `ok` stays `true` -- nothing failed, the request ran correctly and simply had zero supported input. Treat this status the same way you would treat `fact_graph_complete: false`: an empty `findings[]` under it is not a verified-clean result, it is "there was nothing this tool could look at".
+When EVERY candidate file (after `include_patterns`/`exclude_patterns`) is an unsupported language AND none of them had a genuine parse error, `status` is `"no_supported_files"` instead of `"ran_ok"` -- a single candidate file with a real parse error keeps `status: "ran_ok"` even if every OTHER file is unsupported-language. `ok` stays `true` -- nothing failed, the request ran correctly and simply had zero supported input. Treat this status the same way you would treat `fact_graph_complete: false`: an empty `findings[]` under it is not a verified-clean result, it is "there was nothing this tool could look at".
 
 ```json
 {
@@ -281,15 +369,95 @@ When EVERY candidate file (after `include_patterns`/`exclude_patterns`) is an un
 }
 ```
 
-`no_supported_files` is deliberately scoped to "no candidate file reached a supported-language extractor". The graph builder's `files_with_unsupported_language` and `unreadable_or_unsupported_files` counters are disjoint: the former covers recognized non-Java source extensions with no extractor, while the latter covers genuinely unrecognized extensions or paths rejected before extraction. The status is used only when their combined count covers every candidate file. A mixed repo containing any successfully extracted Java file therefore keeps `status: "ran_ok"`, even if it yields zero findings. Genuine read, parse, extractor, and collector failures are excluded from this status and remain independently signaled via their own `degradation` counters and `fact_graph_complete`; conflating those failures with "wrong language" would blur two different remediations.
+The exact two-condition rule: `files_with_unsupported_language + unreadable_or_unsupported_files == <candidate file count>` AND `files_with_parse_errors == 0` (these two degradation counters are NOT disjoint -- an unsupported-language file is still parsed with a generic/fallback grammar to compute `has_syntax_error`, so the same file can land in both counters at once). A repo with real Java files present, correctly parsed, that simply contains zero declarations matching your evaluator's query is a DIFFERENT, ordinary case that stays `"ran_ok"` -- `fact_graph_complete` and `degradation` already tell the caller everything needed to judge that outcome.
 
-A related case that deliberately does NOT get its own status: a repo with real Java files present, correctly parsed, that simply contains zero declarations for your evaluator's query to match. This is a legitimate empty result (e.g. a directory containing only interfaces with no method bodies, or a narrow `include_patterns` scope) -- structurally different from "no supported language was even present" -- so it stays `"ran_ok"`. `fact_graph_complete` and `degradation` already give the caller everything needed to judge that outcome; a third status would add a distinction without a corresponding difference in what the caller should do next.
+## Truncation and paging
 
-## Directional asymmetry (dead-code vs reachability)
+For results larger than the server's single payload character budget (Web UI `payload_max_fetch_size_chars`, default 5000 chars), `findings[]`/`refine[]` are truncated and the FULL set is stored in PayloadCache as a series of whole-entry pages. The inline budget IS the page budget -- there is no separate, smaller preview threshold. `findings[]`/`refine[]` come back inline as many WHOLE leading entries as fit -- a dead-code sweep with many small findings can inline dozens of them. **No entry is ever partially cut to fit a page**: an entry that alone exceeds the budget gets its own, necessarily oversized, page in the cache, intact and unmodified. The ONE exception is the inline response itself when even the very first entry alone exceeds the budget -- that single entry is adaptively shrunk (string/list fields capped) for the inline preview ONLY, flagged via `inline_entry_truncated: true`; the cached copy remains whole regardless.
 
-Per the epic's design: **dead-code analysis must UNDER-report (safe)**. The engine enforces the declaration-kind and visibility floor for `is_definitely_dead_code`: only an unreferenced private `Method` or `Type` can produce `Some(true)`; every field, constant, package, unknown-kind, or non-private symbol produces `None` unless it has an inbound reference, which produces `Some(false)`. The predicate still does not consult `fact_graph_complete`, so your evaluator must check completeness before trusting any `Some(true)`; runtime behavior such as reflection, JNI, or dependency injection can remain invisible even for an allowed kind. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's confidence, since a caller relying on a reachability claim needs to audit exactly how strong that claim is rather than trusting a bare boolean.
+To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP tool with `cache_handle`, incrementing `page` from 1 through `total_pages` (or until `has_more` is `false`). Each page is its own independent cache row, returned WHOLE regardless of the server's CURRENT `payload_max_fetch_size_chars` setting.
+
+**The real wire shape needs TWO parses, not one.** `cidx_fetch_cached_payload`'s own response is `{"success": true, "content": "<json string>", "page": N, "total_pages": M, "has_more": bool}` -- `content` is a JSON STRING, not the findings object itself. `json.loads(page)["findings"]` raises `KeyError`, because `"findings"` is a key of the PARSED `content` string, not of the outer page object. The correct sequence per page: `outer = json.loads(raw_page_response)`, then `inner = json.loads(outer["content"])`, then read `inner["findings"]`/`inner["refine"]`. Concatenate every page's `inner["findings"]`/`inner["refine"]` lists, in page order, to reconstruct the full arrays exactly.
+
+When `truncated: false` (or absent), the full `findings[]`/`refine[]` arrays are returned inline, unmodified.
+
+**Cache degradation and failure:** two DISTINCT conditions can affect this path. `cache_unavailable: true` means PayloadCache itself was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), but no further pages exist to fetch (retry once the cache is back). `success: false, error: "cache_store_failed"` means the OPPOSITE -- the cache was reachable but the atomic page-set write itself failed (single-repo: the whole response carries this; multi-repo: only that alias's entry lands in `errors[]`). In both cases every non-array metadata field the analysis already produced (`fact_graph_complete`, `ok`, `degradation`, `cached`, `compile_ms`, `build_status`, ...) is still present -- only `findings[]`/`refine[]` are genuinely undeliverable.
+
+## Optional `refine`
+
+`analyze_graph` never sees file source -- it only has `GraphHandle`/`FactsHandle`, never an `OwnedNode`, so it structurally cannot read a method body, cite an AST-derived risk signal, or point at a specific line. `fn refine` closes that gap: define it alongside `collect_facts`/`analyze_graph`, push symbols worth a follow-up per-file look onto `result.refine` inside `analyze_graph`, then pass `refine: true` on the request. `refine` is OPTIONAL (unlike the other two) -- an evaluator with only `collect_facts`/`analyze_graph` is still valid; omitting `fn refine` while passing `refine: true` reports `refine_status: "absent"`, never an error.
+
+```rust,fragment
+// OPTIONAL: runs once per file in the narrowed refine set (the files a
+// symbol in GraphResult.refine belongs to, intersected with the files
+// already indexed -- never the whole repo). Has BOTH the file's real
+// OwnedNode (so you can walk the AST, check for a catch block, read a
+// literal, etc.) AND the same GraphHandle/FactsHandle analyze_graph used,
+// simultaneously -- the only callback with both at once.
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {
+    Vec::new()
+}
+```
+
+```rust,fragment
+pub struct FileContext {
+    pub file: String,  // this file's repo-relative path
+}
+```
+
+`EvalFinding` is the SAME shape `xray_search` evaluators return:
+
+```rust,fragment
+pub struct EvalFinding {
+    pub pattern: String,   // your label for this finding
+    pub line: usize,       // 1-based line number
+    pub snippet: String,   // free-text detail / matched text
+}
+```
+
+`refine_findings[]` in the response adds `file` (from `FileContext.file`) to each one, giving `{pattern, file, line, snippet}`. See "Response envelope and completeness" above for `refine`/`refine_status`/`refine_findings`/`refine_files_examined` and the two cost guards (opt-in, and skipped when `GraphResult.refine` is empty).
+
+## Request options: file scope, globs, stored patterns
+
+**`include_patterns`/`exclude_patterns` DO narrow which files are read into the graph.** By default (both empty) indexing covers the whole repository; passing `include_patterns: ["*.java", "*.kt", "*.kts"]` restricts indexing to just the matching files -- the recommended usage on a repo holding other languages (an empty `include_patterns` there pulls in every unextractable file too, inflating `files_with_unsupported_language` and making `fact_graph_complete: true` unreachable). Narrow to the EXTRACTABLE set, never to one language: dropping `*.kt` from a mixed Java/Kotlin repo does not remove the Kotlin dependency, it only removes your ability to see it.
+
+What patterns do NOT narrow is which files can appear as the *target* of a resolved reference. A reference from an included file to a symbol declared in an EXCLUDED file still resolves as "external to the graph", a real, meaningful signal your evaluator can act on -- it is never silently dropped.
+
+`include_patterns`/`exclude_patterns` use the exact same selector as `regex_search` and `xray_search` (`PathPatternMatcher`, gitignore-style globs):
+
+- `*` does not cross `/` when the pattern has a trailing suffix -- `src/*.java` matches only `src/Foo.java`, never `src/sub/Foo.java`.
+- A BARE trailing `*` with no suffix (e.g. `src/*`) behaves DIFFERENTLY by list: as `include_patterns` it matches only files directly under `src/` by name (never `src/sub/Foo.java`); as `exclude_patterns` it excludes the WHOLE subtree (gitignore containment semantics). Use `src/**` to deliberately include the whole subtree.
+- A pattern with no `/` at all (e.g. `*.java`) matches the basename at any depth: `Foo.java`, `src/Foo.java`, `src/sub/Foo.java` all match.
+- A trailing-slash directory marker (e.g. `src/tests/`) selects that directory's CONTENTS in both lists, including with a wildcard (`src/*/` selects files under any direct subdirectory; `*/tests/` selects any `tests/` directory's contents at any depth).
+- Brace groups are supported (e.g. `*.{java,kt}`), capped at 64 expanded variants per pattern.
+
+See `regex_search`'s tool docs for the full semantics reference (leading `*/` any-depth rewriting, trailing-`/` directory markers -- root-anchored only when MULTI-segment, e.g. `src/main/`; a single-segment marker like `docs/` matches at any depth -- bare-token ambiguity handling) -- the underlying matcher is shared, so those rules apply here unchanged.
+
+`pattern_name` resolves a previously stored evaluator from the X-Ray pattern library instead of inlining `evaluator_code` (mutually exclusive with it). Resolution tries the REPOSITORY-SPECIFIC scope first (`cidx-meta/xray-patterns/{repository_alias}/{pattern_name}.yaml`), then falls back to the cross-repo `__any__` scope -- a repo-specific pattern always takes precedence over a same-named `__any__` pattern. A stored pattern declares its own `execution_mode` (`"legacy"` for `xray_search`-style single-file evaluators, or `"graph"` for the two-function contract this tool requires); `analyze_graph` checks the declared mode BEFORE preparing the evaluator code -- a pattern authored for `xray_search` cannot be run here. `pattern_params` supplies optional typed overrides for the pattern's declared parameters, using the exact same substitution semantics `xray_search` uses for its own stored patterns: each resolved value is injected as a Rust `const` declaration prepended to the evaluator source before compilation. Ignored unless `pattern_name` is also supplied.
+
+## Task-to-primitive table and runnable templates
+
+| Task | Primitive |
+|------|-----------|
+| Orphan/dead symbols | Iterate dense ids, report `is_definitely_dead_code(i) == Some(true)`. |
+| Unwired components | Report `is_symbol_referenced(i) == false` for a specific declaration kind (e.g. Spring `@Component` classes with zero inbound edges). |
+| Layering violations / package cycles | `g.strongly_connected_components()` over module-level symbol ids -- see the two caveats below before acting on a component. |
+| Endpoint -> sink reachability | `g.shortest_path_to_any(endpoint, sinks, max_depth)`, always ship the path and audit every hop (see "Directional asymmetry" below); use the `_filtered` form instead when a false positive is the expensive mistake. Either way, `None` means "no path found", never proof of unreachability. |
+| Blast radius ("how much can a change to `roots` affect") | `g.reachable_to(roots, max_depth).len()` -- the transitive CALLERS closure, over METHOD dense ids. `reachable_from` answers the OPPOSITE question and is the wrong primitive here. A false positive (extra symbol to double-check) is cheap here vs. a false negative (a missed caller), so UNFILTERED is the right default -- but an implausibly large or uniform count across roots is a signal to cross-check with `reachable_to_filtered`. |
+
+**Layering-violations caveats.** (1) `callers_of`/`callees_of` read the POST-CAP candidate arena, where a reference's candidate window may include more than one proposed target when the binder could not disambiguate -- an SCC over these edges is a POSSIBLE cycle among proposed candidates, not a confirmed source-level reference cycle. Name findings accordingly (the shipped `find-reference-cycles` template below calls them `possible_candidate_cycle`, not `reference_cycle`) and verify each component against source. (2) Tarjan returns a self-recursive method as a SINGLETON component, so a common `component.len() > 1` filter silently misses ALL self-recursion -- check `g.callees_of(d).contains(&d)` before treating a one-node component as nothing to report. `g.strongly_connected_components_filtered(RECEIVER_TYPE_MATCH, RECEIVER_TYPE_MISMATCH)` drops a cycle formed purely by weak/mismatched evidence, at the cost of also dropping a REAL cycle closed only by an unqualified/static-import call.
+
+### Directional asymmetry (dead-code vs reachability)
+
+This tool's dead-code and reachability analyses are held to deliberately OPPOSITE safety guarantees: **dead-code analysis must UNDER-report (safe)**. Only an unreferenced private `Method` or `Type` can produce `Some(true)`; every field, constant, package, unknown-kind, or non-private symbol produces `None` unless it has an inbound reference, which produces `Some(false)`. The predicate still does not consult `fact_graph_complete`, so check completeness before trusting any `Some(true)`; reflection, JNI, or dependency injection can remain invisible even for an allowed kind. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's evidence, using `g.edge_evidence(from, to)` for the reason bits and `g.edge_reason(from, to)` for the candidate count. The template below does exactly that; a finding that ships a bare path is not complete.
+
+This is also the **endpoint-to-sink reachability template**:
 
 ```rust
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new() // this example has no use for facts -- collect_facts is still required
+}
+
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
     let endpoint_dense_id = 0u32; // resolve your real endpoint's dense id
@@ -300,12 +468,44 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         for dense_id in &path {
             if let Some(sym) = g.resolve_symbol(*dense_id) {
                 involved.push(sym);
-                signatures.push(g.signature_for(*dense_id).unwrap_or("").to_string());
+                // location_for gives file:line so a reader can check the hop against source.
+                let where_ = match g.location_for(*dense_id) {
+                    Some((file, line)) => format!("{}:{}", file, line),
+                    None => "<no location>".to_string(),
+                };
+                signatures.push(format!("{} @ {}", g.signature_for(*dense_id).unwrap_or("?"), where_));
             }
         }
+
+        // Audit EVERY hop. A hop is only as trustworthy as its evidence, and the
+        // binder deliberately over-binds -- a bare path proves nothing on its own.
+        // RECEIVER_TYPE_MATCH means the receiver's declared type was resolved and
+        // matched -- on a narrowed pool OR on a corroborated unique-name shortcut.
+        // Its ABSENCE still proves nothing (an unqualified call has no receiver to
+        // check), so rank hops rather than asking for a proof the binder cannot give.
+        let mut strong_hops = 0usize;
+        let mut weakest = "receiver-resolved";
+        for pair in path.windows(2) {
+            let evidence = g.edge_evidence(pair[0], pair[1]).unwrap_or(0);
+            let sole = g.edge_reason(pair[0], pair[1]) == Some(EdgeReason::SoleCandidate);
+            if evidence & RECEIVER_TYPE_MATCH != 0 {
+                strong_hops += 1;                 // disambiguated AGAINST the receiver's real type
+            } else if evidence & UNIQUE_NAME_IN_REPO != 0 && sole {
+                weakest = "unique-name-only";     // one repo match; target may still be external
+            } else if sole {
+                weakest = "shape-only";           // name+arity shape alone
+            } else {
+                weakest = "guessed";              // one of several candidates
+                break;
+            }
+        }
+
         result.findings.push(ReduceFinding {
             pattern: "endpoint_reaches_sink".to_string(),
-            message: format!("path length {}", path.len()),
+            message: format!(
+                "path length {}, {}/{} hops receiver-verified, weakest link: {}",
+                path.len(), strong_hops, path.len().saturating_sub(1), weakest
+            ),
             involved,
             signatures,
         });
@@ -314,22 +514,138 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 ```
 
-## Use cases
+**Read the weakest link before acting on the claim.** The four ranks, strongest first: `"receiver-resolved"` -- every hop was disambiguated against the receiver's real declared type, the only rank where the binder actively ruled other candidates out. `"unique-name-only"` -- some hop matched exactly one declaration in this repo by name and arity, with no receiver evidence; a bare call inherited from a superclass OUTSIDE the repo, or a static import of an external method, produces exactly this, so the hop may not exist at all. `"shape-only"` -- matched on name and arity alone. `"guessed"` -- one of several candidates. Only `"receiver-resolved"` is worth acting on unreviewed, and it is rarer than it looks: a call whose name is unique in the repo never runs receiver narrowing at all, so a perfectly genuine hop routinely reports `"unique-name-only"`. Treat the rank as a ranking, not a verdict -- ship the path with `location_for`'s `file:line` per hop and let a human confirm.
 
-- **Orphan/dead symbols**: iterate dense ids, report `is_definitely_dead_code(i) == Some(true)`.
-- **Unwired components**: report `is_symbol_referenced(i) == false` for a specific declaration kind (e.g. Spring `@Component` classes with zero inbound edges).
-- **Layering violations / package cycles**: `g.strongly_connected_components()` over module-level symbol ids.
-- **Endpoint -> sink reachability**: `g.shortest_path_to_any(endpoint, sinks, max_depth)`, always ship the path.
-- **Blast radius**: `g.reachable_from(roots, max_depth).len()` -- how much of the codebase a change to `roots` can affect.
+`g.shortest_path_to_any_filtered(endpoint, sinks, max_depth, RECEIVER_TYPE_MATCH, RECEIVER_TYPE_MISMATCH)` does the equivalent filtering UP FRONT: every hop it returns already carries the required evidence, so there is no weakest-link ranking left to compute -- but `None` from it means only "no strong-evidence path found", never a proof `endpoint` cannot reach `sinks`.
 
-## Execution model
+### Templates
 
-This tool runs SYNCHRONOUSLY within `timeout_seconds` (off the server's event loop) -- it does not yet submit a `BackgroundJobManager` job the way `xray_search` does, so `await_seconds` is accepted but currently inert. A future story may add full async job-polling parity; for now, plan for `timeout_seconds` (max 600s) to cover the whole pipeline: repo resolution, file collection, evaluator compile, `--build-graph`, and `--analyze-graph`.
+Ready-to-adapt graph-mode evaluators. Every one is real, compilable source (proven by an automated test that compiles every example on this page through the real evaluator pipeline) -- copy one as `evaluator_code` and edit the parts that need editing. The Quick Start example above is the **dead-code sweep** template. The Directional asymmetry example above is the **endpoint-to-sink reachability** template, with a full evidence audit. Below is the **possible reference cycles** template referenced by the layering-violations task above:
 
-## Related
+```rust
+// Walks every strongly-connected component unconditionally -- nothing to
+// edit. When fact_graph_complete: false, an empty or sparse findings list
+// is untrustworthy. strongly_connected_components traverses the same
+// POST-CAP CSR candidate arena as callers_of/callees_of.
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+
+// The negative control is computed and emitted BEFORE any per-component
+// finding, so it always lands in findings[0] regardless of how many
+// components the graph has.
+//
+// A singleton SCC with a genuine self-edge
+// (g.callees_of(*dense_id).contains(dense_id)) is a real one-node cycle,
+// not a suppressed acyclic node -- Tarjan cannot distinguish the two by
+// component length alone, so this template checks the edge itself before
+// treating component.len() < 2 as "nothing to report".
+//
+// possible_candidate_cycle (not reference_cycle): callers_of/callees_of
+// read the POST-CAP candidate arena, where a reference's candidate window
+// may include more than one proposed target when the binder could not
+// disambiguate -- an SCC over these edges is a possible cycle among
+// proposed candidates, not a confirmed source-level reference cycle.
+fn analyze_component(
+    g: &GraphHandle<'_>,
+    component: &[u32],
+    acyclic_singletons: &mut usize,
+    self_loop_singletons: &mut usize,
+) -> Option<ReduceFinding> {
+    if component.len() < 2 {
+        for dense_id in component {
+            if !g.callees_of(*dense_id).contains(dense_id) {
+                *acyclic_singletons += 1;
+                return None;
+            }
+            *self_loop_singletons += 1;
+            return g.resolve_symbol(*dense_id).map(|symbol| ReduceFinding {
+                pattern: "possible_candidate_cycle".to_string(),
+                message: "component_size=1 unresolved_drop_count=0 self_loop=true".to_string(),
+                involved: vec![symbol],
+                signatures: vec![g.signature_for(*dense_id).unwrap_or("<no-signature>").to_string()],
+            });
+        }
+        return None;
+    }
+    let true_size = component.len();
+    let mut involved: Vec<u64> = Vec::new();
+    let mut signatures: Vec<String> = Vec::new();
+    for dense_id in component {
+        if let Some(symbol) = g.resolve_symbol(*dense_id) {
+            involved.push(symbol);
+            signatures.push(g.signature_for(*dense_id).unwrap_or("<no-signature>").to_string());
+        }
+    }
+    let unresolved_drop_count = true_size - involved.len();
+    Some(ReduceFinding {
+        pattern: "possible_candidate_cycle".to_string(),
+        message: format!("component_size={} unresolved_drop_count={}", true_size, unresolved_drop_count),
+        involved,
+        signatures,
+    })
+}
+
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    let components = g.strongly_connected_components();
+    let mut acyclic_singletons: usize = 0;
+    let mut self_loop_singletons: usize = 0;
+    let mut buffered: Vec<ReduceFinding> = Vec::new();
+    for component in &components {
+        if let Some(finding) = analyze_component(g, component, &mut acyclic_singletons, &mut self_loop_singletons) {
+            buffered.push(finding);
+        }
+    }
+    result.findings.push(ReduceFinding {
+        pattern: "reference_cycle_negative_control".to_string(),
+        message: format!(
+            "acyclic_singletons_suppressed={} self_loop_singletons={}",
+            acyclic_singletons, self_loop_singletons
+        ),
+        involved: Vec::new(),
+        signatures: Vec::new(),
+    });
+    result.findings.append(&mut buffered);
+    result
+}
+```
+
+The template above walks the UNFILTERED `strongly_connected_components()`, the right default when a missed cycle is worse than a false one -- it already names its findings `possible_candidate_cycle` and expects each one verified. Swapping in `g.strongly_connected_components_filtered(RECEIVER_TYPE_MATCH, RECEIVER_TYPE_MISMATCH)` suppresses a cycle formed purely by weak/mismatched evidence before it reaches `findings[]`, at the cost described above. Prefer the filtered form only when an unverified false cycle in this report would itself be the costly mistake.
+
+## Errors and multi-repo results
+
+Beyond the general `error` shapes documented in this file's `outputSchema` frontmatter, two-function-evaluator validation and stored-pattern resolution have their own error paths:
+
+**Mixed/incomplete evaluator mode.** A genuine MIXED-mode evaluator (defines both `fn evaluate_node` and the graph pair) reaches the Rust compiler and is rejected there with a real `CompileError` (`ok: false`, `error: {error_type: "CompileError", error_message: ...}`). Defining only ONE of `collect_facts`/`analyze_graph` is a DIFFERENT, EARLIER rejection, caught by a Python-side pre-compile gate before the Rust compiler ever runs:
+
+```json
+{"error": "xray_evaluator_validation_failed", "error_code": "missing_entry_point",
+ "offending_construct": "analyze_graph", "message": "missing required entry point: ..."}
+```
+
+Note there is no `ok` field here at all (unlike the `CompileError` shape, which carries `ok: false`). `offending_construct` names whichever function you left out (`"analyze_graph"` if you defined only `collect_facts`; `"collect_facts"` if you defined only `analyze_graph`); it falls back to `"evaluate_node"` only when your source defines NEITHER graph-mode function, in which case the legacy entry point is the honest thing to name. A real `CompileError`'s detail lines are remapped to YOUR OWN line numbers wherever a diagnostic location falls inside your code; an out-of-span location (inside generated support code) is labeled `(evaluator support code, not user code)` on its `-->` arrow line, but a numbered gutter row rustc prints alongside it keeps its raw, unlabeled assembled line number -- treat any gutter row you cannot match to your own source as support code too.
+
+**Stored-pattern resolution codes** (when using `pattern_name`):
+
+- `mutually_exclusive_params` -- both `pattern_name` and `evaluator_code` were supplied; provide exactly one.
+- `pattern_mode_mismatch` -- the stored pattern's declared `execution_mode` is not `"graph"` (this includes a legacy pattern predating `execution_mode`).
+- `pattern_not_found` -- `pattern_name` does not exist in either the repository-specific scope or `__any__`.
+- `invalid_pattern_params` -- `pattern_params` was supplied as a TRUTHY, non-empty JSON value that is not an object; rejected before any per-parameter validation runs. An EMPTY array/string is treated as absent and never reaches this check.
+- `path_traversal_rejected` -- `repository_alias` or `pattern_name` contains `/`, `\`, or `..`; checked before the filesystem lookup, so it takes priority over `pattern_not_found` for the same request.
+- `unknown_parameter` / `parameter_type_mismatch` -- can also surface from `pattern_params` validation, mirroring `xray_search`'s own stored-pattern parameter errors.
+
+**Multi-repo results**: passing an array (or JSON-encoded array string) for `repository_alias` analyzes each repository ONE AT A TIME against its own graph -- never a union graph, and dense ids never mean anything across repositories. The response envelope, the two multi-repo-only error codes (`multi_repo_deadline_exceeded`, `multi_repo_pipeline_exception`), and the up-front `repo_count_cap_exceeded` rejection are documented in full in this file's `outputSchema.error`/`inputSchema.repository_alias` frontmatter -- read that before writing a multi-repo caller.
+
+## Execution model, known extraction gaps, related references
+
+**Execution model.** This tool runs SYNCHRONOUSLY within `timeout_seconds` (off the server's event loop) -- it does not yet submit a `BackgroundJobManager` job the way `xray_search` does, so `await_seconds` is accepted but currently inert. Plan for `timeout_seconds` (max 600s) to cover the whole pipeline: repo resolution, file collection, evaluator compile, `--build-graph`, `--analyze-graph`, and -- only when `refine: true` AND `GraphResult.refine` came back non-empty -- a THIRD subprocess, `--refine`, inside the SAME budget (its own deadline is whatever remains of `timeout_seconds`, never additional time). A `refine` request that would otherwise exceed the budget reports `refine_status: "skipped_timeout"` rather than extending the deadline -- the primary `findings`/`fact_graph_complete` result is unaffected either way.
+
+**Known extraction gaps** (each also called out where it matters above): the graph extractor supports Java and Kotlin ONLY (see "When to use" above); a Kotlin `object : X { fun m() {} }` literal written entirely on one line fails to parse and drops the rest of that file's declarations (counted in `files_with_parse_errors`; reformat across multiple lines to fix); the Kotlin `invoke` convention and a compound-assignment onto an indexed target (`m[k] += v`) never produce an edge, so a Kotlin-only `is_definitely_dead_code: Some(true)` verdict on an `operator fun` reachable only through one of those two forms is unproven. Full binder-internal detail for all of these: `docs/xray-graph-binder-internals.md`.
+
+**Related:**
 
 - See `xray_search` for single-file AST pattern matching (regex-driven candidate selection, one evaluator call per file).
 - See `xray_explore` for AST structure discovery to help craft `collect_facts`/`analyze_graph` logic.
-- For guidance on choosing between single-file and graph mode, and for ready-to-adapt graph-mode evaluator templates: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-cookbook.md')` (X-Ray Cookbook).
-- For the graph engine's node/edge model, CSR arena layout, and what the graph cannot see: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-architecture.md')` (X-Ray Architecture).
-- To fetch a graph-mode template's source directly: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-templates/find-definitely-dead-symbols.rs')` (also available: `docs/xray-templates/find-reference-cycles.rs`, `docs/xray-templates/report-reachable-symbols-from-dense-id.rs`, `docs/xray-templates/find-path-to-dense-sink.rs`, `docs/xray-templates/callers-of-symbols-matching-signature-text.rs`).
+- Every ready-to-adapt graph-mode template lives inline in this doc (Quick Start, Directional asymmetry, and Templates above), reachable on every deployment -- this page is the cookbook; adapt an example directly rather than fetching an external one.
+- Full contract, evidence-bit guidance, and every example on this page: `cidx_quick_reference(tool="analyze_graph")`.

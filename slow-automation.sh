@@ -198,7 +198,7 @@ echo "Per-test timeout: ${SLOW_PYTEST_TIMEOUT}s"
 
 # PYTHONPATH: src + tests, exactly as server-fast-automation.sh computes it. A bare
 # `pytest` here (no PYTHONPATH) resolves `code_indexer` from the sibling repo at
-# /home/jsbattig/Dev/code-indexer/ instead of this project -- always set PYPATH explicitly.
+# /home/opuser/Dev/code-indexer/ instead of this project -- always set PYPATH explicitly.
 PYPATH="$(pwd)/src:$(pwd)/tests"
 
 SLOW_MARKER_EXPR="slow and not e2e and not real_api and not integration and not requires_server and not requires_containers and not performance"

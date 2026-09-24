@@ -14,11 +14,17 @@ AC7: ssh_key_manager no longer imports or calls api_metrics_service
 """
 
 import json
+import pathlib
 import pytest
 from datetime import datetime
 from unittest.mock import Mock, patch
 
+import code_indexer
 from code_indexer.server.auth.user_manager import User, UserRole
+
+# Repo-relative src root, derived from the installed package rather than a
+# hardcoded absolute path -- works regardless of where the repo is checked out.
+_SRC_ROOT = pathlib.Path(code_indexer.__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -441,10 +447,8 @@ class TestServiceLevelTrackingRemoved:
         file_crud_service should NOT import api_metrics_service after Bug #350 fix.
         Tracking is now centralized in protocol.py.
         """
-        import pathlib
-
-        source_path = pathlib.Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/server/services/file_crud_service.py"
+        source_path = (
+            _SRC_ROOT / "code_indexer" / "server" / "services" / "file_crud_service.py"
         )
         source = source_path.read_text()
 
@@ -463,10 +467,12 @@ class TestServiceLevelTrackingRemoved:
         git_operations_service should NOT import api_metrics_service after Bug #350 fix.
         Tracking is now centralized in protocol.py.
         """
-        import pathlib
-
-        source_path = pathlib.Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/server/services/git_operations_service.py"
+        source_path = (
+            _SRC_ROOT
+            / "code_indexer"
+            / "server"
+            / "services"
+            / "git_operations_service.py"
         )
         source = source_path.read_text()
 
@@ -484,10 +490,8 @@ class TestServiceLevelTrackingRemoved:
         ssh_key_manager should NOT import api_metrics_service after Bug #350 fix.
         Tracking is now centralized in protocol.py.
         """
-        import pathlib
-
-        source_path = pathlib.Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/server/services/ssh_key_manager.py"
+        source_path = (
+            _SRC_ROOT / "code_indexer" / "server" / "services" / "ssh_key_manager.py"
         )
         source = source_path.read_text()
 

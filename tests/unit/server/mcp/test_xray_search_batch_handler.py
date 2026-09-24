@@ -182,77 +182,112 @@ class TestResolveBatchEvaluator:
 
 
 class TestTruncateXrayBatchResult:
-    def test_small_result_returns_inline(self):
+    """Bug #1928: _truncate_xray_batch_result delegates to
+    xray_truncation.truncate_result_fields(), which reads
+    payload_cache.config.max_fetch_size_chars directly (no longer calls
+    payload_cache.truncate_result()) -- uses a REAL PayloadCache on temp
+    SQLite rather than a stale MagicMock mock of the old method."""
+
+    def _make_cache(self, tmp_path, max_fetch_size_chars: int):
+        from code_indexer.server.cache.payload_cache import (
+            PayloadCache,
+            PayloadCacheConfig,
+        )
+
+        config = PayloadCacheConfig(
+            preview_size_chars=max_fetch_size_chars,
+            max_fetch_size_chars=max_fetch_size_chars,
+        )
+        cache = PayloadCache(db_path=tmp_path / "batch.db", config=config)
+        cache.initialize()
+        return cache
+
+    def test_small_result_returns_inline(self, tmp_path):
         from code_indexer.server.mcp.handlers.xray_batch import (
             _truncate_xray_batch_result,
         )
 
-        mock_cache = MagicMock()
-        mock_cache.truncate_result.return_value = {"has_more": False, "preview": ""}
+        cache = self._make_cache(tmp_path, max_fetch_size_chars=5000)
+        try:
+            result = {
+                "matches": [{"file_path": "a.py", "line_number": 1}],
+                "errors": [],
+                "evaluation_errors": [],
+                "total_repos": 1,
+                "total_scans": 1,
+                "total_cells": 1,
+                "repos_completed": 1,
+                "partial": False,
+                "timeout": False,
+                "cancelled": False,
+            }
+            out = _truncate_xray_batch_result(result, cache)
+        finally:
+            cache.close()
 
-        result = {
-            "matches": [{"file_path": "a.py", "line_number": 1}],
-            "errors": [],
-            "evaluation_errors": [],
-            "total_repos": 1,
-            "total_scans": 1,
-            "total_cells": 1,
-            "repos_completed": 1,
-            "partial": False,
-            "timeout": False,
-            "cancelled": False,
-        }
-        out = _truncate_xray_batch_result(result, mock_cache)
         assert out["truncated"] is False
         assert out["has_more"] is False
         assert out["cache_handle"] is None
         assert len(out["matches"]) == 1
 
-    def test_large_result_stores_cache(self):
+    def test_large_result_stores_cache(self, tmp_path):
         from code_indexer.server.mcp.handlers.xray_batch import (
             _truncate_xray_batch_result,
         )
 
-        mock_cache = MagicMock()
-        mock_cache.truncate_result.return_value = {
-            "has_more": True,
-            "preview": "...",
-            "cache_handle": "handle-abc",
-            "total_size": 99999,
-        }
+        cache = self._make_cache(tmp_path, max_fetch_size_chars=300)
+        try:
+            matches = [{"file_path": f"f{i}.py", "line_number": i} for i in range(10)]
+            errors = [{"error": "x"}] * 5
+            eval_errors = [{"error_type": "Crash"}] * 5
+            result = {
+                "matches": matches,
+                "errors": errors,
+                "evaluation_errors": eval_errors,
+                "total_repos": 2,
+                "total_scans": 1,
+                "total_cells": 2,
+                "repos_completed": 2,
+                "partial": True,
+                "timeout": False,
+                "cancelled": False,
+            }
+            out = _truncate_xray_batch_result(result, cache)
+        finally:
+            cache.close()
 
-        matches = [{"file_path": f"f{i}.py", "line_number": i} for i in range(10)]
-        result = {
-            "matches": matches,
-            "errors": [{"error": "x"}] * 5,
-            "evaluation_errors": [{"error_type": "Crash"}] * 5,
-            "total_repos": 2,
-            "total_scans": 1,
-            "total_cells": 2,
-            "repos_completed": 2,
-            "partial": True,
-            "timeout": False,
-            "cancelled": False,
-        }
-        out = _truncate_xray_batch_result(result, mock_cache)
         assert out["truncated"] is True
         assert out["has_more"] is True
-        assert out["cache_handle"] == "handle-abc"
-        assert len(out["matches"]) == 3
-        assert len(out["errors"]) == 3
-        assert len(out["evaluation_errors"]) == 3
+        assert out["cache_handle"] is not None
+        assert "matches_and_errors_preview" not in out
+        n_inline = len(out["matches"])
+        assert 0 < n_inline < len(matches), (
+            "Bug #1928: inline count is byte-budget-driven, never a fixed count of 3"
+        )
+        assert out["matches"] == matches[:n_inline]
         assert "fetch_tool_hint" in out
         assert out["total_repos"] == 2
         assert out["partial"] is True
 
-    def test_no_cache_returns_original(self):
+    def test_no_cache_returns_small_result_content_unchanged(self):
+        """Bug #1928 round 3 (P3, Codex): a small result with no cache is
+        still content-equal (matches/errors/evaluation_errors preserved),
+        but is no longer the SAME object -- the degrade path always
+        builds a fresh dict, now also flagged cache_unavailable=True."""
         from code_indexer.server.mcp.handlers.xray_batch import (
             _truncate_xray_batch_result,
         )
 
         result = {"matches": [1, 2, 3], "errors": [], "evaluation_errors": []}
         out = _truncate_xray_batch_result(result, None)
-        assert out is result
+
+        assert out["matches"] == [1, 2, 3]
+        assert out["errors"] == []
+        assert out["evaluation_errors"] == []
+        assert out["cache_unavailable"] is True
+        assert out["cache_handle"] is None
+        assert out["has_more"] is False
+        assert out["truncated"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +609,9 @@ class TestXraySearchBatchRepoResolution:
         mock_grm.is_globally_active.return_value = True
 
         def _resolve(alias):
-            return "/repos/evolution-global" if alias == "evolution-global" else None
+            return (
+                "/repos/example-repo-global" if alias == "example-repo-global" else None
+            )
 
         with (
             patch(
@@ -594,7 +631,7 @@ class TestXraySearchBatchRepoResolution:
                 return_value=Path("/cidx-meta"),
             ),
         ):
-            params = _valid_params(repository_alias="evolution")
+            params = _valid_params(repository_alias="example-repo")
             resp = _parse_response(handle_xray_search_batch(params, user))
         assert "job_id" in resp
 

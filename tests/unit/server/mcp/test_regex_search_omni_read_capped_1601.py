@@ -42,15 +42,15 @@ async def _run_omni(args: dict, user, per_repo_read_capped: dict) -> dict:
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers.search._expand_wildcard_patterns",
+            "code_indexer.server.mcp.handlers.search.regex_search._expand_wildcard_patterns",
             return_value=list(per_repo_read_capped.keys()),
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search._enforce_repo_count_cap",
+            "code_indexer.server.mcp.handlers.search.regex_search._enforce_repo_count_cap",
             return_value=None,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.search.handle_regex_search",
+            "code_indexer.server.mcp.handlers.search.regex_search.handle_regex_search",
             side_effect=_fake_handle_regex_search,
         ),
     ):

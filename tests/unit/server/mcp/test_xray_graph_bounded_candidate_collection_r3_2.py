@@ -62,8 +62,10 @@ def test_collection_stops_examining_files_once_cap_is_reached(
         return real_select(selector, path)
 
     with patch.object(PathSelector, "select", count_select):
-        paths, truncated = _collect_graph_candidate_files(
-            repo_root, ["*.py"], [], max_files=_CAP
+        paths, truncated, _with_ext, _without_ext, _langs = (
+            _collect_graph_candidate_files(
+                repo_root, ["*.py"], [], max_files=_CAP, extractor_extensions={}
+            )
         )
 
     # Guard: prove the instrumentation actually intercepted real calls --
@@ -94,8 +96,8 @@ def test_collection_not_truncated_when_matches_are_within_cap(
     repo_root.mkdir()
     _build_flat_fixture(repo_root, 2)
 
-    paths, truncated = _collect_graph_candidate_files(
-        repo_root, ["*.py"], [], max_files=_CAP
+    paths, truncated, _with_ext, _without_ext, _langs = _collect_graph_candidate_files(
+        repo_root, ["*.py"], [], max_files=_CAP, extractor_extensions={}
     )
 
     assert len(paths) == 2
@@ -140,7 +142,7 @@ async def test_pipeline_ors_collection_truncation_into_final_result(
     with (
         _patch(
             "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_and_files",
-            return_value=(repo_root, ["A.java"], True, None),
+            return_value=(repo_root, ["A.java"], True, 0, 0, [], None),
         ),
         _patch(
             "code_indexer.xray.rust_backend.RustNativeBackend.run_graph_analysis",

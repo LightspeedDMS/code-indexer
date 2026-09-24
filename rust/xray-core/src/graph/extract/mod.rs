@@ -15,9 +15,19 @@
 //! worse than an explicit, observable "not yet supported" signal.
 
 pub mod java;
+mod java_annotations;
+mod java_fields;
 mod java_invocations;
+mod java_methods;
 mod java_receiver;
 mod java_type_names;
+pub mod kotlin;
+mod kotlin_declarations;
+mod kotlin_fields;
+mod kotlin_functions;
+mod kotlin_invocations;
+mod kotlin_receiver;
+mod kotlin_type_names;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;
@@ -47,8 +57,67 @@ pub enum ExtractorLookup {
 pub fn extractor_for_language(ext: &str) -> ExtractorLookup {
     match ext {
         "java" => ExtractorLookup::Supported(Box::new(java::JavaExtractor)),
+        // Bug #1908: Kotlin at bind levels 0-2 -- see `kotlin` module docs
+        // for scope (declarations/references/imports/inheritance) and what
+        // is deliberately NOT covered (Java-specific levels 3-4).
+        "kt" | "kts" => ExtractorLookup::Supported(Box::new(kotlin::KotlinExtractor)),
         _ => ExtractorLookup::Unsupported,
     }
+}
+
+/// Bug #1929 item 3: synthesizes a human-chaseable name for an anonymous
+/// (Java `new Base() { ... }` / enum-constant body) or anonymous-object
+/// (Kotlin `object : Base() { ... }`) type -- shared by BOTH extractors
+/// since the naming scheme is identical and language-agnostic (Rule 4,
+/// anti-duplication; `kotlin.rs`'s own `type_declaration_name` doc
+/// comment already says it "mirrors `JavaExtractor`'s own F1 anonymous-
+/// class naming scheme exactly"). Replaces the prior opaque
+/// `<anon:{file_id}:{byte}>` (two large numbers with zero human meaning,
+/// reported live as e.g. `<anon:918273645:42>.read(...)` against a
+/// real-world enum whose every constant overrides `read()` in its own
+/// anonymous body) with `{enclosing}$<anon@L{line}:{file_id}:
+/// {byte}>` -- the enclosing type's real bare name and the anonymous
+/// body's own REAL source line are now visible up front.
+///
+/// `file_id`/`start_byte` are KEPT (never dropped) after the
+/// human-readable prefix: this name is used as a bare-name key in the
+/// REPO-WIDE `TypeIndex` (`graph::bind::families`) for supertype
+/// resolution, so it must stay GLOBALLY unique across the whole analysed
+/// set -- two anonymous bodies in different files, or even two on the
+/// exact same source line of the same file (`new A(){}; new B(){};`),
+/// must never collide onto the identical string, which would silently
+/// merge two unrelated anonymous types' supertype evidence in
+/// `TypeIndex::supertypes_of`. `enclosing_type` is `None` only when
+/// extraction could not determine it (a malformed declaration) and
+/// renders as `<unknown>` rather than fabricating a name.
+fn synthesize_anon_type_name(
+    enclosing_type: Option<&str>,
+    file_id: u32,
+    start_line: usize,
+    start_byte: usize,
+) -> std::rc::Rc<str> {
+    let enclosing = enclosing_type.unwrap_or("<unknown>");
+    std::rc::Rc::from(format!("{enclosing}$<anon@L{start_line}:{file_id}:{start_byte}>"))
+}
+
+/// Extensions with a real `LanguageExtractor` registered, paired with a
+/// human-readable language name (Bug #1907, epic #1906 P0).
+///
+/// This is the single source of truth `xray-cli --print-graph-extractor-
+/// extensions` exposes to Python's candidate-collection walk
+/// (`xray_graph.py`). That walk applies `include_patterns`/
+/// `exclude_patterns` BEFORE any file ever reaches Rust, so an excluded
+/// file leaves no trace in any Rust-side counter -- narrowing the scope to
+/// one extractable language previously made the response report
+/// `fact_graph_complete: true` with every degradation counter at zero,
+/// even though the graph was missing every call site in the excluded
+/// language. Asking THIS function (rather than hand-maintaining a second,
+/// Python-side extension list) is what keeps that honesty check correct
+/// automatically the moment a new language's extractor lands here -- see
+/// `graph_extractor_extensions_agrees_with_extractor_for_language_for_
+/// every_known_extension` below for the anti-drift proof.
+pub fn graph_extractor_extensions() -> &'static [(&'static str, &'static str)] {
+    &[("java", "Java"), ("kt", "Kotlin"), ("kts", "Kotlin")]
 }
 
 #[cfg(test)]
@@ -59,6 +128,21 @@ mod tests {
     fn java_extension_is_supported() {
         assert!(matches!(
             extractor_for_language("java"),
+            ExtractorLookup::Supported(_)
+        ));
+    }
+
+    /// Bug #1908: both Kotlin extensions the tree-sitter grammar layer
+    /// already recognizes (`crate::languages::language_for_extension`)
+    /// must resolve to a real extractor, not merely be parseable.
+    #[test]
+    fn kotlin_extensions_are_supported() {
+        assert!(matches!(
+            extractor_for_language("kt"),
+            ExtractorLookup::Supported(_)
+        ));
+        assert!(matches!(
+            extractor_for_language("kts"),
             ExtractorLookup::Supported(_)
         ));
     }
@@ -81,5 +165,46 @@ mod tests {
             extractor_for_language("xyz"),
             ExtractorLookup::Unsupported
         ));
+    }
+
+    /// Bug #1907: the anti-drift proof. `graph_extractor_extensions()` is
+    /// the sole source `xray-cli --print-graph-extractor-extensions`
+    /// exposes to Python's candidate-collection walk, which uses it to
+    /// decide whether an EXCLUDED file's language could have contributed a
+    /// real call edge. If this list and `extractor_for_language` ever
+    /// disagreed for ANY of the engine's known extensions, the file-
+    /// exclusion honesty check built on top of it would silently reproduce
+    /// exactly the "false fact_graph_complete: true" bug this issue exists
+    /// to fix -- just for a different extension. Checked against every
+    /// extension the tree-sitter grammar layer recognizes
+    /// (`crate::languages::supported_extensions`), not merely the two this
+    /// slice happens to implement, so a THIRD extractor landing later
+    /// without a `graph_extractor_extensions` update fails this test
+    /// immediately instead of silently drifting.
+    #[test]
+    fn graph_extractor_extensions_agrees_with_extractor_for_language_for_every_known_extension() {
+        for ext in crate::languages::supported_extensions() {
+            let has_extractor = matches!(extractor_for_language(ext), ExtractorLookup::Supported(_));
+            let listed = graph_extractor_extensions().iter().any(|(listed_ext, _)| listed_ext == ext);
+            assert_eq!(
+                has_extractor, listed,
+                "extension {ext:?}: extractor_for_language() has_extractor={has_extractor} \
+                 but graph_extractor_extensions() listed={listed} -- these must never disagree"
+            );
+        }
+    }
+
+    /// Bug #1907: the list must never contain an extension `extractor_for_
+    /// language` cannot actually back with a real extractor -- that would
+    /// make Python's honesty check LIE in the opposite direction (treating
+    /// an unsupported file's exclusion as if it mattered).
+    #[test]
+    fn every_listed_extension_is_really_supported() {
+        for (ext, _lang) in graph_extractor_extensions() {
+            assert!(
+                matches!(extractor_for_language(ext), ExtractorLookup::Supported(_)),
+                "graph_extractor_extensions lists {ext:?} but extractor_for_language disagrees"
+            );
+        }
     }
 }

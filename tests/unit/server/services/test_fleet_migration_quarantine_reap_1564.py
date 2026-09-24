@@ -57,23 +57,23 @@ def backend():
 class TestReapsOrphanedAliasRows:
     def test_row_for_alias_no_longer_registered_is_deleted(self, backend):
         manager = _FakeGoldenRepoManager(backend, repos={})
-        record_unrecoverable_corruption(manager, "evolution", "corrupt detail")
+        record_unrecoverable_corruption(manager, "example-repo", "corrupt detail")
 
         reconcile_stale_quarantine_rows(manager)
 
-        assert get_failure_state(manager, "evolution") is None
+        assert get_failure_state(manager, "example-repo") is None
 
     def test_below_threshold_row_for_orphaned_alias_is_still_reaped(self, backend):
         """A dangling row is garbage regardless of its failure count --
         reaping-by-alias must not be gated on the quarantine threshold."""
         manager = _FakeGoldenRepoManager(backend, repos={})
         record_migration_failure(
-            manager, "evolution", "sig", failure_cause=GENERIC_FAILURE_CAUSE
+            manager, "example-repo", "sig", failure_cause=GENERIC_FAILURE_CAUSE
         )
 
         reconcile_stale_quarantine_rows(manager)
 
-        assert get_failure_state(manager, "evolution") is None
+        assert get_failure_state(manager, "example-repo") is None
 
 
 class TestNeverRaisesOnBackendFailures:
@@ -94,10 +94,10 @@ class TestNeverRaisesOnBackendFailures:
                 raise RuntimeError("simulated registry outage")
 
         manager = _FailingListManager(backend)
-        record_unrecoverable_corruption(manager, "evolution", "corrupt detail")
+        record_unrecoverable_corruption(manager, "example-repo", "corrupt detail")
 
         # Must not raise; row is left untouched since we cannot safely
         # tell live-vs-orphaned without the golden repo list.
         reconcile_stale_quarantine_rows(manager)
 
-        assert get_failure_state(manager, "evolution") is not None
+        assert get_failure_state(manager, "example-repo") is not None

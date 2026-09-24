@@ -28,6 +28,40 @@ Before writing "ready"/"complete"/"validated"/"promoted", state all three: (1) t
 
 ---
 
+## Disclosure Discipline -- THIS IS A PUBLIC OPEN-SOURCE REPOSITORY
+
+**Everything here is world-readable: code, tests, docs, commit messages, issue bodies, issue comments, PR descriptions, and CHANGELOG.** GitHub also retains edit history, so editing a leaked value later does NOT remove it. The only reliable control is never writing it in the first place.
+
+### Mandatory check in EVERY code review
+
+Every code review -- `code-reviewer`, `codex-code-reviewer`, every external-CLI reviewer variant, and every human pass -- MUST scan the diff for disclosure and REJECT on any hit. This check ranks alongside correctness; a functionally perfect change that leaks is a REJECT.
+
+Scan for, and reject:
+
+| Class | Examples |
+|-------|----------|
+| **Secrets / credentials** | passwords, API keys, tokens, JWTs, private keys, connection strings with real credentials, `.env` / `.local-testing` / `.e2e-automation` content |
+| **PII** | names, emails, usernames, phone numbers, addresses, account ids, anything identifying a person |
+| **Third-party / customer identity** | customer or partner names, their package namespaces, their class/method/table names, their repository aliases, snippets of their source |
+| **System internals** | real hostnames, public/private IPs, network topology, cluster node ids, ports, mount paths, internal service names |
+| **Internal project vocabulary** | repository aliases for internal systems, internal codenames used as sample data |
+
+Applies to source, tests, **test fixtures and sample data**, docstrings, comments, doc files, commit messages, and anything written to an issue or PR.
+
+### Rules when authoring
+
+- Sample data is neutral by default: `com.example.app`, `example-repo-global`, `ExampleService`, RFC-1918 / RFC-5737 addresses, `example.com`.
+- Never paste real production output (query results, log lines, stack traces, repo listings) into an issue, PR, commit message, or doc without sanitising identifiers first.
+- Bug reports and epics cite BEHAVIOUR and code locations in THIS repository -- never a third party's file paths, type names, or source.
+- Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
+- Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
+
+### If something already leaked
+
+Scrub it, then say so plainly to the user -- do not quietly edit and move on. Editing reduces casual visibility but does not erase GitHub edit history, so the user needs to know in order to judge whether further action (rotation, takedown, disclosure) is warranted.
+
+---
+
 ## Documentation Standards
 
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.
@@ -118,6 +152,10 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 4. `server-fast-automation.sh` when server code touched
 5. `rust-automation.sh` when `rust/` touched
 6. `e2e-automation.sh` (final gate)
+
+**A/B comparison traps** (proving a fix or a regression against HEAD): a shared `CARGO_TARGET_DIR` across two checkouts of the SAME crate version at different paths SILENTLY REUSES the other tree's integration-test binary -- an A/B run then reports the wrong tree's numbers verbatim, with no error. Give every tree its OWN target dir. This produced a false review result on Bug #1898; the reviewer's first probe of the fixed tree reproduced HEAD's output exactly.
+
+**Scratchpad lifetime**: an A/B proof tree is deleted when its finding is RESOLVED, not when the session ends. Each one is a whole-repo checkout plus build artifacts (~0.5-3 GB); a single completed dual-review session left ~15 of them totalling 94 GB, filling the root filesystem to 91% weeks later. `rust/target` lives on a different mount and is NOT the risk -- `/tmp` is. Check `df -h /` before starting a multi-tree comparison.
 
 **Long-suite running traps** (fast-/server-fast-automation): the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run -- launch in the BACKGROUND and poll. Judge completion from the log's `EXIT=` line, NEVER the background-task notification (a `{ ./script; echo "EXIT=$?"; } > log` wrapper reports the wrapper's exit 0 even when the run failed). A mid-run `grep -c '^FAILED'` is always 0 (pytest emits FAILED only in the end summary). Don't use `pgrep -f fast-automation` as the liveness test (the polling shell matches its own pattern). A timeout is NOT automatically a hang -- check the actual duration against the baseline first.
 
