@@ -82,10 +82,17 @@ BANNED_PATTERNS: List[Tuple[str, str, bool]] = [
     # introduced by 90661b08, the Bug #1916 scrubbing commit itself. Scrubbed
     # to the RFC-5737 documentation range (203.0.113.0/24), which keeps the
     # values IP-shaped so argument-validation assertions still hold.
-    ("cluster-nfs-server-ip", "192.168.60.23", False),
-    # Same audit: a PostgreSQL host address, which additionally appeared inside
-    # a connection string carrying a password.
-    ("cluster-postgres-host-ip", "192.168.68.43", False),
+    # Banned by SUBNET PREFIX, not per host. The audit found THREE distinct
+    # hosts across FOUR files (.60.20 cluster node, .60.23 CoW/NFS server,
+    # .68.43 PostgreSQL host), and two were missed on the first pass. A
+    # per-host list only ever catches the hosts someone already noticed; the
+    # boundary worth protecting is the operator's subnets themselves.
+    # Scrubbed to the RFC-5737 documentation range (203.0.113.0/24), which is
+    # invisible to consumers: the only matcher involved is a generic dotted
+    # quad (tools/perf-suite/sanitizer.py `_IP_PATTERN`), never an RFC-1918
+    # test, so one IP-shaped value substitutes freely for another.
+    ("operator-subnet-192-168-60", "192.168.60.", False),
+    ("operator-subnet-192-168-68", "192.168.68.", False),
 ]
 
 # ---------------------------------------------------------------------------
@@ -154,14 +161,14 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # This script necessarily names the literal it searches for.
         _SELF_PATH,
     },
-    "cluster-nfs-server-ip": {
+    "operator-subnet-192-168-60": {
         # This script necessarily names the literal it searches for. Same
         # accepted tradeoff as the four patterns above: the value survives in
         # ONE file whose entire purpose is to list what must never reappear,
         # in exchange for a gate that blocks it everywhere else.
         _SELF_PATH,
     },
-    "cluster-postgres-host-ip": {
+    "operator-subnet-192-168-68": {
         # As above.
         _SELF_PATH,
     },
