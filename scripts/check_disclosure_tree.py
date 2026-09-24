@@ -123,9 +123,14 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # wave-through reflex #1948 warns about.
         # 12.70.0 shifted them another +45 -- the THIRD consecutive release to
         # break this list. See #1948: key these by content, not line number.
-        "CHANGELOG.md:9755",
-        "CHANGELOG.md:10126",
-        "CHANGELOG.md:10607",
+        # 12.71.0 shifted them another +37 (9755/10126/10607 ->
+        # 9792/10163/10644). FOUR consecutive releases have now had to re-point
+        # this list by hand, which is the whole argument of #1948: the key
+        # should be the credit line's CONTENT, so prepending a release entry
+        # cannot invalidate it.
+        "CHANGELOG.md:9792",
+        "CHANGELOG.md:10163",
+        "CHANGELOG.md:10644",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

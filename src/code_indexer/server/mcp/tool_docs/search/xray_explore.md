@@ -13,13 +13,13 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier(s): String for single-repo exploration, array of strings for omni multi-repo exploration. JSON-encoded string arrays are also accepted. Use list_global_repos to see available repositories.'
+      description: 'Repository identifier(s). String for single-repo exploration; array of strings (or a JSON-encoded array string) for multi-repo exploration.'
     pattern:
       type: string
-      description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
+      description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files.'
     evaluator_code:
       type: string
-      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. The function receives the file root AST node (OwnedNode) and returns zero or more findings. Each EvalFinding has: pattern (String identifying the finding), line (usize, 1-based line number), snippet (String, code context). The OwnedNode and EvalFinding types are provided automatically by the compiler preamble -- do not define them yourself. Use node.descendants_of_kind("type_name") to walk the AST. Rust security whitelist enforced: no unsafe, no std::fs/net/process/env/io, no raw pointers, no extern blocks, no forbidden macros. When omitted, the server substitutes a default evaluator that produces one finding per Phase 1 hit (or a single file-level finding in filename mode), accepting all candidate files for AST exploration.'
+      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. Mutually exclusive with pattern_name. When omitted, a default acceptor is used. See "Evaluator API" below.'
     search_target:
       type: string
       enum:
@@ -30,7 +30,7 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include (e.g. ["*.java", "*.kt"]). "*" matches a single path segment; use "**" for recursive segment matching. Empty list means include all.'
+      description: 'Glob patterns for files to include (e.g. ["*.java", "*.kt"]). Empty list means include all.'
       default: []
     exclude_patterns:
       type: array
@@ -73,17 +73,17 @@ inputSchema:
       default: 50
     max_results:
       type: integer
-      description: 'Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use a small value (e.g. 5) to test the evaluator before running the full search. Renamed from max_files in v10.3.x. Must be >= 1 when provided.'
+      description: 'Maximum number of candidate files to evaluate. Must be >= 1 when provided.'
       minimum: 1
     await_seconds:
       type: number
-      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..45.0 -- LOWERED from 120.0 by Bug #1070 because handlers are async and a longer inline wait risks a 504 at the ALB 60s hard timeout; the server enforces 45.0 (_AWAIT_SECONDS_MAX in handlers/xray.py). Values > 30.0 emit a server-side warning. Error code await_seconds_invalid if out of range or wrong type.'
+      description: 'Optional server-side polling window in seconds (floats accepted, e.g. 2.5). Range 0.0..45.0. See intro paragraph above for behavior at 0 vs. > 0.'
       minimum: 0
       maximum: 45.0
       default: 0
     pattern_name:
       type: string
-      description: "Before writing evaluator_code inline, check the pattern library: a pattern for your use case may already exist. Use browse_directory('cidx-meta-global', path='xray-patterns') to list available patterns. Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code: provide one or the other, not both. When provided, the server loads the pattern YAML, resolves typed parameter defaults, applies any pattern_params overrides, and uses the resulting evaluator code. Seed patterns catch-rethrow and deep-nesting are created automatically in __any__/ scope on first use. Use store_xray_pattern to add custom patterns. Before ending a session where you developed a new evaluator, if it took iteration, call store_xray_pattern so the work survives session restart and reaches all users."
+      description: "Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code. See \"Pattern Library\" below."
     pattern_params:
       type: object
       description: 'JSON object of parameter overrides for the resolved pattern. Only valid when pattern_name is provided. Keys must match parameter names declared in the pattern YAML (UPPER_SNAKE_CASE). Values must be compatible with the declared parameter type (usize, i64, f64, bool, or str). Unknown keys return invalid_parameter error; type-incompatible values return invalid_parameter_type error.'
@@ -143,7 +143,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path`, `language`, `line_content`, `matched_node`, and `ast_debug`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 45 seconds (lowered from 120.0 by Bug #1070 -- see the `await_seconds` parameter description below).
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait capped at 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
 
 ## Quick Start
 
@@ -180,7 +180,7 @@ Key points:
 - **Evaluator code is Rust**, not Python. Signature: `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
 - `OwnedNode`, `EvalFinding`, `truncate_snippet`, and `debug_log` are provided automatically.
 - Omit `evaluator_code` to explore AST structure without writing any Rust -- the default evaluator accepts all files.
-- Keep `max_results` and `max_debug_nodes` small while iterating -- AST payloads are large.
+- Keep `max_results` (e.g. 5) and `max_debug_nodes` small while iterating -- AST payloads are large.
 
 ## Parameters
 
@@ -200,7 +200,7 @@ Key points:
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap (10..600). |
 | max_debug_nodes | int | no | 50 | Maximum AST nodes in the `ast_debug` payload per match (1..500). When the cap is hit a `{"type": "...truncated"}` sentinel appears in the children list. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
-| await_seconds | float | no | 0 | Server-side inline-wait window (0.0..45.0 -- lowered from 120.0 by Bug #1070; async handlers risk a 504 at the ALB 60s timeout). |
+| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). Range 0.0..45.0 -- lowered from 120.0 by Bug #1070; async handlers risk a 504 at the ALB 60s timeout; the server enforces the 45.0 ceiling via `_AWAIT_SECONDS_MAX` in `handlers/xray.py`. Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
 | pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
@@ -262,7 +262,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 | `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
 | `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
 
-For the full cookbook of worked evaluator examples and a cross-language node type table covering the 17 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools.
+For the full cookbook of worked evaluator examples and a cross-language node type table covering the 17 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools. Glob pattern semantics for `include_patterns`/`exclude_patterns` (brace groups, any-depth vs. root-anchored segments) are also identical between the two tools -- see `xray_search`'s "Glob Pattern Semantics" section for the full matching rules.
 
 ### Globals available in evaluator context
 
@@ -480,13 +480,16 @@ To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP 
 
 ## Pattern Library
 
+Before writing `evaluator_code` inline, check the pattern library: a pattern for your use case may already exist (see "Discovering Available Patterns" below).
+
 When an evaluator pattern is complex, tuned through iteration, or costly to produce, save it via `store_xray_pattern` for reuse. Stored patterns:
 
 - Are referenced by name via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
 - Support typed parameters with defaults, overridable per-call via `pattern_params`.
 - Persist in cidx-meta (git-versioned) across sessions and server restarts.
+- Seed patterns `catch-rethrow` and `deep-nesting` are created automatically in `__any__/` scope on first use.
 
-**Recommendation**: If you have spent significant effort developing and testing an evaluator with `xray_explore`, store it rather than discarding it. Future searches (via `xray_explore` or `xray_search`) can reference the pattern by name without reconstructing the evaluator logic.
+**Recommendation**: If you have spent significant effort developing and testing an evaluator with `xray_explore`, store it rather than discarding it -- especially before ending a session, so the work survives session restart and reaches all users. Future searches (via `xray_explore` or `xray_search`) can reference the pattern by name without reconstructing the evaluator logic.
 
 ### Discovering Available Patterns
 
@@ -502,6 +505,7 @@ Running xray_explore jobs can be cancelled via `cancel_job(job_id)`. XRay jobs r
 
 ## Related
 
+- See `list_global_repos` to see available repositories before calling this tool.
 - See `cancel_job` to cancel a running xray_explore job with process termination.
 - See `xray_search` for the production search variant (no AST debug overhead).
 - See `xray_dump_ast` for a synchronous single-file AST dump (no Phase 1 driver, no evaluator).
