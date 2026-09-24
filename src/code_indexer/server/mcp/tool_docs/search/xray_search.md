@@ -140,7 +140,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path` and `language`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait capped at 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
 
 ## Quick Start
 

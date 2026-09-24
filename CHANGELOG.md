@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.72.0] - 2026-09-24
+
+### Fixed
+
+- **Bug #1962 follow-up**: restores the literal inline-wait ceiling phrasing in
+  `xray_search.md` and `xray_explore.md`. Relocating the `await_seconds` prose
+  out of `inputSchema` in 12.71.0 rephrased "up to 45 seconds" to "capped at
+  45 seconds"; the fact stayed correct but two parity guards assert the literal
+  string, since Bug #1070 lowered that ceiling from 120.0 and a doc still
+  claiming the old value would have callers request a window the server
+  rejects. The docs are fixed and the guards left strict.
+
+### Added
+
+- **Bug #1968**: three negative-control tests pinning that a real
+  `PermissionError` during golden-repo cleanup still reports failure, still
+  logs, and still creates exactly one `.corrupt-*` quarantine directory. They
+  guard the boundary that the originally-proposed #1968 fix would have crossed
+  -- treating `FileNotFoundError` as success would have masked an
+  unsynchronised-removal race rather than fixing it. No production code
+  changed; see #1968 for the locking analysis.
+
+### Validated
+
+- Full regression suite green on this tree: `rust-automation.sh`,
+  `fast-automation.sh`, `server-fast-automation.sh` (20,942 passed across all
+  six chunks) and `e2e-automation.sh` all six phases (55 / 6 / 306 / 107 / 22 /
+  13 passed), with zero non-allowlisted entries from the Story #1122 post-E2E
+  log-audit gate.
+
 ## [12.71.0] - 2026-09-24
 
 ### Changed
