@@ -1473,6 +1473,21 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
     """
     has_legacy_entry_point, has_graph_entry_point = detect_evaluator_entry_points(code)
     if not has_legacy_entry_point and not has_graph_entry_point:
+        # Bug #1955 defect 5: name the construct the user ACTUALLY left
+        # out, never a hardcoded guess. A source with exactly one of the
+        # two graph-mode functions is one step from graph mode -- the
+        # honest offending construct is the OTHER graph function, not the
+        # unrelated legacy entry point the user never wrote. Only fall
+        # back to 'evaluate_node' when neither graph-mode function is
+        # present at all (nothing more specific to point at).
+        has_collect_facts = bool(_re.search(r"\bfn\s+collect_facts\b", code))
+        has_analyze_graph = bool(_re.search(r"\bfn\s+analyze_graph\b", code))
+        if has_collect_facts and not has_analyze_graph:
+            offending_construct = "analyze_graph"
+        elif has_analyze_graph and not has_collect_facts:
+            offending_construct = "collect_facts"
+        else:
+            offending_construct = "evaluate_node"
         return ValidationResult(
             ok=False,
             reason=(
@@ -1481,7 +1496,7 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
                 "(graph mode)"
             ),
             error_code="missing_entry_point",
-            offending_construct="evaluate_node",
+            offending_construct=offending_construct,
             offending_line=None,
         )
 

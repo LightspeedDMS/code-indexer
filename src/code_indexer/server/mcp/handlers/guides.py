@@ -226,7 +226,7 @@ def quick_reference(
         Dictionary with tool summaries filtered by category and user permissions
     """
     try:
-        from ..tools import TOOL_REGISTRY
+        from ..tools import TOOL_REGISTRY, tool_passes_config_gate
         from ..tool_doc_loader import _get_tool_doc_loader
         from ..tool_access import ToolAccessMemo, resolve_effective_user
 
@@ -269,6 +269,14 @@ def quick_reference(
         tools_by_category: Dict[str, list] = {}
         total_tools = 0
 
+        # Story #22 / Bug #1955 item 6: fetched BEFORE the counting loop (moved
+        # up from after it) so total_tools can apply the SAME requires_config
+        # gate filter_tools_by_role (the real tools/list) applies -- otherwise
+        # this count silently disagreed with what tools/list actually serves
+        # whenever a requires_config tool (e.g. Langfuse-gated start_trace/
+        # end_trace) was disabled.
+        config = get_config_service().get_config()
+
         for tool_name, tool_def in TOOL_REGISTRY.items():
             # Check permission
             decision = tool_access_memo.is_allowed(tool_name, effective_user)
@@ -277,6 +285,12 @@ def quick_reference(
                 decision is None
                 and not effective_user.has_permission(required_permission)
             ):
+                continue
+
+            # Bug #1955 item 6: skip a tool whose requires_config condition
+            # (e.g. langfuse_enabled) is not satisfied -- mirrors
+            # filter_tools_by_role exactly (Rule 4, anti-duplication).
+            if not tool_passes_config_gate(tool_def, config):
                 continue
 
             # Get category and tl_dr from frontmatter; fallback for undocumented tools
@@ -302,8 +316,8 @@ def quick_reference(
             tools_by_category[tool_category].append({"name": tool_name, "tl_dr": tl_dr})
             total_tools += 1
 
-        # Story #22: Add server identity with a.k.a. line
-        config = get_config_service().get_config()
+        # Story #22: Add server identity with a.k.a. line (config fetched
+        # above, before the counting loop)
         display_name = config.service_display_name or "Neo"
         server_identity = f"This server is CIDX (a.k.a. {display_name})."
 
@@ -428,6 +442,13 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "example_call": "git_stage(repository_alias='my-backend', file_paths=['src/new_file.py'])",
                 "expected_result": "Files staged for commit, ready for git_commit",
             },
+            {
+                "step_number": 10,
+                "title": "Cross-file analysis with X-Ray (analyze_graph)",
+                "description": "search_code() inspects one match at a time; xray_search inspects one file's AST at a time. For a question that spans the WHOLE repository -- dead code, unwired components, layering violations, endpoint-to-sink reachability, blast radius -- use analyze_graph(), the X-Ray graph-mode tool: it builds a real cross-file reference graph (Java/Kotlin) and runs your evaluator over it. See cidx_quick_reference(tool='analyze_graph') for the full contract, templates, and worked examples.",
+                "example_call": "cidx_quick_reference(tool='analyze_graph')",
+                "expected_result": "The full analyze_graph reference, including ready-to-copy evaluator templates for dead-code sweeps, endpoint-to-sink reachability, and cycle detection",
+            },
         ],
         "quick_start_summary": [
             "1. whoami() - Check your permissions",
@@ -439,6 +460,7 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             "7. scip_definition('symbol', 'repo-global') - Find definitions",
             "8. activate_repository('repo-global', 'my-repo') - Enable editing",
             "9. edit_file -> git_stage -> git_commit -> git_push - Make changes",
+            "10. analyze_graph() - X-Ray whole-repository graph analysis (dead code, blast radius, reachability)",
         ],
         "common_errors": [
             {

@@ -355,7 +355,42 @@ _CLEANUP_JOB_FETCH_LIMIT = 10000
 # against this same set; a divergent copy here would let the raw-SQLite
 # _upsert_job path and the backend path disagree on what counts as terminal
 # for the SAME background_jobs table.
-_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+#
+# Bug #1950: "interrupted" is a terminal status distinct from "failed" for
+# a job whose worker process was killed by a server restart/shutdown
+# rather than by a genuine failure. It must be treated as terminal here
+# too so a stale non-terminal write can never resurrect/overwrite it, same
+# guarantee "failed"/"completed"/"cancelled" already get.
+_TERMINAL_JOB_STATUSES = (
+    "completed",
+    "completed_partial",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
+
+# Bug #1950: known error-message markers that identify a job terminated by
+# a server restart/shutdown rather than a genuine failure. The system
+# already writes one of these distinct messages at the moment a job is
+# reclaimed/aborted for this reason (JobTracker's own startup sweep,
+# BackgroundJobManager.fail_orphaned_jobs(), and the RuntimeError
+# global_repos/refresh_scheduler.py raises when a `cidx index` subprocess
+# is killed by SIGTERM during shutdown) -- this is the single source of
+# truth for recognizing them, shared with repositories/background_jobs.py.
+_RESTART_INTERRUPTION_MARKERS = (
+    "orphaned by server restart",
+    "job interrupted by server restart",
+    "interrupted by server shutdown",
+)
+
+
+def is_restart_interruption_error(error: Optional[str]) -> bool:
+    """True if *error* is one of the known restart/shutdown interruption
+    messages (Bug #1950) rather than a genuine job failure reason."""
+    if not error:
+        return False
+    lowered = error.lower()
+    return any(marker in lowered for marker in _RESTART_INTERRUPTION_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +762,46 @@ class JobTracker:
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: cancelled job {job_id}")
+
+    def interrupt_job(self, job_id: str, error: str) -> None:
+        """
+        Mark job as interrupted by a server restart/shutdown (Bug #1950).
+
+        Sets status="interrupted" (a terminal status DISTINCT from
+        "failed"), completed_at, and the restart-interruption error
+        message; persists to SQLite/backend and removes from the
+        in-memory dict. Mirrors fail_job's terminal-transition contract,
+        but for a restart artifact instead of a genuine failure --
+        /health's degraded computation counts ONLY status='failed' rows,
+        so this keeps a restart artifact from poisoning that count
+        forever.
+
+        No OTEL job-failure metric is recorded here, mirroring
+        cancel_job's existing behavior: this is not a genuine failure, so
+        it must not be attributed as one in job-failure telemetry either.
+
+        Args:
+            job_id: Job to mark interrupted.
+            error: Human-readable restart-interruption message (e.g.
+                "Job interrupted by server restart").
+        """
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            job = self._active_jobs.pop(job_id, None)
+
+        if job is None:
+            self._finalize_absent_job(
+                job_id, terminal_status="interrupted", now=now, error=error
+            )
+            return
+
+        job.status = "interrupted"
+        job.completed_at = now
+        job.error = error
+
+        self._upsert_job(job)
+        logger.debug(f"JobTracker: interrupted job {job_id}: {error}")
 
     def _finalize_absent_job(
         self,
@@ -1166,14 +1241,17 @@ class JobTracker:
 
     def cleanup_orphaned_jobs_on_startup(self, is_primary_instance: bool = True) -> int:
         """
-        Mark stale running/pending jobs as failed.
+        Mark stale running/pending jobs as interrupted.
 
         Called once on server startup to handle jobs that were in-flight when
         the server last restarted. See _should_skip_unscoped_orphan_sweep for
         the is_primary_instance semantics (Bug #1549).
 
+        Bug #1950: marked 'interrupted' (not 'failed') -- a restart
+        artifact, distinct from a genuine failure.
+
         Returns:
-            Number of orphaned jobs marked as failed.
+            Number of orphaned jobs marked as interrupted.
         """
         if self._backend is not None:
             if self._should_skip_unscoped_orphan_sweep(
@@ -1186,7 +1264,7 @@ class JobTracker:
             if count:
                 logger.info(
                     f"JobTracker.cleanup_orphaned_jobs_on_startup: "
-                    f"marked {count} orphaned job(s) as failed"
+                    f"marked {count} orphaned job(s) as interrupted"
                 )
             return count
 
@@ -1195,7 +1273,14 @@ class JobTracker:
         return self._cleanup_legacy_sqlite_orphans()
 
     def _cleanup_legacy_sqlite_orphans(self) -> int:
-        """Direct-SQLite (no injected backend) orphan sweep body."""
+        """Direct-SQLite (no injected backend) orphan sweep body.
+
+        Bug #1950: writes status='interrupted' (not 'failed') -- a job
+        orphaned by this same process's own restart is a restart artifact,
+        never a genuine failure, so it must not poison /health's
+        get_failed_job_count() (which counts ONLY status='failed', with no
+        time window) forever.
+        """
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"
 
@@ -1206,7 +1291,7 @@ class JobTracker:
             orphaned_ids = [row[0] for row in cursor.fetchall()]
             if orphaned_ids:
                 conn.execute(
-                    "UPDATE background_jobs SET status = 'failed', "
+                    "UPDATE background_jobs SET status = 'interrupted', "
                     "completed_at = ?, error = ? "
                     "WHERE status IN ('running', 'pending')",
                     (now_iso, orphan_error),
@@ -1217,18 +1302,24 @@ class JobTracker:
         if sqlite_count:
             logger.info(
                 f"JobTracker.cleanup_orphaned_jobs_on_startup: "
-                f"marked {sqlite_count} orphaned job(s) as failed"
+                f"marked {sqlite_count} orphaned job(s) as interrupted"
             )
         return sqlite_count
 
     def _evict_stale_from_memory(self, operation_type: str, cutoff: datetime) -> None:
-        """Remove stale completed/failed/cancelled jobs from in-memory dict."""
+        """Remove stale terminal-status jobs from in-memory dict.
+
+        Bug #1950: uses _TERMINAL_JOB_STATUSES (completed/completed_partial/
+        failed/cancelled/interrupted) rather than a hardcoded subset -- an
+        interrupted or completed_partial job must be evicted exactly like a
+        completed/failed/cancelled one, or it leaks in _active_jobs forever.
+        """
         with self._lock:
             stale_ids = [
                 jid
                 for jid, j in self._active_jobs.items()
                 if j.operation_type == operation_type
-                and j.status in ("completed", "failed", "cancelled")
+                and j.status in _TERMINAL_JOB_STATUSES
                 and j.completed_at is not None
                 and j.completed_at < cutoff
             ]
@@ -1239,7 +1330,8 @@ class JobTracker:
         """
         Remove completed jobs of the given operation_type older than max_age_hours.
 
-        Deletes from the persistence store (completed/failed/cancelled status).
+        Deletes from the persistence store (any terminal status --
+        completed/completed_partial/failed/cancelled/interrupted, Bug #1950).
         Also removes matching entries from _active_jobs dict if present.
 
         Args:
@@ -1255,8 +1347,11 @@ class JobTracker:
         if self._backend is not None:
             # Backend cleanup_old_jobs has no operation_type filter, so we
             # enumerate candidates per terminal status and delete individually.
+            # Bug #1950: _TERMINAL_JOB_STATUSES includes completed_partial and
+            # interrupted -- omitting either here would leave those rows
+            # undeleted forever regardless of age.
             count = 0
-            for terminal_status in ("completed", "failed", "cancelled"):
+            for terminal_status in _TERMINAL_JOB_STATUSES:
                 candidates = self._backend.list_jobs(
                     operation_type=operation_type,
                     status=terminal_status,
@@ -1276,14 +1371,19 @@ class JobTracker:
                 )
             return count
 
+        # Bug #1950: build the IN(...) clause from _TERMINAL_JOB_STATUSES so
+        # completed_partial/interrupted rows are deleted too, not just the
+        # original 3 statuses.
+        _placeholders = ", ".join("?" for _ in _TERMINAL_JOB_STATUSES)
+
         def operation(conn) -> int:
             cursor = conn.execute(
-                """DELETE FROM background_jobs
+                f"""DELETE FROM background_jobs
                    WHERE operation_type = ?
-                   AND status IN ('completed', 'failed', 'cancelled')
+                   AND status IN ({_placeholders})
                    AND completed_at IS NOT NULL
                    AND completed_at < ?""",
-                (operation_type, cutoff_iso),
+                (operation_type, *_TERMINAL_JOB_STATUSES, cutoff_iso),
             )
             return cursor.rowcount  # type: ignore[no-any-return]
 

@@ -12,7 +12,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
@@ -167,9 +167,21 @@ class DataRetentionScheduler:
             if self._job_tracker is not None:
                 failed_tables: List[str] = result.get("failed_tables", [])
                 if failed_tables:
+                    # Bug #1951: surface the underlying exception text per
+                    # table, not just its name, so the job record is
+                    # diagnosable from the front door without server access.
+                    failed_table_errors: Dict[str, str] = result.get(
+                        "failed_table_errors", {}
+                    )
+                    error_parts = [
+                        f"{name}: {failed_table_errors[name]}"
+                        if name in failed_table_errors
+                        else name
+                        for name in failed_tables
+                    ]
                     self._job_tracker.fail_job(
                         job_id,
-                        error=f"Per-table cleanup errors: {', '.join(failed_tables)}",
+                        error=f"Per-table cleanup errors: {'; '.join(error_parts)}",
                     )
                 else:
                     self._job_tracker.complete_job(job_id, result=result)
@@ -192,6 +204,9 @@ class DataRetentionScheduler:
         """
         cfg = self._config_service.get_config().data_retention_config
         failed_tables: List[str] = []
+        # Bug #1951: parallel table_name -> str(exc) map so the underlying
+        # cause reaches the job record, not just the bare table name.
+        failed_table_errors: Dict[str, str] = {}
 
         logs_deleted = self._safe_cleanup_table(
             self._log_db_path,
@@ -199,6 +214,7 @@ class DataRetentionScheduler:
             "timestamp",
             retention_hours=cfg.operational_logs_retention_hours,
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         audit_logs_deleted = self._safe_cleanup_table(
@@ -207,6 +223,7 @@ class DataRetentionScheduler:
             "timestamp",
             retention_hours=cfg.audit_logs_retention_hours,
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         sync_jobs_deleted = self._safe_cleanup_table(
@@ -216,10 +233,11 @@ class DataRetentionScheduler:
             retention_hours=cfg.sync_jobs_retention_hours,
             status_filter="status IN ('completed', 'failed')",
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         dep_map_history_deleted = self._safe_cleanup_dep_map_history(
-            cfg, failed_tables=failed_tables
+            cfg, failed_tables=failed_tables, failed_table_errors=failed_table_errors
         )
 
         background_jobs_deleted = self._safe_cleanup_table(
@@ -227,22 +245,32 @@ class DataRetentionScheduler:
             "background_jobs",
             "completed_at",
             retention_hours=cfg.background_jobs_retention_hours,
-            status_filter="status IN ('completed', 'failed', 'cancelled')",
+            # Bug #1950/#679: completed_partial and interrupted are terminal
+            # too -- omitting either here leaves those rows undeleted forever
+            # regardless of age.
+            status_filter=(
+                "status IN ('completed', 'completed_partial', 'failed', "
+                "'cancelled', 'interrupted')"
+            ),
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         cfg_root = self._config_service.get_config()
         token_blacklist_deleted = self._safe_prune_token_blacklist(
             jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         elevated_sessions_deleted = self._safe_prune_elevated_sessions(
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         oidc_state_deleted = self._safe_prune_oidc_state_tokens(
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         return {
@@ -265,6 +293,7 @@ class DataRetentionScheduler:
                 + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
+            "failed_table_errors": failed_table_errors,
         }
 
     def _execute_cleanup_pg(self) -> dict:
@@ -281,6 +310,9 @@ class DataRetentionScheduler:
         cfg = self._config_service.get_config().data_retention_config
         reg = self._backend_registry
         failed_tables: List[str] = []
+        # Bug #1951: parallel table_name -> str(exc) map so the underlying
+        # cause reaches the job record, not just the bare table name.
+        failed_table_errors: Dict[str, str] = {}
 
         # LogsBackend.cleanup_old_logs takes days_to_keep
         logs_days = max(1, cfg.operational_logs_retention_hours // 24)
@@ -288,6 +320,7 @@ class DataRetentionScheduler:
             "logs",
             lambda: reg.logs.cleanup_old_logs(days_to_keep=logs_days),  # type: ignore[union-attr]
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         # AuditLogBackend.cleanup_old_logs takes cutoff_iso
@@ -298,6 +331,7 @@ class DataRetentionScheduler:
             "audit_logs",
             lambda: reg.audit_log.cleanup_old_logs(cutoff_iso=audit_cutoff),  # type: ignore[union-attr]
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         # SyncJobsBackend.cleanup_old_completed takes cutoff_iso
@@ -308,6 +342,7 @@ class DataRetentionScheduler:
             "sync_jobs",
             lambda: reg.sync_jobs.cleanup_old_completed(cutoff_iso=sync_cutoff),  # type: ignore[union-attr]
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         # DependencyMapTrackingBackend.cleanup_old_history takes cutoff_iso
@@ -321,6 +356,7 @@ class DataRetentionScheduler:
                 cutoff_iso=dep_cutoff
             ),
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         # BackgroundJobsBackend.cleanup_old_jobs takes max_age_hours
@@ -330,20 +366,24 @@ class DataRetentionScheduler:
                 max_age_hours=cfg.background_jobs_retention_hours
             ),
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         cfg_root = self._config_service.get_config()
         token_blacklist_deleted = self._safe_prune_token_blacklist(
             jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         elevated_sessions_deleted = self._safe_prune_elevated_sessions(
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         oidc_state_deleted = self._safe_prune_oidc_state_tokens(
             failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
         )
 
         return {
@@ -366,6 +406,7 @@ class DataRetentionScheduler:
                 + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
+            "failed_table_errors": failed_table_errors,
         }
 
     def _cleanup_dep_map_history(self, cfg: Any) -> int:
@@ -392,6 +433,7 @@ class DataRetentionScheduler:
         retention_hours: int,
         status_filter: Optional[str] = None,
         failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Call _cleanup_table, catching and logging any exception so that one
@@ -400,7 +442,10 @@ class DataRetentionScheduler:
         Returns 0 when an exception occurs (same as 'table does not exist').
         When failed_tables is supplied, the table name is appended to it on
         failure so callers can surface per-table errors in the job outcome
-        (Bug #1068 anti-silent-failure).
+        (Bug #1068 anti-silent-failure). When failed_table_errors is
+        supplied, the real exception text is recorded under the table name
+        so the job error can surface *why* the table failed, not just its
+        name (Bug #1951).
         """
         try:
             return self._cleanup_table(
@@ -419,16 +464,23 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append(table_name)
+            if failed_table_errors is not None:
+                failed_table_errors[table_name] = str(exc)
             return 0
 
     def _safe_cleanup_dep_map_history(
-        self, cfg: Any, failed_tables: Optional[List[str]] = None
+        self,
+        cfg: Any,
+        failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Per-table-safe wrapper around _cleanup_dep_map_history (Bug #1068).
 
         When failed_tables is supplied, 'dependency_map_tracking' is appended
         to it on failure so callers can surface the error in the job outcome.
+        When failed_table_errors is supplied, the real exception text is
+        recorded under 'dependency_map_tracking' (Bug #1951).
         """
         try:
             return self._cleanup_dep_map_history(cfg)
@@ -440,10 +492,16 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("dependency_map_tracking")
+            if failed_table_errors is not None:
+                failed_table_errors["dependency_map_tracking"] = str(exc)
             return 0
 
     def _safe_pg_call(
-        self, table_name: str, call: Any, failed_tables: Optional[List[str]] = None
+        self,
+        table_name: str,
+        call: Any,
+        failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Execute a single PG backend cleanup call, catching and logging any
@@ -452,7 +510,9 @@ class DataRetentionScheduler:
         Returns 0 when an exception occurs.
         When failed_tables is supplied, the table name is appended to it on
         failure so callers can surface per-table errors in the job outcome
-        (Bug #1068 anti-silent-failure).
+        (Bug #1068 anti-silent-failure). When failed_table_errors is
+        supplied, the real exception text is recorded under the table name
+        (Bug #1951).
         """
         try:
             result: int = call()
@@ -466,12 +526,15 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append(table_name)
+            if failed_table_errors is not None:
+                failed_table_errors[table_name] = str(exc)
             return 0
 
     def _safe_prune_token_blacklist(
         self,
         jwt_expiration_minutes: int,
         failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """Prune expired rows from token_blacklist (Story #1163 AC2).
 
@@ -481,7 +544,9 @@ class DataRetentionScheduler:
 
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'token_blacklist' to failed_tables on error, and
-        returns 0 so the rest of the cleanup cycle is never aborted.
+        returns 0 so the rest of the cleanup cycle is never aborted. When
+        failed_table_errors is supplied, the real exception text is recorded
+        under 'token_blacklist' so the job error is diagnosable (Bug #1951).
 
         Bug #1758: transient SQLite lock contention during a restart window
         is absorbed at the connection level (TokenBlacklist._sqlite_prune's
@@ -503,11 +568,14 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("token_blacklist")
+            if failed_table_errors is not None:
+                failed_table_errors["token_blacklist"] = str(exc)
             return 0
 
     def _safe_prune_elevated_sessions(
         self,
         failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """Prune expired rows from elevated_sessions (Bug #1221).
 
@@ -516,7 +584,9 @@ class DataRetentionScheduler:
 
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'elevated_sessions' to failed_tables on error, and
-        returns 0 so the rest of the cleanup cycle is never aborted.
+        returns 0 so the rest of the cleanup cycle is never aborted. When
+        failed_table_errors is supplied, the real exception text is recorded
+        under 'elevated_sessions' so the job error is diagnosable (Bug #1951).
 
         Bug #1758: transient SQLite lock contention during a restart window
         is absorbed at the connection level (ElevatedSessionManager._get_conn's
@@ -539,11 +609,14 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("elevated_sessions")
+            if failed_table_errors is not None:
+                failed_table_errors["elevated_sessions"] = str(exc)
             return 0
 
     def _safe_prune_oidc_state_tokens(
         self,
         failed_tables: Optional[List[str]] = None,
+        failed_table_errors: Optional[Dict[str, str]] = None,
     ) -> int:
         """Prune expired rows from oidc_state_tokens (Bug #1224).
 
@@ -557,7 +630,9 @@ class DataRetentionScheduler:
 
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'oidc_state_tokens' to failed_tables on error, and
-        returns 0 so the rest of the cleanup cycle is never aborted.
+        returns 0 so the rest of the cleanup cycle is never aborted. When
+        failed_table_errors is supplied, the real exception text is recorded
+        under 'oidc_state_tokens' so the job error is diagnosable (Bug #1951).
 
         Bug #1758: transient SQLite lock contention during a restart window
         is absorbed at the connection level (StateManager._get_conn's raw
@@ -580,6 +655,8 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("oidc_state_tokens")
+            if failed_table_errors is not None:
+                failed_table_errors["oidc_state_tokens"] = str(exc)
             return 0
 
     # ------------------------------------------------------------------

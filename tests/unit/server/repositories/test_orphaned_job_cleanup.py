@@ -108,39 +108,42 @@ def backend_with_orphaned_jobs(tmp_path: Path) -> Generator:
 class TestBackgroundJobsSqliteBackendOrphanedJobCleanup:
     """Tests for BackgroundJobsSqliteBackend orphaned job cleanup."""
 
-    def test_cleanup_orphaned_jobs_marks_running_jobs_as_failed(
+    def test_cleanup_orphaned_jobs_marks_running_jobs_as_interrupted(
         self, backend_with_orphaned_jobs
     ) -> None:
-        """When cleanup_orphaned_jobs() is called, running jobs are marked as failed."""
+        """When cleanup_orphaned_jobs() is called, running jobs are marked
+        'interrupted' (Bug #1950) -- a restart artifact, DISTINCT from
+        'failed', so /health's get_failed_job_count() never counts it."""
         backend = backend_with_orphaned_jobs
 
         # Act: Clean up orphaned jobs
         backend.cleanup_orphaned_jobs_on_startup()
 
-        # Assert: Running jobs are now failed
+        # Assert: Running jobs are now interrupted
         job1 = backend.get_job("running-job-1")
         job2 = backend.get_job("running-job-2")
 
         assert job1 is not None
-        assert job1["status"] == "failed"
+        assert job1["status"] == "interrupted"
 
         assert job2 is not None
-        assert job2["status"] == "failed"
+        assert job2["status"] == "interrupted"
 
-    def test_cleanup_orphaned_jobs_marks_pending_jobs_as_failed(
+    def test_cleanup_orphaned_jobs_marks_pending_jobs_as_interrupted(
         self, backend_with_orphaned_jobs
     ) -> None:
-        """When cleanup_orphaned_jobs() is called, pending jobs are marked as failed."""
+        """When cleanup_orphaned_jobs() is called, pending jobs are marked
+        'interrupted' (Bug #1950), not 'failed'."""
         backend = backend_with_orphaned_jobs
 
         # Act: Clean up orphaned jobs
         backend.cleanup_orphaned_jobs_on_startup()
 
-        # Assert: Pending jobs are now failed
+        # Assert: Pending jobs are now interrupted
         job = backend.get_job("pending-job-1")
 
         assert job is not None
-        assert job["status"] == "failed"
+        assert job["status"] == "interrupted"
 
     def test_cleanup_orphaned_jobs_sets_error_message(
         self, backend_with_orphaned_jobs
@@ -318,16 +321,18 @@ class TestBackgroundJobManagerOrphanedJobCleanup:
         # Act: Create new BackgroundJobManager (simulates server restart)
         manager = BackgroundJobManager(use_sqlite=True, db_path=str(db_path))
 
-        # Assert: Jobs loaded into memory are marked as failed
+        # Assert: Jobs loaded into memory are marked 'interrupted' (Bug
+        # #1950) -- a restart artifact, DISTINCT from 'failed', so
+        # /health's get_failed_job_count() never counts it.
         running_job = manager.get_job_status("orphan-running", username="testuser")
         pending_job = manager.get_job_status("orphan-pending", username="testuser")
 
         assert running_job is not None
-        assert running_job["status"] == "failed"
+        assert running_job["status"] == "interrupted"
         assert running_job["error"] == "Job interrupted by server restart"
 
         assert pending_job is not None
-        assert pending_job["status"] == "failed"
+        assert pending_job["status"] == "interrupted"
         assert pending_job["error"] == "Job interrupted by server restart"
 
         # Cleanup
@@ -431,7 +436,11 @@ class TestBackgroundJobManagerOrphanedJobCleanup:
         # Assert: Dashboard metrics show correct counts
         assert manager.get_active_job_count() == 0  # No running jobs
         assert manager.get_pending_job_count() == 0  # No pending jobs
-        assert manager.get_failed_job_count() >= 2  # At least 2 failed (the orphans)
+        # Bug #1950: restart-orphaned jobs are classified 'interrupted',
+        # NOT 'failed' -- get_failed_job_count() is the exact scalar
+        # /health reads to compute 'degraded', so it must converge to 0
+        # here rather than accumulating restart bookkeeping forever.
+        assert manager.get_failed_job_count() == 0
 
         # Cleanup
         manager.shutdown()

@@ -51,7 +51,16 @@ logger = logging.getLogger(__name__)
 # statuses via the worker's own terminal write. Tuple (not set/frozenset)
 # for deterministic SQL placeholder ordering. Mirrors the same constant in
 # storage/sqlite_backends.py so both backends enforce the guard identically.
-_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+#
+# Bug #1950: "interrupted" (a restart/shutdown artifact, distinct from a
+# genuine "failed") is terminal too.
+_TERMINAL_JOB_STATUSES = (
+    "completed",
+    "completed_partial",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
 
 _ALLOWED_JOB_COLUMNS = frozenset(
     {
@@ -600,9 +609,16 @@ class BackgroundJobsPostgresBackend:
         raise last_exc  # type: ignore[misc]
 
     def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
-        """Mark all running/pending jobs as failed. Called on startup."""
+        """Mark all running/pending jobs as interrupted. Called on startup.
+
+        Bug #1950: writes status='interrupted' (not 'failed') -- a row
+        still running/pending at startup was orphaned by a restart, a
+        restart artifact rather than a genuine failure, so it must not
+        poison /health's get_failed_job_count() (which counts ONLY
+        status='failed', with no time window) forever.
+        """
         sql = (
-            "UPDATE background_jobs SET status = 'failed', error = %s, "
+            "UPDATE background_jobs SET status = 'interrupted', error = %s, "
             "completed_at = NOW() "
             "WHERE status IN ('running', 'pending')"
         )
@@ -806,19 +822,27 @@ class BackgroundJobsPostgresBackend:
         return deleted
 
     def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
-        """Delete old completed/failed/cancelled jobs older than max_age_hours."""
+        """Delete old jobs in any terminal status, older than max_age_hours.
+
+        Bug #1950: uses _TERMINAL_JOB_STATUSES (completed/completed_partial/
+        failed/cancelled/interrupted) rather than a hardcoded subset -- an
+        interrupted (restart-artifact) or completed_partial row must be
+        retention-cleaned exactly like a completed/failed/cancelled one, or
+        it accumulates in the cluster-shared table forever.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         cutoff_iso = cutoff.isoformat()
+        placeholders = ", ".join("%s" for _ in _TERMINAL_JOB_STATUSES)
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     DELETE FROM background_jobs
-                    WHERE status IN ('completed', 'failed', 'cancelled')
+                    WHERE status IN ({placeholders})
                       AND completed_at IS NOT NULL
                       AND completed_at < %s
                     """,
-                    (cutoff_iso,),
+                    (*_TERMINAL_JOB_STATUSES, cutoff_iso),
                 )
                 count: int = cur.rowcount
         if count > 0:
@@ -867,10 +891,12 @@ class BackgroundJobsPostgresBackend:
 
     def cleanup_orphaned_jobs_on_startup(self, node_id: Optional[str] = None) -> int:
         """
-        Mark running/pending jobs as failed on server startup.
+        Mark running/pending jobs as interrupted on server startup.
 
         Any job still in 'running' or 'pending' state when the server starts
-        was orphaned by a previous crash or restart.
+        was orphaned by a previous crash or restart. Bug #1950: marked
+        'interrupted' (not 'failed') -- a restart artifact, distinct from a
+        genuine failure.
 
         Bug #1512: a 'running' row with executing_node IS NULL is
         unreachable by the node-scoped ``executing_node = %s`` branch on
@@ -980,10 +1006,17 @@ class BackgroundJobsPostgresBackend:
 
                 count = 0
                 if job_ids_to_fail:
+                    # Bug #1950: status='interrupted' (not 'failed') -- a
+                    # row reclaimed here (either this node's own dead
+                    # worker, or a genuinely orphaned NULL-owner row) is a
+                    # restart artifact, never a genuine failure, so it
+                    # must not poison /health's get_failed_job_count()
+                    # (which counts ONLY status='failed', with no time
+                    # window) forever.
                     cur.execute(
                         """
                         UPDATE background_jobs
-                        SET status = 'failed',
+                        SET status = 'interrupted',
                             error = %s,
                             completed_at = %s
                         WHERE job_id = ANY(%s)

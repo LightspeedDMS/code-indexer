@@ -30,8 +30,10 @@ mod name_index;
 mod narrowing;
 mod receiver_mismatch;
 mod receiver;
+mod receiver_qualified;
 mod receiver_type_qualifier;
 mod resolve;
+mod same_class_qualified;
 mod scope;
 
 pub use admission::{
@@ -109,8 +111,10 @@ fn resolve_site(
     receiver_type_is_qualified_non_java_lang: bool,
     file_has_unresolved_external_supertype: bool,
     site_enclosing_method: Option<SymbolId>,
+    caller_enclosing_type: Option<&str>,
 ) -> PendingReference {
-    let candidates = resolve_reference(
+    let is_java_file = file.language == "java";
+    let mut candidates = resolve_reference(
         name,
         ref_kind,
         file.file_id,
@@ -130,6 +134,19 @@ fn resolve_site(
         receiver_is_direct_parameter,
         receiver_type_is_qualified_non_java_lang,
         file_has_unresolved_external_supertype,
+    );
+    // #1956: the safe-exclusion half of #1952 -- applied one layer above
+    // `resolve_reference` itself (rather than threaded through that
+    // function's own signature) so its many existing direct unit-test
+    // callers stay untouched. See `receiver_qualified`'s own module doc
+    // for the full three-condition soundness argument.
+    receiver_qualified::apply_receiver_qualified_type_narrowing(
+        &mut candidates,
+        receiver_type,
+        caller_enclosing_type,
+        is_java_file,
+        &scope.imports,
+        type_index,
     );
     PendingReference {
         from: enclosing_symbol_for_site(&file.index, file.file_id, line, site_enclosing_method),
@@ -566,6 +583,7 @@ fn resolve_all_references(
                 receiver_type_is_qualified_non_java_lang,
                 file_has_unresolved_external_supertype,
                 site.enclosing_method,
+                site.enclosing_type.as_deref(),
             );
             // Bug #1952 (P1 of epic #1906): `QUALIFIED_NAME` (reasons bit 7)
             // was never set anywhere in this binder (the issue's own
@@ -635,6 +653,7 @@ fn resolve_all_references(
                 false,
                 false,
                 site.enclosing_method,
+                None,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);
@@ -673,6 +692,7 @@ fn resolve_all_references(
                 false,
                 false,
                 site.enclosing_method,
+                None,
             );
             total_candidates += r.candidates.len();
             family_truncated_anywhere |= any_family_truncated(&r.candidates);

@@ -13,7 +13,9 @@
 //! filters that EXISTING pool rather than rebuilding an equivalent join a
 //! second time (Rule 4, anti-duplication).
 
+use super::scope::{build_file_scope, FileScope};
 use super::FileForBind;
+use crate::graph::extract::local_index::ImportKind;
 use std::collections::{HashMap, HashSet};
 
 /// Repo-wide inheritance-family index. Never mutated after `build`
@@ -125,6 +127,52 @@ pub(crate) struct TypeIndex {
     /// `false`, matching the un-memoized BFS's own behaviour for a name
     /// it can never make progress from (no recorded ancestor evidence).
     unresolved_external_supertype_transitively: HashMap<String, bool>,
+    /// Issue #1956: the QUALIFIED counterpart of `direct_parents` above --
+    /// same semantics (subtype identity -> its DIRECT supertypes' own
+    /// identities), but keyed by a QUALIFIED type identity
+    /// (`{package}.{bare_name}` when the declaring file has a `package`
+    /// statement, bare `{bare_name}` otherwise) resolved via each file's
+    /// own `FileScope` (imports + package) at `build()` time -- see
+    /// `qualify_bare_type_name`/`resolve_supertype_to_qualified_name`'s
+    /// own doc comments for the exact resolution rule, which reuses
+    /// `resolve.rs`'s `context_reasons`/`import_reasons` same-package/
+    /// ordinary-import logic rather than inventing a second one (Rule 4,
+    /// anti-duplication).
+    ///
+    /// Deliberately a SEPARATE substrate, never an in-place replacement of
+    /// `direct_parents`/`direct_children` above: most EXISTING consumers of
+    /// those (`narrowing.rs`'s `apply_receiver_type_narrowing`, `resolve.
+    /// rs`'s `try_unique_name_shortcut`, `receiver.rs`'s `return_type_of_
+    /// method_on_type`) query with a BARE name derived from a call site's
+    /// own `receiver_type` -- a locally-declared-type string as written in
+    /// source, or a repo-wide unanimous field/return-type guess -- with NO
+    /// sound package attribution available at that call site today.
+    /// Repointing them at this qualified graph would silently stop
+    /// matching wherever that attribution is missing (exactly the "looks
+    /// like fewer edges" regression issue #1956 itself warns against), and
+    /// fixing that is a structurally separate, larger effort issue #1956
+    /// explicitly scopes OUT ("Do NOT try to also fix the over-binding/
+    /// self-edge in this task").
+    ///
+    /// `narrowing::apply_same_class_or_super_narrowing` IS migrated (see
+    /// its own doc comment): its query value (`same_class_context`, always
+    /// the CALLING SITE's own enclosing type) is declared in that call's
+    /// own file, hence always exactly qualifiable via that file's own
+    /// package -- no guessing required, unlike `receiver_type`.
+    /// `apply_super_class_narrowing` is deliberately NOT migrated even
+    /// though it shares the same `same_class_context`-shaped input: it is a
+    /// HARD filter gated on the bare-keyed `has_incomplete_supertype_
+    /// evidence`, and mixing that bare completeness signal with this
+    /// qualified graph's own, un-tracked incompleteness would reopen a
+    /// false-empty-set door -- exactly the class of mistake Attempt 1 made
+    /// (see this issue's own history).
+    ///
+    /// An unresolved supertype clause (see `resolve_supertype_to_qualified_
+    /// name`'s own doc: a wildcard-import ambiguity, or -- pre-existing,
+    /// unrelated to this substrate -- a syntactically unresolvable clause)
+    /// records NO edge here at all, mirroring `incomplete_supertype_names`'s
+    /// own "ambiguity resolves to unresolved, never a guess" doctrine.
+    qualified_direct_parents: HashMap<String, Vec<String>>,
 }
 
 impl TypeIndex {
@@ -152,6 +200,28 @@ impl TypeIndex {
             }
             for name in &file.index.incomplete_supertypes {
                 incomplete_supertype_names.insert(name.clone());
+            }
+        }
+        // Issue #1956: the QUALIFIED counterpart of the bare `direct_
+        // parents`/`direct_children` pass above -- see `qualified_direct_
+        // parents`'s own field doc for why this is a separate, additive
+        // pass rather than a rewrite of the one above. A second per-file
+        // loop (rather than folding into the pass above) because it needs
+        // each file's own `FileScope`, which the bare pass has no use for.
+        let mut qualified_direct_parents: HashMap<String, Vec<String>> = HashMap::new();
+        for file in files {
+            let scope = build_file_scope(&file.index);
+            for edge in &file.index.inheritance {
+                let qualified_subtype =
+                    qualify_bare_type_name(&edge.subtype_name, scope.package.as_deref());
+                if let Some(qualified_supertype) =
+                    resolve_supertype_to_qualified_name(&edge.supertype_name, &scope)
+                {
+                    qualified_direct_parents
+                        .entry(qualified_subtype)
+                        .or_default()
+                        .push(qualified_supertype);
+                }
             }
         }
         let mut top_levels = HashMap::new();
@@ -235,6 +305,7 @@ impl TypeIndex {
             type_parameter_names,
             nesting_pairs,
             unresolved_external_supertype_transitively: HashMap::new(),
+            qualified_direct_parents,
         };
         type_index.unresolved_external_supertype_transitively =
             type_index.compute_unresolved_external_supertype_transitively_map();
@@ -496,6 +567,37 @@ impl TypeIndex {
         result
     }
 
+    /// Issue #1956: the QUALIFIED counterpart of `supertypes_of` above --
+    /// identical BFS/cycle-safety argument (see that method's own doc
+    /// comment), walking `qualified_direct_parents` instead of `direct_
+    /// parents`. `qualified_type_name` must already BE a qualified
+    /// identity (e.g. `{package}.{bare_name}`, exactly as `qualify_bare_
+    /// type_name` produces it) -- this performs no bare-name resolution of
+    /// its own; the caller resolves its OWN query name against its OWN
+    /// package first. Sole consumer: `narrowing::apply_same_class_or_
+    /// super_narrowing`, the one query value in this whole binder whose
+    /// package is always exactly known (see `qualified_direct_parents`'s
+    /// field doc for why every other consumer stays on the bare
+    /// substrate).
+    pub(crate) fn supertypes_of_qualified(&self, qualified_type_name: &str) -> HashSet<String> {
+        let mut visited: HashSet<String> = HashSet::from([qualified_type_name.to_string()]);
+        let mut queue: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([qualified_type_name.to_string()]);
+        let mut result = HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let Some(parents) = self.qualified_direct_parents.get(&current) else {
+                continue;
+            };
+            for parent in parents {
+                if visited.insert(parent.clone()) {
+                    result.insert(parent.clone());
+                    queue.push_back(parent.clone());
+                }
+            }
+        }
+        result
+    }
+
     /// AC1 "engine query": every declaration in `pool` (an existing
     /// `RepoNameIndex::lookup(method_name, Method)` result) whose
     /// `enclosing_type` is a known implementor of `interface_name` --
@@ -554,6 +656,111 @@ impl TypeIndex {
     }
 }
 
+/// Issue #1956: qualifies a type declared IN a file whose own recorded
+/// `package` is `package` -- EXACT, never a guess, since a file's own
+/// package is definitionally where a type IT declares lives (mirrors the
+/// `subtype -> {package}.{subtype_name}` rule the issue's own verified fix
+/// plan specifies). A `None` package (a file with no `package` statement --
+/// the Java default package) preserves a bare-name fallback: the returned
+/// identity is simply `bare_name` itself, unprefixed.
+///
+/// `pub(super)` (visible to every sibling module under `bind`, not just
+/// `families`): `narrowing::apply_same_class_or_super_narrowing` reuses
+/// this SAME rule to qualify a call site's own enclosing type (always
+/// declared in that call's own file, hence always exactly qualifiable via
+/// that file's own package -- see that function's own doc comment) --
+/// Rule 4, anti-duplication, rather than a second copy of this exact
+/// one-line rule.
+///
+/// Known, accepted limitation (documented, not fixed here): this does not
+/// disambiguate two SIBLING nested types sharing a bare name within the
+/// SAME package (e.g. `OuterA.Builder` and `OuterB.Builder`, both already
+/// collapsed to the bare name `"Builder"` by the extractor before this
+/// function ever sees it) -- only CROSS-PACKAGE collisions, the shape
+/// issue #1956 itself targets, are resolved by this substrate.
+pub(super) fn qualify_bare_type_name(bare_name: &str, package: Option<&str>) -> String {
+    match package {
+        Some(package) => format!("{package}.{bare_name}"),
+        None => bare_name.to_string(),
+    }
+}
+
+/// Issue #1956: resolves an `extends`/`implements` clause's bare supertype
+/// name (already reduced to its bare last identifier by the extractor --
+/// see `InheritanceRecord::supertype_name`'s own extraction) to a qualified
+/// type identity, using ONLY the declaring file's own `FileScope` --
+/// reusing `resolve.rs`'s `import_reasons`/`context_reasons` resolution
+/// rules rather than inventing a second one (Rule 4, anti-duplication): an
+/// ORDINARY (single-type) import whose last dotted segment equals
+/// `bare_name` names it exactly (Java import semantics; confirmed
+/// identical for Kotlin -- `kotlin_declarations::extract_imports`'s own
+/// doc comment: "any import can bring in a class ... uniformly", and
+/// `ImportKind::Static`/`StaticWildcard` are never produced for Kotlin, so
+/// only the `Ordinary`/`Wildcard` arms below are ever reached for a Kotlin
+/// file). Static imports (`ImportKind::Static`/`StaticWildcard`) never
+/// apply here -- Java's `extends`/`implements` names a TYPE, never a
+/// static member.
+///
+/// `None` (never a guess) when the file ALSO carries a wildcard import
+/// (`import pkg.*;`) and `bare_name` matched no ordinary import: a wildcard
+/// import makes "same package, or this wildcard-imported package"
+/// genuinely ambiguous, and this substrate's governing rule is that
+/// ambiguity resolves to unresolved, never a guess -- exactly what Attempt
+/// 1 (see this issue's own history) violated by trusting an unproven
+/// same-bare-named candidate. Otherwise, falls back to the same-package
+/// assumption (`qualify_bare_type_name`), mirroring `context_reasons`'s own
+/// `SAME_PACKAGE` reason-bit heuristic (never validated against a real
+/// classpath, an accepted imprecision this whole binder already carries).
+///
+/// Known, accepted Kotlin limitation (documented, not fixed here):
+/// `kotlin_declarations::apply_import_aliases` rewrites an aliased
+/// import's uses in invocations/constructions/type-references, but NEVER
+/// in `LocalIndex::inheritance` -- an aliased Kotlin supertype clause
+/// (`import foo.Base as B`, then `class Sub : B()`) records `supertype_
+/// name: "B"`, which will not match the ordinary-import path below (its
+/// last segment is `"Base"`, not `"B"`) and falls through to the
+/// same-package guess. This is a PRE-EXISTING extraction gap (the bare-
+/// keyed `direct_parents` has always recorded `"B"` verbatim too); it is
+/// not introduced by this qualified substrate and is out of this issue's
+/// scope.
+fn resolve_supertype_to_qualified_name(bare_name: &str, scope: &FileScope) -> Option<String> {
+    if let Some(qualified) = resolve_via_ordinary_import(bare_name, &scope.imports) {
+        return Some(qualified);
+    }
+    if scope.imports.iter().any(|import| import.kind == ImportKind::Wildcard) {
+        return None;
+    }
+    Some(qualify_bare_type_name(bare_name, scope.package.as_deref()))
+}
+
+/// Issue #1956 (receiver-type qualification, `receiver_qualified.rs`): the
+/// ORDINARY-IMPORT half of `resolve_supertype_to_qualified_name`'s own
+/// rule, split out so a SECOND caller (`receiver_qualified::apply_
+/// receiver_qualified_type_narrowing`) can reuse the exact same "an
+/// ordinary single-type import whose last dotted segment equals
+/// `bare_name` names it exactly" rule (Rule 4, anti-duplication) WITHOUT
+/// also inheriting the same-package-guess fallback the supertype caller
+/// needs -- the receiver-side caller deliberately never falls back to a
+/// same-package guess (see that module's own doc comment for why an
+/// EXACT, non-guessed identity is required before a candidate can be
+/// EXCLUDED from the graph, a strictly stronger bar than the tag-
+/// adjustment-only consumers of the same-package fallback tolerate).
+/// `None` (never "unresolved", simply "this rule found nothing") when no
+/// ordinary import's last segment matches `bare_name` -- callers must
+/// never treat that as proof of absence, only as "this specific
+/// resolution path has nothing to add". Bounded loop (Rule 14): iterates
+/// at most `imports.len()` times, the file's own already-extracted import
+/// list.
+pub(super) fn resolve_via_ordinary_import(
+    bare_name: &str,
+    imports: &[crate::graph::extract::local_index::ImportRecord],
+) -> Option<String> {
+    imports.iter().find_map(|import| {
+        (import.kind == ImportKind::Ordinary && import.path.rsplit('.').next() == Some(bare_name))
+            .then(|| import.path.clone())
+    })
+}
+
 /// Hard ceiling on how many override candidates `overrides_of` will EVER
 /// return for one `(interface_name, pool)` call. A real interface rarely
 /// has more than a handful of genuine implementors; this is deliberately
@@ -570,3 +777,7 @@ mod tests;
 #[cfg(test)]
 #[path = "families_transitive_supertype_tests.rs"]
 mod transitive_supertype_tests;
+
+#[cfg(test)]
+#[path = "families_qualified_supertype_tests.rs"]
+mod qualified_supertype_tests;

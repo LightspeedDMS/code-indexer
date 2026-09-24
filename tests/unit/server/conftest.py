@@ -93,6 +93,7 @@ some other test file's import order.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 from typing import Any, Callable, Generator, List, Set, Type
@@ -561,3 +562,82 @@ def _snapshot_restore_shared_app_state() -> Generator[None, None, None]:
     singleton object is ever snapshotted/restored here.
     """
     yield from _snapshot_restore_shared_app_state_impl()
+
+
+def _ensure_event_loop_usable() -> None:
+    """Guarantee `asyncio.get_event_loop()` succeeds in the MainThread.
+
+    Bug #1959: several test files under `tests/unit/server/` (audited:
+    `mcp/`, `middleware/`, `repositories/`, `routers/`, `routes/`,
+    `services/`, `startup/`, `telemetry/`, `web/` -- see
+    `test_omni_search_dead_code_removed_1753.py` for the confirmed
+    culprit) call `asyncio.run(...)` directly in the MainThread.
+    `asyncio.run()`'s cleanup unconditionally calls
+    `asyncio.set_event_loop(None)` in its `finally` block (cpython
+    `asyncio/runners.py`) once the coroutine completes. That leaves the
+    thread's "current event loop" EXPLICITLY unset -- a different state
+    from "never set": the default event-loop policy auto-creates a loop
+    lazily only in the latter case, and raises
+    `RuntimeError: There is no current event loop in thread 'MainThread'.`
+    in the former.
+
+    Several other files (three under `tests/unit/server/auth/`:
+    `test_timing_attack_async.py`, `test_mcp_auth_off_event_loop_1491.py`,
+    `test_oauth_mcp_pre_elevation_v10_4_7.py`; more under `mcp/`,
+    `middleware/`, `routers/`, `startup/`) call the deprecated bare
+    `asyncio.get_event_loop()` and depend on the auto-create fallback.
+    Whether those 61+ tests actually run at all was, before this fix,
+    entirely dependent on which directory happened to run immediately
+    before them in the same pytest process -- a fully green gate could
+    stop covering real OIDC/OAuth/MCP-auth/timing-attack assertions after
+    nothing more than a chunk re-split or a new file being added.
+
+    Creating a fresh, non-closed event loop when the current one is
+    missing or closed restores exactly the auto-creatable state these
+    deprecated call sites already rely on -- it does not change behavior
+    for any test that never touches the deprecated API.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or loop.is_closed():
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def _restore_event_loop_impl() -> Generator[None, None, None]:
+    """Core generator body for `_restore_event_loop_after_asyncio_run`
+    below; extracted so a unit test can drive it via `next()` without
+    pytest's fixture machinery (mirrors
+    `_snapshot_restore_shared_app_state_impl` and
+    `_teardown_all_background_job_managers_impl` above) -- see
+    `tests/unit/server/test_event_loop_leak_protection_1959.py`.
+
+    Repairs the MainThread's current-event-loop state both BEFORE and
+    AFTER each test (mirroring `_reset_correlation_id_contextvar`'s
+    before-and-after `.set(None)` pattern above), rather than
+    snapshotting and restoring a specific prior loop object: the actual
+    invariant this fixture must hold is simply "the deprecated
+    `asyncio.get_event_loop()` call sites this suite still depends on
+    keep working," regardless of which loop object satisfies that. This
+    is deliberately simpler than a save/restore-the-exact-object
+    approach, and closes the leak symmetrically for tests that run
+    before the first `asyncio.run()` caller in the process as well as
+    tests that run after one.
+    """
+    _ensure_event_loop_usable()
+    try:
+        yield
+    finally:
+        _ensure_event_loop_usable()
+
+
+@pytest.fixture(autouse=True)
+def _restore_event_loop_after_asyncio_run() -> Generator[None, None, None]:
+    """Bug #1959: tree-wide autouse fixture that keeps the MainThread's
+    asyncio current-event-loop usable around every test under
+    tests/unit/server/. See `_ensure_event_loop_usable` and
+    `_restore_event_loop_impl` above for the full rationale and the
+    measured leak evidence this closes.
+    """
+    yield from _restore_event_loop_impl()

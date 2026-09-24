@@ -60,6 +60,34 @@ from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
 
+# Bug #1863 fast-automation run (2026-09-23, load average 2.33 rising to
+# 3.05 on 12 cores): `test_genuinely_absent_temporal_data_still_downgrades_
+# both_tables` was killed by pytest-timeout's suite-wide 15.0s default
+# ceiling at exactly 15.05s -- a wall-clock expiry, not an assertion
+# failure. `.test-telemetry` history across 48 recorded runs of this file
+# shows all three tests here normally cost 1.3s-9.6s (`call` phase), with
+# real outliers climbing under load: this same 2026-09-23 run also clocked
+# `TestSisterTemporalDetectionFeedsReconciliation::
+# test_sister_relocated_temporal_data_prevents_false_downgrade` at 13.33s --
+# a near-miss on the very same 15s ceiling in the very same run -- while
+# `TestSisterLookupFailsOpen::test_sister_lookup_error_falls_back_to_in_
+# repo_result` reached 7.30s. All three tests share the identical
+# heavyweight fixture (real SQLite-backed GlobalRegistry +
+# GoldenRepoMetadataSqliteBackend, real RefreshScheduler, real filesystem
+# fixtures) and were all pushed by the same load event, so all three get
+# the same explicit per-test ceiling rather than leaving the next one to
+# fail. Isolated idle-box reruns of the previously-failing test measured
+# 2.31s/4.06s/2.12s -- confirming the test itself is healthy and this is
+# purely a shared-box amplification of the suite's default timeout, the
+# same failure class fixed via `@pytest.mark.timeout(60)` in
+# tests/unit/server/mcp/test_lazy_module_attr_or_none_1709.py (Issue #1947)
+# and tests/unit/storage/test_filesystem_vector_store_1575_part_b_sharded_
+# json_scroll.py (Bug #1953/#1956). 60s gives >4.5x headroom over the
+# worst real (non-timeout-killed) duration ever recorded for any test in
+# this file (13.33s) while still failing fast on an actual hang.
+_SISTER_TEMPORAL_RECONCILE_TIMEOUT_SECONDS = 60
+
+
 # ---------------------------------------------------------------------------
 # Real-backend helpers (copied verbatim from
 # test_refresh_scheduler_enable_temporal_one_way_1406.py).
@@ -170,6 +198,7 @@ class TestSisterTemporalDetectionFeedsReconciliation:
     """Test case A: the actual bug -- sister-relocated data must be detected
     and must prevent the Bug #1406 one-way auto-disable from firing."""
 
+    @pytest.mark.timeout(_SISTER_TEMPORAL_RECONCILE_TIMEOUT_SECONDS)
     def test_sister_relocated_temporal_data_prevents_false_downgrade(
         self, tmp_path: Path
     ) -> None:
@@ -212,6 +241,7 @@ class TestGenuineAbsenceStillDowngrades:
     from BOTH the in-repo tree AND the sister location, Bug #1406's
     auto-disable must still fire exactly as before."""
 
+    @pytest.mark.timeout(_SISTER_TEMPORAL_RECONCILE_TIMEOUT_SECONDS)
     def test_genuinely_absent_temporal_data_still_downgrades_both_tables(
         self, tmp_path: Path
     ) -> None:
@@ -248,6 +278,7 @@ class TestSisterLookupFailsOpen:
     must never crash reconciliation, must log a WARNING, and must fall back
     to the in-repo-only result."""
 
+    @pytest.mark.timeout(_SISTER_TEMPORAL_RECONCILE_TIMEOUT_SECONDS)
     def test_sister_lookup_error_falls_back_to_in_repo_result(
         self,
         tmp_path: Path,

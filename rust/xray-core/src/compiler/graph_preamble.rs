@@ -63,6 +63,7 @@ pub struct GraphHandle<'graph> {
     reachable_from_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
     reachable_to_filtered_fn: fn(*const (), &[u32], usize, u16, u16) -> Vec<u32>,
     strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
+    shortest_path_to_any_filtered_fn: fn(*const (), u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -174,6 +175,10 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
 
     pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
         (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
+    }
+
+    pub fn shortest_path_to_any_filtered(&self, from: u32, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Option<Vec<u32>> {
+        (self.shortest_path_to_any_filtered_fn)(self.ctx, from, targets, max_depth, required_bits, forbidden_bits)
     }
 }
 

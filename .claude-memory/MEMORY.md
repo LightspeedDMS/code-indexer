@@ -109,6 +109,7 @@
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
 - [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)
+- [project_batch_1950_1956_pending_staging.md](project_batch_1950_1956_pending_staging.md) - six-issue batch after v12.69.0; NOT done until driven through both staging front doors
 - [project_release_1873_1876_overnight_state.md](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 overnight #1873/#1875/#1876/#1886 release — read first after a reset
 - [project_backlog_session_paused_2026_08_27.md](project_backlog_session_paused_2026_08_27.md) - resume state for the backlog sweep paused 2026-08-27 — read this first
 - [project_backlog_session_paused_for_vm_migration.md](project_backlog_session_paused_for_vm_migration.md) - superseded by the 2026-08-27 entry above

@@ -153,6 +153,9 @@ pub mod handle {
         /// filtered` -- see `GraphHandle::strongly_connected_components_
         /// filtered`.
         strongly_connected_components_filtered_fn: fn(*const (), u16, u16) -> Vec<Vec<u32>>,
+        /// #1953: exposes `CodeGraph::shortest_path_to_any_filtered` -- see
+        /// `GraphHandle::shortest_path_to_any_filtered`.
+        shortest_path_to_any_filtered_fn: fn(*const (), u32, &[u32], usize, u16, u16) -> Option<Vec<u32>>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -287,6 +290,18 @@ pub mod handle {
         graph_from_ctx(ctx).strongly_connected_components_filtered(required, forbidden)
     }
 
+    /// #1953: thunk for `shortest_path_to_any_filtered`.
+    fn thunk_shortest_path_to_any_filtered(
+        ctx: CtxPtr,
+        from: u32,
+        targets: &[u32],
+        max_depth: usize,
+        required: u16,
+        forbidden: u16,
+    ) -> Option<Vec<u32>> {
+        graph_from_ctx(ctx).shortest_path_to_any_filtered(from, targets, max_depth, required, forbidden)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -318,6 +333,7 @@ pub mod handle {
                 reachable_from_filtered_fn: thunk_reachable_from_filtered,
                 reachable_to_filtered_fn: thunk_reachable_to_filtered,
                 strongly_connected_components_filtered_fn: thunk_strongly_connected_components_filtered,
+                shortest_path_to_any_filtered_fn: thunk_shortest_path_to_any_filtered,
                 _graph: PhantomData,
             }
         }
@@ -519,6 +535,13 @@ pub mod handle {
         /// components_filtered`'s doc comment.
         pub fn strongly_connected_components_filtered(&self, required_bits: u16, forbidden_bits: u16) -> Vec<Vec<u32>> {
             (self.strongly_connected_components_filtered_fn)(self.ctx, required_bits, forbidden_bits)
+        }
+
+        /// #1953: the evidence-FILTERED counterpart of
+        /// `shortest_path_to_any` -- see `CodeGraph::shortest_path_to_any_
+        /// filtered`'s doc comment.
+        pub fn shortest_path_to_any_filtered(&self, from: u32, targets: &[u32], max_depth: usize, required_bits: u16, forbidden_bits: u16) -> Option<Vec<u32>> {
+            (self.shortest_path_to_any_filtered_fn)(self.ctx, from, targets, max_depth, required_bits, forbidden_bits)
         }
     }
 
@@ -888,6 +911,44 @@ pub mod handle {
             empty_mask.sort_unstable();
             unfiltered_from.sort_unstable();
             assert_eq!(empty_mask, unfiltered_from);
+        }
+
+        /// #1953: `shortest_path_to_any_filtered` must be reachable through
+        /// `GraphHandle`, delegating byte-for-byte to
+        /// `CodeGraph::shortest_path_to_any_filtered`. Reuses the same
+        /// diamond-plus-cycle fixture as the test above (every edge tagged
+        /// RECEIVER_TYPE_MATCH), so filtering with an empty mask must
+        /// reproduce the unfiltered result exactly.
+        #[test]
+        fn shortest_path_to_any_filtered_delegates_to_the_real_graph() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(5);
+            let a = builder.intern_symbol(make_symbol_id(14, 0));
+            let b = builder.intern_symbol(make_symbol_id(14, 1));
+            let c = builder.intern_symbol(make_symbol_id(14, 2));
+            let d = builder.intern_symbol(make_symbol_id(14, 3));
+            builder.add_reference(a, 14, 1, 0, &[Candidate::new(b, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(a, 14, 2, 0, &[Candidate::new(c, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(b, 14, 3, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(c, 14, 4, 0, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+            builder.add_reference(d, 14, 5, 0, &[Candidate::new(a, reasons::RECEIVER_TYPE_MATCH)]);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0),
+                graph.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0)
+            );
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 100, reasons::RECEIVER_TYPE_MATCH, 0),
+                handle.shortest_path_to_any(a, &[d], 100),
+                "an empty forbidden mask (with the only evidence bit present required) must reproduce \
+                 the unfiltered result over this fixture"
+            );
+            assert_eq!(
+                handle.shortest_path_to_any_filtered(a, &[d], 1, reasons::RECEIVER_TYPE_MATCH, 0),
+                None,
+                "D is 2 hops away, beyond max_depth=1"
+            );
         }
     }
 }

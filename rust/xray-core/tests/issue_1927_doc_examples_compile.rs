@@ -248,8 +248,13 @@ const EXPECTED_FULL_RUST_EVALUATORS: usize = 3;
 
 /// Exact number of ```rust,fragment blocks (explicitly non-evaluator
 /// type-shape illustrations / isolated `fn refine` demo) the doc must
-/// contain.
-const EXPECTED_RUST_FRAGMENTS: usize = 4;
+/// contain. Bumped 4 -> 6 by Bug #1955's doc fixes: the `EvalFinding`
+/// struct shape (previously only named inline as "{pattern, line,
+/// snippet}", now given its own fragment per defect 4) and the
+/// `DeclarationKind`/`Visibility` enum variant list (previously
+/// unlisted, also defect 4) are both new, genuine fragments -- neither
+/// defines a complete `collect_facts`+`analyze_graph` pair.
+const EXPECTED_RUST_FRAGMENTS: usize = 6;
 
 /// Exact number of ```json blocks carrying an `evaluator_code` string
 /// field (compiled verbatim) the doc must contain.

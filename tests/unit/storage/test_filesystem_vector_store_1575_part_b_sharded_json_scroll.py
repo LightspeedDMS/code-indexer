@@ -60,6 +60,24 @@ TIME_RATIO_FLOOR_SECONDS = 1e-4
 # "served from cache" (ratio ~= 1).
 COST_PROOF_RATIO_TOLERANCE_FACTOR = 2
 
+# Bug #1953/#1956 fast-automation run (2026-09-23): this test failed with
+# "Failed: Timeout (>15.0s) from pytest-timeout" at 16.41s, sharing the box
+# with a just-finished 20,931-test server-fast run. `.test-telemetry`
+# duration history across ~40 runs since 2026-09-05 shows this test normally
+# costs 7.2s-9.5s, with exactly two prior spikes to 14.31s (2026-09-17) and
+# 14.92s (2026-09-15) that stayed under the suite's 15s default ceiling --
+# a load artifact of the suite-wide pytest-timeout ceiling, not a regression:
+# nothing in this test's own path (FilesystemVectorStore scroll) was touched
+# by the unrelated Rust graph/csr and graph/bind changes in flight that day.
+# The assertion itself is already load-robust (a size_ratio/time_ratio
+# comparison below, never an absolute wall-clock threshold), so the fix is
+# per-test wall-clock headroom, not a weaker check. 60s gives >3.6x headroom
+# over the worst-ever recorded value (16.41s) while still failing fast on an
+# actual hang -- mirrors the `@pytest.mark.timeout(60)` idiom already used
+# for load-sensitive tests elsewhere in this suite for the same reason
+# (Issue #1947, see tests/unit/server/mcp/test_lazy_module_attr_or_none_1709.py).
+_CONTINUATION_PAGE_COST_PROOF_TIMEOUT_SECONDS = 60
+
 # Staleness-safety fixture sizing (TestShardedJsonSessionCacheStalenessSafety).
 DELETED_CURSOR_COLLECTION_POINT_COUNT = 12
 DELETED_CURSOR_PAGE_LIMIT = 4
@@ -177,6 +195,7 @@ class TestShardedJsonContinuationPageCostDecoupledFromCollectionSize:
     must not scale with the collection's total size -- that is exactly the
     cost the per-page id_to_file rebuild used to impose."""
 
+    @pytest.mark.timeout(_CONTINUATION_PAGE_COST_PROOF_TIMEOUT_SECONDS)
     def test_continuation_page_time_does_not_scale_with_collection_size(
         self, tmp_path: Path
     ) -> None:

@@ -26,7 +26,7 @@
 //! module).
 
 use super::code_graph::CodeGraph;
-use super::ops::strongly_connected_components_over_adjacency;
+use super::ops::{reconstruct_path, strongly_connected_components_over_adjacency};
 use std::collections::{HashSet, VecDeque};
 
 /// Shared bounded-BFS core for `reachable_from_filtered`/`reachable_to_
@@ -85,12 +85,55 @@ impl CodeGraph {
             (0..n as u32).map(|v| self.callees_of_filtered(v, required_bits, forbidden_bits)).collect();
         strongly_connected_components_over_adjacency(n, &adjacency)
     }
+
+    /// #1953: the evidence-FILTERED counterpart of `shortest_path_to_any`
+    /// -- the ONE primitive #1953 identified as having no filtered form,
+    /// even though it is the one the docs tell users to build
+    /// endpoint-reaches-sink findings from. Byte-for-byte the same shape as
+    /// `shortest_path_to_any` (parent-tracked BFS, `from` counts as depth
+    /// 0, same visited-set termination bound per Rule 14), with the ONLY
+    /// difference being the edge source: `callees_of_filtered` instead of
+    /// `callees_of`, exactly how `bounded_bfs_filtered` above relates to
+    /// `reachable_from`/`reachable_to`. Reuses `super::ops::reconstruct_
+    /// path` rather than a second copy (Rule 4, anti-duplication).
+    pub fn shortest_path_to_any_filtered(
+        &self,
+        from: u32,
+        targets: &[u32],
+        max_depth: usize,
+        required_bits: u16,
+        forbidden_bits: u16,
+    ) -> Option<Vec<u32>> {
+        if targets.contains(&from) {
+            return Some(vec![from]);
+        }
+        let mut visited: HashSet<u32> = HashSet::from([from]);
+        let mut parent: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut queue: VecDeque<(u32, usize)> = VecDeque::from([(from, 0)]);
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            for callee in self.callees_of_filtered(node, required_bits, forbidden_bits) {
+                if !visited.insert(callee) {
+                    continue;
+                }
+                parent.insert(callee, node);
+                if targets.contains(&callee) {
+                    return Some(reconstruct_path(&parent, from, callee));
+                }
+                queue.push_back((callee, depth + 1));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::builder::CodeGraphBuilder;
     use super::super::candidate::Candidate;
+    use super::super::code_graph::CodeGraph;
     use crate::graph::identity::make_symbol_id;
     use crate::graph::reasons;
 
@@ -240,5 +283,82 @@ mod tests {
         unfiltered.sort();
         filtered.sort();
         assert_eq!(filtered, unfiltered, "an empty required/forbidden mask must reproduce the unfiltered SCC result");
+    }
+
+    /// Builds the diamond-plus-cycle-plus-forbidden-edge fixture used by
+    /// `shortest_path_to_any_filtered_excludes_a_path_reachable_only_
+    /// through_a_forbidden_edge` below (A->B, A->C, B->D, C->D, D->A cycle,
+    /// D->E where D->E ALSO carries RECEIVER_TYPE_MISMATCH) -- pulled into
+    /// its own helper purely to keep that test's body short, not for reuse
+    /// (the two `reachable_*_filtered` tests above predate this one and
+    /// bake their own copy with a different file id).
+    fn build_forbidden_edge_fixture(file_id: u32) -> (CodeGraph, u32, u32, u32, u32) {
+        const FIXTURE_CANDIDATE_CAPACITY: usize = 6;
+        const SYMBOL_INDEX_A: u32 = 0;
+        const SYMBOL_INDEX_B: u32 = 1;
+        const SYMBOL_INDEX_C: u32 = 2;
+        const SYMBOL_INDEX_D: u32 = 3;
+        const SYMBOL_INDEX_E: u32 = 4;
+        const REF_LOC_A_TO_B: u32 = 1;
+        const REF_LOC_A_TO_C: u32 = 2;
+        const REF_LOC_B_TO_D: u32 = 3;
+        const REF_LOC_C_TO_D: u32 = 4;
+        const REF_LOC_D_TO_A: u32 = 5;
+        const REF_LOC_D_TO_E: u32 = 6;
+        const NO_COLUMN: u8 = 0;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(FIXTURE_CANDIDATE_CAPACITY);
+        let a = builder.intern_symbol(make_symbol_id(file_id, SYMBOL_INDEX_A));
+        let b = builder.intern_symbol(make_symbol_id(file_id, SYMBOL_INDEX_B));
+        let c = builder.intern_symbol(make_symbol_id(file_id, SYMBOL_INDEX_C));
+        let d = builder.intern_symbol(make_symbol_id(file_id, SYMBOL_INDEX_D));
+        let e = builder.intern_symbol(make_symbol_id(file_id, SYMBOL_INDEX_E));
+        builder.add_reference(a, file_id, REF_LOC_A_TO_B, NO_COLUMN, &[Candidate::new(b, reasons::RECEIVER_TYPE_MATCH)]);
+        builder.add_reference(a, file_id, REF_LOC_A_TO_C, NO_COLUMN, &[Candidate::new(c, reasons::RECEIVER_TYPE_MATCH)]);
+        builder.add_reference(b, file_id, REF_LOC_B_TO_D, NO_COLUMN, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+        builder.add_reference(c, file_id, REF_LOC_C_TO_D, NO_COLUMN, &[Candidate::new(d, reasons::RECEIVER_TYPE_MATCH)]);
+        builder.add_reference(d, file_id, REF_LOC_D_TO_A, NO_COLUMN, &[Candidate::new(a, reasons::RECEIVER_TYPE_MATCH)]);
+        builder.add_reference(
+            d,
+            file_id,
+            REF_LOC_D_TO_E,
+            NO_COLUMN,
+            &[Candidate::new(e, reasons::RECEIVER_TYPE_MATCH | reasons::RECEIVER_TYPE_MISMATCH)],
+        );
+        (builder.build(), a, b, d, e)
+    }
+
+    /// #1953: the primitive-level acceptance criterion. The fixture is the
+    /// same shape #1953 measured live: an 11-hop jsoup path whose hop 3
+    /// (`SoftPool.borrow() -> HttpConnection.get()`) was a
+    /// receiver-mismatched JDK `Supplier.get()` binding, not a real call.
+    /// `shortest_path_to_any` (unfiltered) happily reports the path as
+    /// though rendering text does I/O; `shortest_path_to_any_filtered`
+    /// requiring RECEIVER_TYPE_MATCH and forbidding RECEIVER_TYPE_MISMATCH
+    /// must refuse it -- E is reachable ONLY through the forbidden edge.
+    #[test]
+    fn shortest_path_to_any_filtered_excludes_a_path_reachable_only_through_a_forbidden_edge() {
+        const FIXTURE_FILE_ID: u32 = 34;
+        const UNBOUNDED_DEPTH: usize = 100;
+        let (graph, a, b, d, e) = build_forbidden_edge_fixture(FIXTURE_FILE_ID);
+
+        let unfiltered = graph.shortest_path_to_any(a, &[e], UNBOUNDED_DEPTH);
+        assert_eq!(unfiltered, Some(vec![a, b, d, e]), "fixture sanity: unfiltered finds the path through the edge");
+
+        let filtered = graph.shortest_path_to_any_filtered(
+            a,
+            &[e],
+            UNBOUNDED_DEPTH,
+            reasons::RECEIVER_TYPE_MATCH,
+            reasons::RECEIVER_TYPE_MISMATCH,
+        );
+        assert_eq!(
+            filtered, None,
+            "E is reachable only through the forbidden-bit edge D->E -- shortest_path_to_any_filtered \
+             must refuse the path, never silently return it like the unfiltered primitive does"
+        );
+
+        let everything = graph.shortest_path_to_any_filtered(a, &[e], UNBOUNDED_DEPTH, 0, 0);
+        assert_eq!(everything, unfiltered, "an empty required/forbidden mask must exclude nothing");
     }
 }
