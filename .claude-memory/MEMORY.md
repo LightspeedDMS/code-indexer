@@ -5,6 +5,7 @@
 - [feedback_never_claim_ready_without_staging_e2e.md](feedback_never_claim_ready_without_staging_e2e.md) - green gates are not evidence; drive the NEW capability through staging
 - [feedback_everything_always_ends_with_staging.md](feedback_everything_always_ends_with_staging.md) - broken staging access is a blocker to raise, never a reason to stop at local gates
 - [feedback_grep_absence_is_not_evidence.md](feedback_grep_absence_is_not_evidence.md) - zero hits proves a spelling absent, not a capability missing
+- [feedback_never_assert_unverified_facts_in_briefs.md](feedback_never_assert_unverified_facts_in_briefs.md) - verify every premise before writing it into a brief or an issue; an issue's own repro can be wrong
 - [feedback_probe_in_service_execution_context.md](feedback_probe_in_service_execution_context.md) - probe as the SERVICE user with the unit's PATH/HOME; an SSH login's user-site silently shadows the real install
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - never full-re-index evolution: hours + embedder cost; restore from copies
 - [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - verify zero vector_*.json on all 3 envs before chunk/temporal work (#1528)
