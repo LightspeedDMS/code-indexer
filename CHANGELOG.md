@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.72.1] - 2026-09-25
+
+### Security
+
+- **Self-registration can now be disabled, and is off by default.**
+  `POST /auth/register` let any unauthenticated caller create a live
+  `normal_user` account, with no setting to turn it off. A new
+  `self_registration_enabled` setting (Web UI: Config > Web Security)
+  gates the endpoint; when it is off, the endpoint returns 403 before any
+  account lookup or creation. The setting defaults to off, including on
+  upgraded servers whose stored config predates it, so deployments that
+  rely on `cidx auth register` must have an admin switch it on after
+  upgrading. The setting is read on every request and takes effect
+  without a restart; in a cluster, other nodes pick it up on their next
+  config reload (about 30 seconds).
+
 ## [12.72.0] - 2026-09-24
 
 ### Fixed

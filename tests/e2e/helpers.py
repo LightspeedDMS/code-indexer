@@ -871,3 +871,44 @@ def toggle_cidx_meta_backup(
     _web_login(client, admin_user, admin_pass, login_csrf)
     form_csrf = _fetch_csrf_from_page(client, "/admin/config")
     _post_cidx_meta_backup_form(client, enabled, remote_url, form_csrf)
+
+
+def set_self_registration_enabled(
+    client: "httpx.Client",
+    *,
+    admin_user: str,
+    admin_pass: str,
+    enabled: bool,
+) -> None:
+    """Enable/disable POST /auth/register via the admin Web UI Config screen.
+
+    Performs the real admin login flow (GET /login -> POST /login ->
+    GET /admin/config -> POST /admin/config/web_security) on one httpx.Client
+    so the session cookie and CSRF token carry across requests.
+
+    Self-registration defaults to DISABLED (403); tests that exercise the
+    registration flow must enable it explicitly through this front door.
+
+    Raises:
+        ValueError: If client is None or admin_user/admin_pass is empty.
+        httpx.HTTPStatusError: If any step returns a 4xx/5xx response.
+    """
+    if client is None:
+        raise ValueError("set_self_registration_enabled: client must not be None")
+    if not admin_user:
+        raise ValueError("set_self_registration_enabled: admin_user must be non-empty")
+    if not admin_pass:
+        raise ValueError("set_self_registration_enabled: admin_pass must be non-empty")
+
+    login_csrf = _fetch_csrf_from_page(client, "/login")
+    _web_login(client, admin_user, admin_pass, login_csrf)
+    form_csrf = _fetch_csrf_from_page(client, "/admin/config")
+    _post_and_assert_status(
+        client,
+        "/admin/config/web_security",
+        {
+            "self_registration_enabled": "true" if enabled else "false",
+            "csrf_token": form_csrf,
+        },
+        expected_status=httpx.codes.OK,
+    )
