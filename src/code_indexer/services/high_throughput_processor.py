@@ -1358,6 +1358,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     },
                     limit=1000,
                     collection_name=collection_name,
+                    # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
+                    # path (it mutates hidden_branches on these points, or
+                    # is invoked as part of deleting the file) -- it must
+                    # self-heal a corrupt id_index.bin rather than
+                    # silently giving up and leaving the file's records
+                    # untouched.
+                    self_heal=True,
                 )
                 if not isinstance(content_points, list):
                     logger.error(
@@ -1514,6 +1521,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     },
                     limit=1000,
                     collection_name=collection_name,
+                    # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
+                    # path (it mutates hidden_branches on these points, or
+                    # is invoked as part of deleting the file) -- it must
+                    # self-heal a corrupt id_index.bin rather than
+                    # silently giving up and leaving the file's records
+                    # untouched.
+                    self_heal=True,
                 )
                 if not isinstance(content_points, list):
                     logger.error(
@@ -1788,7 +1802,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             try:
                 return list(
                     self.vector_store_client.fetch_points_for_paths(
-                        collection_name, raw_paths_to_hide
+                        collection_name,
+                        raw_paths_to_hide,
+                        # Bug #1969 Round 5 (R4-F2): write-adjacent (these
+                        # points are about to be hidden) -- self-heal a
+                        # corrupt id_index.bin rather than silently
+                        # giving up.
+                        self_heal=True,
                     )
                 )
             except Exception as e:

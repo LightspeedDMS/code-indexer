@@ -135,7 +135,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.id_index_manager import (
@@ -431,6 +431,13 @@ def _extract_lightweight_identity_fields(
             "has_path": "path" in payload,
             "has_content": "content" in payload,
             "has_hidden_branches_key": "hidden_branches" in payload,
+            # Bug #1969 Round 4 (R3-F1): the path VALUE (a small, bounded
+            # string) -- never a memory concern like the large `content`/
+            # `vector` fields Bug #1558 excludes above. Needed by
+            # recover_from_corrupt_id_index_by_wiping_files() to surface
+            # WHICH relative paths it wiped, so a same-run reprocessing
+            # caller can re-queue them.
+            "path": payload.get("path"),
         }
     return {
         "id": point_id,
@@ -750,6 +757,139 @@ def clear_pending_dedup_outcome(collection_dir: "Path | str") -> bool:
         return False
     _fsync_dir(collection_dir)
     return True
+
+
+# Bug #1969 Round 5 (R4-F1, P2 BLOCKING): durable, crash-safe replacement
+# for Round 4's in-memory-only FilesystemVectorStore._pending_self_heal_
+# reprocess_paths queue. That queue was populated ad hoc by whichever
+# caller happened to trigger a wipe and was drained by exactly ONE code
+# path (smart_indexer.py's _do_incremental_index post-pass drain) --
+# every OTHER trigger site (end_indexing's finally block, upsert_points
+# during a resumed run, scroll_points under a non-git detect_deletions
+# reconcile) populated it too, but nothing ever drained it there, AND the
+# in-memory queue itself is lost on process exit regardless. Recording
+# here instead -- INSIDE recover_from_corrupt_id_index_by_wiping_files(),
+# the SINGLE choke point every self-heal call site already funnels
+# through -- guarantees the record exists regardless of which caller
+# triggered the wipe, and a fsynced sidecar file survives a process
+# crash/restart. Mirrors this module's own established durable-marker
+# pattern (`.dedup-repair-pending`, `.dedup-outcome-pending`) -- this is
+# operational bookkeeping, not a new "setting".
+SELF_HEAL_REPROCESS_PENDING_FILENAME = ".self-heal-reprocess-pending"
+
+
+def _self_heal_reprocess_pending_path(collection_dir: Path) -> Path:
+    return collection_dir / SELF_HEAL_REPROCESS_PENDING_FILENAME
+
+
+def _write_self_heal_reprocess_pending_file(
+    collection_dir: Path, paths: FrozenSet[str]
+) -> None:
+    """Atomic + durable overwrite of the sidecar with EXACTLY `paths`
+    (same pattern as `_write_pending_outcome_durably`: temp file in the
+    SAME directory, flush+fsync, os.replace, then an nfs_safe_fsync of
+    the containing directory). Callers decide merge-vs-replace semantics;
+    this is the low-level writer only."""
+    pending_path = _self_heal_reprocess_pending_path(collection_dir)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(collection_dir), suffix=".tmp")
+    fd_owned = False
+    try:
+        try:
+            tmp_f = os.fdopen(tmp_fd, "w")
+            fd_owned = True
+            with tmp_f:
+                json.dump({"paths": sorted(paths)}, tmp_f)
+                tmp_f.flush()
+                nfs_safe_fsync(tmp_f.fileno())
+            os.replace(tmp_path, str(pending_path))
+        finally:
+            if not fd_owned:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(collection_dir)
+
+
+def read_pending_self_heal_reprocess_paths(
+    collection_dir: "Path | str",
+) -> FrozenSet[str]:
+    """Read the durable self-heal reprocess sidecar for `collection_dir`.
+    Never mutates. Returns an empty frozenset when the sidecar is absent,
+    unreadable, or malformed (best-effort recovery -- a genuinely
+    unreadable sidecar cannot be replayed anyway, matching
+    `read_pending_dedup_outcome`'s own established tolerance)."""
+    pending_path = _self_heal_reprocess_pending_path(Path(collection_dir))
+    try:
+        with open(pending_path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "read_pending_self_heal_reprocess_paths: %s exists but could "
+            "not be read/parsed (%s) -- treating as empty",
+            pending_path,
+            exc,
+        )
+        return frozenset()
+    if not isinstance(data, dict):
+        return frozenset()
+    paths = data.get("paths")
+    if not isinstance(paths, list):
+        return frozenset()
+    return frozenset(p for p in paths if isinstance(p, str) and p)
+
+
+def record_self_heal_reprocess_pending(
+    collection_dir: "Path | str", paths: FrozenSet[str]
+) -> None:
+    """Durably record `paths` as needing reprocessing -- MERGES with any
+    already-pending set (a prior wipe whose own reprocessing has not yet
+    completed) rather than overwriting it, so two wipes recorded before
+    anything drains either one never lose the first one's paths. No-op
+    for an empty `paths`."""
+    if not paths:
+        return
+    collection_dir = Path(collection_dir)
+    existing = read_pending_self_heal_reprocess_paths(collection_dir)
+    merged = existing | paths
+    _write_self_heal_reprocess_pending_file(collection_dir, merged)
+
+
+def clear_self_heal_reprocess_paths(
+    collection_dir: "Path | str", paths: Iterable[str]
+) -> None:
+    """Remove `paths` from the durable pending set -- callers MUST call
+    this ONLY after those paths have been successfully (not merely
+    attempted, and not cancelled) reprocessed; clearing any earlier would
+    lose the record on a crash before reprocessing actually finished.
+    Idempotent. Deletes the sidecar file entirely once the remaining set
+    is empty. A no-op (including for a nonexistent sidecar) when nothing
+    changes."""
+    collection_dir = Path(collection_dir)
+    to_clear = set(paths)
+    if not to_clear:
+        return
+    existing = read_pending_self_heal_reprocess_paths(collection_dir)
+    remaining = existing - to_clear
+    if remaining == existing:
+        return
+    pending_path = _self_heal_reprocess_pending_path(collection_dir)
+    if not remaining:
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            return
+        _fsync_dir(collection_dir)
+        return
+    _write_self_heal_reprocess_pending_file(collection_dir, frozenset(remaining))
 
 
 def _accumulate_pending_outcome_durably(
@@ -1759,6 +1899,13 @@ class DuplicateFileWipeResult:
     #: files (every chunk of each implicated file, not just the
     #: colliding ones).
     records_deleted: int = 0
+    #: Bug #1969 Round 4 (R3-F1): the relative path (``payload.path``) of
+    #: every wiped file, so a caller (IDIndexManager.rebuild_from_
+    #: vectors(), and ultimately smart_indexer.py's incremental indexing
+    #: loop) can re-queue these files for reprocessing within the SAME
+    #: run instead of leaving them permanently unsearchable until an
+    #: unrelated edit or a manual --reconcile.
+    wiped_relative_paths: FrozenSet[str] = field(default_factory=frozenset)
 
 
 def _try_parse_record_file_identity(
@@ -1905,6 +2052,27 @@ def recover_from_corrupt_id_index_by_wiping_files(
     # been deleted.
     vector_dim, space = _resolve_hnsw_build_params(collection_dir)
 
+    # Pure planning pass: compute which relative paths will be wiped --
+    # NO deletion happens here.
+    wiped_relative_paths: set = set()
+    for path, record in identity_by_path.items():
+        identity = _try_parse_record_file_identity(record)
+        if identity is not None and identity in implicated_files:
+            payload = record.get("payload") or {}
+            rel_path = payload.get("path")
+            if isinstance(rel_path, str) and rel_path:
+                wiped_relative_paths.add(rel_path)
+
+    # Bug #1969 Round 5 (R4-F1): durably record the about-to-be-wiped
+    # paths BEFORE the first physical deletion below -- a crash anywhere
+    # after this point (mid-deletion, or during the HNSW rebuild's long
+    # lock hold, R3-F5) still leaves a durable record for the NEXT run's
+    # own consult-and-fold-in step to pick up, so the file is never
+    # silently, permanently lost regardless of which caller (upsert_
+    # points, end_indexing, scroll_points, in this run or a future one)
+    # triggered this wipe.
+    record_self_heal_reprocess_pending(collection_dir, frozenset(wiped_relative_paths))
+
     records_deleted = 0
     for path, record in identity_by_path.items():
         identity = _try_parse_record_file_identity(record)
@@ -1913,20 +2081,22 @@ def recover_from_corrupt_id_index_by_wiping_files(
             records_deleted += 1
 
     logger.warning(
-        "Bug #1969 Round 3: recover_from_corrupt_id_index_by_wiping_files "
+        "Bug #1969 Round 4: recover_from_corrupt_id_index_by_wiping_files "
         "wiped %d record(s) across %d implicated file(s) in %s -- "
         "id_index.bin was corrupt/unreadable so no per-chunk winner "
         "could be resolved; every chunk of each implicated file was "
         "deleted (not just the colliding ones) so the file is fully "
-        "MISSING rather than half-indexed, and will be fully "
-        "reprocessed on the next real re-index.",
+        "MISSING rather than half-indexed. Wiped relative paths: %s.",
         records_deleted,
         len(implicated_files),
         collection_dir,
+        sorted(wiped_relative_paths),
     )
 
     _rebuild_derived_artifacts(collection_dir, vector_dim, space)
 
     return DuplicateFileWipeResult(
-        file_hashes_wiped=len(implicated_files), records_deleted=records_deleted
+        file_hashes_wiped=len(implicated_files),
+        records_deleted=records_deleted,
+        wiped_relative_paths=frozenset(wiped_relative_paths),
     )

@@ -8,7 +8,7 @@ import logging
 import os
 import struct
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, FrozenSet, List, Tuple
 import threading
 
 from code_indexer.services.temporal.temporal_structure_marker import (
@@ -100,6 +100,16 @@ class IDIndexManager:
     def __init__(self):
         """Initialize IDIndexManager."""
         self._lock = threading.RLock()  # Reentrant lock to allow nested locking
+        # Bug #1969 Round 4 (R3-F1): the relative paths a self-heal
+        # escalation (recover_from_corrupt_id_index_by_wiping_files) wiped
+        # during the MOST RECENT rebuild_from_vectors() call on THIS
+        # instance -- reset to empty at the start of every call, populated
+        # only when that specific escalation actually runs. Read by
+        # FilesystemVectorStore._load_id_index() off the SAME
+        # IDIndexManager instance it already holds a reference to, so the
+        # indexing orchestrator can guarantee same-run reprocessing
+        # instead of leaving a wiped file permanently unsearchable.
+        self.last_self_heal_wiped_relative_paths: FrozenSet[str] = frozenset()
 
     @staticmethod
     def _read_exact(f, size: int, context: str) -> bytes:
@@ -541,6 +551,11 @@ class IDIndexManager:
         """
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
+        # Bug #1969 Round 4 (R3-F1): reset at the START of every call so a
+        # reused instance never leaks a PRIOR call's wiped paths into a
+        # later call that had nothing to wipe.
+        self.last_self_heal_wiped_relative_paths = frozenset()
+
         try:
             id_index = self.scan_vectors_for_id_map(collection_path)
         except DuplicateSourceIdError:
@@ -602,7 +617,12 @@ class IDIndexManager:
                     "file-wipe recovery.",
                     collection_path,
                 )
-                recover_from_corrupt_id_index_by_wiping_files(collection_path)
+                wipe_result = recover_from_corrupt_id_index_by_wiping_files(
+                    collection_path
+                )
+                self.last_self_heal_wiped_relative_paths = (
+                    wipe_result.wiped_relative_paths
+                )
             # Retry exactly once -- a second failure of any kind
             # propagates unchanged (bounded, never a loop), whether the
             # repair above ran normally or was escalated to the whole-
