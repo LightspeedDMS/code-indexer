@@ -659,6 +659,10 @@ class WebSecurityConfig:
     # Story #563: When True, non-SSO accounts are denied REST/MCP API access (403).
     # They can only use the Web UI. SSO accounts are unaffected. Default OFF.
     restrict_non_sso_to_web_ui: bool = False
+    # Hotfix: When True, unauthenticated callers may self-register a
+    # normal_user account via POST /auth/register. When False the endpoint
+    # returns 403 before any account lookup/creation. Default OFF (closed).
+    self_registration_enabled: bool = False
 
 
 @dataclass

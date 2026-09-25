@@ -23,10 +23,11 @@ import uuid
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import httpx
 import pytest
 
 from tests.e2e.conftest import E2EConfig
-from tests.e2e.helpers import run_cidx
+from tests.e2e.helpers import run_cidx, set_self_registration_enabled
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +215,39 @@ def test_auth_register_and_login(
 ) -> None:
     """cidx auth register creates a user account; login as that user succeeds.
 
+    Self-registration is disabled by default, so it is enabled through the
+    admin Web UI Config screen for the duration of this test and disabled
+    again afterwards.
+
     Skips only if the CLI output explicitly contains "no such command",
     indicating the register subcommand is absent in this build.
     Any other failure is a real test failure.
     """
+    with httpx.Client(base_url=e2e_server_url) as web_client:
+        set_self_registration_enabled(
+            web_client,
+            admin_user=e2e_config.admin_user,
+            admin_pass=e2e_config.admin_pass,
+            enabled=True,
+        )
+        try:
+            _register_and_login(e2e_server_url, e2e_config, e2e_cli_env, tmp_path)
+        finally:
+            set_self_registration_enabled(
+                web_client,
+                admin_user=e2e_config.admin_user,
+                admin_pass=e2e_config.admin_pass,
+                enabled=False,
+            )
+
+
+def _register_and_login(
+    e2e_server_url: str,
+    e2e_config: E2EConfig,
+    e2e_cli_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """Body of test_auth_register_and_login (runs with self-registration on)."""
     init_result = _init_remote(
         e2e_server_url,
         tmp_path,

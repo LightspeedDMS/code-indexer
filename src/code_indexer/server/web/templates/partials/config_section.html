@@ -3121,6 +3121,55 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Web Security Settings Section (self-registration gate hotfix) -->
+<details class="config-section" id="section-web-security">
+    <summary>
+        <h2>Web Security</h2>
+    </summary>
+    <p class="section-description">
+        Controls whether unauthenticated callers may create their own account via
+        <code>POST /auth/register</code>. When disabled (the default), the endpoint returns
+        HTTP 403 and no account is looked up or created; administrators create accounts
+        instead. Changes take effect immediately, without a restart.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-web-security">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Self-Registration Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.web_security.self_registration_enabled else 'No' }}</td>
+                    <td class="config-description">Whether anyone can create a normal user account via POST /auth/register without logging in (default: No)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('web-security')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-web-security" method="post" action="/admin/config/web_security" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.web_security %}
+            <div class="validation-error">{{ validation_errors.web_security }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="web-security-self-registration-enabled">
+                    Self-Registration Enabled
+                    <select id="web-security-self-registration-enabled" name="self_registration_enabled">
+                        <option value="true" {% if config.web_security.self_registration_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.web_security.self_registration_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Disabled by default. Enabling lets any unauthenticated caller create a live normal user account.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('web-security')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 
 <!-- TOTP Step-Up Elevation Settings Section -->
 <details class="config-section" id="section-totp_elevation">
