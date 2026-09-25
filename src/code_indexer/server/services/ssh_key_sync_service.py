@@ -25,6 +25,11 @@ from code_indexer.server.services.ssh_config_manager import (
     HostEntry,
     SSHConfigManager,
 )
+from code_indexer.server.services.ssh_input_validation import (
+    RESERVED_SSH_FILE_NAMES,
+    is_valid_hostname,
+    is_valid_key_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +149,14 @@ class SSHKeySyncService:
         errors = []
 
         # Write keys that exist in backend but not yet on disk
+        #
+        # _write_key_file is the single gate for a row's key files (NUL
+        # byte, a '..' path component, a reserved OpenSSH filename, then
+        # containment -- NUL is checked before Path.resolve(), which raises
+        # ValueError for it). A row it refuses is skipped on its own and
+        # reported by fingerprint; it is never added to `written`, so it
+        # never reaches the manifest. All per-row work stays inside the
+        # per-row try, so one row can never abort the rest of sync().
         for key_data in backend_keys:
             name = key_data["name"]
             try:
@@ -161,6 +174,9 @@ class SSHKeySyncService:
                         continue
                 public_key = key_data.get("public_key")
 
+                # Path.exists() never raises for a NUL byte (unlike
+                # .resolve()/.write_text()), so this stays safe even for a
+                # row _write_key_file will go on to refuse below.
                 private_path = self._ssh_dir / name
                 public_path = self._ssh_dir / f"{name}.pub"
 
@@ -171,7 +187,14 @@ class SSHKeySyncService:
                     needs_write = True
 
                 if needs_write:
-                    self._write_key_file(name, private_key or "", public_key or "")
+                    if not self._write_key_file(
+                        name, private_key or "", public_key or ""
+                    ):
+                        errors.append(
+                            f"skipped row with fingerprint "
+                            f"{key_data.get('fingerprint')!r}"
+                        )
+                        continue
                     written.append(name)
                     logger.info(f"SSH key synced to disk: {name}")
                 else:
@@ -192,10 +215,32 @@ class SSHKeySyncService:
         # node A, node B removing its now-orphaned local copy on the next sync)
         # still works, because every node shares one backend identity and
         # therefore one namespace.
+        #
+        # A stale name is removed only if it names a key file directly in
+        # ssh_dir: _key_file_name_refusal() must accept it and its parent
+        # directory must resolve to ssh_dir (the final component is not
+        # followed, since unlink() removes a link, not its target). A name
+        # that fails either check is left on disk, logged by repr() (never
+        # raw), and -- not being in `written` or the backend -- drops out of
+        # the manifest below.
         removed = []
         stale_names = managed_names - backend_names
+        ssh_dir_resolved = self._ssh_dir.resolve()
         for name in stale_names:
             try:
+                refusal = self._key_file_name_refusal(name)
+                if refusal is None and (
+                    (self._ssh_dir / name).parent.resolve() != ssh_dir_resolved
+                ):
+                    refusal = "path escapes the ssh directory"
+                if refusal is not None:
+                    logger.warning(
+                        "SSH key sync: not removing stale manifest entry %r -- %s",
+                        name,
+                        refusal,
+                    )
+                    errors.append(f"stale entry {name!r} not removed: {refusal}")
+                    continue
                 private_path = self._ssh_dir / name
                 public_path = self._ssh_dir / f"{name}.pub"
                 if private_path.exists():
@@ -254,9 +299,41 @@ class SSHKeySyncService:
             entries: List[HostEntry] = []
             for key_data in backend_keys:
                 name = key_data["name"]
+                # Re-validate every row read from the shared backend,
+                # independently of the write-file loop above -- this
+                # method is also called with the FULL backend_keys list,
+                # not just the subset that passed that loop's check.
+                # Skipping here (rather than letting SSHConfigManager's
+                # format-time backstop raise) keeps one invalid row from
+                # aborting write_config() for every OTHER legitimate key's
+                # Host block in this same sync. The row's name is not
+                # itself valid here, so it is never logged raw -- only its
+                # fingerprint identifies it.
+                if not is_valid_key_name(name):
+                    fingerprint = key_data.get("fingerprint")
+                    logger.warning(
+                        "SSH config sync: skipping a backend row with "
+                        "fingerprint %r -- its stored name is not valid "
+                        "for a config line",
+                        fingerprint,
+                    )
+                    errors.append(
+                        f"ssh-config: skipped row with fingerprint {fingerprint!r}"
+                    )
+                    continue
                 hosts = key_data.get("hosts") or []
                 key_path = str(self._ssh_dir / name)
                 for hostname in hosts:
+                    if not is_valid_hostname(hostname):
+                        logger.warning(
+                            "SSH config sync: skipping an invalid host "
+                            "mapping for key %r",
+                            name,
+                        )
+                        errors.append(
+                            f"ssh-config: skipped invalid host mapping for key {name!r}"
+                        )
+                        continue
                     entries.append(
                         HostEntry(
                             host=hostname,
@@ -381,17 +458,70 @@ class SSHKeySyncService:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _write_key_file(self, name: str, private_key: str, public_key: str) -> None:
+    @staticmethod
+    def _key_file_name_refusal(name: str) -> Optional[str]:
+        """Return why ``name`` may not map to a key file in ssh_dir, or None.
+
+        Applied to every name this service writes or removes: a NUL byte
+        (checked first, since ``Path.resolve()`` raises for it), a ``..``
+        path component, or a name coinciding with an OpenSSH-managed file
+        in the ssh directory (``RESERVED_SSH_FILE_NAMES``). Containment is
+        checked separately by each caller.
+        """
+        if "\x00" in name:
+            return "name contains a NUL byte"
+        if ".." in Path(name).parts:
+            return "name contains a '..' path component"
+        if name in RESERVED_SSH_FILE_NAMES:
+            return "name coincides with an OpenSSH-managed file in the ssh directory"
+        return None
+
+    def _write_key_file(self, name: str, private_key: str, public_key: str) -> bool:
         """
         Write key files with correct permissions (600 private, 644 public).
+
+        Writing a key FILE is not a config-line surface, so this method
+        applies filesystem containment checks rather than the
+        ``~/.ssh/config`` grammar: a resolved path escaping ``ssh_dir``
+        (e.g. an absolute ``name`` like ``"/etc/passwd"``, which
+        ``self._ssh_dir / name`` would silently resolve to verbatim, since
+        joining a `Path` with an absolute right-hand side discards the left
+        side entirely), a ``..`` path component (which containment alone
+        would not catch if it happens to resolve back inside ``ssh_dir``),
+        a NUL byte (which raises inside ``Path.resolve()`` rather than
+        failing cleanly), and a name coinciding with an OpenSSH-managed
+        file that lives directly in the ssh directory. None of these checks
+        touch the config-line grammar, so every name that stays within
+        ``ssh_dir`` and names no such file (spaces, ``#``, ``@``, even a
+        literal newline) is still written.
 
         Args:
             name: Key name — used as filename under ssh_dir.
             private_key: Private key content (PEM/OpenSSH).  Empty string = skip.
             public_key: Public key content.  Empty string = skip.
+
+        Returns:
+            True if the write proceeded (or was a legitimate no-op because
+            both contents were empty); False if refused.
         """
+        refusal = self._key_file_name_refusal(name)
+        if refusal is not None:
+            logger.warning("SSH key sync: refusing to write key file -- %s", refusal)
+            return False
+
         private_path = self._ssh_dir / name
         public_path = self._ssh_dir / f"{name}.pub"
+        ssh_dir_resolved = self._ssh_dir.resolve()
+
+        if not (
+            private_path.resolve().parent == ssh_dir_resolved
+            and public_path.resolve().parent == ssh_dir_resolved
+        ):
+            logger.warning(
+                "SSH key sync: refusing to write key file -- resolved path "
+                "escapes the ssh directory"
+            )
+            return False
 
         if private_key:
             private_path.write_text(private_key)
@@ -400,6 +530,8 @@ class SSHKeySyncService:
         if public_key:
             public_path.write_text(public_key)
             os.chmod(public_path, 0o644)
+
+        return True
 
     def _read_manifest_document(self) -> Dict[str, Any]:
         """Read the raw manifest document.

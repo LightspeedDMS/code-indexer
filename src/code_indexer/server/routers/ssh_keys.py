@@ -23,6 +23,7 @@ from ..services.ssh_key_generator import (
     InvalidKeyNameError,
     KeyAlreadyExistsError,
 )
+from ..services.ssh_input_validation import InvalidHostnameError
 
 
 # Request/Response Models
@@ -271,6 +272,8 @@ def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
         raise HTTPException(status_code=404, detail=f"Key not found: {name}")
     except HostConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except InvalidHostnameError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # Register routes with proper decorators

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .ssh_input_validation import RESERVED_SSH_FILE_NAMES, is_valid_key_name
+
 
 class InvalidKeyNameError(Exception):
     """Raised when key name contains invalid characters."""
@@ -142,26 +144,27 @@ class SSHKeyGenerator:
 
     def _validate_key_name(self, key_name: str) -> None:
         """
-        Validate key name for security.
+        Validate key name for safe use in ~/.ssh/config.
+
+        Delegates to the shared ``ssh_input_validation.is_valid_key_name``
+        grammar -- the single source of truth this module, the SSH config
+        manager, the SSH key manager, and the cluster sync service all
+        enforce.
 
         Args:
             key_name: Key name to validate
 
         Raises:
-            InvalidKeyNameError: If key name is invalid
+            InvalidKeyNameError: If key name is invalid. The rejected value
+                is embedded via ``repr()`` so a newline/control character
+                in ``key_name`` can never add a line to a log or
+                error message derived from this exception.
         """
-        # Check for path traversal
-        if "/" in key_name or ".." in key_name:
-            raise InvalidKeyNameError("Key name contains invalid characters")
-
-        # Check for command injection
-        if ";" in key_name:
-            raise InvalidKeyNameError("Key name contains invalid characters")
-
-        # Check for dash prefix (could be interpreted as command flag)
-        if key_name.startswith("-"):
-            raise InvalidKeyNameError("Key name cannot start with dash")
-
-        # Check length
-        if len(key_name) > 255:
-            raise InvalidKeyNameError("Key name too long")
+        if key_name in RESERVED_SSH_FILE_NAMES:
+            raise InvalidKeyNameError(
+                f"Key name is reserved for an OpenSSH file: {key_name!r}"
+            )
+        if not is_valid_key_name(key_name):
+            raise InvalidKeyNameError(
+                f"Key name contains invalid characters: {key_name!r}"
+            )
