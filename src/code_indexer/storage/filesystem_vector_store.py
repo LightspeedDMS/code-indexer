@@ -1649,8 +1649,11 @@ class FilesystemVectorStore:
                     _end_indexing_id_cache_key not in self._id_index
                     or not self._id_index[_end_indexing_id_cache_key]
                 ):
+                    # Bug #1969 F1: end_indexing() is a genuine write/
+                    # indexing-path caller -- opt in to the one-shot
+                    # dedup-repair self-heal.
                     self._id_index[_end_indexing_id_cache_key] = self._load_id_index(
-                        collection_name, subdirectory
+                        collection_name, subdirectory, self_heal=True
                     )
 
                 if _end_indexing_id_cache_key in self._id_index:
@@ -2840,8 +2843,11 @@ class FilesystemVectorStore:
         # Ensure ID index exists for this collection (also loads file path cache)
         with self._id_index_lock:
             if _upsert_cache_key not in self._id_index:
+                # Bug #1969 F1: upsert_points() is a genuine write/
+                # indexing-path caller -- opt in to the one-shot
+                # dedup-repair self-heal.
                 self._id_index[_upsert_cache_key] = self._load_id_index(
-                    collection_name, subdirectory
+                    collection_name, subdirectory, self_heal=True
                 )
             # Ensure file path cache exists (in case ID index was manually populated)
             if collection_name not in self._file_path_cache:
@@ -3675,7 +3681,11 @@ class FilesystemVectorStore:
         return set(id_index.keys())
 
     def _load_id_index(
-        self, collection_name: str, subdirectory: Optional[str] = None
+        self,
+        collection_name: str,
+        subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> Dict[str, Path]:
         """Load ID index from persistent binary file for fast loading.
 
@@ -3698,6 +3708,15 @@ class FilesystemVectorStore:
                 ``id_index.bin`` (and its ``vector_*.json`` rglob fallback)
                 is read from its REAL location instead of a non-existent
                 top-level directory.
+            self_heal: Bug #1969 F1 -- forwarded to
+                ``IDIndexManager.rebuild_from_vectors()``'s ``self_heal``
+                kwarg when the on-disk index is corrupt AND the scan finds
+                a duplicate point_id. Defaults to False (the original
+                hard-fail-immediately behavior): this method is called from
+                BOTH write paths (upsert_points/end_indexing) AND
+                query-time read paths (search, count_points, list_files,
+                the daemon cache) -- only the genuine write-path callers
+                pass True.
 
         Returns:
             Dictionary mapping point IDs to file paths
@@ -3716,7 +3735,9 @@ class FilesystemVectorStore:
                 collection_name,
                 exc,
             )
-            return index_manager.rebuild_from_vectors(collection_path)
+            return index_manager.rebuild_from_vectors(
+                collection_path, self_heal=self_heal
+            )
 
         if index:
             return index

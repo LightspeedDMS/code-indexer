@@ -133,12 +133,14 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.id_index_manager import (
     CorruptIDIndexError,
+    DuplicateSourceIdError,
     IDIndexManager,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
@@ -181,6 +183,55 @@ _MAX_MALFORMED_SAMPLE_SIZE = 5
 _MAX_SKIPPED_GROUP_SAMPLE_SIZE = 5
 
 
+class DedupRepairAmbiguousReason(Enum):
+    """Bug #1969 Round 3: distinguishes WHY DedupRepairAmbiguousError was
+    raised, so a caller can decide PROGRAMMATICALLY (never by parsing the
+    exception's message text) whether automatic escalation is safe. One
+    member per raise site in this module.
+
+    Only CORRUPT_ID_INDEX is safe for IDIndexManager.rebuild_from_
+    vectors()'s self-heal escalation (Round 3): id_index.bin itself
+    failed to load, so _plan_dedup's own winner-lookup has no
+    trustworthy reference and cannot pick a per-chunk winner -- but that
+    recovery (a whole-file wipe of every implicated file) does not
+    depend on id_index.bin at all, so it can proceed safely.
+
+    Every OTHER reason means this repair's own identity/metadata
+    assumptions do not hold for this collection's data (a malformed
+    record, a foreign/inconsistent unique_key shape, an undeterminable
+    HNSW build parameter, an internal invariant violation, or an
+    anomalous stale-marker-plus-empty-tree state). Auto-resolving those
+    would be genuinely unsafe -- they must continue to propagate as hard
+    failures requiring human review, exactly as before this attribute
+    existed."""
+
+    #: id_index.bin itself failed to load (_plan_dedup, AC30) -- the ONLY
+    #: reason safe for automatic whole-file-wipe escalation.
+    CORRUPT_ID_INDEX = "corrupt_id_index"
+    #: A genuinely malformed/unreadable/undecodable vector record was
+    #: found during the pre-mutation scan.
+    MALFORMED_RECORDS = "malformed_records"
+    #: A stale crash marker survives alongside a now-empty JSON tree.
+    STALE_MARKER_EMPTY_TREE = "stale_marker_empty_tree"
+    #: One file group has a mix of records with and without line_start.
+    MIXED_LINE_START_PRESENCE = "mixed_line_start_presence"
+    #: A survivor passed the whole-collection identity gate but its
+    #: unique_key is unparseable during renumber planning -- an internal
+    #: invariant violation (the gate itself would have a bug), not a
+    #: legitimate foreign-format record.
+    INTERNAL_INVARIANT_VIOLATION = "internal_invariant_violation"
+    #: collection_meta.json could not be read/parsed to determine the
+    #: authoritative HNSW build parameters.
+    HNSW_PARAMS_META_UNREADABLE = "hnsw_params_meta_unreadable"
+    #: collection_meta.json does not contain a JSON object.
+    HNSW_PARAMS_META_NOT_OBJECT = "hnsw_params_meta_not_object"
+    #: Neither hnsw_index.vector_dim nor top-level vector_size is a valid
+    #: positive integer.
+    HNSW_PARAMS_VECTOR_DIM_UNDETERMINABLE = "hnsw_params_vector_dim_undeterminable"
+    #: hnsw_index.space is missing or not a recognized distance metric.
+    HNSW_PARAMS_SPACE_UNDETERMINABLE = "hnsw_params_space_undeterminable"
+
+
 class DedupRepairAmbiguousError(Exception):
     """Raised when a shifted-label file group cannot be safely,
     unambiguously repaired from metadata alone, when a malformed vector
@@ -193,7 +244,16 @@ class DedupRepairAmbiguousError(Exception):
     stale-marker-plus-empty-tree case, WITHOUT ever touching the
     pre-existing marker) -- the collection is guaranteed to be left
     byte-for-byte untouched. Requires manual operator review; never
-    auto-resolved."""
+    auto-resolved.
+
+    Bug #1969 Round 3: carries a `reason` attribute (a
+    DedupRepairAmbiguousReason member) identifying exactly which raise
+    site fired -- see that enum's docstring for which single reason is
+    safe for automatic escalation and why every other one is not."""
+
+    def __init__(self, message: str, *, reason: DedupRepairAmbiguousReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -942,7 +1002,8 @@ def _plan_dedup(
             f"Dedup repair refused for {collection_dir}: id_index.bin is "
             f"corrupt ({exc}) -- cannot resolve {len(duplicated)} "
             f"duplicate point_id(s) without a trustworthy winner "
-            f"reference. Collection left untouched."
+            f"reference. Collection left untouched.",
+            reason=DedupRepairAmbiguousReason.CORRUPT_ID_INDEX,
         ) from exc
 
     winners: Dict[str, Optional[Path]] = {}
@@ -1040,7 +1101,8 @@ def _plan_renumber(
                 f"passed the whole-collection identity gate but its "
                 f"unique_key ({unique_key!r}) is unparseable here "
                 f"({exc}). Collection left untouched; requires manual "
-                f"review."
+                f"review.",
+                reason=DedupRepairAmbiguousReason.INTERNAL_INVARIANT_VIOLATION,
             ) from exc
 
         groups.setdefault((project_id, file_hash), []).append(
@@ -1066,7 +1128,8 @@ def _plan_renumber(
                 f"{project_id!r}/{file_hash!r} has a mix of records with "
                 f"and without line_start -- cannot reliably order them "
                 f"for canonical renumbering. Collection left untouched; "
-                f"requires manual review."
+                f"requires manual review.",
+                reason=DedupRepairAmbiguousReason.MIXED_LINE_START_PRESENCE,
             )
 
         if all(has_line_start):
@@ -1178,14 +1241,16 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"Dedup repair refused for {collection_dir}: could not read "
             f"{meta_path} to determine the authoritative HNSW build "
             f"parameters (vector dimension / distance metric) -- "
-            f"refusing to guess ({exc}). Collection left untouched."
+            f"refusing to guess ({exc}). Collection left untouched.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_META_UNREADABLE,
         ) from exc
     if not isinstance(meta, dict):
         raise DedupRepairAmbiguousError(
             f"Dedup repair refused for {collection_dir}: {meta_path} does "
             f"not contain a JSON object -- cannot determine the "
             f"authoritative HNSW build parameters. Collection left "
-            f"untouched."
+            f"untouched.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_META_NOT_OBJECT,
         )
 
     hnsw_index = meta.get("hnsw_index")
@@ -1222,7 +1287,8 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"vector_size is a valid positive integer) -- refusing to "
             f"guess and rebuild the HNSW index with a potentially WRONG "
             f"dimension. Collection left untouched; requires manual "
-            f"review."
+            f"review.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_VECTOR_DIM_UNDETERMINABLE,
         )
     if space is None:
         raise DedupRepairAmbiguousError(
@@ -1230,7 +1296,8 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"determine the authoritative HNSW distance metric from "
             f"{meta_path}'s hnsw_index.space -- refusing to guess "
             f"(defaulting could rebuild with the WRONG metric). "
-            f"Collection left untouched; requires manual review."
+            f"Collection left untouched; requires manual review.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_SPACE_UNDETERMINABLE,
         )
 
     return vector_dim, space
@@ -1320,8 +1387,14 @@ def _rebuild_derived_artifacts(
     branch-isolation semantics (Bug #306) survive the rebuild unchanged
     (closes Codex HIGH finding 1), and durably restores that same branch
     context in collection_meta.json afterward so it survives for a LATER
-    rebuild too (closes Codex MEDIUM round-3 finding)."""
-    IDIndexManager().rebuild_from_vectors(collection_dir)
+    rebuild too (closes Codex MEDIUM round-3 finding).
+
+    Bug #1969 F2: self_heal=False is EXPLICIT here -- a duplicate found by
+    THIS internal rebuild must never trigger a SECOND repair_duplicate_
+    and_shifted_points() call recursively; it must raise
+    DuplicateSourceIdError immediately, exactly as it did before Bug
+    #1969's self-heal existed."""
+    IDIndexManager().rebuild_from_vectors(collection_dir, self_heal=False)
 
     current_branch = _infer_current_branch(collection_dir)
     HNSWIndexManager(vector_dim=vector_dim, space=space).rebuild_from_vectors(
@@ -1385,7 +1458,8 @@ def repair_duplicate_and_shifted_points(
             f"(sample: {[(str(p), reason) for p, reason in sample]}) -- "
             f"refusing to mutate ANY record in this collection before "
             f"the malformed one(s) can be reviewed. Collection left "
-            f"untouched."
+            f"untouched.",
+            reason=DedupRepairAmbiguousReason.MALFORMED_RECORDS,
         )
 
     if not id_to_paths:
@@ -1407,7 +1481,8 @@ def repair_duplicate_and_shifted_points(
                 f"may have been unexpectedly lost mid-repair). Refusing "
                 f"to silently converge over a potentially stale HNSW "
                 f"index. Collection left untouched (marker NOT "
-                f"deleted); requires manual review."
+                f"deleted); requires manual review.",
+                reason=DedupRepairAmbiguousReason.STALE_MARKER_EMPTY_TREE,
             )
         return DedupRepairResult()
 
@@ -1670,4 +1745,188 @@ def repair_duplicate_and_shifted_points(
         hnsw_rebuilt=True,
         groups_skipped_renumber=len(skipped_groups),
         skipped_renumber_file_hashes=skipped_sample,
+    )
+
+
+@dataclass
+class DuplicateFileWipeResult:
+    """Outcome of one :func:`recover_from_corrupt_id_index_by_wiping_files`
+    call."""
+
+    #: Number of distinct (project_id, file_hash) files wholly wiped.
+    file_hashes_wiped: int = 0
+    #: Total physical vector_*.json records deleted across all wiped
+    #: files (every chunk of each implicated file, not just the
+    #: colliding ones).
+    records_deleted: int = 0
+
+
+def _try_parse_record_file_identity(
+    record: Dict[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """Best-effort (project_id, file_hash) extraction from one raw
+    lightweight identity record's payload.unique_key -- returns None
+    (never raises) for anything unparseable, so callers can uniformly
+    skip records this recovery cannot safely classify."""
+    payload = record.get("payload") or {}
+    unique_key = payload.get("unique_key")
+    try:
+        project_id, file_hash, _old_index = parse_unique_key(unique_key)
+    except ValueError:
+        return None
+    return project_id, file_hash
+
+
+def recover_from_corrupt_id_index_by_wiping_files(
+    collection_dir: "Path | str",
+) -> DuplicateFileWipeResult:
+    """Bug #1969 Round 3: whole-file-wipe escalation for the ONE
+    DedupRepairAmbiguousError reason that is safe to auto-resolve --
+    ``DedupRepairAmbiguousReason.CORRUPT_ID_INDEX``. Called ONLY by
+    ``IDIndexManager.rebuild_from_vectors``'s self-heal escalation, and
+    ONLY after :func:`repair_duplicate_and_shifted_points` has already
+    raised that specific reason: ``id_index.bin`` itself failed to load,
+    so ``_plan_dedup`` has no trustworthy reference to pick a per-chunk
+    winner among a duplicate point_id's colliding copies.
+
+    Recovery here does NOT depend on ``id_index.bin`` at all: for every
+    duplicate point_id group, every conflicting record's ``unique_key``
+    is parsed to its ``(project_id, file_hash)`` identity -- a point_id
+    collision can ONLY occur between chunks of the SAME source file
+    (identical project_id + file_hash + chunk_index), so recovery is
+    naturally bounded to those implicated files. Because this function
+    is only reached after ``repair_duplicate_and_shifted_points`` has
+    already run its whole-collection identity gate and malformed-record
+    pre-check, every duplicate-group record here is guaranteed to carry
+    a parseable, self-consistent ``unique_key``.
+
+    EVERY vector_*.json record belonging to any implicated
+    ``(project_id, file_hash)`` -- not just the colliding chunks -- is
+    deleted, so the file ends up with ZERO indexed chunks rather than a
+    partial/inconsistent set. This is deliberate: smart_indexer.py's
+    reconcile decides whether a file needs reprocessing using ONLY a
+    file-level identity comparison (git blob hash / mtime) -- it has no
+    notion of "does this file have all its expected chunks present". A
+    half-deleted file with an unchanged blob hash would never be
+    reprocessed again (a silent, permanent search-coverage gap). A
+    WHOLLY missing file is instead correctly detected as "needs
+    reprocessing" and fully re-indexed on the next real run.
+
+    Metadata-only: no re-chunking, no re-embedding, no provider calls.
+    Each deletion fsyncs its containing directory (reuses
+    :func:`_delete_loser`). ``id_index.bin`` and the HNSW index are then
+    rebuilt from the remaining, now conflict-free records via the SAME
+    already-battle-tested :func:`_rebuild_derived_artifacts` machinery
+    this module's normal repair uses -- its internal
+    ``IDIndexManager.rebuild_from_vectors`` call already passes
+    ``self_heal=False`` explicitly (Round 2's F2 fix), preventing this
+    escalation from ever recursing into itself.
+
+    Applies the SAME ``.versioned/`` snapshot guard as the rest of this
+    project (defense-in-depth: the caller already checks this before
+    ever reaching here, but this function must be safe to call
+    standalone too) -- raises ``DuplicateSourceIdError`` for that case,
+    matching that exception's own documented "an immutable versioned
+    snapshot" cause.
+
+    Returns:
+        A :class:`DuplicateFileWipeResult` describing what was wiped.
+        Zero-valued (no mutation) when the collection currently has no
+        duplicate point_id at all.
+
+    Raises:
+        DuplicateSourceIdError: ``collection_dir`` is at or inside an
+            immutable ``.versioned/`` snapshot.
+        DedupRepairAmbiguousError: a malformed record is found during
+            this function's own re-scan (defensive; should not happen
+            given the caller's own pre-checks already passed), or the
+            authoritative HNSW build parameters cannot be determined --
+            both propagate unchanged, exactly like the normal repair
+            path.
+    """
+    collection_dir = Path(collection_dir)
+
+    from code_indexer.server.services.query_path_cache import (
+        is_immutable_versioned_snapshot,
+    )
+
+    if is_immutable_versioned_snapshot(str(collection_dir)):
+        logger.warning(
+            "Bug #1969 Round 3: recover_from_corrupt_id_index_by_wiping_"
+            "files refused for %r -- immutable versioned snapshot; "
+            "refusing to mutate regardless of what was requested.",
+            collection_dir,
+        )
+        raise DuplicateSourceIdError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: path is an immutable versioned snapshot "
+            f"-- refusing to mutate a snapshot regardless of what was "
+            f"requested."
+        )
+
+    id_to_paths, malformed, identity_by_path = _scan_raw_records(collection_dir)
+
+    if malformed:
+        sample = malformed[:_MAX_MALFORMED_SAMPLE_SIZE]
+        raise DedupRepairAmbiguousError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: {len(malformed)} malformed vector "
+            f"record(s) found (sample: "
+            f"{[(str(p), r) for p, r in sample]}) -- refusing to mutate "
+            f"ANY record before the malformed one(s) can be reviewed.",
+            reason=DedupRepairAmbiguousReason.MALFORMED_RECORDS,
+        )
+
+    duplicated = {
+        point_id: paths for point_id, paths in id_to_paths.items() if len(paths) > 1
+    }
+    if not duplicated:
+        return DuplicateFileWipeResult()
+
+    implicated_files = set()
+    for paths in duplicated.values():
+        for path in paths:
+            identity = _try_parse_record_file_identity(identity_by_path[path])
+            if identity is not None:
+                implicated_files.add(identity)
+
+    if not implicated_files:
+        # No duplicate group had a parseable unique_key -- this recovery
+        # cannot safely identify which files to wipe. Should not happen
+        # in practice (the caller only reaches here after the whole-
+        # collection identity gate already passed), but a genuine no-op
+        # is safer than guessing.
+        return DuplicateFileWipeResult()
+
+    # Codex LOW finding 5 pattern (mirrors repair_duplicate_and_shifted_
+    # points): resolve the authoritative HNSW build parameters BEFORE any
+    # mutation -- an undeterminable value must fail loud, pre-mutation,
+    # leaving the collection untouched, never after files have already
+    # been deleted.
+    vector_dim, space = _resolve_hnsw_build_params(collection_dir)
+
+    records_deleted = 0
+    for path, record in identity_by_path.items():
+        identity = _try_parse_record_file_identity(record)
+        if identity is not None and identity in implicated_files:
+            _delete_loser(path)
+            records_deleted += 1
+
+    logger.warning(
+        "Bug #1969 Round 3: recover_from_corrupt_id_index_by_wiping_files "
+        "wiped %d record(s) across %d implicated file(s) in %s -- "
+        "id_index.bin was corrupt/unreadable so no per-chunk winner "
+        "could be resolved; every chunk of each implicated file was "
+        "deleted (not just the colliding ones) so the file is fully "
+        "MISSING rather than half-indexed, and will be fully "
+        "reprocessed on the next real re-index.",
+        records_deleted,
+        len(implicated_files),
+        collection_dir,
+    )
+
+    _rebuild_derived_artifacts(collection_dir, vector_dim, space)
+
+    return DuplicateFileWipeResult(
+        file_hashes_wiped=len(implicated_files), records_deleted=records_deleted
     )
