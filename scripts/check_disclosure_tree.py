@@ -147,9 +147,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # should be the credit line's CONTENT, so prepending a release entry
         # cannot invalidate it.
         # 12.72.0 shifted them another +30. FIVE consecutive releases now.
-        "CHANGELOG.md:9822",
-        "CHANGELOG.md:10193",
-        "CHANGELOG.md:10674",
+        # 12.72.1 (hotfix) shifted them another +16 (9822/10193/10674 ->
+        # 9838/10209/10690).
+        "CHANGELOG.md:9838",
+        "CHANGELOG.md:10209",
+        "CHANGELOG.md:10690",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.
