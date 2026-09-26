@@ -49,7 +49,7 @@ def _parse_mcp_response(response_json: dict) -> dict:
     """Decode the inner JSON payload from an MCP envelope response."""
     content = response_json.get("content", [])
     assert len(content) > 0, f"Empty MCP response: {response_json}"
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 def _make_user(username: str = "bob"):
