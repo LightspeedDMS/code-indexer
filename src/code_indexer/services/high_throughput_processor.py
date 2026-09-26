@@ -1005,6 +1005,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 if abs_path.exists():
                     absolute_changed_files.append(abs_path)
 
+            # This is the single choke point every relative-path-list
+            # caller (branch-switch detection's git-topology delta, the
+            # reconcile pass, the watch-mode incremental path) joins onto
+            # codebase_dir before handing files to chunking/embedding --
+            # reject any candidate whose resolved location is not inside
+            # the codebase root.
+            absolute_changed_files = self._filter_paths_within_codebase_root(
+                absolute_changed_files
+            )
+
             total_files = len(absolute_changed_files)
 
             if progress_callback:

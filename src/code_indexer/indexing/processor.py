@@ -1,8 +1,9 @@
 """Document processing utilities for indexing."""
 
+import logging
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Iterable
 from dataclasses import dataclass
 
 from ..config import Config
@@ -10,6 +11,9 @@ from ..services.embedding_provider import EmbeddingProvider
 from ..services.vector_calculation_manager import VectorCalculationManager
 from .file_finder import FileFinder
 from .fixed_size_chunker import FixedSizeChunker
+from ..utils.path_confinement import is_resolved_within_root
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,6 +56,43 @@ class DocumentProcessor:
         self.file_finder = FileFinder(config)
         # Use model-aware fixed-size chunker for all processing
         self.fixed_size_chunker = FixedSizeChunker(config)
+
+    def _filter_paths_within_codebase_root(
+        self, candidates: Iterable[Path]
+    ) -> List[Path]:
+        """Drop any candidate whose resolved location is not inside the
+        resolved codebase root before it is treated as a file to index.
+
+        Shared by every path-list-building call site that joins an
+        externally-sourced relative path string (a git-diff entry, a
+        filesystem-watch event) onto codebase_dir without going through
+        ``FileFinder.find_files()``'s own containment check: the
+        incremental git-diff path, the watch-mode incremental-processing
+        path, and the branch-changes high-throughput join. Rejected
+        candidates are dropped silently except for a single WARNING
+        naming the COUNT, never the path/content.
+
+        Resolves ``self.config.codebase_dir`` directly rather than
+        reading ``self.file_finder.resolved_codebase_dir`` -- several
+        callers/tests replace the whole ``file_finder`` attribute with a
+        test double, which would otherwise turn the containment root
+        into an unrelated mock value and reject every real file.
+        """
+        resolved_root = Path(self.config.codebase_dir).resolve()
+        kept: List[Path] = []
+        rejected_count = 0
+        for candidate in candidates:
+            if is_resolved_within_root(candidate, resolved_root):
+                kept.append(candidate)
+            else:
+                rejected_count += 1
+        if rejected_count:
+            logger.warning(
+                "%d candidate file path(s) resolve outside the codebase "
+                "root; dropping them from this indexing pass.",
+                rejected_count,
+            )
+        return kept
 
     def process_file(self, file_path: Path) -> List[Dict[str, Any]]:
         """DEPRECATED: Use process_files_high_throughput instead."""

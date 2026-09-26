@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
+from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
@@ -1074,6 +1075,8 @@ class XRaySearchEngine:
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
         start = time.monotonic()
+        # Resolved ONCE for the whole walk, never per candidate.
+        resolved_repo_root = repo_path.resolve()
 
         # Bug #1598: iterate rglob() directly (unsorted) instead of
         # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
@@ -1087,6 +1090,12 @@ class XRaySearchEngine:
                 raise XRayPhase1TimeoutError(candidates=sorted(candidates))
 
             if not p.is_file():
+                continue
+
+            # p.is_file() follows a symlink's target regardless of where
+            # it points -- reject any candidate whose resolved location
+            # is not strictly inside the repository root.
+            if not is_resolved_within_root(p, resolved_repo_root):
                 continue
 
             rel = str(p.relative_to(repo_path))

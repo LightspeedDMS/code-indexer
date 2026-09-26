@@ -30,6 +30,7 @@ from .indexing_lock import IndexingLockError, create_indexing_lock
 from .high_throughput_processor import HighThroughputProcessor
 from .git_hook_manager import GitHookManager
 from ..utils.enhanced_messaging import OperationType, create_enhanced_callback
+from ..utils.path_confinement import resolve_if_within_root
 from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
 
 # CRITICAL: Lazy import for FTS - only load when --fts flag used
@@ -1308,7 +1309,12 @@ class SmartIndexer(HighThroughputProcessor):
             for f in [str(f) for f in committed_files]
             + [str(f) for f in working_dir_files]
         }
-        files_to_index = list(unique_files_to_index)
+        # committed_files (Track 1, git delta) entries are repo-relative
+        # strings taken from git diff output; _should_index_file only
+        # applies string-only eligibility filtering (extension/exclude),
+        # never containment. Reject any entry whose resolved location is
+        # not inside the codebase root before it is treated as work to do.
+        files_to_index = self._filter_paths_within_codebase_root(unique_files_to_index)
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK: Detect corrupted state before marking as completed
@@ -2229,15 +2235,15 @@ class SmartIndexer(HighThroughputProcessor):
         pattern), since directory pruning and pattern exclusion happen by
         NAME, before ``find_files()`` ever resolves a symlink's target.
         """
-        try:
-            resolved_candidate = candidate.resolve()
-        except (OSError, RuntimeError):
+        # resolve_if_within_root is the ONE shared implementation of the
+        # resolve+containment decision -- it both performs the check and
+        # hands back the resolved path, so there is no second,
+        # independent resolve() call here.
+        resolved_candidate = resolve_if_within_root(candidate, resolved_codebase)
+        if resolved_candidate is None:
             return False
 
-        try:
-            relative_path = resolved_candidate.relative_to(resolved_codebase)
-        except ValueError:
-            return False
+        relative_path = resolved_candidate.relative_to(resolved_codebase)
 
         eligibility_candidate = Path(self.config.codebase_dir) / relative_path
         if not self.file_finder.is_eligible(eligibility_candidate):
@@ -2713,6 +2719,12 @@ class SmartIndexer(HighThroughputProcessor):
                             f"Watch mode deletion verification failed for {file_path}"
                         )
                         # Continue processing other files even if one deletion fails
+
+            # NOTE: absolute_paths is re-joined onto codebase_dir and
+            # re-filtered for containment inside
+            # process_branch_changes_high_throughput() below (the single
+            # choke point shared by every relative-path-list caller) --
+            # no separate check is needed here.
 
             if not absolute_paths:
                 stats.end_time = time.time()

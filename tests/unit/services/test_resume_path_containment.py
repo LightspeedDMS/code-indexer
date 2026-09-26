@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from unittest.mock import MagicMock, patch
 
 from code_indexer.config import Config
@@ -56,7 +56,7 @@ def _create_git_repo(path: Path) -> None:
 
 def _make_indexer(repo: Path, tmp_path: Path, store: MagicMock) -> SmartIndexer:
     """Create a SmartIndexer wired to a real repo with mocked external services."""
-    config = Config(codebase_dir=str(repo))
+    config = Config(codebase_dir=repo)
     mock_embedding = MagicMock()
     metadata_path = tmp_path / "metadata.json"
     return SmartIndexer(
@@ -99,7 +99,7 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
     """Drive the REAL resume path, capturing exactly the file list that
     would be handed to chunking/embedding (process_files_high_throughput),
     without invoking real chunking/embedding/FTS I/O."""
-    captured: dict = {}
+    captured: Dict[str, List[Path]] = {}
 
     def _capture(files, **kwargs):
         captured["files"] = list(files)
@@ -148,8 +148,29 @@ def _eligibility_only_safety_check(
     at all. Used exclusively as a test-harness monkeypatch (never as a
     production code change) to prove that the real safety check's
     rejection of a traversal candidate is attributable to containment,
-    not to eligibility filtering."""
-    return bool(indexer.file_finder.is_eligible(candidate))
+    not to eligibility filtering.
+
+    Deliberately does NOT call ``FileFinder.is_eligible()`` /
+    ``_should_include_file()`` directly: that method itself starts with
+    the SAME resolve/containment check this stand-in exists to omit,
+    which would make it no longer eligibility-only. Replicates the rest
+    of that method's body (size gate, base filtering, override filter)
+    so the eligibility decision itself is unchanged."""
+    file_finder = indexer.file_finder
+    try:
+        if candidate.stat().st_size > file_finder.config.indexing.max_file_size:
+            return False
+        base_result = file_finder._get_base_filtering_result(candidate)
+        if file_finder.override_filter_service:
+            relative_path = candidate.relative_to(file_finder.config.codebase_dir)
+            return bool(
+                file_finder.override_filter_service.should_include_file(
+                    relative_path, base_result
+                )
+            )
+        return bool(base_result)
+    except (OSError, ValueError):
+        return False
 
 
 class TestResumePathTraversalContainment:
