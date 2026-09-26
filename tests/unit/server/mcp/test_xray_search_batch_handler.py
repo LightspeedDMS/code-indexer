@@ -29,7 +29,25 @@ from pathlib import Path
 from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.server.auth.user_manager import User, UserRole
+
+
+@pytest.fixture(autouse=True)
+def _xray_batch_access_filtering_bypass():
+    """handle_xray_search_batch() now enforces
+    repo-level access via its own _get_access_filtering_service() seam.
+    Autouse admin-bypass for every test in this file -- none of these
+    pre-existing tests exercise authorization (that is covered separately
+    by test_xray_routes_repo_authz.py)."""
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    with patch(
+        "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+        return_value=mock_access_service,
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
