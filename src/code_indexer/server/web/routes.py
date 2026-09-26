@@ -7644,6 +7644,15 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Web Session Timeout must be a valid number"
 
+        # Hotfix: self-registration gate is a Yes/No <select>; reject anything
+        # else rather than letting _parse_bool silently coerce it to False.
+        self_registration = data.get("self_registration_enabled")
+        if self_registration is not None and self_registration not in (
+            "true",
+            "false",
+        ):
+            return "Self-Registration Enabled must be 'true' or 'false'"
+
     # Story #683 AC3: "auth" validation block removed (AuthConfig deleted).
 
     elif section == "multi_search":

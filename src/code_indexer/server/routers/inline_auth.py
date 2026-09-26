@@ -14,6 +14,7 @@ Part of the inline_routes.py modularization effort. Contains 8 route handlers:
 Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -53,6 +54,41 @@ from ..auth.login_rate_limiter import (
     LoginRateLimiter,
     login_rate_limiter as _default_login_rate_limiter,
 )
+
+logger = logging.getLogger(__name__)
+
+SELF_REGISTRATION_DISABLED_DETAIL = (
+    "Self-registration is disabled on this server. "
+    "Contact your administrator to request an account."
+)
+
+
+def _is_self_registration_enabled() -> bool:
+    """Return True only when runtime config explicitly enables self-registration.
+
+    Read at REQUEST time from the runtime config service (not captured at
+    route-registration time) so a Web UI toggle takes effect without restart.
+    Fails CLOSED: if the config or its web_security_config cannot be
+    resolved, registration is denied.
+    """
+    from ..services.config_service import get_config_service
+
+    try:
+        web_sec = get_config_service().get_config().web_security_config
+    except Exception as e:
+        logger.error(
+            "Self-registration gate: runtime config unavailable, denying "
+            "POST /auth/register (fail closed): %s",
+            e,
+        )
+        return False
+    if web_sec is None:
+        logger.error(
+            "Self-registration gate: web_security_config missing, denying "
+            "POST /auth/register (fail closed)"
+        )
+        return False
+    return web_sec.self_registration_enabled is True
 
 
 def register_auth_routes(
@@ -326,7 +362,18 @@ def register_auth_routes(
 
         Returns:
             Generic success message for all registration attempts
+
+        Raises:
+            HTTPException: 403 when web_security.self_registration_enabled is
+                not True (default). Checked before any account lookup or
+                creation and before the timing-prevention wrapper runs.
         """
+        if not _is_self_registration_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=SELF_REGISTRATION_DISABLED_DETAIL,
+            )
+
         # Extract client information for audit logging
         client_ip = request.client.host if request.client else "unknown"
         user_agent = request.headers.get("user-agent")

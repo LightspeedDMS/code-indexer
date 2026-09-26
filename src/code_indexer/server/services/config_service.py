@@ -853,6 +853,8 @@ class ConfigService:
             "web_security": {
                 # Story #683 AC2: csrf_max_age_seconds removed (dead field).
                 "web_session_timeout_seconds": config.web_security_config.web_session_timeout_seconds,
+                # Hotfix: gate for unauthenticated POST /auth/register.
+                "self_registration_enabled": config.web_security_config.self_registration_enabled,
             },
             # Story #683 AC3: "auth" section removed (AuthConfig deleted entirely).
             # Story #25/29 - Multi-search limits configuration (includes omni settings)
@@ -2508,6 +2510,8 @@ class ConfigService:
         assert web_security is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "web_session_timeout_seconds":
             web_security.web_session_timeout_seconds = int(value)
+        elif key == "self_registration_enabled":
+            web_security.self_registration_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown web security setting: {key}")
 
