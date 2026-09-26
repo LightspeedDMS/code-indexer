@@ -58,12 +58,12 @@ def admin_user():
 
 @pytest.fixture
 def app(admin_user):
-    """Minimal FastAPI app with the elevation router and admin auth overridden."""
+    """Minimal FastAPI app with the elevation router and auth overridden."""
     _app = FastAPI()
     _app.include_router(elevation_router)
     from code_indexer.server.auth import dependencies as _deps
 
-    _app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user
+    _app.dependency_overrides[_deps.get_current_user_hybrid] = lambda: admin_user
     return _app
 
 

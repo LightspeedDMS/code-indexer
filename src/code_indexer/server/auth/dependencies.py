@@ -14,7 +14,7 @@ import base64
 import logging
 
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
-from .user_manager import UserManager, User
+from .user_manager import UserManager, User, UserRole
 from .api_key_manager import ApiKeyManager
 from code_indexer.server.logging_utils import format_error_log
 
@@ -594,6 +594,13 @@ def get_current_user_web_or_api(
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
                 if user:
+                    # Elevation windows opened through the Web UI (e.g.
+                    # /admin/elevate) are keyed by the raw "session" cookie
+                    # value -- the same value _hybrid_auth_impl's web-session
+                    # branch stores as user_jti. Set it here too so
+                    # _resolve_session_key() finds that same window instead
+                    # of falling through to the unrelated cidx_session cookie.
+                    request.state.user_jti = session_cookie
                     # An elevation window is valid only for the user who
                     # created it -- stash the authenticated username so any
                     # downstream elevation lookup binds to this identity.
@@ -983,9 +990,24 @@ _ERROR_TOTP_SETUP_REQUIRED = "totp_setup_required"
 _ERROR_ELEVATION_REQUIRED = "elevation_required"
 _ERROR_ELEVATION_FAILED = "elevation_failed"  # reserved; used by /auth/elevate
 
-# Stable internal FastAPI route path for MFA setup — not environment-specific;
-# the router registers this path unconditionally in all deployments.
+# Stable internal FastAPI route paths for MFA setup — not environment-specific;
+# the router registers both paths unconditionally in all deployments.
+# _TOTP_SETUP_URL renders via a session with role=="admin" (_get_session_username);
+# _USER_TOTP_SETUP_URL renders for any authenticated session (_get_any_session_username).
 _TOTP_SETUP_URL = "/admin/mfa/setup"
+_USER_TOTP_SETUP_URL = "/user/mfa/setup"
+
+
+def _mfa_setup_url_for_role(role: UserRole) -> str:
+    """Return the MFA setup page appropriate to `role`.
+
+    Elevation is available to every TOTP-enrolled user, not only admins, but
+    the admin setup page is gated to an admin-role session -- pointing a
+    non-admin caller at it would be a dead end. Only ADMIN gets the admin
+    page; every other role gets the self-service one.
+    """
+    return _TOTP_SETUP_URL if role == UserRole.ADMIN else _USER_TOTP_SETUP_URL
+
 
 # Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
 # A session satisfies required_scope R when session_rank <= required_rank.
@@ -1005,11 +1027,11 @@ def _elevation_required_exc(message: Optional[str] = None) -> HTTPException:
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
-def _totp_setup_required_exc() -> HTTPException:
-    """403 — admin has TOTP not yet set up; directs to setup_url."""
+def _totp_setup_required_exc(setup_url: str = _TOTP_SETUP_URL) -> HTTPException:
+    """403 — caller has TOTP not yet set up; directs to `setup_url`."""
     return HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": _TOTP_SETUP_URL},
+        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": setup_url},
     )
 
 
@@ -1038,10 +1060,15 @@ def _is_elevation_enforcement_enabled() -> bool:
 
 
 def _check_totp_setup(user: User) -> None:
-    """Raise 403 totp_setup_required when admin has no TOTP MFA enabled.
+    """Raise 403 totp_setup_required when the caller has no TOTP MFA enabled.
+
+    Shared by the admin-only require_elevation() gate and the self-service
+    elevation gate (any role) -- the setup_url in the raised exception is
+    resolved from the CALLER's own role so a non-admin is never pointed at
+    the admin-only setup page.
 
     Design: fail-open on non-HTTP exceptions (e.g. TOTPService DB unavailable).
-    TOTPService availability must not block admin access entirely — the elevation
+    TOTPService availability must not block access entirely — the elevation
     window check that follows is the authoritative gate (Story #923 AC5 spec).
     Logs a warning so operators can detect persistent TOTPService failures.
     """
@@ -1054,7 +1081,7 @@ def _check_totp_setup(user: User) -> None:
             # design: TOTPService availability must not block admin access.
             return
         if not totp_service.is_mfa_enabled(user.username):
-            raise _totp_setup_required_exc()
+            raise _totp_setup_required_exc(_mfa_setup_url_for_role(user.role))
     except HTTPException:
         raise
     except Exception:

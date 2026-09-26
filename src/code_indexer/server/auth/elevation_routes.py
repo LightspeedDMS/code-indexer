@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from code_indexer.server.auth.dependencies import (
-    get_current_admin_user_hybrid,
+    get_current_user_hybrid,
     _is_elevation_enforcement_enabled,
+    _mfa_setup_url_for_role,
 )
 from code_indexer.server.auth.elevated_session_manager import (
     ElevatedSession,
@@ -141,9 +142,14 @@ def _verify_elevation_code(
 def elevate(
     body: ElevateRequest,
     request: Request,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """Submit a TOTP or recovery code to open an elevation window (AC3).
+
+    Elevation is available to every TOTP-enrolled user, not only admins --
+    this opens a window for the CALLER's own username; it never grants any
+    admin-only action, which stays behind require_elevation()'s own admin
+    gate on each protected route.
 
     When the kill switch is OFF, this endpoint has no meaning — the caller is
     asking to satisfy a TOTP challenge that no protected route will issue.
@@ -159,7 +165,10 @@ def elevate(
     if not totp_service.is_mfa_enabled(user.username):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "totp_setup_required", "setup_url": "/admin/mfa/setup"},
+            detail={
+                "error": "totp_setup_required",
+                "setup_url": _mfa_setup_url_for_role(user.role),
+            },
         )
 
     session_key = _resolve_session_key(request)
@@ -223,7 +232,7 @@ def elevate(
 @router.get("/elevation-status", response_model=StatusResponse)
 def elevation_status(
     request: Request,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """Read-only elevation window check — does NOT touch (AC4).
 

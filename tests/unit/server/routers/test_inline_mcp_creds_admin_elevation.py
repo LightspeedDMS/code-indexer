@@ -9,13 +9,28 @@ require TOTP elevation on top of the admin role, matching the MCP twin
 (`mcp/handlers/admin/mcp_credentials.py`), which requires elevation via
 `@require_mcp_elevation()` for the mutating actions.
 
-The SELF-SERVICE, non-admin routes in the SAME file are
-explicitly OUT of scope here -- a structural test below asserts those three
-routes do NOT gain an elevation dependency as a side effect of this fix.
+The SELF-SERVICE, non-admin routes in the SAME file (create/delete of the
+CALLER'S OWN credential) are covered separately -- see
+test_inline_mcp_creds_self_service_elevation.py for their full functional
+coverage. The structural assertions below capture the resulting split
+between the two elevation gates in this file:
+
+- `POST /api/mcp-credentials` (create) and
+  `DELETE /api/mcp-credentials/{credential_id}` (delete) -- mutating,
+  self-service -- carry an elevation dependency, but it is the SELF-SERVICE
+  gate (`inline_mcp_creds._require_self_elevation`, which resolves the
+  caller via `get_current_user_web_or_api` and works for ANY authenticated
+  user), never this file's admin-only `require_elevation.<locals>._check`
+  (which hard-requires `get_current_admin_user_hybrid` and would incorrectly
+  reject every NORMAL_USER self-service caller).
+- `GET /api/mcp-credentials` (list, read-only) remains completely
+  unelevated -- out of scope for both gates -- and must carry NEITHER
+  dependency.
 
 Coverage:
-- Structural: all 4 admin routes carry require_elevation(); the 3
-  self-service routes do not.
+- Structural: all 4 admin routes carry the admin require_elevation() check;
+  the 2 self-service MUTATING routes carry the self-service elevation
+  check instead; the 1 self-service READ route carries neither.
 - Functional: admin without an active elevation window is refused
   (403 elevation_required) on every admin route; admin WITH an elevation
   window succeeds (representative: create route).
@@ -36,6 +51,10 @@ from code_indexer.server.auth.elevated_session_manager import ElevatedSessionMan
 from code_indexer.server.auth.user_manager import User, UserRole
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+# The self-service elevation gate is a plain module-level function (not a
+# factory-produced closure like the admin one above), so its __qualname__
+# is just its own name.
+_SELF_SERVICE_ELEVATION_QUALNAME = "_require_self_elevation"
 _ENFORCEMENT_PATH = (
     "code_indexer.server.auth.dependencies._is_elevation_enforcement_enabled"
 )
@@ -52,11 +71,17 @@ _ADMIN_ROUTE_CASES = [
     ("/api/admin/mcp-credentials", "GET", True),
 ]
 
-# Self-service routes must NOT gain elevation here.
-_SELF_SERVICE_ROUTE_CASES = [
-    ("/api/mcp-credentials", "POST", False),
-    ("/api/mcp-credentials", "GET", False),
-    ("/api/mcp-credentials/{credential_id}", "DELETE", False),
+# Self-service MUTATING routes: must carry the SELF-SERVICE elevation gate
+# specifically -- not this file's admin-only one.
+_SELF_SERVICE_ELEVATED_CASES = [
+    ("/api/mcp-credentials", "POST"),
+    ("/api/mcp-credentials/{credential_id}", "DELETE"),
+]
+
+# Self-service READ route: read-only, out of scope for either elevation
+# gate -- must carry NEITHER elevation dependency.
+_SELF_SERVICE_UNELEVATED_CASES = [
+    ("/api/mcp-credentials", "GET"),
 ]
 
 
@@ -65,14 +90,22 @@ _SELF_SERVICE_ROUTE_CASES = [
 # ---------------------------------------------------------------------------
 
 
-def _route_has_elevation_dep(route) -> bool:
+def _route_has_dependency_qualname(route, qualname: str) -> bool:
     for dep in getattr(route, "dependencies", []) or []:
         dep_callable = getattr(dep, "dependency", None)
         if dep_callable is None:
             continue
-        if getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME:
+        if getattr(dep_callable, "__qualname__", "") == qualname:
             return True
     return False
+
+
+def _route_has_elevation_dep(route) -> bool:
+    return _route_has_dependency_qualname(route, _ELEVATION_QUALNAME)
+
+
+def _route_has_self_service_elevation_dep(route) -> bool:
+    return _route_has_dependency_qualname(route, _SELF_SERVICE_ELEVATION_QUALNAME)
 
 
 def _find_route(app, path: str, method: str):
@@ -126,7 +159,7 @@ def elevation_manager():
 
 @pytest.fixture(autouse=True)
 def _restore_elevated_session_manager():
-    original = getattr(_deps, "elevated_session_manager", None)
+    original = _deps.elevated_session_manager
     yield
     _deps.elevated_session_manager = original
 
@@ -176,17 +209,40 @@ def test_admin_mcp_credential_routes_require_elevation(
     )
 
 
-@pytest.mark.parametrize("path,method,expected", _SELF_SERVICE_ROUTE_CASES)
-def test_self_service_mcp_credential_routes_unaffected(
-    tmpdir_path, path, method, expected
+@pytest.mark.parametrize("path,method", _SELF_SERVICE_ELEVATED_CASES)
+def test_self_service_mutating_routes_require_self_service_elevation(
+    tmpdir_path, path, method
 ):
-    """Scope boundary: self-service routes must NOT gain
-    elevation as an accidental side effect of the admin-route gate."""
+    """Self-service create/delete must carry the SELF-SERVICE elevation
+    gate, never the admin-only one this file's routes use -- reusing the
+    admin gate would hard-require admin role and break self-service for
+    every NORMAL_USER account."""
     app = _get_app(tmpdir_path)
     route = _find_route(app, path, method)
     assert route is not None, f"{method} {path} route not found"
-    assert _route_has_elevation_dep(route) is expected, (
-        f"{method} {path}: must NOT have require_elevation() (self-service scope)"
+    assert _route_has_self_service_elevation_dep(route), (
+        f"{method} {path}: expected the self-service elevation "
+        "gate (_require_self_elevation)"
+    )
+    assert not _route_has_elevation_dep(route), (
+        f"{method} {path}: must NOT carry the admin-only require_elevation() "
+        "gate -- that would reject non-admin self-service callers"
+    )
+
+
+@pytest.mark.parametrize("path,method", _SELF_SERVICE_UNELEVATED_CASES)
+def test_self_service_read_route_remains_unelevated(tmpdir_path, path, method):
+    """Scope boundary: the self-service LIST route is read-only and must
+    carry NEITHER elevation gate."""
+    app = _get_app(tmpdir_path)
+    route = _find_route(app, path, method)
+    assert route is not None, f"{method} {path} route not found"
+    assert not _route_has_elevation_dep(route), (
+        f"{method} {path}: must NOT have the admin require_elevation() gate"
+    )
+    assert not _route_has_self_service_elevation_dep(route), (
+        f"{method} {path}: must NOT have the self-service elevation gate "
+        "(the read-only list route is explicitly out of scope for it)"
     )
 
 
