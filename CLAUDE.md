@@ -56,6 +56,7 @@ Applies to source, tests, **test fixtures and sample data**, docstrings, comment
 - Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
 - Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
 - Security vulnerabilities are tracked out of band in the dedicated private repository `code-indexer-security`, never in this repository's issues, PRs, or docs.
+- Commit messages always use neutral, professional language. Security commits, and their code comments and tests, state the invariant enforced (e.g. "validate git remote and branch arguments"), never the flaw, exploit, payload, or impact.
 
 ### If something already leaked
 
