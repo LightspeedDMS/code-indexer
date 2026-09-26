@@ -120,6 +120,7 @@ def test_corrupt_marker_forces_reconcile_and_repairs_missing_file(
     assert quarantined[0].read_text() == ""
 
 
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "damaged_content",
     [

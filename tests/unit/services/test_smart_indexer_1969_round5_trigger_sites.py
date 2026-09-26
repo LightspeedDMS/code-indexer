@@ -9,6 +9,8 @@ point `recover_from_corrupt_id_index_by_wiping_files()`) is never
 permanently lost, regardless of which code path triggers the wipe.
 """
 
+import pytest
+
 from tests.unit.services.test_smart_indexer_1969_round4_incremental_reprocess import (
     _corrupt_id_index_bin,
     _deterministic_embedding,
@@ -118,6 +120,7 @@ def test_non_git_detect_deletions_reprocesses_self_heal_wipe(tmp_path):
     )
 
 
+@pytest.mark.timeout(60)
 def test_empty_file_commit_wipe_is_not_permanently_lost(tmp_path):
     """Trigger site: `end_indexing`'s own cache-miss self-heal branch,
     fired by an UNRELATED file being emptied to zero content in the same

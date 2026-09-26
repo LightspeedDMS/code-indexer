@@ -866,7 +866,18 @@ def _read_self_heal_reprocess_markers(collection_dir: Path) -> Dict[Path, str]:
     mismatched individual marker is skipped with a WARNING (full P1-4
     quarantine of a marker happens separately, in
     ``quarantine_corrupt_self_heal_reprocess_sidecar``). Returns
-    {marker_file_path: rel_path}."""
+    {marker_file_path: rel_path}.
+
+    An already-quarantined marker (name contains ``.corrupt.``, produced
+    by ``quarantine_corrupt_self_heal_reprocess_sidecar``/
+    ``_quarantine_one_corrupt_file``) is skipped silently, with no WARNING
+    -- it was already logged and quarantined once, at the moment it was
+    found corrupt; treating it as a live marker on every subsequent read
+    would re-attempt to parse it (and, for real UTF-8 corruption, re-raise
+    and re-log its decode failure) forever. Mirrors the same exclusion
+    ``_find_corrupt_self_heal_reprocess_markers`` already applies so a
+    quarantined marker is never rediscovered as newly corrupt either.
+    """
     marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
     result: Dict[Path, str] = {}
     try:
@@ -874,7 +885,7 @@ def _read_self_heal_reprocess_markers(collection_dir: Path) -> Dict[Path, str]:
     except FileNotFoundError:
         return result
     for marker_path in entries:
-        if marker_path.suffix == ".tmp":
+        if marker_path.suffix == ".tmp" or ".corrupt." in marker_path.name:
             continue
         try:
             content = marker_path.read_text().strip()

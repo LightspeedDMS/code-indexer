@@ -3309,15 +3309,20 @@ class SmartIndexer(HighThroughputProcessor):
 
             all_points.extend(points)
 
-            # Update offset first
+            # Bug #1971: the stuck-pagination safety check MUST compare
+            # `next_offset` against the PREVIOUS `offset` BEFORE it is
+            # reassigned -- comparing after assignment is always True
+            # (self-comparison), which silently truncated every
+            # multi-page scroll to page 1. Mirrors the already-correct
+            # sibling loop in
+            # HighThroughputProcessor._fetch_all_content_points.
+            if next_offset is not None and next_offset == offset:
+                logger.error(f"Pagination stuck at offset {offset} - breaking")
+                break
+
             offset = next_offset
             if offset is None:
                 # Normal completion - no more data
-                break
-
-            # Safety check to prevent infinite loops (only check if offset is not None)
-            if next_offset == offset:
-                logger.error(f"Pagination stuck at offset {offset} - breaking")
                 break
 
         return all_points

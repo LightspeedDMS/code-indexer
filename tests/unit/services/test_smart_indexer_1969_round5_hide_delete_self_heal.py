@@ -43,6 +43,7 @@ from tests.unit.services.test_smart_indexer_1969_round4_incremental_reprocess im
 SEARCH_RESULT_LIMIT = 10
 
 
+@pytest.mark.timeout(60)
 def test_delete_only_commit_deletes_file_despite_unrelated_self_heal_same_run(
     tmp_path,
 ):

@@ -10,6 +10,8 @@ import inspect
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.unit.services.test_smart_indexer_1969_round4_incremental_reprocess import (
     SEARCH_RESULT_LIMIT,
     _corrupt_id_index_bin,
@@ -30,6 +32,7 @@ def _vector_files_for_path(collection_path: Path, rel_path: str) -> list[Path]:
     ]
 
 
+@pytest.mark.timeout(60)
 def test_next_plain_incremental_run_restores_end_indexing_finally_wipe(
     tmp_path: Path, monkeypatch
 ) -> None:
