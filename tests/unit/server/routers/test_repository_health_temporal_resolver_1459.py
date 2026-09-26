@@ -19,7 +19,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -31,6 +31,23 @@ from code_indexer.services.temporal.temporal_server_paths import (
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers import repository_health
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
+from code_indexer.server.services.group_access_manager import GroupAccessManager
+
+
+def _build_granting_access_service(
+    db_path: Path, *, granted_username: str, granted_repo: str
+) -> AccessFilteringService:
+    """Real AccessFilteringService backed by a real GroupAccessManager
+    (temp SQLite DB) granting ONE repo to ONE user -- not a mock of the
+    access-control decision itself."""
+    gam = GroupAccessManager(db_path)
+    group = gam.create_group("restricted", "test group")
+    gam.assign_user_to_group(granted_username, group.id, assigned_by="test")
+    gam.grant_repo_access(granted_repo, group.id, granted_by="test")
+    return AccessFilteringService(gam)
 
 
 def _test_user(username: str = "alice") -> User:
@@ -92,9 +109,12 @@ class _FakeActivatedRepoManager:
 
 
 class _AppUnderTest:
-    def __init__(self, golden_manager=None, activated_manager=None):
+    def __init__(
+        self, golden_manager=None, activated_manager=None, access_service=None
+    ):
         self._golden_manager = golden_manager
         self._activated_manager = activated_manager
+        self._access_service = access_service
         self._stack: Optional[ExitStack] = None
 
     def __enter__(self) -> TestClient:
@@ -115,6 +135,24 @@ class _AppUnderTest:
                 repository_health,
                 "_get_activated_repo_manager",
                 return_value=self._activated_manager,
+            )
+        )
+        # GET .../indexes enforces a repo-level access check. This suite's
+        # user ("alice") has no group grants configured by default, so an
+        # admin-bypass mock keeps every scenario that doesn't pass an
+        # explicit access_service unchanged. A test that needs to prove
+        # genuine NON-admin access passes a REAL AccessFilteringService
+        # instead, so a passing assertion cannot be explained by admin
+        # bypass alone.
+        access_service = self._access_service
+        if access_service is None:
+            access_service = MagicMock()
+            access_service.is_admin_user.return_value = True
+        self._stack.enter_context(
+            patch.object(
+                repository_health,
+                "_get_access_filtering_service",
+                return_value=access_service,
             )
         )
         return TestClient(app)
@@ -225,11 +263,19 @@ class TestActivatedRepoBranchTemporalDetection:
     activated_repo_manager.get_repository(...)["golden_repo_alias"]."""
 
     def test_sister_relocated_temporal_data_is_detected_for_activated_repo(
-        self, golden_layout
+        self, golden_layout, tmp_path
     ):
         """THE ACTUAL BUG FIX for the activated-repo resolution branch:
         golden_repo_alias is resolved from get_repository() metadata, then
-        used to query the resolver against the sister location."""
+        used to query the resolver against the sister location.
+
+        Grants "alice" access to ONLY the backing golden repo
+        ('backing-golden'), never the activated repo's own custom alias
+        ('my-activated-repo'), through a REAL
+        AccessFilteringService/GroupAccessManager -- so a 200 here is
+        genuine proof of the backing-alias fallback for a non-admin user,
+        not an artifact of an admin-bypass mock.
+        """
         clone_path = golden_layout["clone_path"]
         golden_repos_dir = golden_layout["golden_repos_dir"]
         (clone_path / ".code-indexer" / "index").mkdir(parents=True)
@@ -255,8 +301,15 @@ class TestActivatedRepoBranchTemporalDetection:
             known_alias="my-activated-repo",
             golden_repo_alias="backing-golden",
         )
+        access_service = _build_granting_access_service(
+            tmp_path / "group_access.db",
+            granted_username="alice",
+            granted_repo="backing-golden",
+        )
 
-        with _AppUnderTest(golden_manager, activated_manager) as client:
+        with _AppUnderTest(
+            golden_manager, activated_manager, access_service=access_service
+        ) as client:
             resp = client.get("/api/repositories/my-activated-repo/indexes")
 
         assert resp.status_code == 200

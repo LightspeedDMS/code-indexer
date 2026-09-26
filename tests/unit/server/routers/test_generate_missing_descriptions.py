@@ -24,11 +24,25 @@ from code_indexer.server.auth.dependencies import (
     get_current_user_hybrid,
     get_current_admin_user_hybrid,
 )
+from code_indexer.server.routers import repository_health
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _admin_bypass_repo_access():
+    """GET .../description (exercised by AC5 below) enforces a repo-level
+    access check. This suite's admin_user fixture keeps working unchanged
+    via an admin-bypass mock."""
+    mock_service = MagicMock()
+    mock_service.is_admin_user.return_value = True
+    with patch.object(
+        repository_health, "_get_access_filtering_service", return_value=mock_service
+    ):
+        yield
 
 
 @pytest.fixture

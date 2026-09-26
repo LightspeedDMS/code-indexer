@@ -11,12 +11,28 @@ import pytest
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import app
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
+from code_indexer.server.routers import repository_health
+
+
+@pytest.fixture(autouse=True)
+def _admin_bypass_repo_access():
+    """GET .../description enforces a repo-level access check (fail-closed
+    if access_filtering_service is unwired). This suite exercises only the
+    admin_user fixture, so an admin-bypass mock keeps every existing
+    scenario's behavior unchanged."""
+    mock_service = MagicMock()
+    mock_service.is_admin_user.return_value = True
+    with patch.object(
+        repository_health, "_get_access_filtering_service", return_value=mock_service
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
