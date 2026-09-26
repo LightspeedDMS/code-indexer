@@ -33,6 +33,7 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
+from ..utils.host_validation import validate_server_host
 from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
@@ -1278,7 +1279,9 @@ class ConfigService:
     ) -> None:
         """Update a server setting."""
         if key == "host":
-            config.host = str(value)
+            host_str = str(value)
+            validate_server_host(host_str)
+            config.host = host_str
         elif key == "port":
             config.port = int(value)
         elif key == "workers":

@@ -55,6 +55,7 @@ from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
     SubmissionGateOverloadedError,
 )
+from ..utils.host_validation import is_valid_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -6934,6 +6935,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             host_str = str(host).strip()
             if not host_str:
                 return "Host cannot be empty"
+            if not is_valid_server_host(host_str):
+                return "Host must be a valid IPv4/IPv6 address or hostname"
 
         port = data.get("port")
         if port is not None:
