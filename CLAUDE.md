@@ -216,7 +216,7 @@ Three CI sync constraints, all learned by breaking them:
 2. `lint` runs on **Python 3.9**, tracking `[tool.mypy] python_version`. `no_site_packages=false` means mypy PARSES third-party sources under that target -- a newer interpreter installs deps whose syntax 3.9 can't parse and the gate dies inside `site-packages`. Do NOT modernize to 3.12 without moving the mypy target. (mypy also flags `attr-defined` on a private third-party attr the CI-installed version lacks -- access such internals via `getattr(mod, "_X", fallback)`, not a bare import.)
 3. `rust` pins `dtolnay/rust-toolchain@<exact>` which must track `rust/rust-toolchain.toml`'s `channel`; rustup auto-installs it for any `cargo` invocation with cwd inside `rust/`, in CI and locally alike. Do not revert either to floating.
 
-**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing.
+**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing. **The pre-commit hook skips `tests/`, but `lint.sh` and CI type-check them** -- also run `python3 -m mypy --explicit-package-bases --check-untyped-defs <changed test files>` (typical hits: `str` passed where `Path`/an enum is expected, `Any` returned from a typed helper).
 
 ---
 
