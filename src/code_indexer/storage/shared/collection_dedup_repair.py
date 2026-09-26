@@ -132,6 +132,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -230,6 +231,13 @@ class DedupRepairAmbiguousReason(Enum):
     HNSW_PARAMS_VECTOR_DIM_UNDETERMINABLE = "hnsw_params_vector_dim_undeterminable"
     #: hnsw_index.space is missing or not a recognized distance metric.
     HNSW_PARAMS_SPACE_UNDETERMINABLE = "hnsw_params_space_undeterminable"
+    #: Bug #1969 Round 6 (P1-5): an implicated (project_id, file_hash)
+    #: group in ``recover_from_corrupt_id_index_by_wiping_files`` has NO
+    #: record with a valid, project-confined relative ``payload.path``
+    #: (missing, empty, absolute, or a ``..`` path-traversal escape) --
+    #: deleting its records would lose the only durably nameable replay
+    #: path with zero mutation to show for it.
+    UNRESOLVABLE_REPLAY_PATH = "unresolvable_replay_path"
 
 
 class DedupRepairAmbiguousError(Exception):
@@ -775,33 +783,50 @@ def clear_pending_dedup_outcome(collection_dir: "Path | str") -> bool:
 # crash/restart. Mirrors this module's own established durable-marker
 # pattern (`.dedup-repair-pending`, `.dedup-outcome-pending`) -- this is
 # operational bookkeeping, not a new "setting".
-SELF_HEAL_REPROCESS_PENDING_FILENAME = ".self-heal-reprocess-pending"
+#
+#: Bug #1969 Round 6 (P1-2, Amendment 6): a lock-free, per-event marker
+#: directory. Amendment 6 disproved Lead 1 (cluster job dedup does NOT
+#: serialize writers of one collection across nodes -- filed separately as
+#: issue #1970, out of #1969's scope) and adopted Lead 2: the sidecar
+#: itself must be correct with ZERO mutual exclusion available, since
+#: NFSv3 `nolock` gives no cross-node lock and no cross-node writer gate
+#: exists. Each self-heal wipe event gets its OWN marker file
+#: (name = sha256(path) + a random nonce, so two concurrent events for the
+#: SAME path never collide), created via a single atomic rename -- there
+#: is no shared file to read-merge-write, so there is nothing for two
+#: concurrent writers to race on, with or without a lock. This is the
+#: ONLY sidecar storage format: a single-file `.self-heal-reprocess-
+#: pending` design was drafted for Round 5 but NEVER SHIPPED (Amendment 8
+#: -- verified absent from every remote branch and every real index on
+#: this machine), so there is no legacy format and no migration.
+SELF_HEAL_REPROCESS_PENDING_DIR_NAME = ".self-heal-reprocess-pending.d"
 
 
-def _self_heal_reprocess_pending_path(collection_dir: Path) -> Path:
-    return collection_dir / SELF_HEAL_REPROCESS_PENDING_FILENAME
+def _self_heal_reprocess_pending_dir(collection_dir: Path) -> Path:
+    return collection_dir / SELF_HEAL_REPROCESS_PENDING_DIR_NAME
 
 
-def _write_self_heal_reprocess_pending_file(
-    collection_dir: Path, paths: FrozenSet[str]
-) -> None:
-    """Atomic + durable overwrite of the sidecar with EXACTLY `paths`
-    (same pattern as `_write_pending_outcome_durably`: temp file in the
-    SAME directory, flush+fsync, os.replace, then an nfs_safe_fsync of
-    the containing directory). Callers decide merge-vs-replace semantics;
-    this is the low-level writer only."""
-    pending_path = _self_heal_reprocess_pending_path(collection_dir)
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(collection_dir), suffix=".tmp")
+def _write_self_heal_reprocess_marker(collection_dir: Path, rel_path: str) -> None:
+    """Atomically create ONE new marker file recording `rel_path` as
+    pending. Never reads or overwrites any other marker -- two concurrent
+    calls (same or different processes, same or different paths) each
+    create their OWN file and cannot collide or lose each other's write.
+    """
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_name = f"{hashlib.sha256(rel_path.encode()).hexdigest()}.{uuid.uuid4().hex}"
+    marker_path = marker_dir / marker_name
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(marker_dir), suffix=".tmp")
     fd_owned = False
     try:
         try:
             tmp_f = os.fdopen(tmp_fd, "w")
             fd_owned = True
             with tmp_f:
-                json.dump({"paths": sorted(paths)}, tmp_f)
+                tmp_f.write(rel_path)
                 tmp_f.flush()
                 nfs_safe_fsync(tmp_f.fileno())
-            os.replace(tmp_path, str(pending_path))
+            os.replace(tmp_path, str(marker_path))
         finally:
             if not fd_owned:
                 try:
@@ -814,53 +839,129 @@ def _write_self_heal_reprocess_pending_file(
         except OSError:
             pass
         raise
-    _fsync_dir(collection_dir)
+    _fsync_dir(marker_dir)
+
+
+def _is_valid_self_heal_marker_content(marker_path: Path, content: str) -> bool:
+    """Bug #1969 Round 6 (P1-4, Amendment 9): true when `content` is
+    trustworthy for `marker_path` -- its sha256 digest matches the digest
+    embedded in the marker's own filename (`_write_self_heal_reprocess_
+    marker` always names a marker after ITS OWN content's digest, so a
+    mismatch proves the bytes were damaged after the fact, not a
+    legitimate marker for a different path), AND it independently passes
+    the same project-confinement check P1-5 already applies at record
+    time (`_is_project_confined_relative_path`) -- a marker is never
+    trusted as a replay path just because some record-time check once
+    passed for different bytes.
+    """
+    if not _is_project_confined_relative_path(content):
+        return False
+    expected_digest = marker_path.name.split(".", 1)[0]
+    return hashlib.sha256(content.encode()).hexdigest() == expected_digest
+
+
+def _read_self_heal_reprocess_markers(collection_dir: Path) -> Dict[Path, str]:
+    """Read every marker file's recorded path, tolerating one bad marker
+    without losing the rest -- an unreadable, malformed, or digest-
+    mismatched individual marker is skipped with a WARNING (full P1-4
+    quarantine of a marker happens separately, in
+    ``quarantine_corrupt_self_heal_reprocess_sidecar``). Returns
+    {marker_file_path: rel_path}."""
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    result: Dict[Path, str] = {}
+    try:
+        entries = list(marker_dir.iterdir())
+    except FileNotFoundError:
+        return result
+    for marker_path in entries:
+        if marker_path.suffix == ".tmp":
+            continue
+        try:
+            content = marker_path.read_text().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "self-heal-reprocess marker %s could not be read (%s) -- "
+                "skipping this marker only",
+                marker_path,
+                exc,
+            )
+            continue
+        if content and _is_valid_self_heal_marker_content(marker_path, content):
+            result[marker_path] = content
+    return result
+
+
+def _find_corrupt_self_heal_reprocess_markers(collection_dir: Path) -> List[Path]:
+    """Bug #1969 Round 6 (P1-4, Amendment 9): find per-event markers that
+    exist but are corrupt -- unreadable (including containing bytes that
+    are not valid UTF-8), empty, or holding content whose sha256 digest
+    does not match the digest embedded in the marker's own filename (the
+    atomic writer always names a marker after its OWN content's digest,
+    so a mismatch, like an empty or unreadable marker, means the file was
+    damaged after the fact). ``_read_self_heal_reprocess_markers`` silently
+    drops such a marker (it only cares about the paths it CAN trust),
+    which would permanently lose that file's only replay record.
+    Already-quarantined markers (name contains ``.corrupt.``, this
+    function's own prior output) are excluded so a marker is quarantined
+    exactly once, never re-detected and re-quarantined on every
+    subsequent run.
+    """
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    corrupt: List[Path] = []
+    try:
+        entries = list(marker_dir.iterdir())
+    except FileNotFoundError:
+        return corrupt
+    for marker_path in entries:
+        if marker_path.suffix == ".tmp" or ".corrupt." in marker_path.name:
+            continue
+        try:
+            content = marker_path.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            corrupt.append(marker_path)
+            continue
+        if not content or not _is_valid_self_heal_marker_content(marker_path, content):
+            corrupt.append(marker_path)
+    return corrupt
 
 
 def read_pending_self_heal_reprocess_paths(
     collection_dir: "Path | str",
 ) -> FrozenSet[str]:
-    """Read the durable self-heal reprocess sidecar for `collection_dir`.
-    Never mutates. Returns an empty frozenset when the sidecar is absent,
-    unreadable, or malformed (best-effort recovery -- a genuinely
-    unreadable sidecar cannot be replayed anyway, matching
-    `read_pending_dedup_outcome`'s own established tolerance)."""
-    pending_path = _self_heal_reprocess_pending_path(Path(collection_dir))
-    try:
-        with open(pending_path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return frozenset()
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning(
-            "read_pending_self_heal_reprocess_paths: %s exists but could "
-            "not be read/parsed (%s) -- treating as empty",
-            pending_path,
-            exc,
-        )
-        return frozenset()
-    if not isinstance(data, dict):
-        return frozenset()
-    paths = data.get("paths")
-    if not isinstance(paths, list):
-        return frozenset()
-    return frozenset(p for p in paths if isinstance(p, str) and p)
+    """Read the durable self-heal reprocess sidecar for `collection_dir`
+    -- the union of every Round 6 per-event marker's recorded path. Never
+    mutates. A bad individual marker is skipped, not fatal to the rest."""
+    collection_dir = Path(collection_dir)
+    return frozenset(_read_self_heal_reprocess_markers(collection_dir).values())
 
 
 def record_self_heal_reprocess_pending(
     collection_dir: "Path | str", paths: FrozenSet[str]
 ) -> None:
-    """Durably record `paths` as needing reprocessing -- MERGES with any
-    already-pending set (a prior wipe whose own reprocessing has not yet
-    completed) rather than overwriting it, so two wipes recorded before
-    anything drains either one never lose the first one's paths. No-op
-    for an empty `paths`."""
+    """Durably record `paths` as needing reprocessing -- each path gets
+    its OWN independent marker file (Bug #1969 Round 6 P1-2, Amendment 6),
+    so two wipes recorded before anything drains either one never lose
+    the first one's paths, and neither can two CONCURRENT recorders lose
+    each other's write. No-op for an empty `paths`.
+
+    CONCURRENCY INVARIANT (Bug #1969 Round 6, P1-2, Amendment 6): earlier
+    designs considered a shared-file read-merge-write, serialized first by
+    ``self._id_index_lock``/``IndexingLock`` (both disproven -- see git
+    history), then a same-node file lock (which cannot help on the
+    cluster's NFSv3 ``nolock`` mount with no cross-node writer gate --
+    Amendment 6 disproved that gate too, filed separately as issue
+    #1970). This function has NO read-merge-write cycle AT ALL: each call
+    creates one brand-new marker file per path via
+    ``_write_self_heal_reprocess_marker`` and never reads or overwrites
+    any other marker, so there is nothing for two concurrent recorders
+    (same process, different processes, or different NODES) to race on --
+    correct with zero mutual exclusion.
+    """
     if not paths:
         return
     collection_dir = Path(collection_dir)
-    existing = read_pending_self_heal_reprocess_paths(collection_dir)
-    merged = existing | paths
-    _write_self_heal_reprocess_pending_file(collection_dir, merged)
+    for rel_path in paths:
+        _write_self_heal_reprocess_marker(collection_dir, rel_path)
 
 
 def clear_self_heal_reprocess_paths(
@@ -870,26 +971,106 @@ def clear_self_heal_reprocess_paths(
     this ONLY after those paths have been successfully (not merely
     attempted, and not cancelled) reprocessed; clearing any earlier would
     lose the record on a crash before reprocessing actually finished.
-    Idempotent. Deletes the sidecar file entirely once the remaining set
-    is empty. A no-op (including for a nonexistent sidecar) when nothing
-    changes."""
+    Idempotent. A no-op (including when nothing is pending) when nothing
+    changes.
+
+    Bug #1969 Round 6 (P1-2, Amendment 6): deletes every per-event marker
+    file (`_write_self_heal_reprocess_marker`'s output) whose recorded
+    path is in `paths` -- best-effort per file, tolerating a marker
+    already removed by a concurrent clear. The clear-vs-record race PROOF
+    (a marker recorded by another writer AFTER this clear listed its
+    markers must never be touched) is a separate, deferred behavior --
+    this call only reads the marker directory ONCE per invocation and
+    only ever deletes files it saw containing a path this caller asked to
+    clear, never anything it didn't enumerate.
+    """
     collection_dir = Path(collection_dir)
     to_clear = set(paths)
     if not to_clear:
         return
-    existing = read_pending_self_heal_reprocess_paths(collection_dir)
-    remaining = existing - to_clear
-    if remaining == existing:
-        return
-    pending_path = _self_heal_reprocess_pending_path(collection_dir)
-    if not remaining:
-        try:
-            pending_path.unlink()
-        except FileNotFoundError:
-            return
-        _fsync_dir(collection_dir)
-        return
-    _write_self_heal_reprocess_pending_file(collection_dir, frozenset(remaining))
+
+    for marker_path, rel_path in _read_self_heal_reprocess_markers(
+        collection_dir
+    ).items():
+        if rel_path in to_clear:
+            try:
+                marker_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def is_self_heal_reprocess_sidecar_corrupt(collection_dir: "Path | str") -> bool:
+    """Bug #1969 Round 6 (P1-4): true when at least one Round 6 per-event
+    marker exists but is unreadable or empty (see
+    ``_find_corrupt_self_heal_reprocess_markers``). Distinct from a
+    genuinely ABSENT/clean sidecar (no self-heal has ever fired, or its
+    reprocessing was already fully cleared), which returns False here.
+
+    ``read_pending_self_heal_reprocess_paths`` cannot distinguish "empty
+    because nothing is pending" from "empty because a marker is corrupt"
+    -- both can return ``frozenset()``. This function is the
+    discriminator callers use to decide whether they must fall back to a
+    broader detection strategy: Bug #1969 Round 6 P1-4 forces the run
+    into reconcile-with-database mode when this returns True, since
+    ``_do_reconcile_with_database`` classifies any file with zero points
+    as missing and reindexes it -- a complete superset of whatever the
+    lost marker might have listed (a self-heal-wiped file has zero
+    points regardless of whether its marker survives).
+    """
+    return bool(_find_corrupt_self_heal_reprocess_markers(Path(collection_dir)))
+
+
+def _quarantine_one_corrupt_file(source_path: Path) -> Optional[Path]:
+    """Move `source_path` aside to `<name>.corrupt.<timestamp>` in the same
+    directory (never delete), with a numeric suffix on collision. Returns
+    the destination, or None if the move failed (source untouched)."""
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    quarantine_path = source_path.parent / f"{source_path.name}.corrupt.{timestamp}"
+    suffix = 0
+    while quarantine_path.exists():
+        suffix += 1
+        quarantine_path = (
+            source_path.parent / f"{source_path.name}.corrupt.{timestamp}.{suffix}"
+        )
+    try:
+        os.replace(str(source_path), str(quarantine_path))
+    except OSError as exc:
+        logger.error(
+            "Bug #1969 Round 6 (P1-4): failed to quarantine corrupt "
+            "self-heal-reprocess file %s -> %s (%s) -- leaving it in "
+            "place.",
+            source_path,
+            quarantine_path,
+            exc,
+        )
+        return None
+    _fsync_dir(source_path.parent)
+    return quarantine_path
+
+
+def quarantine_corrupt_self_heal_reprocess_sidecar(
+    collection_dir: "Path | str",
+) -> Optional[Path]:
+    """Bug #1969 Round 6 (P1-4): move every CORRUPT Round 6 per-event
+    marker aside for forensics -- NEVER deletes any of them -- after a
+    reconcile-with-database run forced specifically because the sidecar
+    could not be trusted completes SUCCESSFULLY. Each marker found
+    corrupt (empty or unreadable) by
+    ``_find_corrupt_self_heal_reprocess_markers`` is quarantined
+    independently, so one corrupt marker never blocks the others' valid
+    replay paths from being read normally. Returns the first corrupt
+    marker's quarantine destination, or None if nothing needed
+    quarantining or every move failed (the corrupt artifact stays in
+    place either way -- never lost).
+    """
+    collection_dir = Path(collection_dir)
+    marker_quarantine_path: Optional[Path] = None
+    for marker_path in _find_corrupt_self_heal_reprocess_markers(collection_dir):
+        result = _quarantine_one_corrupt_file(marker_path)
+        if marker_quarantine_path is None:
+            marker_quarantine_path = result
+
+    return marker_quarantine_path
 
 
 def _accumulate_pending_outcome_durably(
@@ -1924,6 +2105,30 @@ def _try_parse_record_file_identity(
     return project_id, file_hash
 
 
+def _is_project_confined_relative_path(rel_path: Any) -> bool:
+    """Bug #1969 Round 6 (P1-5): true when `rel_path` is a nonempty
+    string that is safely usable as a project-relative replay path --
+    NOT absolute, and does not escape its base via a `..` path-traversal
+    segment. Validated syntactically against a synthetic root (this
+    module has no access to the real codebase root -- it only ever sees
+    the vector store's own collection directory), so this proves the
+    path COULD be a valid relative path within a project, without
+    needing the actual filesystem tree.
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        return False
+    candidate = Path(rel_path)
+    if candidate.is_absolute():
+        return False
+    synthetic_root = Path("/__self_heal_replay_path_validation_root__")
+    resolved = (synthetic_root / candidate).resolve()
+    try:
+        resolved.relative_to(synthetic_root)
+    except ValueError:
+        return False
+    return True
+
+
 def recover_from_corrupt_id_index_by_wiping_files(
     collection_dir: "Path | str",
 ) -> DuplicateFileWipeResult:
@@ -2052,16 +2257,42 @@ def recover_from_corrupt_id_index_by_wiping_files(
     # been deleted.
     vector_dim, space = _resolve_hnsw_build_params(collection_dir)
 
-    # Pure planning pass: compute which relative paths will be wiped --
-    # NO deletion happens here.
-    wiped_relative_paths: set = set()
+    # Pure planning pass: compute which relative paths will be wiped, PER
+    # implicated identity -- NO deletion happens here.
+    valid_paths_by_identity: Dict[Tuple[str, str], set] = {}
     for path, record in identity_by_path.items():
         identity = _try_parse_record_file_identity(record)
         if identity is not None and identity in implicated_files:
             payload = record.get("payload") or {}
             rel_path = payload.get("path")
-            if isinstance(rel_path, str) and rel_path:
-                wiped_relative_paths.add(rel_path)
+            if _is_project_confined_relative_path(rel_path):
+                valid_paths_by_identity.setdefault(identity, set()).add(rel_path)
+
+    # Bug #1969 Round 6 (P1-5): refuse -- BEFORE recording the sidecar or
+    # deleting anything -- if ANY implicated identity has NO record with
+    # a valid, project-confined replay path (missing, empty, absolute, or
+    # a `..` path-traversal escape). Deleting such a group's records
+    # would lose the only durably nameable replay path with zero
+    # mutation to show for it -- unlike a genuinely malformed record
+    # (caught earlier by the whole-collection scan), this shape is
+    # syntactically valid JSON with a parseable identity, so it slips
+    # past every OTHER precheck in this module.
+    unresolvable_identities = implicated_files - set(valid_paths_by_identity.keys())
+    if unresolvable_identities:
+        raise DedupRepairAmbiguousError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: {len(unresolvable_identities)} implicated "
+            f"file-hash group(s) have NO record with a valid, "
+            f"project-confined replay path (sample identities: "
+            f"{sorted(unresolvable_identities)[:_MAX_MALFORMED_SAMPLE_SIZE]}) "
+            f"-- refusing to delete records that cannot be durably "
+            f"recorded for reprocessing.",
+            reason=DedupRepairAmbiguousReason.UNRESOLVABLE_REPLAY_PATH,
+        )
+
+    wiped_relative_paths: set = set()
+    for paths in valid_paths_by_identity.values():
+        wiped_relative_paths |= paths
 
     # Bug #1969 Round 5 (R4-F1): durably record the about-to-be-wiped
     # paths BEFORE the first physical deletion below -- a crash anywhere

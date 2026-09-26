@@ -647,9 +647,30 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # entering the FileChunkingManager context above, before
                 # the hash phase -- both stay in scope here.
 
+                # Bug #1969 Round 6 (P1-3): relative paths of files that
+                # failed THIS run, so the self-heal-reprocess sidecar clear
+                # logic can attribute a failure to a specific path instead
+                # of only knowing an aggregate count. Declared before the
+                # submission loop (not just the futures-collection loop
+                # below) so a submission-time failure -- e.g.
+                # `submit_file_for_processing` itself raising, before any
+                # future even exists -- is attributed too, not just a
+                # failure discovered later via a completed future.
+                _failed_relative_paths: set = set()
+
                 for file_path in files:
                     if self.cancelled:
                         break
+
+                    if file_path not in hash_results:
+                        # Bug #1118 TOCTOU: this file already vanished
+                        # during the hash phase, which logged its own
+                        # WARNING and excluded it from `hash_results` --
+                        # not a NEW failure to attribute here. Letting the
+                        # resulting KeyError fall into the except-Exception
+                        # handler below would double-count an already-
+                        # logged benign skip as a submission failure.
+                        continue
 
                     try:
                         # Get pre-calculated metadata and size (no I/O)
@@ -673,9 +694,17 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     except Exception as e:
                         logger.error(f"Failed to process file {file_path}: {e}")
                         # Continue with other files rather than failing completely
+                        stats.failed_files += 1
+                        try:
+                            _failed_relative_paths.add(
+                                str(file_path.relative_to(self.config.codebase_dir))
+                            )
+                        except ValueError:
+                            _failed_relative_paths.add(str(file_path))
 
                 if not file_futures:
                     logger.warning("No files to process")
+                    stats.failed_paths = frozenset(_failed_relative_paths)
                     return stats
 
                 logger.info(
@@ -783,6 +812,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         else:
                             stats.failed_files += 1
                             logger.error(f"File processing failed: {file_result.error}")
+                            try:
+                                _failed_relative_paths.add(
+                                    str(
+                                        file_result.file_path.relative_to(
+                                            self.config.codebase_dir
+                                        )
+                                    )
+                                )
+                            except ValueError:
+                                _failed_relative_paths.add(str(file_result.file_path))
 
                     except ChunkStoreUnavailableError as e:
                         # Bug #1746 Change 2: a fatal chunk-store failure
@@ -812,6 +851,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             raise fatal_chunk_store_error
 
         stats.end_time = time.time()
+        stats.failed_paths = frozenset(_failed_relative_paths)
         # stats.files_processed already updated during processing
         logger.info(
             f"High-throughput processing completed: "
@@ -1413,6 +1453,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         offset = None
 
         while True:
+            # Bug #1969 Round 6 (P1-1 caller audit): this pre-fetch feeds
+            # write-adjacent call sites (batch branch-visibility ensure,
+            # branch-isolation hiding) in
+            # process_branch_changes_high_throughput -- self_heal=True so
+            # a corrupt-duplicate collection is repaired here rather than
+            # hard-failing the whole branch-change pass.
             points, next_offset = self.vector_store_client.scroll_points(
                 collection_name=collection_name,
                 filter_conditions={
@@ -1422,6 +1468,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,  # CRITICAL: No vectors - massive memory savings
+                self_heal=True,
             )
 
             if not points:
@@ -1812,8 +1859,26 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
                 )
             except Exception as e:
-                logger.error(f"Failed to fetch targeted points for hiding: {e}")
-                return None
+                # Amendment 2c (Codex review correction, turn 10): a log
+                # line alone is not enough -- every caller of
+                # hide_files_not_in_branch_thread_safe() discarded a bare
+                # boolean return, so a caught-and-swallowed failure here
+                # let a run finish looking successful while leaving stale
+                # branch-visible points. Log the operational consequence
+                # for the log-audit trail, THEN re-raise so the failure
+                # actually reaches the caller instead of being silently
+                # absorbed.
+                logger.error(
+                    "Failed to fetch targeted points for hiding "
+                    "collection '%s' (%d file(s)): %s -- branch isolation "
+                    "for these files will be SKIPPED this pass; stale "
+                    "branch-visible points may remain until a later run "
+                    "succeeds",
+                    collection_name,
+                    len(raw_paths_to_hide),
+                    e,
+                )
+                raise
 
     def hide_files_not_in_branch_thread_safe(
         self,

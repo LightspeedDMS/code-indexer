@@ -621,6 +621,35 @@ class SmartIndexer(HighThroughputProcessor):
                             f"Original error: {e}"
                         ) from e
 
+            # Bug #1969 Round 6 (P1-4): a corrupt/unreadable self-heal-
+            # reprocess sidecar means its replay record is lost -- rather
+            # than silently trusting normal incremental/resume file
+            # selection (which has no way to know what a lost sidecar
+            # might have listed), force THIS run into reconcile-with-
+            # database mode: a complete superset of whatever the corrupt
+            # sidecar could have listed, since a self-heal-wiped file has
+            # zero points regardless of whether the sidecar remembers it.
+            if not force_full and not reconcile_with_database:
+                _p14_collection_name = self.vector_store_client.resolve_collection_name(
+                    self.config, self.embedding_provider
+                )
+                if self.vector_store_client.collection_exists(
+                    _p14_collection_name
+                ) and self.vector_store_client.is_self_heal_reprocess_sidecar_corrupt(
+                    _p14_collection_name
+                ):
+                    logger.error(
+                        "Bug #1969 Round 6 (P1-4): the self-heal-reprocess "
+                        "sidecar for collection %r is corrupt/unreadable -- "
+                        "its replay record is lost, so this run is forced "
+                        "into reconcile-with-database mode (a complete "
+                        "superset: any file with zero points is detected as "
+                        "missing and reindexed) instead of trusting normal "
+                        "incremental/resume file selection.",
+                        _p14_collection_name,
+                    )
+                    reconcile_with_database = True
+
             # Check for interrupted operations first - highest priority (unless forcing full)
             if (
                 not force_full
@@ -644,7 +673,7 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Check for reconcile operation
             if reconcile_with_database:
-                return self._do_reconcile_with_database(
+                reconcile_stats = self._do_reconcile_with_database(
                     batch_size,
                     progress_callback,
                     git_status,
@@ -654,6 +683,33 @@ class SmartIndexer(HighThroughputProcessor):
                     quiet,
                     vector_thread_count,
                 )
+                # Bug #1969 Round 6 (P1-4): only after the reconcile
+                # completes SUCCESSFULLY (not cancelled) is it safe to
+                # quarantine a corrupt sidecar -- covers both this run
+                # being FORCED into reconcile mode above, and an
+                # explicit user-run `--reconcile` that happens to also
+                # see a corrupt sidecar sitting there for an unrelated
+                # reason.
+                if not reconcile_stats.cancelled:
+                    _p14_collection_name = (
+                        self.vector_store_client.resolve_collection_name(
+                            self.config, self.embedding_provider
+                        )
+                    )
+                    if self.vector_store_client.is_self_heal_reprocess_sidecar_corrupt(
+                        _p14_collection_name
+                    ):
+                        quarantine_path = self.vector_store_client.quarantine_corrupt_self_heal_reprocess_sidecar(
+                            _p14_collection_name
+                        )
+                        logger.warning(
+                            "Bug #1969 Round 6 (P1-4): quarantined corrupt "
+                            "self-heal-reprocess sidecar for collection %r "
+                            "after a successful reconcile -> %s",
+                            _p14_collection_name,
+                            quarantine_path,
+                        )
+                return reconcile_stats
 
             # Handle deletion detection for standard indexing (when not doing reconcile)
             # PERFORMANCE FIX (Bug 3): Skip deletion detection for git-aware projects
@@ -937,10 +993,55 @@ class SmartIndexer(HighThroughputProcessor):
             stats.files_processed += reprocess_stats.files_processed
             stats.chunks_created += reprocess_stats.chunks_created
             stats.failed_files += reprocess_stats.failed_files
+            # Bug #1969 Round 6 (P1-3): merge the second pass's per-path
+            # failure attribution too (a set UNION of both passes' failed
+            # paths), not just its aggregate count -- otherwise the
+            # combined stats always look "unattributed" to
+            # _clear_self_heal_reprocess_paths_if_safe's consistency
+            # check, forcing it to (safely, but wrongly) retain every
+            # pending path instead of clearing the one that genuinely
+            # succeeded.
+            stats.failed_paths = stats.failed_paths | reprocess_stats.failed_paths
             stats.total_size += reprocess_stats.total_size
             stats.cancelled = stats.cancelled or reprocess_stats.cancelled
 
         return stats, pending
+
+    def _self_heal_path_has_points(self, collection_name: str, rel_path: str) -> bool:
+        """Bug #1969 Round 6 (P1-3): true if `rel_path` currently has at
+        least one point in the collection -- used to verify a
+        self-heal-pending path was ACTUALLY successfully reprocessed
+        before clearing its durable replay record, rather than trusting
+        the run's aggregate `stats.failed_files` count (which cannot say
+        WHICH path failed). Tries both the relative form (the sidecar's
+        own representation) and the absolute form (Bug #1575 AC6: a
+        stored `payload.path` may be absolute) since either can be the
+        on-disk representation. Fails SAFE: any error while checking is
+        treated as "not yet resolved" -- never silently clears on doubt.
+        """
+        candidates = [rel_path, str(Path(self.config.codebase_dir) / rel_path)]
+        try:
+            for candidate in candidates:
+                points, _ = self.vector_store_client.scroll_points(
+                    collection_name=collection_name,
+                    filter_conditions={
+                        "must": [{"key": "path", "match": {"value": candidate}}]
+                    },
+                    limit=1,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                if points:
+                    return True
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): failed to verify reprocessed "
+                "state for %r (%s) -- treating as still pending.",
+                rel_path,
+                exc,
+            )
+            return False
 
     def _clear_self_heal_reprocess_paths_if_safe(
         self,
@@ -948,11 +1049,44 @@ class SmartIndexer(HighThroughputProcessor):
         pending_paths: FrozenSet[str],
         stats: ProcessingStats,
     ) -> None:
-        """Bug #1969 Round 5 (R4-F3): clear the durable sidecar entries
-        this run consulted -- but ONLY when the run completed without
-        being cancelled. A cancelled run must NOT mark a wipe as
-        resolved: the durable record stays intact for the next attempt,
-        exactly the crash-safety property the sidecar exists for.
+        """Bug #1969 Round 5 (R4-F3) / Round 6 (P1-3): clear the durable
+        sidecar entries this run consulted -- but ONLY when the run
+        completed without being cancelled, AND only PER-PATH: a path is
+        cleared only when it now actually has points again (verified via
+        ``_self_heal_path_has_points``), never just because the run's
+        aggregate ``stats.failed_files`` happened to be zero or because
+        SOME OTHER unrelated path in the same run failed.
+
+        A cancelled run must NOT mark ANY wipe as resolved: the durable
+        record stays intact for every consulted path, exactly the
+        crash-safety property the sidecar exists for.
+
+        A path that still has zero points (its own reprocess attempt
+        genuinely failed, or was never attempted) stays durably recorded
+        -- it gets re-attempted once per future run (a WARNING is logged
+        here, and the sidecar itself is only ever appended/removed, never
+        looped over from this method) rather than being lost or causing
+        an unbounded retry loop.
+
+        (P1-3 review, Codex counter-example) A self-heal wipe records the
+        sidecar entry BEFORE deleting the old (pre-wipe) points -- a
+        crash, or this run's own failure, can leave those stale points in
+        place, never genuinely replaced. "Has points" alone cannot
+        distinguish a fresh success from that leftover, and an AGGREGATE
+        failure count cannot either: two pending paths, one with a stale
+        leftover point and one that genuinely succeeded with zero chunks,
+        produce the exact same (still-pending count, failed_files) pair
+        as one pending path that failed and one that succeeded --
+        opposite correct outcomes from identical aggregate evidence. Only
+        `stats.failed_paths` (Bug #1969 Round 6 P1-3, per-file failure
+        attribution from the real processing loop) can break that tie: a
+        pending path is trusted as resolved via "has points" ONLY when
+        it is NOT in `stats.failed_paths` AND `stats.failed_paths`
+        itself accounts for every reported failure
+        (`len(stats.failed_paths) >= stats.failed_files`). If some
+        failure has no attributed path at all (a rare internal executor
+        error, or a hand-built `ProcessingStats` in a test), nothing is
+        trusted as resolved this call -- fail safe.
         """
         if not pending_paths:
             return
@@ -965,9 +1099,42 @@ class SmartIndexer(HighThroughputProcessor):
                 sorted(pending_paths),
             )
             return
-        self.vector_store_client.clear_self_heal_reprocess_paths(
-            collection_name, pending_paths
-        )
+
+        if len(stats.failed_paths) < stats.failed_files:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): this run reported %d failed "
+                "file(s) but only %d are attributed to a specific path -- "
+                "cannot confirm which self-heal-pending path(s) genuinely "
+                "failed, so none are cleared this run: %s",
+                stats.failed_files,
+                len(stats.failed_paths),
+                sorted(pending_paths),
+            )
+            return
+
+        resolved = {
+            rel_path
+            for rel_path in pending_paths
+            if rel_path not in stats.failed_paths
+            and self._self_heal_path_has_points(collection_name, rel_path)
+        }
+        still_pending = pending_paths - resolved
+
+        if still_pending:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): %d self-heal-pending path(s) "
+                "were not confirmed reprocessed this run (failed_files=%d) "
+                "-- leaving them durably recorded for a future attempt: "
+                "%s",
+                len(still_pending),
+                stats.failed_files,
+                sorted(still_pending),
+            )
+
+        if resolved:
+            self.vector_store_client.clear_self_heal_reprocess_paths(
+                collection_name, resolved
+            )
 
     def _do_full_index(
         self,
@@ -2700,6 +2867,7 @@ class SmartIndexer(HighThroughputProcessor):
                     "must": [{"key": "visible_branches", "match": {"value": branch}}]
                 },
                 limit=10000,  # Process in batches if needed
+                self_heal=True,
             )
 
             content_points_hidden = 0
@@ -3118,6 +3286,12 @@ class SmartIndexer(HighThroughputProcessor):
         offset = None
 
         while True:
+            # Bug #1969 Round 6 (P1-1 caller audit): the sole caller of
+            # this method is _get_indexed_files_snapshot ->
+            # _do_reconcile_with_database -- self_heal=True so
+            # `cidx index --reconcile` self-heals a corrupt-duplicate
+            # collection instead of hard-failing on the exact corruption
+            # this whole fix exists to resolve.
             points, next_offset = self.vector_store_client.scroll_points(
                 collection_name=collection_name,
                 filter_conditions={
@@ -3127,6 +3301,7 @@ class SmartIndexer(HighThroughputProcessor):
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,  # CRITICAL: No vectors = massive memory savings
+                self_heal=True,
             )
 
             if not points:
@@ -3335,6 +3510,7 @@ class SmartIndexer(HighThroughputProcessor):
                 },
                 limit=10000,  # Get all visible content points
                 collection_name=collection_name,
+                self_heal=True,
             )
 
             if not all_points:
@@ -3512,6 +3688,14 @@ class SmartIndexer(HighThroughputProcessor):
 
             while True:
                 try:
+                    # Bug #1969 Round 6 (P1-1 caller audit): this scan
+                    # drives delete_file_branch_aware for genuinely-
+                    # deleted files -- self_heal=True so a corrupt-
+                    # duplicate collection is repaired here instead of
+                    # this loop's own except-Exception handler silently
+                    # masking the failure ("Database query failed during
+                    # deletion detection") and leaving the corruption in
+                    # place forever.
                     points, next_offset = self.vector_store_client.scroll_points(
                         filter_conditions={
                             "should": [
@@ -3524,6 +3708,7 @@ class SmartIndexer(HighThroughputProcessor):
                         with_payload=True,
                         with_vectors=False,
                         collection_name=collection_name,
+                        self_heal=True,
                     )
 
                     for point in points:

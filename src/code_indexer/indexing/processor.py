@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import FrozenSet, List, Dict, Any, Optional, Callable
 from dataclasses import dataclass
 
 from ..config import Config
@@ -23,6 +23,16 @@ class ProcessingStats:
     start_time: float = 0.0
     end_time: float = 0.0
     cancelled: bool = False
+    #: Bug #1969 Round 6 (P1-3): relative paths of files this run reported
+    #: as failed, when known. Distinct from `failed_files` (a bare count):
+    #: the self-heal-reprocess sidecar clear logic needs to know WHICH
+    #: path(s) failed, not just how many, since a stale never-deleted
+    #: point can make a genuinely-failed path look "resolved" under a
+    #: point-existence check alone. May under-count relative to
+    #: `failed_files` for a failure with no attributable path (a rare
+    #: internal executor error) -- callers must treat that as "some
+    #: failure is unattributed" rather than assuming completeness.
+    failed_paths: FrozenSet[str] = frozenset()
 
     @property
     def duration(self) -> float:

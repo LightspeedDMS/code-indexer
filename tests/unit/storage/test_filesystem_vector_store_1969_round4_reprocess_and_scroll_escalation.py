@@ -180,8 +180,11 @@ class TestScrollPointsSelfHealEscalation:
         )
 
         with caplog.at_level(logging.WARNING):
+            # Bug #1969 Round 6 (P1-1): the repair/wipe escalation this test
+            # exercises is now gated on self_heal -- this test deliberately
+            # opts in to prove the legitimate self-heal path still works.
             points, _next_offset = store.scroll_points(
-                collection_name="coll", limit=100
+                collection_name="coll", limit=100, self_heal=True
             )
 
         # Completes successfully -- no exception. The colliding file is
@@ -228,4 +231,12 @@ class TestScrollPointsSelfHealEscalation:
         )
 
         with pytest.raises(DedupRepairAmbiguousError):
-            store.scroll_points(collection_name="coll", limit=100)
+            # Bug #1969 Round 6 (P1-1): self_heal=True so the dedup-repair
+            # path actually runs and this test can prove a DIFFERENT
+            # ambiguous reason (MALFORMED_RECORDS) still propagates
+            # unescalated -- with self_heal=False (default) scroll_points
+            # now raises the original ScrollDataIntegrityError before ever
+            # calling repair_duplicate_and_shifted_points, which is a
+            # different scenario covered separately in
+            # test_filesystem_vector_store_1969_round6_scroll_self_heal_gate.py.
+            store.scroll_points(collection_name="coll", limit=100, self_heal=True)

@@ -27,7 +27,6 @@ from code_indexer.storage.shared.collection_dedup_repair import (
     read_pending_self_heal_reprocess_paths,
     record_self_heal_reprocess_pending,
     recover_from_corrupt_id_index_by_wiping_files,
-    SELF_HEAL_REPROCESS_PENDING_FILENAME,
 )
 
 
@@ -97,11 +96,14 @@ class TestDurableSidecarPrimitives:
         assert read_pending_self_heal_reprocess_paths(tmp_path) == frozenset()
 
     def test_record_and_read_roundtrip(self, tmp_path: Path) -> None:
+        # Bug #1969 Round 6 (P1-2, Amendment 6): records now live in
+        # independent per-event marker files, not the legacy single-file
+        # sidecar -- the roundtrip behavior below is what matters, not
+        # which on-disk representation stores it.
         record_self_heal_reprocess_pending(tmp_path, frozenset({"a.py", "b.py"}))
         assert read_pending_self_heal_reprocess_paths(tmp_path) == frozenset(
             {"a.py", "b.py"}
         )
-        assert (tmp_path / SELF_HEAL_REPROCESS_PENDING_FILENAME).exists()
 
     def test_record_merges_with_existing_rather_than_overwriting(
         self, tmp_path: Path
@@ -125,7 +127,6 @@ class TestDurableSidecarPrimitives:
         record_self_heal_reprocess_pending(tmp_path, frozenset({"a.py"}))
         clear_self_heal_reprocess_paths(tmp_path, ["a.py"])
         assert read_pending_self_heal_reprocess_paths(tmp_path) == frozenset()
-        assert not (tmp_path / SELF_HEAL_REPROCESS_PENDING_FILENAME).exists()
 
     def test_clear_nonexistent_sidecar_is_a_safe_noop(self, tmp_path: Path) -> None:
         clear_self_heal_reprocess_paths(tmp_path, ["never-recorded.py"])

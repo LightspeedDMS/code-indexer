@@ -152,6 +152,23 @@ def test_clear_proceeds_when_stats_not_cancelled(tmp_path):
     collection_path = tmp_path / "repo" / ".code-indexer" / "index" / collection_name
     record_self_heal_reprocess_pending(collection_path, frozenset({"wiped.py"}))
 
+    # Bug #1969 Round 6 (P1-3): a non-cancelled run's clear is now
+    # per-path -- it only clears a path that actually has points again
+    # (successfully reprocessed). Upsert a real point for "wiped.py" so
+    # this test represents that resolved case (the "still has zero
+    # points, must NOT clear" case is covered separately by
+    # test_smart_indexer_1969_round6_p13_per_path_clear.py).
+    indexer.vector_store_client.upsert_points(
+        collection_name,
+        [
+            {
+                "id": "round5-wiped-point",
+                "vector": [0.0] * VECTOR_DIM,
+                "payload": {"path": "wiped.py", "type": "content"},
+            }
+        ],
+    )
+
     normal_stats = ProcessingStats()
     normal_stats.cancelled = False
 

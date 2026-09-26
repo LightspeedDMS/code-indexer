@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 from unittest.mock import MagicMock, Mock
 
+import pytest
+
 
 from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 
@@ -47,7 +49,9 @@ def _configure_content_points_mock(
     }
     processor.vector_store_client.distinct_content_paths.return_value = all_paths
 
-    def _fetch_points_for_paths(_collection_name, paths):
+    def _fetch_points_for_paths(
+        _collection_name, paths, _subdirectory=None, *, self_heal=False
+    ):
         return [
             point
             for point in content_points
@@ -301,6 +305,47 @@ class TestFTSBranchIsolationErrorHandling:
         # The key requirement is: NO EXCEPTION propagated
         # (verified by the fact that we reach this assertion)
         # We just verify the function completed without raising
+
+
+class TestBranchHideFailureIsExplicit:
+    """Amendment 2c: a self-heal/fetch failure during branch-isolation
+    hiding must reach the indexing caller as a failure. A log alone cannot
+    prevent a successful-looking run because every caller discards the
+    boolean result of hide_files_not_in_branch_thread_safe()."""
+
+    def test_fetch_failure_propagates_and_logs_skipped_isolation(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        processor = _make_processor(tmp_path)
+
+        all_files = ["file_a.py", "file_b.py", "file_c.py"]
+        current_files = ["file_a.py"]
+
+        content_points = _make_content_points(all_files)
+        _configure_content_points_mock(processor, content_points)
+        processor.vector_store_client.fetch_points_for_paths.side_effect = RuntimeError(
+            "simulated fetch failure"
+        )
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError, match="simulated fetch failure"):
+                processor.hide_files_not_in_branch_thread_safe(
+                    branch="feature-branch",
+                    current_files=current_files,
+                    collection_name="test_collection",
+                    fts_manager=None,
+                )
+
+        assert any(
+            "skip" in record.message.lower()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ), (
+            "the failure log must explicitly state that branch isolation "
+            "was skipped, in addition to propagating the failure"
+        )
 
 
 class TestFTSParameterSignature:
