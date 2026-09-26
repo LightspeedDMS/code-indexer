@@ -55,6 +55,7 @@ Applies to source, tests, **test fixtures and sample data**, docstrings, comment
 - Bug reports and epics cite BEHAVIOUR and code locations in THIS repository -- never a third party's file paths, type names, or source.
 - Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
 - Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
+- Security vulnerabilities are tracked out of band in the dedicated private repository `code-indexer-security`, never in this repository's issues, PRs, or docs.
 
 ### If something already leaked
 
