@@ -227,6 +227,17 @@ def reconstruct_temporal_backend(
     # dispatch the WRONG embedder/config settings for this repo.
     config = ConfigManager.load_verified_config(repo_path)
 
+    # This function only ever runs in server context (the inline temporal
+    # query path and the standalone temporal worker), so the
+    # embedding-provider endpoint and daemon-mode fields are reset to
+    # server-managed values before the fusion dispatch downstream
+    # constructs the per-commit embedder from them.
+    from ..utils.server_managed_provider_settings import (
+        enforce_server_managed_provider_settings,
+    )
+
+    enforce_server_managed_provider_settings(config)
+
     # Create vector store (Story #526: pass server cache)
     from ..app import _server_hnsw_cache
     from ..services.memory_governor import get_memory_governor

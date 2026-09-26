@@ -50,6 +50,7 @@ class TestAppendServerLayoutArgsIgnoresResumeState:
             "--progress-json",
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
+            "--server-managed-provider-settings",
         ]
 
     def test_does_not_mutate_input_list(self) -> None:

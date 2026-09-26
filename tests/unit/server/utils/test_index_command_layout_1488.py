@@ -9,6 +9,11 @@ future spawn site cannot silently regress to the CLI default.
 This SAME helper also stamps `--ignore-resume-state`
 (see index_command_layout.py's module docstring) -- the two exact-list
 assertions below were updated accordingly when that flag was added.
+
+This SAME helper also stamps `--server-managed-provider-settings`: a
+repository-authored `config.json` must never choose an embedding-provider
+endpoint or a daemon-mode override for server-spawned indexing -- only
+server-managed provider settings are used.
 """
 
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
@@ -23,6 +28,7 @@ class TestAppendServerLayoutArgs:
             "index",
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
+            "--server-managed-provider-settings",
         ]
 
     def test_preserves_prior_tokens_and_order(self) -> None:
@@ -38,6 +44,7 @@ class TestAppendServerLayoutArgs:
             "--progress-json",
             "--new-collection-layout=chunks_db",
             "--ignore-resume-state",
+            "--server-managed-provider-settings",
         ]
 
     def test_does_not_mutate_input_list(self) -> None:

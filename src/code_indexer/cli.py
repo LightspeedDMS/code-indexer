@@ -3171,6 +3171,20 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "for what the server indexes on their behalf. "
     "Does NOT force a full reindex (unlike --clear).",
 )
+@click.option(
+    "--server-managed-provider-settings",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: reset the embedding-provider endpoint(s) and daemon-"
+    "mode selection to fixed, server-managed values before indexing, "
+    "ignoring whatever a repository's own .code-indexer/config.json set "
+    "for those fields. Used by the server for repos whose working tree a "
+    "tenant/committer can write to, since that config cannot be trusted "
+    "to choose where the server's provider requests are sent or whether "
+    "indexing delegates to a daemon. Every other provider setting (model, "
+    "timeout, retries, ...) is left untouched.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3194,6 +3208,7 @@ def index(
     new_collection_layout: Optional[str] = None,
     migrate_chunks_to_sqlite: bool = False,
     ignore_resume_state: bool = False,
+    server_managed_provider_settings: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -3274,6 +3289,30 @@ def index(
     """
     config_manager = ctx.obj["config_manager"]
 
+    def _load_config_for_index() -> Config:
+        """Load config for this `cidx index` invocation.
+
+        A repository's own .code-indexer/config.json must never choose the
+        embedding-provider endpoint or daemon-mode delegation for a
+        server-spawned run. `config_manager.load()`
+        re-parses config.json from disk and returns a NEW object every
+        call, and this command's branches call it more than once (the
+        initial daemon-delegation decision, the temporal branch, the
+        --rebuild-fts-index early exit, and the main indexing path) -- so
+        the override is applied HERE, at the single shared load point,
+        rather than once after an early call whose result a later reload
+        would silently discard. Every other provider setting is left
+        exactly as loaded.
+        """
+        loaded_config = cast(Config, config_manager.load())
+        if server_managed_provider_settings:
+            from .server.utils.server_managed_provider_settings import (
+                enforce_server_managed_provider_settings,
+            )
+
+            enforce_server_managed_provider_settings(loaded_config)
+        return loaded_config
+
     # Story #1418: install the embedding-stats writer BEFORE any
     # embedding-provider client is constructed, and BEFORE any
     # --index-commits branching (unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR,
@@ -3332,7 +3371,7 @@ def index(
             )
 
     # Check if daemon mode is enabled and delegate accordingly
-    config = config_manager.load()
+    config = _load_config_for_index()
 
     # Story #1488: `--migrate-chunks-to-sqlite` is a one-shot in-place storage
     # migration that runs BEFORE any daemon delegation (it must never trigger
@@ -3402,7 +3441,9 @@ def index(
 
         exit_code = _index_via_daemon(
             force_reindex=clear,
-            daemon_config=config.daemon.model_dump(),  # config.daemon is guaranteed to exist here
+            daemon_config=cast(
+                Any, config.daemon
+            ).model_dump(),  # config.daemon is guaranteed to exist here
             enable_fts=fts,
             batch_size=batch_size,
             reconcile=reconcile,
@@ -3589,7 +3630,7 @@ def index(
                 from .services.temporal.temporal_indexer import TemporalIndexer
                 from .storage.filesystem_vector_store import FilesystemVectorStore
 
-                config = config_manager.load()
+                config = _load_config_for_index()
 
                 # Apply diff_context override if provided
                 if diff_context is not None:
@@ -3727,7 +3768,7 @@ def index(
 
                 resolve_temporal_collection_from_config(config)
                 _temporal_coll_name = resolve_temporal_collection_name(
-                    config.temporal.active_embedder
+                    cast(str, config.temporal.active_embedder)
                 )
                 temporal_indexer = TemporalIndexer(
                     config_manager, vector_store, collection_name=_temporal_coll_name
@@ -4040,7 +4081,7 @@ def index(
     # Handle --rebuild-fts-index flag (early exit path)
     if rebuild_fts_index:
         try:
-            config = config_manager.load()
+            config = _load_config_for_index()
 
             # Check if indexing progress file exists
             progress_file = config_manager.config_path.parent / "indexing_progress.json"
@@ -4194,7 +4235,7 @@ def index(
         sys.exit(1)
 
     try:
-        config = config_manager.load()
+        config = _load_config_for_index()
 
         # Multi-provider loop (Story #620): read embedding_providers, check API keys.
         # config.json is never mutated on disk — only in-memory override is used.
