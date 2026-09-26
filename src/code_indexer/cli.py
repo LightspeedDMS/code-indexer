@@ -3158,6 +3158,19 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     "only after a verified, crash-safe chunks.db is committed. Idempotent and "
     "crash-resumable; exits non-zero if any collection failed/was skipped.",
 )
+@click.option(
+    "--ignore-resume-state",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: do not trust a stored interrupted-operation resume "
+    "state (.code-indexer/metadata-<provider>.json) -- fall through to a "
+    "normal incremental/full walk instead of resuming from it. Used by "
+    "the server for repos whose working tree a tenant/committer can "
+    "write to, since that resume state cannot be trusted as provenance "
+    "for what the server indexes on their behalf. "
+    "Does NOT force a full reindex (unlike --clear).",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3180,6 +3193,7 @@ def index(
     progress_json: bool = False,
     new_collection_layout: Optional[str] = None,
     migrate_chunks_to_sqlite: bool = False,
+    ignore_resume_state: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -3358,6 +3372,8 @@ def index(
         sys.exit(exit_code)
 
     daemon_enabled = config.daemon and config.daemon.enabled
+    if ignore_resume_state:
+        daemon_enabled = False
 
     # Handle --rebuild-fts-index BEFORE general daemon delegation
     if rebuild_fts_index and daemon_enabled:
@@ -4563,6 +4579,7 @@ def index(
                     vector_thread_count=config.voyage_ai.parallel_requests,
                     detect_deletions=detect_deletions,
                     enable_fts=fts,
+                    trust_resume_state=not ignore_resume_state,
                 )
 
                 # Show final completion state (if not interrupted)
@@ -4676,6 +4693,7 @@ def index(
                 ),
                 detect_deletions=detect_deletions,
                 enable_fts=False,
+                trust_resume_state=not ignore_resume_state,
             )
             if _extra_stats is not None:
                 console.print(

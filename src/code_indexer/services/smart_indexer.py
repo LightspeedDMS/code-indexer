@@ -10,6 +10,7 @@ See HighThroughputProcessor for file progress patterns (total>0).
 from __future__ import annotations
 
 import logging
+import os
 import time
 import datetime
 import subprocess
@@ -340,6 +341,7 @@ class SmartIndexer(HighThroughputProcessor):
         vector_thread_count: Optional[int] = None,
         detect_deletions: bool = False,
         enable_fts: bool = False,
+        trust_resume_state: bool = True,
     ) -> ProcessingStats:
         """
         Smart indexing that automatically chooses between full and incremental indexing.
@@ -355,6 +357,13 @@ class SmartIndexer(HighThroughputProcessor):
             vector_thread_count: Number of threads for vector calculation
             detect_deletions: Detect and handle files deleted from filesystem but still in database
             enable_fts: Build full-text search index alongside semantic index
+            trust_resume_state: When False, never
+                take the interrupted-operation resume branch, regardless
+                of what the resume metadata claims -- server-spawned
+                indexing passes False since that file lives in a
+                tenant/committer-writable tree. Deliberately not
+                force_full/--clear (avoids a full re-embed). Default True
+                preserves existing behavior.
 
         Returns:
             ProcessingStats with operation results
@@ -624,6 +633,7 @@ class SmartIndexer(HighThroughputProcessor):
             # Check for interrupted operations first - highest priority (unless forcing full)
             if (
                 not force_full
+                and trust_resume_state
                 and self.progressive_metadata.can_resume_interrupted_operation()
             ):
                 # NOTE: The "Resuming interrupted operation" progress message is
@@ -642,6 +652,44 @@ class SmartIndexer(HighThroughputProcessor):
                     fts_manager,
                 )
 
+            # trust_resume_state=False after a genuinely
+            # interrupted operation must not stall forever (mtime scan
+            # compares against an already-advanced last_index_timestamp).
+            # Fall back to a fresh disk-vs-database reconcile instead.
+            #
+            # `not force_full` is REQUIRED here. force_full=True (--clear)
+            # must always fall straight through to the force_full branch
+            # below (progressive_metadata.clear() + _do_full_index(), which
+            # actually calls vector_store_client.clear_collection()) --
+            # never be silently downgraded to this reconcile fallback,
+            # which only diffs disk-vs-database and can decide there is
+            # nothing to do at all, defeating --clear's contract of
+            # clearing old content.
+            #
+            # Checking status alone is sufficient: can_resume_interrupted_
+            # operation() requires status in ("in_progress", "failed") as
+            # part of its own definition, so it can never be true while the
+            # status check below is false -- an explicit
+            # `can_resume_interrupted_operation() or` here would be
+            # redundant.
+            if (
+                not trust_resume_state
+                and not force_full
+                and self.progressive_metadata.metadata.get("status")
+                in ("in_progress", "failed")
+            ):
+                return self._do_reconcile_with_database(
+                    batch_size,
+                    progress_callback,
+                    git_status,
+                    provider_name,
+                    model_name,
+                    files_count_to_process,
+                    quiet,
+                    vector_thread_count,
+                    fts_manager,
+                )
+
             # Check for reconcile operation
             if reconcile_with_database:
                 return self._do_reconcile_with_database(
@@ -653,6 +701,7 @@ class SmartIndexer(HighThroughputProcessor):
                     files_count_to_process,
                     quiet,
                     vector_thread_count,
+                    fts_manager,
                 )
 
             # Handle deletion detection for standard indexing (when not doing reconcile)
@@ -722,6 +771,7 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
+                trust_resume_state=trust_resume_state,
             )
 
         except KeyboardInterrupt:
@@ -1114,11 +1164,17 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
+        trust_resume_state: bool = True,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
         # 🔧 FIX: Check for interrupted operation first (before timestamp check)
-        if self.progressive_metadata.can_resume_interrupted_operation():
+        # trust_resume_state=False must skip this
+        # branch too (defense in depth alongside smart_index()'s gate).
+        if (
+            trust_resume_state
+            and self.progressive_metadata.can_resume_interrupted_operation()
+        ):
             if progress_callback:
                 # Get preview stats for feedback
                 metadata_stats = self.progressive_metadata.get_stats()
@@ -1511,11 +1567,18 @@ class SmartIndexer(HighThroughputProcessor):
         files_count_to_process: Optional[int] = None,
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
+        fts_manager: Optional[TantivyIndexManager] = None,
     ) -> ProcessingStats:
-        """Reconcile disk files with database contents and index missing/modified files."""
+        """Reconcile disk files with database contents and index missing/modified files.
 
-        # Initialize FTS manager to None (FTS not supported in reconcile)
-        fts_manager: Optional[TantivyIndexManager] = None
+        ``fts_manager``
+        is accepted (not hardcoded to None) so a caller with
+        ``enable_fts=True`` -- in particular the ``trust_resume_state=False``
+        interrupted-operation fallback in ``smart_index()`` -- keeps
+        feeding the SAME already-initialized FTS index reconcile's
+        semantic-side files go into, instead of every reconciled file's
+        FTS update being silently dropped.
+        """
 
         # Ensure provider-aware collection exists
         collection_name = self.vector_store_client.ensure_provider_aware_collection(
@@ -1534,6 +1597,13 @@ class SmartIndexer(HighThroughputProcessor):
             if progress_callback:
                 # ⚠️  CRITICAL: total=0 makes this show as ℹ️ message in CLI
                 progress_callback(0, 0, Path(""), info="No files found to index")
+            # A reconcile that finds nothing to do
+            # must still mark the operation completed -- otherwise a
+            # lingering "in_progress"/"failed" status (e.g. the
+            # trust_resume_state=False fallback after an interrupted run)
+            # never clears, and every subsequent run re-enters this same
+            # reconcile fallback forever.
+            self.progressive_metadata.complete_indexing()
             return ProcessingStats()
 
         # Query database to see what files are already indexed with timestamps
@@ -1590,6 +1660,11 @@ class SmartIndexer(HighThroughputProcessor):
         files_to_index = []
         modified_files = 0
         missing_files = 0
+        # Count files whose analysis THROWS, so
+        # the "nothing to index" early return below can distinguish
+        # "genuinely up-to-date" from "every candidate file's analysis
+        # failed" -- the latter must never be reported as completed.
+        analysis_failures = 0
 
         for file_path in all_files_to_index:
             try:
@@ -1638,6 +1713,7 @@ class SmartIndexer(HighThroughputProcessor):
             except Exception as e:
                 # File might have issues, log and skip
                 logger.warning(f"Failed to analyze file {file_path} for reconcile: {e}")
+                analysis_failures += 1
                 continue
 
         # Codex #1505 review, Finding 2: a degraded reconcile run (batched
@@ -1777,6 +1853,25 @@ class SmartIndexer(HighThroughputProcessor):
                     Path(""),
                     info=f"✅ All {len(all_files_to_index)} files up-to-date - no reconciliation needed",
                 )
+            if analysis_failures > 0:
+                # Nothing was queued, but not
+                # because every file was genuinely verified up-to-date --
+                # every candidate's analysis THREW instead. Marking this
+                # completed would be a false completion (Bug #1218-class
+                # silent partial index): those files were never actually
+                # checked. Leave status as-is so a subsequent run retries.
+                logger.warning(
+                    "Reconcile found nothing to index, but %d file(s) "
+                    "failed analysis and were skipped -- NOT marking the "
+                    "operation completed, since those files were never "
+                    "actually verified.",
+                    analysis_failures,
+                )
+                return ProcessingStats()
+            # Same as the "no files on disk" early
+            # return above -- finding nothing to reconcile must still mark
+            # the operation completed.
+            self.progressive_metadata.complete_indexing()
             return ProcessingStats()
 
         # Apply files count limit if specified (for testing)
@@ -2098,6 +2193,72 @@ class SmartIndexer(HighThroughputProcessor):
         # return unchanged so downstream .exists()/.relative_to can surface it.
         return first_match if first_match is not None else candidate
 
+    def _resume_candidate_is_safe(
+        self, candidate: Path, resolved_codebase: Path
+    ) -> bool:
+        """Reject a resume-path candidate unless it resolves
+        (collapsing '..', following symlinks) strictly inside
+        codebase_dir, and passes the SAME eligibility decision a fresh
+        FileFinder walk would apply. Fails closed (returns False) on any
+        resolve error.
+
+        Containment is checked on the RESOLVED candidate against the
+        RESOLVED codebase root -- this is what actually proves the
+        candidate cannot escape codebase_dir via '..' or a symlink.
+        Eligibility (size/extension/exclude/text-file checks), however, is
+        checked on the candidate reconstructed in codebase_dir's OWN,
+        possibly-unresolved form: ``FileFinder.is_eligible()`` computes
+        ``file_path.relative_to(self.config.codebase_dir)`` internally
+        against the CONFIGURED (unresolved) codebase_dir, which
+        ``ConfigManager.load()`` deliberately leaves unresolved when it is
+        itself a symlink (Bug #1087's mount-path case). Feeding it the
+        fully-resolved candidate instead would raise ValueError there for
+        every legitimate in-tree file whenever codebase_dir is a symlink,
+        rejecting them all rather than just the ones that actually escape.
+
+        Uses FileFinder's own eligibility method (the exact one
+        ``find_files()`` itself calls) rather than the git-diff based
+        ``_should_index_file()`` filter, which never applies FileFinder's
+        max-file-size gate or its extension-gated text-file check.
+
+        Also requires the candidate's own, unresolved link NAME to be
+        eligible -- a symlink whose resolved TARGET is a perfectly
+        eligible, in-tree file can still have a NAME that a fresh
+        ``find_files()`` walk would never reach at all (inside an excluded
+        directory such as ``node_modules/``, or matching a ``.gitignore``
+        pattern), since directory pruning and pattern exclusion happen by
+        NAME, before ``find_files()`` ever resolves a symlink's target.
+        """
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, RuntimeError):
+            return False
+
+        try:
+            relative_path = resolved_candidate.relative_to(resolved_codebase)
+        except ValueError:
+            return False
+
+        eligibility_candidate = Path(self.config.codebase_dir) / relative_path
+        if not self.file_finder.is_eligible(eligibility_candidate):
+            return False
+
+        try:
+            link_relative_path = candidate.relative_to(Path(self.config.codebase_dir))
+        except ValueError:
+            return False
+
+        normalized_link_relative = os.path.normpath(str(link_relative_path))
+        if normalized_link_relative == os.curdir or normalized_link_relative.startswith(
+            ".."
+        ):
+            return False
+
+        link_eligibility_candidate = (
+            Path(self.config.codebase_dir) / normalized_link_relative
+        )
+        return bool(self.file_finder.is_eligible(link_eligibility_candidate))
+
     def _do_resume_interrupted(
         self,
         batch_size: int,
@@ -2144,8 +2305,30 @@ class SmartIndexer(HighThroughputProcessor):
             self._reanchor_resume_path(f, codebase) for f in remaining_file_strings
         ]
 
+        # Reject any re-anchored candidate that does
+        # not resolve inside codebase_dir or fails FileFinder's own
+        # eligibility filters, before the existence check below. Rejected
+        # entries are dropped (resume continues with the rest); only the
+        # count is logged, never the path/content.
+        resolved_codebase = codebase.resolve()
+        safe_files = []
+        rejected_count = 0
+        for candidate in remaining_files:
+            if self._resume_candidate_is_safe(candidate, resolved_codebase):
+                safe_files.append(candidate)
+            else:
+                rejected_count += 1
+        if rejected_count:
+            logger.warning(
+                "Resume metadata contained %d file path candidate(s) that "
+                "are outside the codebase root or ineligible for indexing; "
+                "dropping them and continuing the resume with the "
+                "remaining files.",
+                rejected_count,
+            )
+
         # Filter out files that no longer exist
-        existing_files = [f for f in remaining_files if f.exists()]
+        existing_files = [f for f in safe_files if f.exists()]
 
         if not existing_files:
             # All remaining files have been deleted

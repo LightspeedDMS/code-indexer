@@ -183,6 +183,15 @@ class FileFinder:
         except (OSError, IOError):
             return False
 
+    def is_eligible(self, file_path: Path) -> bool:
+        """Public wrapper for the eligibility decision a fresh
+        ``find_files()`` walk applies to a single file (size, extension,
+        exclude patterns, text-file check, override filters). No behaviour
+        change from ``_should_include_file()`` -- exists so callers outside
+        this class (e.g. SmartIndexer's resume-path safety check) do not
+        need to reach into a private method."""
+        return self._should_include_file(file_path)
+
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if a file should be included in indexing."""
         try:

@@ -5,6 +5,10 @@ The server states the chunk-storage layout explicitly rather than relying
 on the CLI/daemon default (which is SHARDED_JSON). Every server-context
 `cidx index` command list routes through append_server_layout_args so a
 future spawn site cannot silently regress to the CLI default.
+
+This SAME helper also stamps `--ignore-resume-state`
+(see index_command_layout.py's module docstring) -- the two exact-list
+assertions below were updated accordingly when that flag was added.
 """
 
 from code_indexer.server.utils.index_command_layout import append_server_layout_args
@@ -14,7 +18,12 @@ class TestAppendServerLayoutArgs:
     def test_appends_chunks_db_layout_flag(self) -> None:
         result = append_server_layout_args(["cidx", "index"])
 
-        assert result == ["cidx", "index", "--new-collection-layout=chunks_db"]
+        assert result == [
+            "cidx",
+            "index",
+            "--new-collection-layout=chunks_db",
+            "--ignore-resume-state",
+        ]
 
     def test_preserves_prior_tokens_and_order(self) -> None:
         result = append_server_layout_args(
@@ -28,6 +37,7 @@ class TestAppendServerLayoutArgs:
             "--reconcile",
             "--progress-json",
             "--new-collection-layout=chunks_db",
+            "--ignore-resume-state",
         ]
 
     def test_does_not_mutate_input_list(self) -> None:
