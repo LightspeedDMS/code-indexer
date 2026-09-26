@@ -90,6 +90,27 @@ async def sso_callback(code: str, state: str, request: Request):
         # Use the backend-aware oauth_manager from app.state (set in app_wiring.py)
         oauth_manager = request.app.state.oauth_manager
 
+        # MFA enforcement for SSO users (same condition and helper as the
+        # standard OIDC branch below). Reuses the OAuth MFA-challenge page
+        # and its POST /oauth/mfa/verify completion, the same mechanism the
+        # password-based OAuth authorize flow already applies.
+        if _get_user_mfa_status(user.username):
+            from ..mfa_challenge import mfa_challenge_manager
+            from ...web.mfa_routes import render_oauth_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url="/oauth/authorize",
+                oauth_client_id=state_data["client_id"],
+                oauth_redirect_uri=state_data["redirect_uri"],
+                oauth_code_challenge=state_data["code_challenge"],
+                oauth_state=state_data["oauth_state"],
+            )
+            return render_oauth_mfa_challenge_page(challenge_token)
+
         # Generate OAuth authorization code
         oauth_code = oauth_manager.generate_authorization_code(
             client_id=state_data["client_id"],

@@ -11232,6 +11232,22 @@ def unified_login_submit(
             if user.role.value == "admin"
             else "/user/change-password?info=password_expired"
         )
+
+        # MFA enforcement -- check before creating session (same condition
+        # and helper as the standard login branch below).
+        if _get_user_mfa_status(user.username):
+            from ..auth.mfa_challenge import mfa_challenge_manager
+            from .mfa_routes import render_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url=redirect_url,
+            )
+            return render_mfa_challenge_page(challenge_token)
+
         session_manager = get_session_manager()
         expiry_response = RedirectResponse(
             url=redirect_url,
