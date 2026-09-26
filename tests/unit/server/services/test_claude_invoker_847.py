@@ -250,7 +250,13 @@ class TestClaudeInvokerCommandLine:
         """Command list includes '-e' flag so inner command exit codes propagate through script."""
         from code_indexer.server.services.claude_invoker import _build_claude_command
 
-        cmd = _build_claude_command("test prompt", "opus", 90)
+        cmd = _build_claude_command(
+            "test prompt",
+            "opus",
+            90,
+            flow="repo_lifecycle",
+            analysis_dir="/golden-repos/repo-a",
+        )
         assert "-e" in cmd
 
 
@@ -407,15 +413,22 @@ class TestClaudeInvokerFailureClassification:
 
 class TestClaudeInvokerSubprocessParams:
     def test_cwd_passed_to_subprocess_run(self):
-        """The cwd parameter is forwarded to subprocess.run."""
+        """The analyzed directory is never the subprocess's own cwd, so the
+        CLI does not auto-load its CLAUDE.md/AGENTS.md as configuration —
+        it is passed via --add-dir instead. See
+        test_claude_invoker_agent_isolation.py for the full isolation-
+        behavior test suite."""
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="text")
             invoker = _make_invoker()
             invoker.invoke(
                 flow="describe", cwd="/repo/myproject", prompt="p", timeout=30
             )
-            _, kwargs = mock_run.call_args
-            assert kwargs.get("cwd") == "/repo/myproject"
+            cmd, kwargs = mock_run.call_args[0][0], mock_run.call_args[1]
+            assert kwargs.get("cwd") != "/repo/myproject"
+            cmd_str = " ".join(cmd)
+            assert "--add-dir" in cmd_str
+            assert "/repo/myproject" in cmd_str
 
     def test_timeout_passed_to_subprocess_run(self):
         """The timeout parameter is forwarded to subprocess.run."""

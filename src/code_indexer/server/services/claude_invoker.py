@@ -35,6 +35,13 @@ import shlex
 import subprocess
 from typing import Mapping, Optional
 
+from code_indexer.server.services.agent_cli_isolation import (
+    build_claude_isolation_args,
+    is_isolation_exempt_flow,
+    prepare_stable_neutral_cwd,
+    remove_mcp_config_file,
+    try_build_mcp_config_file,
+)
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,
@@ -56,7 +63,14 @@ _STDERR_SNIPPET_LEN = 200
 
 
 def _build_claude_command(
-    prompt: str, analysis_model: str, soft_timeout: int, max_turns: int = 0
+    prompt: str,
+    analysis_model: str,
+    soft_timeout: int,
+    max_turns: int = 0,
+    *,
+    flow: str = "",
+    analysis_dir: str = "",
+    mcp_config_path: Optional[str] = None,
 ) -> list:
     """
     Build the shell command list for invoking Claude CLI via ``script``.
@@ -64,24 +78,47 @@ def _build_claude_command(
     Wraps the Claude CLI in ``script -q -c ... /dev/null`` to provide a
     pseudo-TTY required for Claude CLI in non-interactive environments.
 
+    For every flow except the narrow isolation-exempt set (see
+    ``agent_cli_isolation.is_isolation_exempt_flow``), the agent keeps its
+    full built-in tool set (Bash, Read, Write, Edit, Glob, Grep) and runs
+    with ``--dangerously-skip-permissions`` (needed for those tools to run
+    non-interactively) plus the isolation flags from
+    ``build_claude_isolation_args`` — a neutral working directory (via
+    --add-dir) and an explicit MCP server list. Exempt flows keep the
+    pre-existing invocation shape unchanged.
+
     Args:
-        prompt:         Prompt string to pass to Claude.
-        analysis_model: Model name (e.g. "opus", "sonnet").
-        soft_timeout:   Inner shell timeout budget in seconds.
-        max_turns:      When > 0, adds ``--max-turns`` flag to enable agentic
-                        mode.  When 0 (default), single-shot ``--print`` mode.
+        prompt:          Prompt string to pass to Claude.
+        analysis_model:  Model name (e.g. "opus", "sonnet").
+        soft_timeout:    Inner shell timeout budget in seconds.
+        max_turns:       When > 0, adds ``--max-turns`` flag to enable
+                         agentic mode. When 0 (default), single-shot
+                         ``--print`` mode.
+        flow:            Logical flow name; selects the isolation policy.
+        analysis_dir:    Directory the agent needs read AND write access to
+                         (passed via --add-dir for non-exempt flows).
+        mcp_config_path: Path to a standalone --mcp-config file naming only
+                         the cidx-local server, or None when no such file
+                         could be built (the invocation still runs with
+                         --strict-mcp-config alone in that case).
 
     Returns:
         Command list suitable for ``subprocess.run``.
     """
     max_turns_flag = f" --max-turns {max_turns}" if max_turns > 0 else ""
-    claude_cmd = (
+    base_cmd = (
         f"timeout {soft_timeout}"
         f" claude --model {shlex.quote(analysis_model)}"
         f" -p {shlex.quote(prompt)}"
         f"{max_turns_flag}"
-        f" --print --dangerously-skip-permissions"
+        f" --print"
     )
+    if is_isolation_exempt_flow(flow):
+        claude_cmd = base_cmd + " --dangerously-skip-permissions"
+    else:
+        iso_args = build_claude_isolation_args(analysis_dir, mcp_config_path)
+        quoted_iso_args = " ".join(shlex.quote(arg) for arg in iso_args)
+        claude_cmd = f"{base_cmd} {quoted_iso_args}"
     return ["script", "-q", "-e", "-c", claude_cmd, os.devnull]
 
 
@@ -253,15 +290,38 @@ class ClaudeInvoker:
             error_msg = f"ClaudeInvoker: max_turns must be int >= 0, got {max_turns!r}"
             return _make_failure(error_msg, FailureClass.NOT_RETRYABLE)
 
+        exempt = is_isolation_exempt_flow(flow)
+        subprocess_cwd = cwd
+        scratch_dir: Optional[str] = None
+        mcp_config_path: Optional[str] = None
+        if not exempt:
+            # The analyzed directory (cwd, as the caller understands it) is
+            # never the subprocess's own working directory — a repository-
+            # authored CLAUDE.md/AGENTS.md there must not be auto-loaded as
+            # trusted CLI configuration. It is still reachable by the agent
+            # via --add-dir (built into the command below). The scratch
+            # directory is STABLE per target (cwd) rather than fresh per
+            # call, so the claude CLI's own per-cwd session-transcript
+            # folder is created once per target instead of once per call.
+            scratch_dir = prepare_stable_neutral_cwd(cwd)
+            subprocess_cwd = scratch_dir
+            mcp_config_path = try_build_mcp_config_file()
+
         cmd = _build_claude_command(
-            prompt, self._analysis_model, self._soft_timeout_seconds, max_turns
+            prompt,
+            self._analysis_model,
+            self._soft_timeout_seconds,
+            max_turns,
+            flow=flow,
+            analysis_dir=cwd,
+            mcp_config_path=mcp_config_path,
         )
         env = _build_claude_env(os.environ)
 
         try:
             result = subprocess.run(
                 cmd,
-                cwd=cwd,
+                cwd=subprocess_cwd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -279,6 +339,14 @@ class ClaudeInvoker:
             error_msg = f"ClaudeInvoker: unexpected error: {exc}"
             logger.error(error_msg, exc_info=True)
             return _make_failure(error_msg, FailureClass.RETRYABLE_ON_OTHER)
+        finally:
+            # scratch_dir is a stable per-target directory (see
+            # prepare_stable_neutral_cwd) and is intentionally NOT removed
+            # here -- it is emptied at the START of the next call for the
+            # same target instead, so the claude CLI's per-cwd session-
+            # transcript folder is created once per target, not once per
+            # call.
+            remove_mcp_config_file(mcp_config_path)
 
         if result.returncode != 0:
             error_msg = (

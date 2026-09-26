@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import yaml
 
+from code_indexer.server.services.agent_cli_isolation import (
+    build_claude_isolation_args,
+    prepare_stable_neutral_cwd,
+    remove_mcp_config_file,
+    try_build_mcp_config_file,
+)
 from code_indexer.server.services.config_service import get_config_service
 
 if TYPE_CHECKING:
@@ -212,10 +218,29 @@ def invoke_claude_cli(
     if svc is not None:
         svc.ensure_registered()
 
+    # Stable per-target directory (never per-call) so the claude CLI's own
+    # per-cwd session-transcript folder is created once per repo, not once
+    # per invocation.
+    scratch_dir = prepare_stable_neutral_cwd(repo_path)
+    mcp_config_path = try_build_mcp_config_file()
     try:
+        # The analyzed repository is never the subprocess's own working
+        # directory — a repository's own CLAUDE.md is not auto-loaded as
+        # trusted CLI configuration. It stays fully reachable (read and
+        # write) via --add-dir. --strict-mcp-config always excludes the
+        # account's other globally-registered MCP servers, even though this
+        # prompt itself never calls cidx-local. Full built-in tool capability
+        # (Bash, Write, Edit, git) and --dangerously-skip-permissions are
+        # unchanged from before this policy existed — see
+        # agent_cli_isolation.build_claude_isolation_args.
+        iso_args = build_claude_isolation_args(
+            analysis_dir=repo_path,
+            mcp_config_path=mcp_config_path,
+        )
+        quoted_iso_args = " ".join(shlex.quote(arg) for arg in iso_args)
         claude_cmd = (
             f"timeout {shell_timeout_seconds} claude "
-            f"-p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
+            f"-p {shlex.quote(prompt)} --print {quoted_iso_args}"
         )
         full_cmd = ["script", "-q", "-c", claude_cmd, _SCRIPT_NULL_DEVICE]
 
@@ -229,7 +254,7 @@ def invoke_claude_cli(
 
         proc = subprocess.Popen(
             full_cmd,
-            cwd=repo_path,
+            cwd=scratch_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -260,6 +285,13 @@ def invoke_claude_cli(
         error_msg = f"Unexpected error during Claude CLI execution: {exc}"
         logger.error(error_msg, exc_info=True)
         return False, error_msg
+    finally:
+        # scratch_dir is a stable per-target directory (see
+        # prepare_stable_neutral_cwd) and is intentionally NOT removed
+        # here -- it is emptied at the START of the next call for the same
+        # repo_path instead, so the claude CLI's per-cwd session-transcript
+        # folder is created once per repo, not once per call.
+        remove_mcp_config_file(mcp_config_path)
 
 
 @dataclass
