@@ -638,3 +638,32 @@ class ElevatedSessionManager:
 # Mirrors mfa_challenge_manager pattern in src/code_indexer/server/auth/mfa_challenge.py.
 # Wired into PostgreSQL connection pool via lifespan.set_connection_pool().
 elevated_session_manager: ElevatedSessionManager = ElevatedSessionManager()
+
+
+def log_elevation_owner_mismatch(
+    manager: "ElevatedSessionManager", session_key: str, username: str
+) -> None:
+    """Best-effort diagnostic for a rejected elevation-window lookup.
+
+    An elevation window is valid only for the user who created it. Callers
+    reject a lookup whenever touch_atomic_for_user() returns None and treat
+    that exactly like "no window" -- this helper never influences that
+    decision, it only records, at WARNING level, that a resolved session key
+    existed but belonged to someone other than the authenticating user.
+
+    Read-only and exception-safe (a failed diagnostic read must never turn
+    into an unhandled error on the auth path). Logs only the authenticating
+    username and a truncated session key -- never the mismatched window's
+    owner or the full session key value.
+    """
+    try:
+        existing = manager.get_status(session_key)
+    except Exception:
+        return
+    if existing is not None and existing.username != username:
+        logger.warning(
+            "Elevation window lookup rejected: session key %.8s is not "
+            "owned by the authenticating user %s",
+            session_key,
+            username,
+        )

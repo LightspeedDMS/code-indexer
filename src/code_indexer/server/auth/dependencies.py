@@ -22,6 +22,7 @@ from code_indexer.server.logging_utils import format_error_log
 # Imported here so tests can swap the module attribute for fixture isolation.
 from code_indexer.server.auth.elevated_session_manager import (
     elevated_session_manager,
+    log_elevation_owner_mismatch,
 )
 
 logger = logging.getLogger(__name__)
@@ -508,6 +509,9 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     # client_id is used directly as the session key: MCP client IDs (mcp_...)
     # are already distinct from JWT JTI values (UUIDs). No construction needed.
     request.state.user_jti = client_id
+    # An elevation window is valid only for the user who created it -- stash
+    # the authenticated username alongside the session key.
+    request.state.elevation_username = authenticated_user.username
     if elevated_session_manager is not None:
         try:
             client_ip = request.client.host if request.client else "unknown"
@@ -590,6 +594,10 @@ def get_current_user_web_or_api(
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
                 if user:
+                    # An elevation window is valid only for the user who
+                    # created it -- stash the authenticated username so any
+                    # downstream elevation lookup binds to this identity.
+                    request.state.elevation_username = user.username
                     return user
         except Exception as e:
             # Web session validation failed - fall through to JWT/Bearer auth
@@ -601,7 +609,13 @@ def get_current_user_web_or_api(
 
     # Priority 2: Fall back to JWT/Bearer authentication
     try:
-        return get_current_user(request, credentials)
+        resolved_user = get_current_user(request, credentials)
+        # An elevation window is valid only for the user who created it --
+        # stash the authenticated username so any downstream elevation
+        # lookup binds to this identity, not to whatever session key gets
+        # resolved from a possibly-unrelated cookie.
+        request.state.elevation_username = resolved_user.username
+        return resolved_user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:
@@ -673,6 +687,11 @@ async def get_current_user_for_mcp(request: Request) -> User:
                 lambda: get_current_user(request, credentials)
             ),
         )
+        # An elevation window is valid only for the user who created it --
+        # stash the authenticated username now, before any session-key
+        # resolution below, so it is set even on the path where jti
+        # extraction fails entirely (non-JWT, non-OAuth bearer credential).
+        request.state.elevation_username = resolved_user.username
         # Extract jti for elevation key — Bearer path or cookie fallback path.
         # token is only set when Authorization: Bearer ... is present; when the
         # client authenticates via cidx_session cookie, token is None and we must
@@ -849,6 +868,10 @@ def _hybrid_auth_impl(
             request.state.user_jti = (
                 session_cookie_value  # enables elevation session key resolution
             )
+            # An elevation window is valid only for the user who created it --
+            # stash the authenticated username alongside the session key so
+            # every downstream elevation lookup binds to this identity.
+            request.state.elevation_username = user.username
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
@@ -857,6 +880,12 @@ def _hybrid_auth_impl(
     if not session_cookie_value and credentials:
         try:
             current_user = get_current_user(request, credentials)
+
+            # An elevation window is valid only for the user who created it --
+            # bind every downstream elevation lookup to the identity this
+            # credential actually authenticated, not to whatever session key
+            # gets resolved from a possibly-unrelated cookie.
+            request.state.elevation_username = current_user.username
 
             # Set user_jti for elevation session key resolution.
             # Session-cookie path sets this at the session success block above;
@@ -1063,18 +1092,38 @@ def _check_session_window(
     request: Request,
     required_scope: str,
     manager: Any,
+    username: Optional[str] = None,
 ) -> None:
     """Resolve session key, validate elevation window, and check scope.
 
-    Raises 403 elevation_required when: no session key, window absent/expired,
+    An elevation window is valid only for the user who created it: the
+    lookup is bound to the authenticating user via touch_atomic_for_user(),
+    never the unqualified session-key-only touch_atomic(). `username` is the
+    identity this request actually authenticated as -- callers that already
+    resolved it (e.g. require_elevation()'s `_check`) pass it explicitly;
+    callers that only have `request` fall back to `request.state.elevation_username`,
+    stashed by the auth-resolution dependency (get_current_user_web_or_api,
+    _hybrid_auth_impl, get_mcp_user_from_credentials, get_current_user_for_mcp)
+    at the same point it resolved that same user.
+
+    Raises 403 elevation_required when: no session key, no resolvable
+    authenticated username, window absent/expired/owned by a different user,
     or session scope is insufficient for required_scope.
     """
     session_key = _resolve_session_key(request)
     if not session_key:
         raise _elevation_required_exc()
 
-    session = manager.touch_atomic(session_key)
+    resolved_username = username or getattr(
+        getattr(request, "state", None), "elevation_username", None
+    )
+    if not resolved_username:
+        raise _elevation_required_exc()
+    resolved_username = str(resolved_username)
+
+    session = manager.touch_atomic_for_user(session_key, resolved_username)
     if session is None:
+        log_elevation_owner_mismatch(manager, session_key, resolved_username)
         raise _elevation_required_exc()
 
     _check_scope(getattr(session, "scope", None), required_scope)
@@ -1123,7 +1172,9 @@ def require_elevation(required_scope: str = "full"):
         if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
             return user
         _check_totp_setup(user)
-        _check_session_window(request, required_scope, elevated_session_manager)
+        _check_session_window(
+            request, required_scope, elevated_session_manager, user.username
+        )
         return user
 
     return _check

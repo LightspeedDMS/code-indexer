@@ -19,7 +19,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.elevated_session_manager import (
+    elevated_session_manager,
+    log_elevation_owner_mismatch,
+)
 from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
 
 logger = logging.getLogger(__name__)
@@ -62,12 +65,17 @@ def _resolve_session_key(request: Request) -> Optional[str]:
 
 def _check_elevation_window(
     request: Request,
+    username: str,
     required_scope: str = "full",
 ) -> Optional[Dict[str, Any]]:
     """Return error dict if elevation check fails, or None when check passes.
 
     Story #925 AC5/AC6: enforces TOTP step-up elevation for Web UI endpoints.
-    Fails closed: no window -> returns elevation_required error dict.
+    An elevation window is valid only for the user who created it: the
+    lookup is bound to `username` (the caller's already-authenticated
+    identity) via touch_atomic_for_user(), never a bare session-key lookup.
+    Fails closed: no window, or a window owned by a different user, ->
+    returns elevation_required error dict.
     Both required_scope and session.scope are validated against _SCOPE_RANK;
     unknown values raise ValueError (programmer error, not a runtime auth failure).
     """
@@ -80,8 +88,9 @@ def _check_elevation_window(
     if not session_key:
         return {"error": "elevation_required", "message": "No active elevation window."}
 
-    session = elevated_session_manager.touch_atomic(session_key)
+    session = elevated_session_manager.touch_atomic_for_user(session_key, username)
     if session is None:
+        log_elevation_owner_mismatch(elevated_session_manager, session_key, username)
         return {"error": "elevation_required", "message": "No active elevation window."}
 
     if session.scope not in _SCOPE_RANK:
@@ -130,7 +139,7 @@ def _cross_user_setup_guard(
     Returns an HTMLResponse (403 or 400) when the guard fails, or None when
     all checks pass. Caller emits audit log only on the success path.
     """
-    elev_err = _check_elevation_window(request, required_scope="full")
+    elev_err = _check_elevation_window(request, admin_username, required_scope="full")
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",
@@ -345,7 +354,9 @@ def mfa_setup_page(
     # also required to prevent accidental overwrites.
     if is_cross_user:
         if mode == "show":
-            elev_err = _check_elevation_window(request, required_scope="full")
+            elev_err = _check_elevation_window(
+                request, admin_username, required_scope="full"
+            )
             if elev_err is not None:
                 return _error_html_page(
                     "Elevation Required",
@@ -420,7 +431,9 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
     is_cross_user = target != admin_username
     required_scope = "full" if is_cross_user else "totp_repair"
 
-    elev_err = _check_elevation_window(request, required_scope=required_scope)
+    elev_err = _check_elevation_window(
+        request, admin_username, required_scope=required_scope
+    )
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",
@@ -532,7 +545,7 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    elev_err = _check_elevation_window(request, required_scope="totp_repair")
+    elev_err = _check_elevation_window(request, username, required_scope="totp_repair")
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",

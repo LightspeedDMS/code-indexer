@@ -225,7 +225,12 @@ def elevation_status(
     request: Request,
     user: User = Depends(get_current_admin_user_hybrid),
 ):
-    """Read-only elevation window check — does NOT touch (AC4)."""
+    """Read-only elevation window check — does NOT touch (AC4).
+
+    An elevation window is valid only for the user who created it: a window
+    resolved for this session key but owned by a different user is treated
+    exactly like "no window" -- never disclosed as this user's own status.
+    """
     if not _is_elevation_enforcement_enabled():
         return _not_elevated()
     session_key = _resolve_session_key(request)
@@ -233,5 +238,13 @@ def elevation_status(
         return _not_elevated()
     session = elevated_session_manager.get_status(session_key)
     if session is None:
+        return _not_elevated()
+    if session.username != user.username:
+        logger.warning(
+            "Elevation status lookup rejected: session key %.8s is not "
+            "owned by the authenticating user %s",
+            session_key,
+            user.username,
+        )
         return _not_elevated()
     return _build_status_response(session)
