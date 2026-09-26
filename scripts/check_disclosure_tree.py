@@ -151,9 +151,13 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 9838/10209/10690).
         # 12.73.0 shifted them another +23 (9838/10209/10690 ->
         # 9861/10232/10713).
-        "CHANGELOG.md:9861",
-        "CHANGELOG.md:10232",
-        "CHANGELOG.md:10713",
+        # 12.74.0 shifted them another +2 (9861/10232/10713 ->
+        # 9863/10234/10715). 12.73.0's CI run failed (missing `requests`
+        # dependency) so it was never tagged; 12.74.0's changelog entry
+        # documents that and supersedes it.
+        "CHANGELOG.md:9863",
+        "CHANGELOG.md:10234",
+        "CHANGELOG.md:10715",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

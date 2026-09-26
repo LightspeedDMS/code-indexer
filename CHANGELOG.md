@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [12.73.0] - 2026-09-26
+## [12.74.0] - 2026-09-26
+
+12.73.0 was never tagged or released: its CI run failed because `requests`, which the server's auto-updater imports, was not a declared dependency. This release declares it and supersedes 12.73.0.
 
 ### Fixed
 
