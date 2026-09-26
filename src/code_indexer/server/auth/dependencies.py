@@ -5,10 +5,9 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
-from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple
+from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from functools import wraps
 from datetime import datetime, timezone
 import base64
 
@@ -303,28 +302,33 @@ def get_current_user(
 
 def require_permission(permission: str):
     """
-    Decorator factory for requiring specific permissions.
+    FastAPI dependency factory for requiring specific permissions.
+
+    The returned callable depends on the same `get_current_user` dependency
+    every route already uses, so a route can wire it as its sole
+    `Depends(...)` for both authentication and authorization --
+    `user: User = Depends(require_permission("repository:write"))`.
 
     Args:
         permission: Required permission string
 
     Returns:
-        Decorator function
+        A dependency callable that resolves to the current User (via
+        `Depends(get_current_user)`) and raises HTTPException(403) if that
+        user lacks `permission`.
     """
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(current_user: User = Depends(get_current_user), *args, **kwargs):
-            if not current_user.has_permission(permission):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Insufficient permissions: {permission} required",
-                )
-            return func(current_user, *args, **kwargs)
+    def _require_permission_dependency(
+        current_user: User = Depends(get_current_user),
+    ) -> User:
+        if not current_user.has_permission(permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions: {permission} required",
+            )
+        return current_user
 
-        return wrapper
-
-    return decorator
+    return _require_permission_dependency
 
 
 def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
@@ -458,7 +462,19 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             return None, None
         return verified_user_id, user_manager.get_user(verified_user_id)
 
-    user_id, user = await anyio.to_thread.run_sync(_verify_credential_and_load_user)
+    # mypy: pre-commit's isolated mypy hook venv has no `anyio` stub package
+    # installed (only types-PyYAML/types-requests/types-cachetools are
+    # declared as additional_dependencies), so under ignore_missing_imports
+    # anyio.to_thread.run_sync's return resolves to Any there -- even though
+    # it resolves correctly with anyio actually installed. cast() restores
+    # the real, already-known type here, taken from
+    # _verify_credential_and_load_user's own declared return annotation
+    # immediately above, so the narrowing below is real regardless of
+    # anyio's resolution status in whichever environment mypy runs in.
+    user_id, user = cast(
+        Tuple[Optional[str], Optional[User]],
+        await anyio.to_thread.run_sync(_verify_credential_and_load_user),
+    )
 
     if not user_id:
         # Invalid credentials - return 401 (AC3)
@@ -474,6 +490,15 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             detail="User not found",
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
+
+    # A separate, single-assignment name for the narrowed, definitely-non-None
+    # user: mypy does not retain `if not user: raise` narrowing for a
+    # variable captured by a nested function (the closure below) -- it uses
+    # the variable's type across the WHOLE enclosing function instead, which
+    # for `user` (assigned once, as Optional[User]) stays Optional[User]
+    # even past the guard above. `authenticated_user` has exactly one
+    # assignment, explicitly typed User, so the closure below never sees None.
+    authenticated_user: User = user
 
     # v10.4.7: OAuth-MCP sessions are pre-elevated by virtue of holding the
     # credential. The credential was provisioned by a TOTP-elevated admin --
@@ -493,7 +518,7 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             def _create_elevation_window() -> None:
                 elevated_session_manager.create(
                     session_key=client_id,
-                    username=user.username,
+                    username=authenticated_user.username,
                     elevated_from_ip=client_ip,
                     scope="full",
                 )
@@ -507,13 +532,13 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             # elevation window" -- distinguishable from "no session key" (Gate 5).
             logger.warning(
                 "v10.4.7: failed to pre-elevate oauth session for %s: %s",
-                user.username,
+                authenticated_user.username,
                 exc,
                 exc_info=True,
             )
 
     # Success - verify_credential() already updated last_used_at (AC5)
-    return user
+    return authenticated_user
 
 
 def get_current_user_web_or_api(
@@ -631,8 +656,22 @@ async def get_current_user_for_mcp(request: Request) -> User:
         # run_sync unchanged (anyio re-raises worker-thread exceptions as-is).
         import anyio.to_thread
 
-        user = await anyio.to_thread.run_sync(
-            lambda: get_current_user(request, credentials)
+        # mypy: pre-commit's isolated mypy hook venv has no `anyio` stub
+        # package installed, so under ignore_missing_imports
+        # anyio.to_thread.run_sync's return resolves to Any there. cast()
+        # restores the real type here, taken from get_current_user's own
+        # declared return annotation (called inside the lambda immediately
+        # below), into a fresh, single-assignment name: mypy does not retain
+        # narrowing for a variable captured by a nested function (the
+        # `_create_oauth_bearer_elevation_window` closure further down), and
+        # `user` already has an earlier assignment typed Optional[User]
+        # (from get_mcp_user_from_credentials above) that a second,
+        # same-named assignment cannot un-widen for that closure.
+        resolved_user: User = cast(
+            User,
+            await anyio.to_thread.run_sync(
+                lambda: get_current_user(request, credentials)
+            ),
         )
         # Extract jti for elevation key — Bearer path or cookie fallback path.
         # token is only set when Authorization: Bearer ... is present; when the
@@ -687,7 +726,7 @@ async def get_current_user_for_mcp(request: Request) -> User:
                         def _create_oauth_bearer_elevation_window() -> None:
                             elevated_session_manager.create(
                                 session_key=session_key,
-                                username=user.username,
+                                username=resolved_user.username,
                                 elevated_from_ip=client_ip,
                                 scope="full",
                             )
@@ -701,11 +740,11 @@ async def get_current_user_for_mcp(request: Request) -> User:
                         logger.warning(
                             "v10.4.8: failed to pre-elevate OAuth Bearer "
                             "session for %s: %s",
-                            user.username,
+                            resolved_user.username,
                             exc,
                             exc_info=True,
                         )
-        return user
+        return resolved_user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:

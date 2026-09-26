@@ -9,6 +9,25 @@ Every git clone/fetch/pull/push/ls-remote call that may contact an SSH remote
 MUST pass env=build_non_interactive_git_env() to subprocess.run / subprocess.Popen.
 
 See Bug: SSH password prompt hangs server thread.
+
+Env-level protocol hardening here (e.g. GIT_PROTOCOL_FROM_USER=0 or
+protocol.file.allow policy), beneath the argv validation in
+git_argv_safety.py, was investigated and NOT implemented: this project
+legitimately fetches/pulls over a local filesystem transport for real
+repository-sync workflows (see CLAUDE.md "Golden Repo and Versioned
+Snapshots"; this module is also used by the standalone CLI indexer, which
+never contacts a remote at all).
+
+Empirical proof (real throwaway repos, git 2.52): the protocol-policy env
+settings that would restrict the local ('file') transport block an
+ordinary local-path fetch/pull identically -- there is no env-level
+policy that distinguishes a legitimate local-path operation from any
+other value over that same transport. Enabling either setting would break
+legitimate local-path sync with no corresponding benefit, since the argv
+validation in git_argv_safety.py (remote must be one of the repository's
+actually-configured remotes, and no remote/branch/revision value may
+start with '-') already governs argv construction at a layer below the
+transport, with zero risk to legitimate local-path operation.
 """
 
 import os

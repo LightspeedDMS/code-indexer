@@ -20,6 +20,10 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.server.services.branch_service import BranchService
+from code_indexer.server.services.git_argv_safety import (
+    reject_leading_dash,
+    validate_branch_name,
+)
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
@@ -926,6 +930,21 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "Failed to resolve repository path"}
             )
+
+        # _get_pat_credential_for_remote() below builds its own "git remote
+        # get-url <remote>" argv, a separate call site from
+        # GitOperationsService.git_push_with_pat's own validation. Reject a
+        # leading '-' in `remote` here too, before that call and before the
+        # migration trigger, so no such value from the MCP front door ever
+        # reaches any git subprocess -- using the lean, subprocess-free
+        # reject_leading_dash() rather than the full validate_remote_name()
+        # membership check, since repo_path here has not yet been proven to
+        # be a real, initialized git repository. The membership check still
+        # runs, unconditionally, inside git_push_with_pat below before any
+        # of its own subprocesses; this is defense-in-depth at an earlier
+        # call site. See git_argv_safety module docstring for the invariant.
+        reject_leading_dash(remote, param_name="remote")
+        branch = validate_branch_name(branch)
 
         # Trigger migration before push if needed (Bug #639)
         git_operations_service._trigger_migration_if_needed(

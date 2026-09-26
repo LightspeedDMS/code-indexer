@@ -33,6 +33,12 @@ from cachetools import TTLCache
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.git_argv_safety import (
+    validate_branch_name,
+    validate_pathspecs,
+    validate_remote_name,
+    validate_revision,
+)
 
 if TYPE_CHECKING:
     # Bug #1650: type-only imports for the lazily-constructed attributes
@@ -1050,6 +1056,18 @@ class GitOperationsService:
             )
             effective_limit = min(effective_limit, self._api_limits.max_diff_lines)
 
+            # from_revision/to_revision/file_paths are validated before
+            # they ever reach argv: none may start with '-', and
+            # from_revision/to_revision must resolve to a real revision.
+            # See git_argv_safety module docstring for the invariant.
+            from_revision = validate_revision(
+                from_revision, repo_path, param_name="from_revision"
+            )
+            to_revision = validate_revision(
+                to_revision, repo_path, param_name="to_revision"
+            )
+            file_paths = validate_pathspecs(file_paths)
+
             cmd = ["git", "diff"]
 
             # Add context lines flag
@@ -1059,6 +1077,14 @@ class GitOperationsService:
             # Add stat flag
             if stat_only:
                 cmd.append("--stat")
+
+            # Defense in depth only: unlike push/pull/fetch, `--end-of-options`
+            # is not a hard option boundary for every `git diff` mode on
+            # every git version. The real, version-independent control is
+            # the leading-'-' rejection on from_revision/to_revision/file_paths
+            # above (validate_revision/validate_pathspecs), which runs
+            # before this line and before any argv is built.
+            cmd.append("--end-of-options")
 
             # Add revision range or single revision
             if from_revision and to_revision:
@@ -1071,7 +1097,12 @@ class GitOperationsService:
                 cmd.append("--")
                 cmd.append(path)
             elif file_paths:
-                # Legacy file_paths parameter (kept for backward compatibility)
+                # Legacy file_paths parameter (kept for backward
+                # compatibility). Always emit `--` here too, matching the
+                # `path` branch above, so a pathspec can never be
+                # reinterpreted as an option even in combination with
+                # --end-of-options.
+                cmd.append("--")
                 cmd.extend(file_paths)
 
             result = run_git_command(
@@ -1585,7 +1616,15 @@ class GitOperationsService:
             GitCommandError: If git push fails
         """
         try:
-            cmd = ["git", "push", remote]
+            # remote must be a configured remote name; remote/branch values
+            # never reach argv with a leading '-'. See git_argv_safety
+            # module docstring for the invariant.
+            remote = validate_remote_name(remote, repo_path)
+            branch = validate_branch_name(branch, param_name="branch")
+
+            # Defense in depth: hard option boundary right after the
+            # subcommand, before remote/branch.
+            cmd = ["git", "push", "--end-of-options", remote]
             if branch:
                 cmd.append(branch)
 
@@ -1653,6 +1692,16 @@ class GitOperationsService:
         Raises:
             GitCommandError: If git push fails
         """
+        # This is a separate argv-building path from git_push() above -- the
+        # MCP git_push handler calls this method directly. Validate
+        # remote/branch here, before any subprocess, including the "git
+        # remote get-url" preflight immediately below, so no caller
+        # (present or future) can bypass validation by using this entry
+        # point instead of git_push(). See git_argv_safety module docstring
+        # for the invariant.
+        remote = validate_remote_name(remote, repo_path)
+        branch = validate_branch_name(branch, param_name="branch")
+
         from code_indexer.server.services.git_credential_helper import (
             GitCredentialHelper,
         )
@@ -1788,7 +1837,24 @@ class GitOperationsService:
             GitCommandError: If git pull fails
         """
         try:
-            cmd = ["git", "pull", remote]
+            # remote must be a configured remote name; remote/branch values
+            # never reach argv with a leading '-'. See git_argv_safety
+            # module docstring for the invariant.
+            remote = validate_remote_name(remote, repo_path)
+            branch = validate_branch_name(branch, param_name="branch")
+
+            # NOTE: unlike push/fetch below, `--end-of-options` is not a
+            # hard option boundary for `git pull` on every git version --
+            # pull delegates to an internal fetch+merge step whose own
+            # argument handling does not always inherit this boundary
+            # (proven by TestEndOfOptionsBoundaryByGitCommand::
+            # test_end_of_options_alone_is_insufficient_for_pull). It is
+            # kept here only for consistency with push/fetch and as
+            # defense-in-depth against git-version differences. The real,
+            # version-independent control for pull is
+            # validate_remote_name()'s configured-remote membership check
+            # above, which runs regardless of this separator.
+            cmd = ["git", "pull", "--end-of-options", remote]
             if branch:
                 cmd.append(branch)
 
@@ -1837,8 +1903,15 @@ class GitOperationsService:
             GitCommandError: If git fetch fails
         """
         try:
+            # remote must be a configured remote name; it never reaches
+            # argv with a leading '-'. See git_argv_safety module docstring
+            # for the invariant.
+            remote = validate_remote_name(remote, repo_path)
+
             result = run_git_command(
-                ["git", "fetch", remote],
+                # Defense in depth: hard option boundary right after the
+                # subcommand, before remote.
+                ["git", "fetch", "--end-of-options", remote],
                 cwd=repo_path,
                 timeout=self._git_timeouts.git_remote_timeout,
                 check=True,

@@ -10,9 +10,10 @@ import subprocess
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.git_operations_service import git_operations_service
+from code_indexer.server.services.git_argv_safety import GitArgumentValidationError
 from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoManager
 from code_indexer.server.routers.git_models import (
     GitStatusResponse,
@@ -93,6 +94,17 @@ def _get_activated_repo_manager() -> ActivatedRepoManager:
     return manager
 
 
+# Every route below is gated by Depends(require_permission("...")) on its
+# `user` parameter, mirroring this route's MCP twin's `required_permission`
+# (mcp/tool_docs/git/*.md). Depends(get_current_user) alone verifies
+# identity only, not authorization -- require_permission() itself depends
+# on get_current_user, so wiring it directly on `user` provides both
+# authentication and authorization in one Depends(...) -- and, since it
+# raises HTTPException from a FastAPI dependency (resolved before the
+# route body runs), it can never be re-caught by the route's own inner
+# `except Exception as e:` fallback and turned into a 500.
+
+
 # Git Status/Inspection Endpoints
 
 
@@ -103,12 +115,15 @@ def _get_activated_repo_manager() -> ActivatedRepoManager:
     responses={
         200: {"description": "Git status retrieved successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:read permission"},
         404: {"description": "Repository not found"},
     },
     summary="Get git status",
     description="Get the git status of the activated repository",
 )
-def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusResponse:
+def git_status(
+    alias: str, user: User = Depends(require_permission("repository:read"))
+) -> GitStatusResponse:
     """Get git status of the repository."""
     try:
         service = git_operations_service
@@ -143,6 +158,7 @@ def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusR
     responses={
         200: {"description": "Git diff retrieved successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing query_repos permission"},
         404: {"description": "Repository not found"},
     },
     summary="Get git diff",
@@ -165,7 +181,7 @@ def git_diff(
     offset: Optional[int] = Query(
         None, description="Number of lines to skip for pagination"
     ),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("query_repos")),
 ) -> GitDiffResponse:
     """Get git diff of the repository."""
     try:
@@ -197,6 +213,14 @@ def git_diff(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-040",
+                f"Invalid git diff request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -218,6 +242,7 @@ def git_diff(
     responses={
         200: {"description": "Git log retrieved successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing query_repos permission"},
         404: {"description": "Repository not found"},
     },
     summary="Get git log",
@@ -246,7 +271,7 @@ def git_log(
     response_format: Optional[str] = Query(
         None, description="Response format (flat or grouped)"
     ),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("query_repos")),
 ) -> GitLogResponse:
     """Get git log of the repository."""
     try:
@@ -307,13 +332,16 @@ def git_log(
         200: {"description": "Files staged successfully"},
         400: {"description": "Invalid parameters"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
     },
     summary="Stage files",
     description="Stage files for commit in the activated repository",
 )
 def git_stage(
-    alias: str, request: GitStageRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitStageRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitStageResponse:
     """Stage files for commit."""
     try:
@@ -359,13 +387,16 @@ def git_stage(
     responses={
         200: {"description": "Files unstaged successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
     },
     summary="Unstage files",
     description="Unstage files in the activated repository",
 )
 def git_unstage(
-    alias: str, request: GitUnstageRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitUnstageRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitUnstageResponse:
     """Unstage files."""
     try:
@@ -404,13 +435,16 @@ def git_unstage(
         201: {"description": "Commit created successfully"},
         400: {"description": "Invalid parameters"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
     },
     summary="Create commit",
     description="Create a git commit in the activated repository",
 )
 def git_commit(
-    alias: str, request: GitCommitRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitCommitRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitCommitResponse:
     """Create a git commit."""
     try:
@@ -463,6 +497,7 @@ def git_commit(
     responses={
         200: {"description": "Push completed successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
         500: {"description": "Network error or push failed"},
     },
@@ -470,7 +505,9 @@ def git_commit(
     description="Push commits to remote repository",
 )
 def git_push(
-    alias: str, request: GitPushRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitPushRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitPushResponse:
     """Push commits to remote."""
     try:
@@ -491,6 +528,14 @@ def git_push(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-029",
+                f"Invalid git push request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -512,6 +557,7 @@ def git_push(
     responses={
         200: {"description": "Pull completed successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
         409: {"description": "Merge conflicts"},
         500: {"description": "Network error or pull failed"},
@@ -520,7 +566,9 @@ def git_push(
     description="Pull commits from remote repository",
 )
 def git_pull(
-    alias: str, request: GitPullRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitPullRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitPullResponse:
     """Pull commits from remote."""
     try:
@@ -540,6 +588,14 @@ def git_pull(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-034",
+                f"Invalid git pull request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -561,6 +617,7 @@ def git_pull(
     responses={
         200: {"description": "Fetch completed successfully"},
         401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
         500: {"description": "Network error or fetch failed"},
     },
@@ -568,7 +625,9 @@ def git_pull(
     description="Fetch refs and objects from remote repository",
 )
 def git_fetch(
-    alias: str, request: GitFetchRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitFetchRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitFetchResponse:
     """Fetch from remote."""
     try:
@@ -585,6 +644,14 @@ def git_fetch(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-035",
+                f"Invalid git fetch request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -610,14 +677,18 @@ def git_fetch(
         200: {"description": "Reset completed successfully"},
         400: {"description": "Invalid parameters"},
         401: {"description": "Missing or invalid authentication"},
-        403: {"description": "Missing confirmation token"},
+        403: {
+            "description": "Missing confirmation token or missing repository:admin permission"
+        },
         404: {"description": "Repository not found"},
     },
     summary="Reset repository",
     description="Reset repository to a specific commit (requires confirmation for hard reset)",
 )
 def git_reset(
-    alias: str, request: GitResetRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitResetRequest,
+    user: User = Depends(require_permission("repository:admin")),
 ) -> GitResetResponse:
     """Reset repository to a specific state."""
     try:
@@ -684,7 +755,7 @@ def git_reset(
 def git_clean(
     alias: str,
     request: GitCleanRequest = GitCleanRequest(),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:admin")),
 ) -> GitCleanResponse:
     """Clean untracked files from repository."""
     try:
@@ -738,7 +809,7 @@ def git_clean(
     description="Abort an in-progress merge operation",
 )
 def git_merge_abort(
-    alias: str, user: User = Depends(get_current_user)
+    alias: str, user: User = Depends(require_permission("repository:write"))
 ) -> GitMergeAbortResponse:
     """Abort an in-progress merge."""
     try:
@@ -780,7 +851,9 @@ def git_merge_abort(
     description="Restore a file to its last committed state",
 )
 def git_checkout_file(
-    alias: str, request: GitCheckoutFileRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitCheckoutFileRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitCheckoutFileResponse:
     """Restore a file to its last committed state."""
     try:
@@ -827,7 +900,7 @@ def git_checkout_file(
     description="List all local and remote branches in the repository",
 )
 def git_branch_list(
-    alias: str, user: User = Depends(get_current_user)
+    alias: str, user: User = Depends(require_permission("repository:read"))
 ) -> GitBranchListResponse:
     """List all branches."""
     try:
@@ -871,7 +944,9 @@ def git_branch_list(
     description="Create a new branch in the repository",
 )
 def git_branch_create(
-    alias: str, request: GitBranchCreateRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: GitBranchCreateRequest,
+    user: User = Depends(require_permission("repository:write")),
 ) -> GitBranchCreateResponse:
     """Create a new branch."""
     try:
@@ -931,7 +1006,7 @@ def git_branch_create(
     description="Switch to a different branch",
 )
 def git_branch_switch(
-    alias: str, name: str, user: User = Depends(get_current_user)
+    alias: str, name: str, user: User = Depends(require_permission("repository:write"))
 ) -> GitBranchSwitchResponse:
     """Switch to a different branch."""
     try:
@@ -979,7 +1054,7 @@ def git_branch_delete(
     alias: str,
     name: str,
     confirmation_token: Optional[str] = Query(None, description="Confirmation token"),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("repository:admin")),
 ) -> GitBranchDeleteResponse:
     """Delete a branch."""
     try:
@@ -1037,9 +1112,10 @@ def git_cat(
     alias: str,
     path: str = Query(..., description="Relative file path within the repository"),
     rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("query_repos")),
 ) -> dict:
     """Return the content of a file at the given revision."""
+    # MCP twin: git_file_at_revision (mcp/tool_docs/git/git_file_at_revision.md)
     if ".." in path or path.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1163,9 +1239,10 @@ def git_blame(
     alias: str,
     path: str = Query(..., description="Relative file path within the repository"),
     rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("query_repos")),
 ) -> dict:
     """Return blame information for each line of a file."""
+    # MCP twin: git_blame (mcp/tool_docs/git/git_blame.md)
     if ".." in path or path.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1275,9 +1352,10 @@ def git_file_history(
         le=_FILE_HISTORY_MAX_LIMIT,
         description="Maximum commits to return (1..500)",
     ),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("query_repos")),
 ) -> dict:
     """Return commit history for a single file (follows renames)."""
+    # MCP twin: git_file_history (mcp/tool_docs/git/git_file_history.md)
     if ".." in path or path.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

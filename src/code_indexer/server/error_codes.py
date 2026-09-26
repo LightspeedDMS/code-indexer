@@ -4658,6 +4658,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "SVC-GENERAL-040": ErrorDefinition(
+        code="SVC-GENERAL-040",
+        description="Git diff request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify from_revision/to_revision/file_paths values are well-formed",
+    ),
     "TELEM-GENERAL-009": ErrorDefinition(
         code="TELEM-GENERAL-009",
         description="TODO",
@@ -4777,6 +4783,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "TELEM-GENERAL-029": ErrorDefinition(
+        code="TELEM-GENERAL-029",
+        description="Git push request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote/branch values are well-formed and remote is configured",
     ),
     "VALID-GENERAL-012": ErrorDefinition(
         code="VALID-GENERAL-012",
@@ -4909,6 +4921,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "VALID-GENERAL-034": ErrorDefinition(
+        code="VALID-GENERAL-034",
+        description="Git pull request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote/branch values are well-formed and remote is configured",
+    ),
+    "VALID-GENERAL-035": ErrorDefinition(
+        code="VALID-GENERAL-035",
+        description="Git fetch request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote value is well-formed and remote is configured",
     ),
     "WEB-GENERAL-042": ErrorDefinition(
         code="WEB-GENERAL-042",
