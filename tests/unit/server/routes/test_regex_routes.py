@@ -92,10 +92,22 @@ def _make_mock_search_result(
 
 @pytest.fixture
 def app():
-    """Create test FastAPI app."""
+    """Create test FastAPI app.
+
+    regex_search() now enforces repo-level access
+    via app.state.access_filtering_service. This fixture wires a
+    permissive stub (admin bypass) so the many pre-existing behavioral
+    tests below (none of which exercise authorization) are unaffected --
+    authorization-denial behavior is covered separately by
+    test_regex_routes_repo_authz.py.
+    """
     from code_indexer.server.app import create_app
 
-    return create_app()
+    app = create_app()
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    app.state.access_filtering_service = mock_access_service
+    return app
 
 
 @pytest.fixture
