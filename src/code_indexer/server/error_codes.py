@@ -541,6 +541,24 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "GIT-CAT-003": ErrorDefinition(
+        code="GIT-CAT-003",
+        description="Git cat (file-at-revision) request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
+    "GIT-BLAME-003": ErrorDefinition(
+        code="GIT-BLAME-003",
+        description="Git blame request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
+    "GIT-FILE-HISTORY-003": ErrorDefinition(
+        code="GIT-FILE-HISTORY-003",
+        description="Git file-history request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
     "GIT-GENERAL-001": ErrorDefinition(
         code="GIT-GENERAL-001",
         description="TODO",
@@ -4664,6 +4682,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="Verify from_revision/to_revision/file_paths values are well-formed",
     ),
+    "SVC-GENERAL-041": ErrorDefinition(
+        code="SVC-GENERAL-041",
+        description="Git log request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the branch value is well-formed",
+    ),
     "TELEM-GENERAL-009": ErrorDefinition(
         code="TELEM-GENERAL-009",
         description="TODO",
@@ -4789,6 +4813,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="Git push request rejected by argv validation",
         severity=Severity.WARNING,
         action="Verify remote/branch values are well-formed and remote is configured",
+    ),
+    "TELEM-GENERAL-030": ErrorDefinition(
+        code="TELEM-GENERAL-030",
+        description="Git unstage request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify file_paths values are well-formed",
     ),
     "VALID-GENERAL-012": ErrorDefinition(
         code="VALID-GENERAL-012",
@@ -5089,6 +5119,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="Batch golden repository creation failed for an individual repository",
         severity=Severity.WARNING,
         action="Review web logs for repository URL, alias, and stack trace",
+    ),
+    "WEB-GENERAL-068": ErrorDefinition(
+        code="WEB-GENERAL-068",
+        description="Invalid git branch name argument on branch switch",
+        severity=Severity.WARNING,
+        action="Review the branch name in the request",
+    ),
+    "WEB-GENERAL-069": ErrorDefinition(
+        code="WEB-GENERAL-069",
+        description="Invalid git branch name argument on branch delete",
+        severity=Severity.WARNING,
+        action="Review the branch name in the request",
     ),
     # Story #86: Migrated logger statements - AUTH subsystem
     "AUTH-AUDIT-010": ErrorDefinition(

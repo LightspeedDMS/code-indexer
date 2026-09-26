@@ -273,11 +273,12 @@ class TestPushPullFetchPermissionSpecific:
 
 
 # ---------------------------------------------------------------------------
-# `branch="+main"` must be rejected over the REST front door too, not just
-# at the validator/service level -- `git check-ref-format --allow-onelevel
-# '+main'` is ACCEPTED by real git, and `git push --end-of-options <remote>
-# +main` force-pushes anyway (verified empirically); validate_branch_name()
-# rejects a leading '+' itself.
+# `branch="+main"` (git's own force-push refspec syntax) must reach `git
+# push` unchanged over the REST front door: `git check-ref-format
+# --allow-onelevel '+main'` is accepted by real git, and `git push
+# --end-of-options <remote> +main` force-pushes anyway (verified
+# empirically), so `validate_branch_name` keeps the leading '+' rather
+# than rejecting it (only a leading '-' on the whole element is a hazard).
 # ---------------------------------------------------------------------------
 
 
@@ -328,9 +329,29 @@ def _repo_resolves_to(repo_path):
 
 
 class TestPlusMainForcePushRest:
-    def test_plus_main_rejected_with_400_and_no_force_push(self, client, tmp_path):
+    def test_plus_main_force_pushes_and_advances_remote(self, client, tmp_path):
+        """`branch="+main"` is git's own force-push refspec syntax --
+        accepted by `git check-ref-format --allow-onelevel` and honored
+        by `git push <remote> +main` even behind `--end-of-options`
+        (verified empirically: the push still reports "(forced
+        update)"). It is the only force-push mechanism available through
+        this route (no separate `force` request field), so it must reach
+        `git push` unchanged and rewrite a diverged remote ref.
+
+        NOTE: asserts the git-level effect (the remote's `main` ref
+        advances), not a clean HTTP 200 -- see
+        test_normal_branch_main_push_still_succeeds's docstring above for
+        the pre-existing, unrelated GitPushResponse field-shape defect
+        this documents rather than works around differently.
+        """
         repo, remote = _make_repo_with_golden_remote(tmp_path)
+        # Diverge local history from what is already on the remote (the
+        # way an amend does), so only a force-push can advance the
+        # remote's main ref.
+        _git(["commit", "--amend", "-q", "-m", "init (amended)"], cwd=repo)
+        local_head = _rev_parse(repo, "HEAD")
         head_before = _rev_parse(remote, "main")
+        assert local_head != head_before
 
         with _repo_resolves_to(repo):
             response = _call_as(
@@ -341,13 +362,13 @@ class TestPlusMainForcePushRest:
                 json={"remote": "golden", "branch": "+main"},
             )
 
-        assert response.status_code == 400, (
-            f"POST push branch='+main' must be rejected with 400, got "
+        assert "must not start with" not in response.text, (
+            f"POST push branch='+main' (git's own force-push syntax) must "
+            f"not be rejected by validate_branch_name, got "
             f"{response.status_code}: {response.text}"
         )
-        assert "must not start with '+'" in response.text
-        assert _rev_parse(remote, "main") == head_before, (
-            "branch='+main' must never force-push -- the remote's main ref changed"
+        assert _rev_parse(remote, "main") == local_head, (
+            "branch='+main' must force-push and advance the remote's diverged main ref"
         )
 
     def test_normal_branch_main_push_still_succeeds(self, client, tmp_path):

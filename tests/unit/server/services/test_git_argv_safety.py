@@ -4,9 +4,21 @@ All tests use REAL throwaway git repositories (no mocking of git itself),
 per this repo's Anti-Mock rule. Each validator must:
   - reject any value starting with '-' (would be parsed as a git OPTION
     rather than a literal value), so no such value can ever reach argv.
-  - apply additional, more specific validation (remote must be configured;
-    branch must be a well-formed ref; revision must resolve).
+  - reject a NUL/CR/LF/other C0 control character (ordinary spaces and
+    tabs are not a hazard: argv is never parsed by a shell).
+  - apply additional, more specific validation only where the value
+    itself carries independent meaning (a remote must be configured). A
+    bare branch/ref name, a refspec side, and a revision are all left for
+    git itself (or the caller's own pre-existing resolution logic) to
+    resolve or reject beyond the two checks above.
   - let legitimate values pass through unchanged.
+
+`validate_pathspecs` is the one exception to the leading-dash/control-
+character rule above: every real caller already places a `--`
+end-of-options marker before these paths reach argv, so a leading '-'
+(including a real filename that is literally "-") can never be misread
+as an option there, and ordinary CR/LF are legal filesystem-path
+characters. It therefore rejects only a NUL byte.
 """
 
 from __future__ import annotations
@@ -72,9 +84,13 @@ class TestValidateRemoteName:
         with pytest.raises(GitArgumentValidationError):
             validate_remote_name("-anything", repo_with_remote)
 
-    def test_rejects_empty_string(self, repo_with_remote: Path):
-        with pytest.raises(GitArgumentValidationError):
-            validate_remote_name("", repo_with_remote)
+    def test_accepts_empty_string_deferred_to_git(self, repo_with_remote: Path):
+        """An empty string is not one of the two hazards (it can never be
+        read as a git OPTION), so it passes through unchanged -- each
+        call site's own pre-existing argument handling (e.g. `git
+        fetch`/`git push`/`git pull`, which build their argv from
+        `remote` unconditionally) decides what an empty remote means."""
+        assert validate_remote_name("", repo_with_remote) == ""
 
     def test_rejects_remote_not_configured_on_repo(self, repo_with_remote: Path):
         """Even a syntactically clean name must be an ACTUALLY configured remote."""
@@ -97,16 +113,11 @@ class TestValidateRemoteName:
     def test_rejects_configured_remote_with_trailing_newline_or_cr(
         self, repo_with_remote: Path
     ):
-        """Trailing-newline regression:
-        a Python regex validated with `.match(...)` against a `$`-anchored
-        pattern incorrectly accepts a trailing '\\n' (re.match's `$` matches
-        just before a final newline, not only true end-of-string). Fixed by
-        using `.fullmatch(...)` with no anchors, which has no such leniency.
-        Uses the actually-configured 'golden' remote name plus a trailing
-        newline/CR so the ONLY thing standing between accept and reject is
-        the regex's own strictness -- the membership check alone would also
-        reject 'golden\\n' as a different string than 'golden', so this
-        exercises both layers rejecting consistently.
+        """A trailing LF or CR is a control character, rejected before
+        the configured-remote membership check runs (which would itself
+        also reject 'golden\\n' as a different string than 'golden').
+        Uses the actually-configured 'golden' remote name so the only
+        difference from an accepted value is the trailing character.
         """
         with pytest.raises(GitArgumentValidationError):
             validate_remote_name("golden\n", repo_with_remote)
@@ -127,56 +138,43 @@ class TestValidateBranchName:
         with pytest.raises(GitArgumentValidationError):
             validate_branch_name("--receive-pack=example-value")
 
-    def test_rejects_empty_string(self):
-        with pytest.raises(GitArgumentValidationError):
-            validate_branch_name("")
+    def test_accepts_empty_string_deferred_to_git(self):
+        """An empty string is not one of the two hazards (it can never be
+        read as a git OPTION), so it passes through unchanged -- each
+        call site's own pre-existing truthy check (e.g. `if branch:`) or
+        git itself decides what an empty value means."""
+        assert validate_branch_name("") == ""
 
-    def test_rejects_malformed_ref(self):
-        with pytest.raises(GitArgumentValidationError):
-            validate_branch_name("bad..ref")
+    def test_accepts_range_shaped_value(self):
+        """A bare branch/ref name (create/switch/delete) is not checked
+        against `check-ref-format`; git itself resolves or rejects a
+        value here exactly as it would with no validation at all."""
+        assert validate_branch_name("bad..ref") == "bad..ref"
 
     def test_accepts_well_formed_branch_name(self):
         assert validate_branch_name("main") == "main"
         assert validate_branch_name("feature/foo-bar_1") == "feature/foo-bar_1"
 
     def test_rejects_well_formed_branch_with_trailing_newline_or_cr(self):
-        """Trailing-newline regression.
-        `validate_branch_name` has no Python regex of its own -- it
-        delegates well-formedness to `git check-ref-format
-        --allow-onelevel`, which this test proves is ALREADY strict about
-        a trailing '\\n'/'\\r' on real git 2.52 (verified separately via a
-        real subprocess: `check-ref-format` rejects 'main\\n' and 'main\\r'
-        with returncode 1). No code change was needed here; this documents
-        that fact as a permanent regression guard.
-        """
+        """A trailing LF or CR is one of the two hazards `validate_branch_name`
+        checks directly (see `_reject_control_characters`), independent of
+        whether the rest of the value looks like a well-formed ref name."""
         with pytest.raises(GitArgumentValidationError):
             validate_branch_name("main\n")
         with pytest.raises(GitArgumentValidationError):
             validate_branch_name("main\r")
 
-    def test_rejects_leading_plus_force_push_marker(self):
-        """`git check-ref-format --allow-onelevel '+main'` is ACCEPTED by
-        real git 2.52 (verified separately via a real subprocess:
-        returncode 0) -- and `git push --end-of-options golden +main` then
-        force-pushes, rewriting the remote branch (verified separately: the
-        push reports "(forced update)"). Neither check-ref-format nor
-        --end-of-options rejects a leading '+', so validate_branch_name
-        must reject it itself before either ever runs.
-        """
-        with pytest.raises(GitArgumentValidationError):
-            validate_branch_name("+main")
+    def test_accepts_leading_plus(self):
+        """`+foo` reaching a bare branch/ref name position (create/
+        switch/delete) is a literal ref name, not a force-push marker --
+        `git branch +foo` and `git checkout +foo` both treat it as such."""
+        assert validate_branch_name("+main") == "+main"
 
-    def test_rejects_colon_refspec_syntax(self):
-        """A `src:dst` refspec (e.g. 'other:refs/heads/main') must never
-        reach argv as a single `branch` value. This is already rejected by
-        `git check-ref-format --allow-onelevel` (verified separately via a
-        real subprocess: 'a:b' returns returncode 1) -- no code change was
-        needed for this specific case; this documents that fact as a
-        permanent regression guard, alongside the leading-'+' case above
-        which did require a code change.
-        """
-        with pytest.raises(GitArgumentValidationError):
-            validate_branch_name("other:refs/heads/main")
+    def test_accepts_colon_shaped_value(self):
+        """A `src:dst`-shaped string reaching a bare branch/ref name
+        position (create/switch/delete) is not treated as a refspec
+        there; git itself resolves or rejects it."""
+        assert validate_branch_name("other:refs/heads/main") == "other:refs/heads/main"
 
 
 # ---------------------------------------------------------------------------
@@ -198,17 +196,28 @@ class TestValidateRevision:
                 "--no-index", repo_with_remote, param_name="from_revision"
             )
 
-    def test_rejects_empty_string(self, repo_with_remote: Path):
-        with pytest.raises(GitArgumentValidationError):
-            validate_revision("", repo_with_remote, param_name="from_revision")
+    def test_accepts_empty_string_deferred_to_git(self, repo_with_remote: Path):
+        """An empty string is not one of the two hazards (it can never be
+        read as a git OPTION), so it passes through unchanged -- each
+        call site's own pre-existing truthy check or resolution logic
+        (or git itself) decides what an empty value means."""
+        assert validate_revision("", repo_with_remote, param_name="from_revision") == ""
 
-    def test_rejects_unresolvable_revision(self, repo_with_remote: Path):
-        with pytest.raises(GitArgumentValidationError):
+    def test_accepts_unresolvable_revision_deferred_to_git(
+        self, repo_with_remote: Path
+    ):
+        """`validate_revision` no longer resolves the value itself; each
+        call site's own pre-existing resolution logic (or `git` itself)
+        rejects an unresolvable revision, exactly as it did with no
+        validation at all."""
+        assert (
             validate_revision(
                 "not-a-real-revision-xyz",
                 repo_with_remote,
                 param_name="from_revision",
             )
+            == "not-a-real-revision-xyz"
+        )
 
     def test_accepts_head(self, repo_with_remote: Path):
         assert (
@@ -254,23 +263,32 @@ class TestValidatePathspecs:
     def test_none_passes_through(self):
         assert validate_pathspecs(None) is None
 
-    def test_rejects_output_option_injection(self, tmp_path: Path):
-        """--output= must never reach argv as a pathspec. The decoy path
-        is a neutral file under this test's own
-        tmp_path -- validate_pathspecs only inspects the string's leading
-        character and never touches the filesystem, so no real system path
-        is needed here."""
-        decoy = tmp_path / "decoy.txt"
-        decoy.write_text("neutral test content\n")
-        with pytest.raises(GitArgumentValidationError):
-            validate_pathspecs(["--output=output_marker.txt", "--text", str(decoy)])
+    def test_accepts_option_shaped_entry_deferred_to_the_callers_own_dash_dash(
+        self,
+    ):
+        """A pathspec entry starting with '-' -- including one shaped like
+        a real git option -- is not a hazard here: every real caller
+        already places `--` before these paths reach argv, so git can
+        never misread it as an option. This entry reaches the caller's
+        own argv construction unchanged."""
+        assert validate_pathspecs(["--output=output_marker.txt", "--text"]) == [
+            "--output=output_marker.txt",
+            "--text",
+        ]
 
-    def test_rejects_any_leading_dash_entry(self):
-        with pytest.raises(GitArgumentValidationError):
-            validate_pathspecs(["fine.txt", "-x"])
+    def test_accepts_any_leading_dash_entry(self):
+        assert validate_pathspecs(["fine.txt", "-x"]) == ["fine.txt", "-x"]
 
     def test_accepts_normal_paths(self):
         assert validate_pathspecs(["a.txt", "sub/b.txt"]) == ["a.txt", "sub/b.txt"]
 
     def test_accepts_empty_list(self):
         assert validate_pathspecs([]) == []
+
+    def test_rejects_nul_byte(self):
+        """A NUL byte is the one thing that can never be a legal
+        filesystem-path character, and would otherwise reach
+        `subprocess.run` directly and raise a bare `ValueError` instead
+        of this validator's own clean `GitArgumentValidationError`."""
+        with pytest.raises(GitArgumentValidationError):
+            validate_pathspecs(["fine.txt", "a\x00b"])

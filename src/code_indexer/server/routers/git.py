@@ -7,13 +7,18 @@ and service layer integration.
 
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.git_operations_service import git_operations_service
-from code_indexer.server.services.git_argv_safety import GitArgumentValidationError
+from code_indexer.server.services.git_argv_safety import (
+    GitArgumentValidationError,
+    validate_revision,
+    validate_revision_range,
+)
 from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoManager
 from code_indexer.server.routers.git_models import (
     GitStatusResponse,
@@ -307,6 +312,14 @@ def git_log(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-041",
+                f"Invalid git log request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -386,6 +399,7 @@ def git_stage(
     response_model=GitUnstageResponse,
     responses={
         200: {"description": "Files unstaged successfully"},
+        400: {"description": "Invalid parameters"},
         401: {"description": "Missing or invalid authentication"},
         403: {"description": "Missing repository:write permission"},
         404: {"description": "Repository not found"},
@@ -413,6 +427,14 @@ def git_unstage(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-030",
+                f"Invalid file_paths for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1023,6 +1045,14 @@ def git_branch_switch(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-068",
+                f"Invalid request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1082,6 +1112,14 @@ def git_branch_delete(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GitArgumentValidationError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-069",
+                f"Invalid request for {alias}: {e}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1134,6 +1172,26 @@ def git_cat(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    # rev is a free-form revision expression (branch, tag, or commit SHA);
+    # it must not start with '-' or contain a control character, validated
+    # before any git subprocess runs. `rev` is a plain `str` here (the
+    # Query default is the literal "HEAD", never None), so an empty
+    # string reaches the validator unchanged and must be KEPT unchanged
+    # (not coerced to "HEAD"): this route's own subsequent `git
+    # rev-parse`/`git show` calls resolve or reject the value exactly as
+    # they would with no validation at all, and `git rev-parse ""` itself
+    # fails. See git_argv_safety module docstring for the invariant.
+    try:
+        rev = validate_revision(rev, Path(repo_path), param_name="rev")
+    except GitArgumentValidationError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-CAT-003",
+                f"Invalid rev for '{alias}': {exc}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     try:
         rev_result = subprocess.run(
@@ -1262,6 +1320,28 @@ def git_blame(
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
+    # rev is a free-form revision expression (branch, tag, or commit SHA),
+    # and `git blame` itself also accepts a two-dot/three-dot range
+    # (restricting the blame to that range, with boundary commits marked
+    # `^`); it must not start with '-' or contain a control character,
+    # validated before any git subprocess runs. `rev` is a plain `str`
+    # here (the Query default is the literal "HEAD", never None), so an
+    # empty string reaches the validator unchanged and must be KEPT
+    # unchanged (not coerced to "HEAD"): git itself resolves or rejects
+    # the value exactly as it would with no validation at all, and `git
+    # blame --porcelain ""` itself fails. See git_argv_safety module
+    # docstring for the invariant.
+    try:
+        rev = validate_revision_range(rev, Path(repo_path), param_name="rev")
+    except GitArgumentValidationError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-BLAME-003",
+                f"Invalid rev for '{alias}': {exc}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
     try:
         result = subprocess.run(
             ["git", "blame", "--porcelain", rev, "--", path],
@@ -1374,6 +1454,24 @@ def git_file_history(
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    # rev is an optional free-form revision expression (branch, tag,
+    # commit SHA, or a two-dot/three-dot range such as "main..feature",
+    # since it flows straight into `git log <rev> -- path` below); it must
+    # not start with '-' or contain a control character, validated before
+    # any git subprocess runs. Beyond that, git itself resolves or
+    # rejects the value exactly as it would with no validation at all.
+    # See git_argv_safety module docstring for the invariant.
+    try:
+        rev = validate_revision_range(rev, Path(repo_path), param_name="rev")
+    except GitArgumentValidationError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-FILE-HISTORY-003",
+                f"Invalid rev for '{alias}': {exc}",
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     cmd: list[str] = [
         "git",

@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import List, Optional, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.server.services.git_argv_safety import (
+    validate_revision,
+    validate_revision_range,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -271,6 +275,15 @@ class GitOperationsService:
         Returns:
             GitLogResult with commits and metadata
         """
+        # branch is a free-form revision expression (HEAD, HEAD~N, a SHA, a
+        # tag, a branch name with slashes, or a two-dot/three-dot range
+        # such as "main..feature"); it must not start with '-' or contain
+        # a control character. Beyond that, git itself resolves or
+        # rejects the value exactly as it would with no validation at
+        # all. See code_indexer.server.services.git_argv_safety module
+        # docstring for the invariant.
+        branch = validate_revision_range(branch, self.repo_path, param_name="branch")
+
         # Build git log command
         cmd = ["git", "log", f"--format={self.LOG_FORMAT}"]
 
@@ -373,6 +386,19 @@ class GitOperationsService:
         Raises:
             ValueError: If commit is not found
         """
+        # commit_hash is a free-form revision expression; it must not
+        # start with '-' or contain a control character. Beyond that,
+        # this method's OWN subsequent `git rev-parse` call (below)
+        # resolves or rejects the value exactly as it would with no
+        # validation at all. See
+        # code_indexer.server.services.git_argv_safety module docstring
+        # for the invariant.
+        _validated_commit_hash = validate_revision(
+            commit_hash, self.repo_path, param_name="commit_hash"
+        )
+        assert _validated_commit_hash is not None  # required parameter, never None
+        commit_hash = _validated_commit_hash
+
         # First, resolve the commit hash to full SHA
         try:
             resolve_result = run_git_command(
@@ -604,6 +630,19 @@ class GitOperationsService:
         Raises:
             ValueError: If file or revision not found
         """
+        # revision is a free-form revision expression; it must not start
+        # with '-' or contain a control character. Beyond that, this
+        # method's OWN subsequent `git rev-parse --verify` call (below)
+        # resolves or rejects the value exactly as it would with no
+        # validation at all. See
+        # code_indexer.server.services.git_argv_safety module docstring
+        # for the invariant.
+        _validated_revision = validate_revision(
+            revision, self.repo_path, param_name="revision"
+        )
+        assert _validated_revision is not None  # required parameter, never None
+        revision = _validated_revision
+
         # First resolve the revision to full SHA and verify it exists
         try:
             # Use rev-parse --verify to check the revision actually exists
@@ -658,6 +697,17 @@ class GitOperationsService:
         Returns:
             GitDiffResult with file diffs and statistics
         """
+        # from_revision/to_revision are bare positionals in all three argvs
+        # below, so neither may start with '-' (other than exactly '-') or
+        # contain a control character; beyond that, git itself resolves or
+        # rejects the value (a revision or a two-dot/three-dot range). path
+        # always follows `--`. See git_argv_safety module docstring for the
+        # invariant.
+        validate_revision_range(
+            from_revision, self.repo_path, param_name="from_revision"
+        )
+        validate_revision_range(to_revision, self.repo_path, param_name="to_revision")
+
         # Build base args for git diff commands
         base_args = [from_revision]
         if to_revision:
@@ -968,6 +1018,18 @@ class GitOperationsService:
             raise ValueError(
                 f"end_line ({end_line}) must be >= start_line ({start_line})"
             )
+
+        # revision is a free-form revision expression, and `git blame`
+        # itself also accepts a two-dot/three-dot range (restricting the
+        # blame to that range, with boundary commits marked `^`); it must
+        # not start with '-' or contain a control character. Beyond that,
+        # git itself resolves or rejects the value exactly as it would
+        # with no validation at all. See
+        # code_indexer.server.services.git_argv_safety module docstring
+        # for the invariant.
+        revision = validate_revision_range(
+            revision, self.repo_path, param_name="revision"
+        )
 
         # Build git blame command with porcelain format
         cmd = ["git", "blame", "--porcelain"]

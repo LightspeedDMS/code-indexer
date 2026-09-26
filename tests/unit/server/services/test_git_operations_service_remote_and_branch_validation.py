@@ -422,12 +422,23 @@ class TestDiffArgumentValidation:
             "passed as a file_paths entry"
         )
 
-    def test_git_diff_rejects_file_paths_entry_with_leading_dash(
-        self, repo_with_golden_remote: Path
-    ):
-        svc = _make_service()
-        with pytest.raises(GitArgumentValidationError):
-            svc.git_diff(repo_with_golden_remote, file_paths=["f.txt", "-x"])
+    def test_git_diff_file_paths_follow_separator(self, repo_with_golden_remote: Path):
+        """The legacy file_paths branch always emits `--` before the
+        paths, so a tracked file literally named `--stat` is diffed as a
+        path. Without the separator, git reads it as an option placed
+        after a non-option and fails ("option '--stat' must come before
+        non-option arguments")."""
+        repo = repo_with_golden_remote
+        (repo / "--stat").write_text("one\n")
+        _git(["add", "--", "--stat"], repo)
+        _git(["commit", "-q", "-m", "add option-named file"], repo)
+        (repo / "--stat").write_text("one\ntwo\n")
+
+        result = _make_service().git_diff(repo, file_paths=["--stat"])
+
+        assert "diff --git a/--stat b/--stat" in result["diff_text"]
+        assert "+two" in result["diff_text"]
+        assert result["files_changed"] == 1
 
     def test_git_diff_rejects_to_revision_with_leading_dash(
         self, repo_with_golden_remote: Path

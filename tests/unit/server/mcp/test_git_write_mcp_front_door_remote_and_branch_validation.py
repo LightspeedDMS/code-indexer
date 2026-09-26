@@ -95,8 +95,9 @@ def _rev_parse(repo_path: Path, ref: str) -> str:
 # git_write.py's git_push handler must validate before
 # _get_pat_credential_for_remote(), not just inside git_push_with_pat().
 #
-# The guard used here is the lean, subprocess-free reject_leading_dash()
-# (not the full validate_remote_name() membership check): repo_path at
+# The guard used here is the subprocess-free validate_remote_syntax()
+# (a leading '-' other than exactly '-', and a control character -- not
+# the full validate_remote_name() membership check): repo_path at
 # this point in the handler has not been proven to be a real, initialized
 # git repository, and several pre-existing MCP handler tests
 # (test_git_mcp_handlers_remote.py, test_git_mcp_handlers_migration_
@@ -144,7 +145,7 @@ class TestGitPushHandlerValidatesRemoteBeforeCredentialLookup:
         error = str(parsed.get("error", ""))
         assert "must not start with '-'" in error, (
             "Expected the clean GitArgumentValidationError message from "
-            "reject_leading_dash, produced before _get_pat_credential_for_remote "
+            "validate_remote_syntax, produced before _get_pat_credential_for_remote "
             f"runs at all. Got: {error!r}"
         )
         assert "Failed to get remote URL" not in error, (
@@ -155,11 +156,27 @@ class TestGitPushHandlerValidatesRemoteBeforeCredentialLookup:
         )
         assert not marker.exists()
 
+    @pytest.mark.parametrize("remote", ["golden\n", "gol\x01den"])
+    def test_rejects_control_character_remote_before_any_credential_lookup(
+        self, tmp_path: Path, remote: str
+    ):
+        repo = self._make_repo(tmp_path)
+
+        parsed = self._call_git_push(repo, remote)
+
+        assert parsed.get("success") is not True
+        error = str(parsed.get("error", ""))
+        assert "control character" in error, error
+        assert "Failed to get remote URL" not in error, (
+            "The control-character check must run before "
+            "_get_pat_credential_for_remote's 'git remote get-url' subprocess."
+        )
+
     def test_unconfigured_remote_reaches_credential_lookup_gracefully(
         self, tmp_path: Path
     ):
         """A well-formed but unconfigured remote is not an option-shaped
-        value, so reject_leading_dash() lets it through to
+        value, so validate_remote_syntax() lets it through to
         _get_pat_credential_for_remote() -- which already handles this case
         gracefully via its own 'git remote get-url' failure (no crash, no
         unhandled exception): this documents that intentional design, not
@@ -290,7 +307,7 @@ class TestGitMcpFrontDoorRejectsInjection:
             "malformed/unconfigured remote already fails for an unrelated "
             "reason via _get_pat_credential_for_remote's own 'git remote "
             "get-url' failure). Expected the clean "
-            "GitArgumentValidationError message from reject_leading_dash, "
+            "GitArgumentValidationError message from validate_remote_syntax, "
             f"produced before any credential lookup. Got: {error!r}"
         )
         assert not marker.exists(), (
@@ -298,26 +315,54 @@ class TestGitMcpFrontDoorRejectsInjection:
             "execute an option value passed as `remote`"
         )
 
-    async def test_git_push_rejects_plus_main_force_push_through_real_dispatch(
+    async def test_git_push_accepts_plus_main_through_real_dispatch(
         self, tmp_path: Path
     ):
         """`branch="+main"` -- git's own force-push ref marker syntax,
-        accepted by `git check-ref-format --allow-onelevel` and NOT
-        blocked by `--end-of-options` (verified empirically) -- must be
-        rejected through the real MCP front door too, and must never
-        rewrite the remote's `main` ref."""
+        accepted by `git check-ref-format --allow-onelevel` -- must reach
+        `git push` unchanged through the real MCP front door.
+
+        `git_push_with_pat` (the method the MCP `git_push` handler always
+        calls) builds its own explicit refspec `HEAD:refs/heads/{branch}`,
+        so a leading '+' here becomes part of the destination ref NAME
+        rather than a force flag (verified empirically: `git push <url>
+        "HEAD:refs/heads/+main"` creates a NEW ref literally named
+        `refs/heads/+main`, leaving `main` untouched) -- the value is not
+        rejected before it reaches git. The PAT credential lookup is
+        mocked (plumbing not under test; a local filesystem remote has no
+        forge host to resolve a real credential against).
+        """
         import code_indexer.server.mcp.handlers.git_write as git_write
 
         repo = _make_repo_with_golden_remote(tmp_path)
         remote = repo.parent / "golden.git"
         head_before = _rev_parse(remote, "main")
 
+        fake_credential_manager = MagicMock()
+        fake_credential_manager.get_credential_for_host.return_value = {
+            "token": "unused-fixture-token",
+            "git_user_name": "Test User",
+            "git_user_email": "test@example.com",
+        }
+
         async with _real_dispatch_context(
             "git_push", git_write.git_push, "repository:write"
         ) as (user, handle_tools_call):
-            with patch(
-                "code_indexer.server.mcp.handlers._legacy._resolve_git_repo_path",
-                return_value=(str(repo), None),
+            with (
+                patch(
+                    "code_indexer.server.mcp.handlers._legacy._resolve_git_repo_path",
+                    return_value=(str(repo), None),
+                ),
+                patch.object(
+                    git_write,
+                    "_get_credential_manager",
+                    return_value=fake_credential_manager,
+                ),
+                patch(
+                    "code_indexer.server.services.git_credential_helper."
+                    "GitCredentialHelper.extract_host_from_remote_url",
+                    return_value="example.com",
+                ),
             ):
                 result = await handle_tools_call(
                     params={
@@ -334,14 +379,16 @@ class TestGitMcpFrontDoorRejectsInjection:
                 )
 
         parsed = _parse_mcp_response(result)
-        assert parsed.get("success") is not True
-        assert "must not start with '+'" in str(parsed.get("error", "")), (
-            f"Expected the clean GitArgumentValidationError message from "
-            f"validate_branch_name's leading-'+' check. Got: {parsed!r}"
+        assert parsed.get("success") is True, (
+            f"branch='+main' must not be rejected by validate_branch_name "
+            f"through the real MCP dispatch path. Got: {parsed!r}"
+        )
+        assert _rev_parse(remote, "+main") == _rev_parse(repo, "HEAD"), (
+            "git_push through the real MCP dispatch path must let "
+            "branch='+main' reach git, creating refs/heads/+main"
         )
         assert _rev_parse(remote, "main") == head_before, (
-            "git_push through the real MCP dispatch path must never let "
-            "branch='+main' force-push and rewrite the remote's main ref"
+            "the existing remote main ref must be untouched by this call"
         )
 
     async def test_git_pull_rejects_upload_pack_remote_through_real_dispatch(

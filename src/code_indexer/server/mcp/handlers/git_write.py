@@ -21,8 +21,9 @@ from code_indexer.server.telemetry.correlation_bridge import (
 )
 from code_indexer.server.services.branch_service import BranchService
 from code_indexer.server.services.git_argv_safety import (
-    reject_leading_dash,
+    GitArgumentValidationError,
     validate_branch_name,
+    validate_remote_syntax,
 )
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
@@ -579,6 +580,8 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # cache TTL.
         BranchService.invalidate(repo_path)
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_branch_delete", e)
     except GitCommandError as e:
@@ -862,6 +865,8 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_reset")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_reset_hard", e)
     except Exception as e:
@@ -898,6 +903,8 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_clean")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_clean", e)
     except Exception as e:
@@ -933,17 +940,18 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # _get_pat_credential_for_remote() below builds its own "git remote
         # get-url <remote>" argv, a separate call site from
-        # GitOperationsService.git_push_with_pat's own validation. Reject a
-        # leading '-' in `remote` here too, before that call and before the
-        # migration trigger, so no such value from the MCP front door ever
-        # reaches any git subprocess -- using the lean, subprocess-free
-        # reject_leading_dash() rather than the full validate_remote_name()
-        # membership check, since repo_path here has not yet been proven to
-        # be a real, initialized git repository. The membership check still
-        # runs, unconditionally, inside git_push_with_pat below before any
-        # of its own subprocesses; this is defense-in-depth at an earlier
-        # call site. See git_argv_safety module docstring for the invariant.
-        reject_leading_dash(remote, param_name="remote")
+        # GitOperationsService.git_push_with_pat's own validation. Apply both
+        # hazard checks to `remote` here too (a leading '-' other than
+        # exactly '-', and a control character), before that call and
+        # before the migration trigger, so no such value from the MCP front
+        # door ever reaches any git subprocess -- using the subprocess-free
+        # validate_remote_syntax() rather than the full
+        # validate_remote_name() membership check, since repo_path here has
+        # not yet been proven to be a real, initialized git repository. The
+        # membership check still runs, unconditionally, inside
+        # git_push_with_pat below before any of its own subprocesses. See
+        # git_argv_safety module docstring for the invariant.
+        validate_remote_syntax(remote)
         branch = validate_branch_name(branch)
 
         # Trigger migration before push if needed (Bug #639)

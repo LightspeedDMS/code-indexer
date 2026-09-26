@@ -37,7 +37,9 @@ from code_indexer.server.services.git_argv_safety import (
     validate_branch_name,
     validate_pathspecs,
     validate_remote_name,
+    validate_reset_mode,
     validate_revision,
+    validate_revision_range,
 )
 
 if TYPE_CHECKING:
@@ -1056,14 +1058,20 @@ class GitOperationsService:
             )
             effective_limit = min(effective_limit, self._api_limits.max_diff_lines)
 
-            # from_revision/to_revision/file_paths are validated before
-            # they ever reach argv: none may start with '-', and
-            # from_revision/to_revision must resolve to a real revision.
-            # See git_argv_safety module docstring for the invariant.
-            from_revision = validate_revision(
+            # from_revision/to_revision are validated before they ever
+            # reach argv: neither may start with '-' (other than exactly
+            # '-') or contain a control character (either may itself be a
+            # full two-dot/three-dot range, e.g.
+            # from_revision="main..feature" with to_revision left unset;
+            # beyond the two hazards above, git itself resolves or rejects
+            # the value exactly as it would with no validation at all).
+            # file_paths always follow a `--` separator below, so each is a
+            # literal path; only a NUL byte is rejected. See git_argv_safety
+            # module docstring for the invariant.
+            from_revision = validate_revision_range(
                 from_revision, repo_path, param_name="from_revision"
             )
-            to_revision = validate_revision(
+            to_revision = validate_revision_range(
                 to_revision, repo_path, param_name="to_revision"
             )
             file_paths = validate_pathspecs(file_paths)
@@ -1080,10 +1088,10 @@ class GitOperationsService:
 
             # Defense in depth only: unlike push/pull/fetch, `--end-of-options`
             # is not a hard option boundary for every `git diff` mode on
-            # every git version. The real, version-independent control is
-            # the leading-'-' rejection on from_revision/to_revision/file_paths
-            # above (validate_revision/validate_pathspecs), which runs
-            # before this line and before any argv is built.
+            # every git version. The real, version-independent controls are
+            # the leading-'-' rejection on from_revision/to_revision above
+            # (validate_revision_range), which runs before any argv is
+            # built, and the `--` separator emitted before any path below.
             cmd.append("--end-of-options")
 
             # Add revision range or single revision
@@ -1205,6 +1213,18 @@ class GitOperationsService:
 
             # Story #686: Cap limit at configured max_log_commits
             effective_limit = min(limit, self._api_limits.max_log_commits)
+
+            # branch is actually used below as a free-form revision
+            # expression (HEAD, HEAD~N, a SHA, a tag, a branch name with
+            # slashes, or a two-dot/three-dot range such as
+            # "main..feature") for both the count and the log commands, so
+            # it is validated the same way git_diff validates
+            # from_revision/to_revision: it must not start with '-' or
+            # contain a control character; beyond that, git itself
+            # resolves or rejects the value exactly as it would with no
+            # validation at all. See git_argv_safety module docstring for
+            # the invariant.
+            branch = validate_revision_range(branch, repo_path, param_name="branch")
 
             # Get total commit count (for pagination metadata)
             # Use branch or HEAD as the revision specifier
@@ -1346,8 +1366,14 @@ class GitOperationsService:
         try:
             # Validate no .code-indexer files before staging
             validated_paths = self._validate_no_code_indexer_files(file_paths)
+            # file_paths always follow a '--' separator, so every entry
+            # (including one that is '-', starts with '-', or contains LF)
+            # is a literal path, never an option; only a NUL byte is
+            # rejected. See git_argv_safety module docstring for the
+            # invariant.
+            validated_paths = validate_pathspecs(validated_paths) or []
 
-            cmd = ["git", "add"] + validated_paths
+            cmd = ["git", "add", "--"] + validated_paths
 
             run_git_command(
                 cmd,
@@ -1382,7 +1408,13 @@ class GitOperationsService:
             GitCommandError: If git reset fails
         """
         try:
-            cmd = ["git", "reset", "HEAD"] + file_paths
+            # file_paths always follow a '--' separator, so every entry
+            # (including one that is '-', starts with '-', or contains LF)
+            # is a literal path, never an option; only a NUL byte is
+            # rejected. See git_argv_safety module docstring for the
+            # invariant.
+            file_paths = validate_pathspecs(file_paths) or []
+            cmd = ["git", "reset", "HEAD", "--"] + file_paths
 
             run_git_command(
                 cmd,
@@ -1617,8 +1649,17 @@ class GitOperationsService:
         """
         try:
             # remote must be a configured remote name; remote/branch values
-            # never reach argv with a leading '-'. See git_argv_safety
-            # module docstring for the invariant.
+            # never reach argv with a leading '-' unless branch is exactly
+            # '-' (git's own previous-branch shorthand -- not an option,
+            # since it is a single character; verified empirically that
+            # `git push origin -` fails with a real git error, "src
+            # refspec - does not match any", the same failure git
+            # produces with no validation at all -- not a validation error).
+            # branch is really a push refspec (e.g. "+main" or
+            # "HEAD:refs/heads/x"); it is ONE argv element, so only the
+            # whole element is checked and its '+'/'src:dst' contents reach
+            # git unchanged. See git_argv_safety module docstring for
+            # the invariant.
             remote = validate_remote_name(remote, repo_path)
             branch = validate_branch_name(branch, param_name="branch")
 
@@ -1697,8 +1738,14 @@ class GitOperationsService:
         # remote/branch here, before any subprocess, including the "git
         # remote get-url" preflight immediately below, so no caller
         # (present or future) can bypass validation by using this entry
-        # point instead of git_push(). See git_argv_safety module docstring
-        # for the invariant.
+        # point instead of git_push(). Unlike git_push()/git_pull(), branch
+        # here is NOT used as a whole refspec -- this method builds its own
+        # fixed refspec HEAD:refs/heads/{branch} below, embedding branch as
+        # only the destination ref-name component; branch is also a bare
+        # positional in the `git branch --set-upstream-to=... <branch>`
+        # call below, so the whole value is checked the same way as every
+        # other branch site. See git_argv_safety module docstring for the
+        # invariant.
         remote = validate_remote_name(remote, repo_path)
         branch = validate_branch_name(branch, param_name="branch")
 
@@ -1838,8 +1885,17 @@ class GitOperationsService:
         """
         try:
             # remote must be a configured remote name; remote/branch values
-            # never reach argv with a leading '-'. See git_argv_safety
-            # module docstring for the invariant.
+            # never reach argv with a leading '-' unless branch is exactly
+            # '-' (git's own previous-branch shorthand -- not an option,
+            # since it is a single character; verified empirically that
+            # `git pull origin -` fails with a real git error, "couldn't
+            # find remote ref -", the same failure git produces with no
+            # validation at all -- not a validation error). branch
+            # is really a pull refspec (e.g. "+main" or
+            # "HEAD:refs/heads/x"); it is ONE argv element, so only the
+            # whole element is checked and its '+'/'src:dst' contents reach
+            # git unchanged. See git_argv_safety module docstring for
+            # the invariant.
             remote = validate_remote_name(remote, repo_path)
             branch = validate_branch_name(branch, param_name="branch")
 
@@ -1958,6 +2014,25 @@ class GitOperationsService:
             ValueError: If hard reset attempted without valid token
             GitCommandError: If git reset fails
         """
+        # mode must be exactly one of the supported literal reset modes,
+        # validated before any confirmation-token logic. A leading-dash
+        # check alone is not enough here: git's own long-option parser
+        # accepts any unambiguous prefix of a long option name, so a value
+        # that is neither dash-prefixed nor literally equal to "hard"
+        # could still resolve to `--hard` once it reaches argv. See
+        # git_argv_safety module docstring for the invariant.
+        mode = validate_reset_mode(mode)
+
+        # commit_hash is a free-form revision expression (HEAD, HEAD~N, a
+        # SHA, a tag); it must not start with '-' or contain a control
+        # character, validated before any confirmation token is even
+        # issued. Beyond that, `git reset` itself resolves or rejects the
+        # value exactly as it would with no validation at all. See
+        # git_argv_safety module docstring for the invariant.
+        commit_hash = validate_revision(
+            commit_hash, repo_path, param_name="commit_hash"
+        )
+
         if mode == "hard":
             if not confirmation_token:
                 token = self._generate_confirmation_token("git_reset_hard")
@@ -2089,6 +2164,22 @@ class GitOperationsService:
         Raises:
             GitCommandError: If merge fails for a reason other than conflicts
         """
+        # source_branch is a free-form revision expression (a branch name,
+        # tag, or commit-ish); it must not start with '-' (the exact value
+        # '-' itself is accepted -- git's own `git merge -` shorthand for
+        # the previously checked out branch, verified empirically against
+        # real git, is never an option since it is a single character) and
+        # must not contain a control character. Beyond that, `git merge`
+        # itself resolves or rejects the value exactly as it would with no
+        # validation at all. See git_argv_safety module docstring for the
+        # invariant.
+        source_branch = validate_revision(
+            source_branch,
+            repo_path,
+            param_name="source_branch",
+        )
+        assert source_branch is not None  # required parameter, never None here
+
         try:
             result = run_git_command(
                 ["git", "merge", source_branch],
@@ -2537,6 +2628,16 @@ class GitOperationsService:
             GitCommandError: If git branch fails
         """
         try:
+            # branch_name must not start with '-' (would be read as a git
+            # option) unless it is exactly '-' (never an option), and must
+            # not contain a control character; beyond that, git itself
+            # resolves or rejects the value exactly as it would with no
+            # validation at all (e.g. '+foo' is a literal name here, not a
+            # force marker). See git_argv_safety module docstring for the
+            # invariant.
+            branch_name = validate_branch_name(branch_name, param_name="branch_name")
+            assert branch_name is not None  # required parameter, never None here
+
             run_git_command(
                 ["git", "branch", branch_name],
                 cwd=repo_path,
@@ -2572,6 +2673,16 @@ class GitOperationsService:
             GitCommandError: If git checkout/switch fails
         """
         try:
+            # branch_name must not start with '-' (would be read as a git
+            # option) and must not contain a control character, except the
+            # exact value '-' itself, git's own `git checkout -` shorthand
+            # for the previously checked out branch (verified empirically
+            # against real git). Beyond that, git itself resolves or
+            # rejects the value exactly as it would with no validation at
+            # all. See git_argv_safety module docstring for the invariant.
+            branch_name = validate_branch_name(branch_name, param_name="branch_name")
+            assert branch_name is not None  # required parameter, never None here
+
             # Get current branch first
             current_result = run_git_command(
                 ["git", "branch", "--show-current"],
@@ -2627,6 +2738,16 @@ class GitOperationsService:
             ValueError: If attempted without valid token
             GitCommandError: If git branch delete fails
         """
+        # branch_name must not start with '-' (would be read as a git
+        # option) unless it is exactly '-' (never an option), and must not
+        # contain a control character, validated before any confirmation
+        # token is even issued; beyond that, git
+        # itself resolves or rejects the value exactly as it would with no
+        # validation at all. See git_argv_safety module docstring for the
+        # invariant.
+        branch_name = validate_branch_name(branch_name, param_name="branch_name")
+        assert branch_name is not None  # required parameter, never None here
+
         if not confirmation_token:
             token = self._generate_confirmation_token("git_branch_delete")
             return {"requires_confirmation": True, "token": token}
