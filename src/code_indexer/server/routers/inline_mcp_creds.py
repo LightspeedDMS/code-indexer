@@ -147,8 +147,14 @@ def register_mcp_credential_routes(
             raise HTTPException(status_code=404, detail="MCP credential not found")
         return {"message": "MCP credential deleted successfully"}
 
-    # Admin MCP Credentials endpoints (require admin role)
-    @app.get("/api/admin/users/{username}/mcp-credentials")
+    # Admin MCP Credentials endpoints (require admin role + TOTP elevation --
+    # this bearer credential material is equivalent to a
+    # password, matching the elevation gate on the MCP twin
+    # mcp/handlers/admin/mcp_credentials.py's _create_user/_delete_user).
+    @app.get(
+        "/api/admin/users/{username}/mcp-credentials",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def admin_list_user_mcp_credentials(
         username: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -187,7 +193,11 @@ def register_mcp_credential_routes(
 
         return {"credentials": credentials, "username": username}
 
-    @app.post("/api/admin/users/{username}/mcp-credentials", status_code=201)
+    @app.post(
+        "/api/admin/users/{username}/mcp-credentials",
+        status_code=201,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     async def admin_create_user_mcp_credential(
         username: str,
         request: Request,
@@ -238,7 +248,10 @@ def register_mcp_credential_routes(
             "created_at": credential["created_at"],
         }
 
-    @app.delete("/api/admin/users/{username}/mcp-credentials/{credential_id}")
+    @app.delete(
+        "/api/admin/users/{username}/mcp-credentials/{credential_id}",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def admin_revoke_user_mcp_credential(
         username: str,
         credential_id: str,
@@ -282,7 +295,10 @@ def register_mcp_credential_routes(
 
         return {"message": "Credential revoked successfully"}
 
-    @app.get("/api/admin/mcp-credentials")
+    @app.get(
+        "/api/admin/mcp-credentials",
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def admin_list_all_mcp_credentials(
         limit: int = 100,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
