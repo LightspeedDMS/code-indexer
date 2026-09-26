@@ -333,12 +333,31 @@ class OIDCManager:
             }
 
             # Create new user
-            new_user = self.user_manager.create_oidc_user(
-                username=base_username,
-                role=UserRole[self.config.default_role.upper()],
-                email=user_info.email,
-                oidc_identity=oidc_identity,
-            )
+            # base_username
+            # comes from the OIDC username_claim, which this server does not
+            # control (the IdP decides its value, and a username_claim may point
+            # at a free-text field), so it is validated like any other input.
+            # UserManager.create_oidc_user enforces validate_username_path_safe
+            # and raises ValueError on rejection; that is
+            # a NORMAL JIT-provisioning denial here, exactly like the
+            # email-verification/username-claim/collision checks above, and
+            # must never propagate as an unhandled 500 to the SSO callback.
+            try:
+                new_user = self.user_manager.create_oidc_user(
+                    username=base_username,
+                    role=UserRole[self.config.default_role.upper()],
+                    email=user_info.email,
+                    oidc_identity=oidc_identity,
+                )
+            except ValueError as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTH-OIDC-002",
+                        f"JIT provisioning rejected unsafe username {base_username!r} "
+                        f"(OIDC subject={user_info.subject!r}): {e!r}",
+                    )
+                )
+                return None
 
             # Link OIDC identity in database
             await self.link_oidc_identity(

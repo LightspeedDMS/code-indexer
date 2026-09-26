@@ -14,12 +14,16 @@ from code_indexer.server.utils.cancellable_subprocess import (
 from code_indexer.server.storage.shared.snapshot_manager import (
     _ensure_source_tree_readable_for_clone,
 )
+from code_indexer.server.storage.shared.clone_backend import (
+    CloneDestinationExistsError,
+)
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
 from code_indexer.config import write_json_atomic
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import json
 import os
@@ -387,6 +391,121 @@ class ActivatedRepoManager:
             pass
 
     # ------------------------------------------------------------------
+    # Path-traversal defense in depth
+    # ------------------------------------------------------------------
+    #
+    # Independent of any username validation applied at account-creation
+    # time (UserManager.create_user/create_oidc_user) --
+    # a legacy row created before that validation shipped can still carry
+    # an unsafe username, and this layer must contain it regardless.
+    # EVERY path built from (username, user_alias) in this class routes
+    # through _safe_user_dir / _safe_user_scoped_path, never a bare
+    # os.path.join(self.activated_repos_dir, username, ...).
+
+    @staticmethod
+    def _is_safe_path_component(value: Optional[str]) -> bool:
+        """Structural single-path-component safety check.
+
+        Rejects the exact OS-special components ('.', '..'), embedded path
+        separators, and NUL bytes. Deliberately NOT a character allow-list
+        (that job belongs to account-creation-time validation) -- this is
+        the narrower, independent check that a realpath-based containment
+        verification alone cannot fully replace (e.g. a NUL byte raises
+        ValueError deep inside os.path functions rather than silently
+        misbehaving).
+
+        Also rejects RESERVED_ACTIVATED_REPOS_DIR_NAMES (the same shared
+        constant validate_username_path_safe() uses at account-creation
+        time). The invariant: a per-user directory built by
+        _safe_user_dir is never a server-owned entry of activated_repos_dir
+        (e.g. '.trash'), for any stored username.
+        """
+        if not value:
+            return False
+        if value in (".", ".."):
+            return False
+        if value in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+            return False
+        if os.sep in value:
+            return False
+        if os.altsep and os.altsep in value:
+            return False
+        if "\x00" in value:
+            return False
+        return True
+
+    def _safe_user_dir(self, username: str) -> str:
+        """Return ``activated_repos_dir/<username>``, verified to be a
+        single safe path component that realpath-resolves to a DIRECT
+        CHILD of ``activated_repos_dir``.
+
+        Raises:
+            ActivatedRepoError: If username is unsafe, or the resulting
+                path does not resolve strictly inside activated_repos_dir.
+        """
+        if not self._is_safe_path_component(username):
+            raise ActivatedRepoError(
+                f"Unsafe username for activated-repo path: {username!r}"
+            )
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        try:
+            user_dir_real = os.path.realpath(user_dir)
+        except ValueError as e:
+            # e.g. embedded NUL byte reaching the OS layer despite the
+            # structural check above (defense in depth).
+            raise ActivatedRepoError(
+                f"Unsafe username for activated-repo path: {username!r}"
+            ) from e
+        # self.activated_repos_dir is itself realpath'd at assignment time
+        # (__init__ / set_shared_repos_dir), so a direct-child comparison
+        # via dirname is exact and catches '.', '..', and symlink escapes
+        # alike -- os.path.realpath(join(base, '.')) == base, whose dirname
+        # is never base (except the filesystem root).
+        if os.path.dirname(user_dir_real) != self.activated_repos_dir:
+            raise ActivatedRepoError(
+                f"Username resolves outside activated-repos root: {username!r}"
+            )
+        return user_dir
+
+    def _safe_user_scoped_path(self, username: str, *parts: str) -> str:
+        """Return ``activated_repos_dir/<username>/<parts...>``, verified
+        via realpath to lie strictly under the per-user directory returned
+        by :meth:`_safe_user_dir`.
+
+        Covers BOTH halves of the (username, user_alias) pair -- a
+        user_alias containing '../'
+        is caught here exactly the same way an unsafe username is caught
+        in ``_safe_user_dir``.
+
+        Raises:
+            ActivatedRepoError: If username is unsafe, or the joined path
+                (including any of *parts*) escapes the per-user directory.
+        """
+        user_dir = self._safe_user_dir(username)
+        if not parts:
+            return user_dir
+        if not all(parts):
+            raise ActivatedRepoError(
+                f"Unsafe empty path component for activated repo: username={username!r}"
+            )
+        candidate = os.path.join(user_dir, *parts)
+        try:
+            candidate_real = os.path.realpath(candidate)
+            user_dir_real = os.path.realpath(user_dir)
+        except ValueError as e:
+            raise ActivatedRepoError(
+                f"Unsafe activated-repo path for username={username!r}"
+            ) from e
+        if candidate_real != user_dir_real and not candidate_real.startswith(
+            user_dir_real + os.sep
+        ):
+            raise ActivatedRepoError(
+                "Unsafe activated-repo path escapes user directory "
+                f"(username={username!r}, parts={parts!r})"
+            )
+        return candidate
+
+    # ------------------------------------------------------------------
     # Dual-mode metadata helpers (Bug #587)
     # ------------------------------------------------------------------
 
@@ -472,16 +591,18 @@ class ActivatedRepoManager:
         metadata: dict,
     ) -> None:
         """Save metadata to JSON file (standalone mode)."""
-        user_dir = os.path.join(self.activated_repos_dir, username)
+        user_dir = self._safe_user_dir(username)
         os.makedirs(user_dir, exist_ok=True)
-        metadata_path = os.path.join(user_dir, f"{user_alias}_metadata.json")
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
+        )
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2, default=str)
 
     def _load_metadata_file(self, username: str, user_alias: str) -> Optional[dict]:
         """Load metadata from JSON file (standalone mode)."""
-        metadata_path = os.path.join(
-            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
         )
         if not os.path.exists(metadata_path):
             return None
@@ -554,8 +675,8 @@ class ActivatedRepoManager:
 
     def _delete_metadata_file(self, username: str, user_alias: str) -> None:
         """Delete metadata JSON file (standalone mode)."""
-        metadata_path = os.path.join(
-            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
         )
         if os.path.exists(metadata_path):
             os.remove(metadata_path)
@@ -578,7 +699,7 @@ class ActivatedRepoManager:
 
     def _list_user_repos_fs(self, username: str) -> List[dict]:
         """List activated repos for a user from filesystem (standalone mode)."""
-        user_dir = os.path.join(self.activated_repos_dir, username)
+        user_dir = self._safe_user_dir(username)
         if not os.path.exists(user_dir):
             return []
         repos = []
@@ -589,13 +710,28 @@ class ActivatedRepoManager:
                     with open(metadata_path) as f:
                         repo_data = json.load(f)
                     user_alias = repo_data.get("user_alias", "")
-                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_dir = self._safe_user_scoped_path(username, user_alias)
                     if os.path.exists(repo_dir):
                         repo_data.setdefault("username", username)
                         repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
                         "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
+                except ActivatedRepoError as e:
+                    # This is
+                    # well-formed JSON -- the metadata file is NOT corrupted.
+                    # Its stored user_alias failed the path-safety
+                    # containment check (a legacy row predating
+                    # account-creation-time username validation,
+                    # or on-disk tampering). A distinct message avoids
+                    # misdiagnosing a security rejection as data corruption.
+                    self.logger.warning(
+                        "Skipping metadata file %s: user_alias failed "
+                        "path-safety check: %s",
                         metadata_path,
                         e,
                     )
@@ -621,6 +757,9 @@ class ActivatedRepoManager:
             return []
         all_repos: List[dict] = []
         for username in os.listdir(self.activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(self.activated_repos_dir, username)
             if not os.path.isdir(user_dir):
                 continue
@@ -632,13 +771,26 @@ class ActivatedRepoManager:
                     with open(metadata_path) as f:
                         repo_data = json.load(f)
                     user_alias = repo_data.get("user_alias", "")
-                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_dir = self._safe_user_scoped_path(username, user_alias)
                     repo_data.setdefault("username", username)
                     repo_data["path_exists"] = os.path.exists(repo_dir)
                     all_repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
                         "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
+                except ActivatedRepoError as e:
+                    # See
+                    # _list_user_repos_fs's identical split for the full
+                    # rationale -- this is well-formed JSON whose
+                    # user_alias failed the path-safety containment check,
+                    # not a corrupted file.
+                    self.logger.warning(
+                        "Skipping metadata file %s: user_alias failed "
+                        "path-safety check: %s",
                         metadata_path,
                         e,
                     )
@@ -775,8 +927,10 @@ class ActivatedRepoManager:
             branch_name = golden_repo.default_branch
 
         # Check if repository already activated for this user
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Raises ActivatedRepoError synchronously, here,
+        # for an unsafe username/user_alias -- BEFORE the background job
+        # below is ever submitted.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         if (
             os.path.exists(repo_dir)
@@ -896,10 +1050,13 @@ class ActivatedRepoManager:
             )
 
             # Step 2: Create base directory structure
-            user_dir = os.path.join(self.activated_repos_dir, username)
+            # Validates BEFORE any directory is
+            # created -- an unsafe username/user_alias raises here.
+            composite_path_str = self._safe_user_scoped_path(username, user_alias)
+            user_dir = self._safe_user_dir(username)
             os.makedirs(user_dir, exist_ok=True)
 
-            composite_path = Path(user_dir) / user_alias
+            composite_path = Path(composite_path_str)
 
             # Check if already exists
             if composite_path.exists():
@@ -1155,6 +1312,10 @@ class ActivatedRepoManager:
             return matching_repos
 
         for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
             user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
             if not os.path.isdir(user_repos_dir):
                 continue
@@ -1281,8 +1442,8 @@ class ActivatedRepoManager:
         # Validate branch name for security
         self._validate_branch_name(branch_name)
 
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         if (
@@ -1490,8 +1651,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         if (
@@ -1770,14 +1931,13 @@ class ActivatedRepoManager:
             ActivatedRepoError: If the activated repository is not found
         """
         metadata = self._load_metadata(username, user_alias)
-        repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
-        # Defense-in-depth: username/user_alias ultimately come from
-        # authenticated request context and Pydantic-validated request
-        # models, but a realpath-containment check costs nothing and
-        # guards against any future caller that skips that validation.
-        if os.path.realpath(repo_dir) != repo_dir or not os.path.realpath(
-            repo_dir
-        ).startswith(self.activated_repos_dir + os.sep):
+        # Consolidated into the single shared
+        # containment helper (this used to be a bespoke inline realpath
+        # check -- the ONLY containment check that existed anywhere in
+        # this class before this change).
+        try:
+            repo_dir = self._safe_user_scoped_path(username, user_alias)
+        except ActivatedRepoError:
             raise ActivatedRepoError(
                 f"Invalid repository alias '{user_alias}' for user '{username}'"
             )
@@ -1850,8 +2010,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git sync operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         repo_data = self._load_metadata(username, user_alias)
@@ -2031,8 +2191,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         repo_data = self._load_metadata(username, user_alias)
@@ -2212,8 +2372,8 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If metadata loading or refresh fails
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_path = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_path = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         metadata = self._load_metadata(username, user_alias)
@@ -2259,8 +2419,12 @@ class ActivatedRepoManager:
 
         Returns:
             Absolute path to the activated repository directory
+
+        Raises:
+            ActivatedRepoError: If username/user_alias is unsafe or the
+                resulting path escapes activated_repos_dir.
         """
-        return os.path.join(self.activated_repos_dir, username, user_alias)
+        return self._safe_user_scoped_path(username, user_alias)
 
     def get_wiki_enabled(self, username: str, user_alias: str) -> bool:
         """Check if wiki is enabled for an activated repo (read-only, no side effects).
@@ -2476,12 +2640,16 @@ class ActivatedRepoManager:
             update_progress(20, "Validating golden repository")
 
             # Create user directory structure
-            user_dir = os.path.join(self.activated_repos_dir, username)
+            # Validated BEFORE any directory is
+            # created or cloned into -- this is the exact clone destination
+            # an unsafe username/user_alias pair would otherwise
+            # target (username='..' + user_alias='golden-repos' resolving
+            # one level too high).
+            activated_repo_path = self._safe_user_scoped_path(username, user_alias)
+            user_dir = self._safe_user_dir(username)
             os.makedirs(user_dir, exist_ok=True)
 
             update_progress(30, "Creating user directory structure")
-
-            activated_repo_path = os.path.join(user_dir, user_alias)
 
             # Clone repository with CoW (use canonical path for versioned repos)
             golden_repo_actual_path = self.golden_repo_manager.get_actual_repo_path(
@@ -2743,7 +2911,11 @@ class ActivatedRepoManager:
                 # fd-anchored rename-then-purge so orphan cleanup is also
                 # TOCTOU-immune.  If the directory is already gone (ENOENT on
                 # opening the username fd or the rename), absorb silently.
-                repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
+                # Realpath-containment verified here
+                # too -- a legacy unsafe-username row must not have its
+                # orphan-cleanup existence check act on/report a path
+                # outside activated_repos_dir.
+                repo_dir = self._safe_user_scoped_path(username, user_alias)
                 if os.path.exists(repo_dir):
                     trash_root = os.path.join(self.activated_repos_dir, ".trash")
                     try:
@@ -2842,8 +3014,8 @@ class ActivatedRepoManager:
         }
 
         try:
-            user_dir = os.path.join(self.activated_repos_dir, username)
-            repo_dir = os.path.join(user_dir, user_alias)
+            # Realpath-containment verified here.
+            repo_dir = self._safe_user_scoped_path(username, user_alias)
 
             # Story #1032 AC6: pre-flight leak scan is OFF by default — runs only
             # when ops flips the bootstrap flag during incident investigation.
@@ -3607,6 +3779,14 @@ class ActivatedRepoManager:
             ActivatedRepoError: If CoW clone or git setup fails, the write
                 lock cannot be acquired, or a refresh is already in flight
                 for golden_repo_alias.
+            ActivatedRepoCloneNotStartedError:
+                If the clone backend refused an
+                already-existing DIRECTORY destination
+                (CloneDestinationExistsError). dest_path was NEVER touched
+                by this call, so it is re-raised as this Bug #1618 subtype
+                instead of falling into the generic except-Exception
+                cleanup below, which would otherwise shutil.rmtree a
+                pre-existing directory this call never created.
         """
         scheduler = (
             getattr(self.golden_repo_manager, "_refresh_scheduler", None)
@@ -3902,6 +4082,20 @@ class ActivatedRepoManager:
 
             return True
 
+        except CloneDestinationExistsError as e:
+            # The destination
+            # already existed as a DIRECTORY before this call ever ran --
+            # _reject_existing_directory_destination inside the clone
+            # backend raises this BEFORE any `cp`/daemon call is made, so
+            # dest_path was never touched by this attempt and must never be
+            # deleted. Re-raise as the existing Bug #1618 subtype (rather
+            # than falling into the generic `except Exception` below, which
+            # would shutil.rmtree it) so the caller's clone-phase handler
+            # (_do_activate_repository's `except ActivatedRepoCloneNotStartedError:
+            # raise`) also skips the Bug #1349 orphan-cleanup grace loop --
+            # neither the rmtree nor the ~12s grace loop apply to a
+            # pre-existing directory this call never created.
+            raise ActivatedRepoCloneNotStartedError(str(e)) from e
         except subprocess.TimeoutExpired:
             # Bug #1285 follow-up: a timed-out CoW clone must not leak the
             # partial dest_path directory (measured 15-21GB per timed-out
@@ -4709,6 +4903,10 @@ class ActivatedRepoManager:
             return matching_repos
 
         for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
             user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
             if not os.path.isdir(user_repos_dir):
                 continue

@@ -6,6 +6,7 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
 import functools
@@ -4425,6 +4426,9 @@ def _get_all_activated_repos() -> list:
 
         # Iterate over all user directories
         for username in os.listdir(activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(activated_repos_dir, username)
             if os.path.isdir(user_dir):
                 # Get repositories for this user

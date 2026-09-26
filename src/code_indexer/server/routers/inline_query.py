@@ -614,11 +614,15 @@ def register_query_routes(
                             continue
                         repo_path = PathLib(resolved_path)
                     else:
-                        # User repos: activated-repos/username/alias
-                        repo_path = (
-                            PathLib(activated_repo_manager.activated_repos_dir)
-                            / current_user.username
-                            / repo["user_alias"]
+                        # User repos: activated-repos/username/alias.
+                        # Route through the same realpath-containment
+                        # helper every other (username, user_alias) join in
+                        # ActivatedRepoManager uses, instead of a hand-built
+                        # join that bypasses it.
+                        repo_path = PathLib(
+                            activated_repo_manager.get_activated_repo_path(
+                                current_user.username, repo["user_alias"]
+                            )
                         )
                     if repo_path is None:
                         continue

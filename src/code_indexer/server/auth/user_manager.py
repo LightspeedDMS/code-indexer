@@ -16,6 +16,10 @@ from pydantic import BaseModel
 from .password_manager import PasswordManager
 from .password_strength_validator import PasswordStrengthValidator
 from ..utils.datetime_parser import DateTimeParser
+from ...validation.user_validation import (
+    validate_username_path_safe,
+    UserValidationError,
+)
 
 
 class SSOPasswordChangeError(Exception):
@@ -233,8 +237,19 @@ class UserManager:
             Created User object
 
         Raises:
-            ValueError: If user already exists or password is too weak
+            ValueError: If username is unsafe, user already exists, or
+                password is too weak
         """
+        # Centralized path-traversal-safety gate.
+        # Runs BEFORE password validation/hashing and BEFORE any backend
+        # write, so an unsafe username (e.g. '..', containing '/'/'\\')
+        # never reaches storage regardless of which caller invokes
+        # create_user (self-registration, admin REST, web UI, MCP).
+        try:
+            validate_username_path_safe(username)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
+
         # Validate password strength (applies to both backends)
         is_valid, validation_result = self.password_strength_validator.validate(
             password, username
@@ -1324,9 +1339,19 @@ class UserManager:
             Created User object
 
         Raises:
-            ValueError: If user already exists
+            ValueError: If username is unsafe or user already exists
         """
         import secrets
+
+        # Same centralized gate as create_user().
+        # An IdP-derived username is input this server does not control
+        # (the IdP decides its value, and a username_claim may point at a
+        # free-text field) -- JIT
+        # provisioning must not bypass path-traversal-safety validation.
+        try:
+            validate_username_path_safe(username)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
 
         # Story #702 SQLite migration: Add SQLite backend support
         if self._use_sqlite and self._sqlite_backend is not None:

@@ -6,6 +6,7 @@ Handles both golden repositories and user activated repositories.
 """
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
@@ -382,6 +383,9 @@ class RepositoryListingManager:
             return 0
 
         for username in os.listdir(activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(activated_repos_dir, username)
             if not os.path.isdir(user_dir):
                 continue
