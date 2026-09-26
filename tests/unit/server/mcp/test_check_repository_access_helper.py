@@ -515,3 +515,295 @@ class TestCheckRepositoryAccessImpersonation:
 
         access_service.is_admin_user.assert_called_once_with("regularuser")
         access_service.get_accessible_repos.assert_called_once_with("regularuser")
+
+
+# ---------------------------------------------------------------------------
+# `repo_name` is recognized PER TOOL, never globally
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRepositoryAccessRepoNamePerTool:
+    """depmap_find_consumers and depmap_get_repo_domains identify a single
+    repo via a `repo_name` parameter, distinct from the generic scan
+    (repository_alias/alias/user_alias/repo_alias/golden_repo_alias). The
+    guard maps `repo_name` PER TOOL, never globally, because
+    manage_group_repos ALSO takes a top-level `repo_name` (for its
+    'remove' action) with entirely unrelated semantics: a repo being
+    revoked from a GROUP's access, not one the calling admin must already
+    be able to access themselves.
+    """
+
+    def test_repo_name_checked_for_depmap_find_consumers(self):
+        """depmap_find_consumers: repo_name IS checked against the
+        caller's accessible repos."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta"},
+        )
+
+        arguments = {"repo_name": "secret-repo"}
+
+        with pytest.raises(ValueError) as exc_info:
+            _check_repository_access(
+                arguments=arguments,
+                effective_user=user,
+                tool_name="depmap_find_consumers",
+                access_service=access_service,
+            )
+
+        error_str = str(exc_info.value)
+        assert "Access denied" in error_str
+        assert "secret-repo" in error_str
+        assert "regularuser" in error_str
+
+    def test_repo_name_checked_for_depmap_get_repo_domains(self):
+        """depmap_get_repo_domains: repo_name IS checked against the
+        caller's accessible repos."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta"},
+        )
+
+        arguments = {"repo_name": "secret-repo"}
+
+        with pytest.raises(ValueError) as exc_info:
+            _check_repository_access(
+                arguments=arguments,
+                effective_user=user,
+                tool_name="depmap_get_repo_domains",
+                access_service=access_service,
+            )
+
+        error_str = str(exc_info.value)
+        assert "Access denied" in error_str
+        assert "secret-repo" in error_str
+
+    def test_repo_name_checked_allows_when_accessible(self):
+        """depmap_find_consumers: repo_name matching an accessible repo
+        does not raise."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta", "allowed-repo"},
+        )
+
+        arguments = {"repo_name": "allowed-repo"}
+
+        # Must not raise
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="depmap_find_consumers",
+            access_service=access_service,
+        )
+
+    def test_repo_name_not_checked_for_manage_group_repos(self):
+        """REGRESSION: manage_group_repos also takes a top-level
+        `repo_name` (single-repo remove action), but it must NOT be
+        checked against the caller's own accessible-repos set -- an admin
+        revoking a group's access to a repo does not need to personally
+        hold that repo's grant. Mapping `repo_name` globally instead of
+        per-tool would have broken this legitimate admin flow."""
+        user = _make_user("adminish_user")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos=set(),  # would block everything if checked
+        )
+
+        arguments = {
+            "action": "remove",
+            "group_id": "grp1",
+            "repo_name": "some-repo",
+        }
+
+        # Must not raise
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="manage_group_repos",
+            access_service=access_service,
+        )
+
+        # No repo param recognized for this tool - service methods must
+        # not even be called
+        access_service.is_admin_user.assert_not_called()
+        access_service.get_accessible_repos.assert_not_called()
+
+    def test_repo_name_not_checked_for_unrelated_tool(self):
+        """A tool with no special repo_name mapping (e.g. an arbitrary
+        tool that happens to also accept repo_name) is unaffected -- the
+        mapping is opt-in per tool name, not opt-out."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos=set(),
+        )
+
+        arguments = {"repo_name": "any-repo-whatsoever"}
+
+        # Must not raise - repo_name is not a recognized param for this tool
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="some_other_tool",
+            access_service=access_service,
+        )
+
+        access_service.is_admin_user.assert_not_called()
+        access_service.get_accessible_repos.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Every recognized parameter PRESENT in a call must be authorised
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRepositoryAccessAllPresentParamsChecked:
+    """A tool call may carry more than one recognized repo-identifying
+    parameter at once. Passing scrutiny of a single one of them is never
+    sufficient -- every recognized parameter present in the call must
+    resolve to an accessible repo, or the call is denied."""
+
+    def test_accessible_value_under_one_key_does_not_excuse_another_key(self):
+        """golden_repo_alias names a repo the caller CAN access;
+        repository_alias, present in the SAME call, names one they
+        CANNOT. The call must still be denied."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta", "granted-repo"},
+        )
+        arguments = {
+            "golden_repo_alias": "granted-repo",
+            "repository_alias": "secret-repo",
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            _check_repository_access(
+                arguments=arguments,
+                effective_user=user,
+                tool_name="search_code",
+                access_service=access_service,
+            )
+
+        assert "secret-repo" in str(exc_info.value)
+
+    def test_every_present_key_naming_an_accessible_repo_passes(self):
+        """Multiple recognized parameters present, all naming accessible
+        repos, does not raise."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta", "granted-repo"},
+        )
+        arguments = {
+            "golden_repo_alias": "granted-repo",
+            "repository_alias": "granted-repo",
+            "alias": "granted-repo",
+        }
+
+        # Must not raise
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="search_code",
+            access_service=access_service,
+        )
+
+    def test_admin_bypasses_check_with_multiple_params_present(self):
+        """Admin bypass still applies when multiple recognized params are
+        present; get_accessible_repos must never be called."""
+        user = _make_user("admin", role=UserRole.ADMIN)
+        access_service = _make_access_service(
+            is_admin=True,
+            accessible_repos=set(),
+        )
+        arguments = {
+            "golden_repo_alias": "any-repo",
+            "repository_alias": "any-other-repo",
+        }
+
+        # Must not raise
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="search_code",
+            access_service=access_service,
+        )
+
+        access_service.get_accessible_repos.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# user_alias exclusion for tools where it names the NEW/self-owned alias
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRepositoryAccessUserAliasExclusion:
+    """activate_repository's user_alias is the alias of the NEW repo
+    being created; manage_composite_repository's user_alias is the
+    composite's own self-chosen name. Neither is an existing golden-repo
+    alias the caller must already hold, so it stays excluded from the
+    check for these two tools specifically -- any OTHER recognized
+    parameter present is still checked normally."""
+
+    def test_activate_repository_checks_golden_alias_ignores_new_user_alias(self):
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta", "granted-golden"},
+        )
+        arguments = {
+            "golden_repo_alias": "granted-golden",
+            "user_alias": "my-new-activation-name",
+        }
+
+        # Must not raise -- user_alias is the NEW alias, never checked
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="activate_repository",
+            access_service=access_service,
+        )
+
+    def test_activate_repository_still_denies_ungranted_golden_alias(self):
+        """Excluding user_alias must not weaken the golden_repo_alias
+        check itself."""
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos={"cidx-meta"},
+        )
+        arguments = {
+            "golden_repo_alias": "ungranted-golden",
+            "user_alias": "my-new-activation-name",
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            _check_repository_access(
+                arguments=arguments,
+                effective_user=user,
+                tool_name="activate_repository",
+                access_service=access_service,
+            )
+
+        assert "ungranted-golden" in str(exc_info.value)
+
+    def test_manage_composite_repository_ignores_user_alias(self):
+        user = _make_user("regularuser")
+        access_service = _make_access_service(
+            is_admin=False,
+            accessible_repos=set(),  # would block if user_alias were checked
+        )
+        arguments = {"operation": "delete", "user_alias": "my-composite"}
+
+        # Must not raise -- user_alias here is the composite's own name,
+        # not a golden-repo alias
+        _check_repository_access(
+            arguments=arguments,
+            effective_user=user,
+            tool_name="manage_composite_repository",
+            access_service=access_service,
+        )

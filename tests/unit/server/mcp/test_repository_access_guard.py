@@ -263,30 +263,37 @@ class TestGuardErrorMessageContent:
 
 
 # ---------------------------------------------------------------------------
-# Tests: parameter priority ordering
+# Tests: multiple recognized parameters present in the same call
 # ---------------------------------------------------------------------------
 
 
 class TestGuardParameterPriority:
-    """Guard processes parameter names in the order: repository_alias, alias, user_alias."""
+    """Guard recognizes repository_alias, alias, and user_alias among its
+    repo-identifying parameters. When more than one is present in the
+    SAME call, every one of them must be authorized -- an accessible
+    value under one parameter never excuses an inaccessible value under
+    another."""
 
-    def test_guard_checks_repository_alias_before_alias(self):
-        """When both repository_alias and alias are present, repository_alias takes priority."""
+    def test_guard_denies_when_any_present_param_is_inaccessible(self):
+        """When both repository_alias and alias are present, and alias
+        names a repo the caller cannot access, the call is denied even
+        though repository_alias alone would have passed."""
         user = _make_user("restricted_user")
-        # Only "primary-repo" is accessible; "secondary-repo" is not
+        # Only "primary-repo" is accessible; "forbidden-repo" is not
         svc = _make_access_service(accessible_repos={"primary-repo"}, is_admin=False)
 
-        # repository_alias points to allowed repo, alias points to forbidden repo.
-        # Since repository_alias is checked first and is allowed, no error raised.
-        _check_repository_access(
-            arguments={
-                "repository_alias": "primary-repo",
-                "alias": "forbidden-repo",
-            },
-            effective_user=user,
-            tool_name="search_code",
-            access_service=svc,
-        )
+        with pytest.raises(ValueError) as exc_info:
+            _check_repository_access(
+                arguments={
+                    "repository_alias": "primary-repo",
+                    "alias": "forbidden-repo",
+                },
+                effective_user=user,
+                tool_name="search_code",
+                access_service=svc,
+            )
+
+        assert "forbidden-repo" in str(exc_info.value)
 
     def test_guard_falls_through_to_alias_when_repository_alias_absent(self):
         """When repository_alias is absent, alias is used as the repo identifier."""
