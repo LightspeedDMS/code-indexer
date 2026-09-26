@@ -345,6 +345,8 @@ class TestWebSecurityConfig:
             "web_session_timeout_seconds": _WEB_SESSION_DEFAULT_SECONDS,
             "admin_session_timeout_seconds": _ADMIN_SESSION_DEFAULT_SECONDS,
             "restrict_non_sso_to_web_ui": False,
+            # Self-registration gate hotfix: closed by default.
+            "self_registration_enabled": False,
         }
 
     def test_validation_web_session_timeout_below_min(self):

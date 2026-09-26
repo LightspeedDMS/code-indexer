@@ -82,6 +82,7 @@
 - [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs; cost accepted for blind-spot coverage
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs on one fix, dispatch Opus to judge materiality
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - when codex flags over-engineering, SIMPLIFY
+- [feedback_codex_exhausted_fallback_to_claude.md](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [feedback_find_is_bfs_use_mmin.md](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
 - [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling

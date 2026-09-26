@@ -147,9 +147,17 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # should be the credit line's CONTENT, so prepending a release entry
         # cannot invalidate it.
         # 12.72.0 shifted them another +30. FIVE consecutive releases now.
-        "CHANGELOG.md:9822",
-        "CHANGELOG.md:10193",
-        "CHANGELOG.md:10674",
+        # 12.72.1 (hotfix) shifted them another +16 (9822/10193/10674 ->
+        # 9838/10209/10690).
+        # 12.73.0 shifted them another +23 (9838/10209/10690 ->
+        # 9861/10232/10713).
+        # 12.74.0 shifted them another +2 (9861/10232/10713 ->
+        # 9863/10234/10715). 12.73.0's CI run failed (missing `requests`
+        # dependency) so it was never tagged; 12.74.0's changelog entry
+        # documents that and supersedes it.
+        "CHANGELOG.md:9863",
+        "CHANGELOG.md:10234",
+        "CHANGELOG.md:10715",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

@@ -68,6 +68,8 @@ No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, do
 
 ## Memory Files
 
+**MEMORIES ARE PUBLIC.** `.claude-memory/` is committed to this public open-source repository, so every memory file is world-readable. NEVER write secrets, credentials, or any sensitive information into a memory file -- not even temporarily, not even "to sanitize later".
+
 Memory notes in `.claude-memory/` are committed to version control. Before staging/committing ANY memory file, sanitize it: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IPs, network topology, cluster node ids, ports). Capture the lesson, never the environment -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
 
 ---

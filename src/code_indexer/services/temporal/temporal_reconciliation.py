@@ -113,7 +113,9 @@ def _reconcile_shard_legacy(
     # index does not yet know about.
     from ...storage.id_index_manager import IDIndexManager
 
-    point_id_to_path = IDIndexManager().rebuild_from_vectors(shard_dir)
+    # Bug #1969 F1: reconciliation is a genuine write/reconcile-path caller
+    # -- opt in to the one-shot dedup-repair self-heal.
+    point_id_to_path = IDIndexManager().rebuild_from_vectors(shard_dir, self_heal=True)
 
     hashes_with_points: Dict[str, List] = {}
     for point_id, json_path in point_id_to_path.items():

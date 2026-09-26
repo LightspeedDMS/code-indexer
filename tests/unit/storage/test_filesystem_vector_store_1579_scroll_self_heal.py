@@ -170,7 +170,7 @@ class TestScrollSelfHealOnPreExistingDuplicate:
             "sanity: fixture actually created a duplicate pair"
         )
 
-        points, next_offset = store.scroll_points("coll", limit=100)
+        points, next_offset = store.scroll_points("coll", limit=100, self_heal=True)
 
         returned_ids = [p["id"] for p in points]
         assert dup_id in returned_ids, "the repaired point must still be returned"
@@ -230,7 +230,7 @@ class TestScrollSelfHealOnPreExistingDuplicate:
         )
 
         with pytest.raises(ScrollDataIntegrityError):
-            store.scroll_points("coll", limit=100)
+            store.scroll_points("coll", limit=100, self_heal=True)
 
         assert call_count["n"] == 1, (
             "repair must be attempted at most once per scroll_points call, "
@@ -266,4 +266,4 @@ class TestScrollSelfHealOnPreExistingDuplicate:
         )
 
         with pytest.raises(DedupRepairAmbiguousError):
-            store.scroll_points("coll", limit=100)
+            store.scroll_points("coll", limit=100, self_heal=True)

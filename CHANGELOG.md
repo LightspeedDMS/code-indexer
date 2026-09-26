@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.74.0] - 2026-09-26
+
+12.73.0 was never tagged or released: its CI run failed because `requests`, which the server's auto-updater imports, was not a declared dependency. This release declares it and supersedes 12.73.0.
+
+### Fixed
+
+- **Bug #1969**: `cidx index` no longer aborts with "operator intervention
+  required" when a legacy SHARDED_JSON collection has a corrupt `id_index.bin`
+  and duplicate point_ids left by the historical Bug #1502 chunk-index defect.
+  Indexing now self-heals: when the duplicate cannot be resolved safely it
+  removes every chunk of the affected file and re-indexes it, so no file is
+  left partially indexed or silently unsearchable. The files to re-index are
+  recorded as one marker file per event, written before anything is deleted,
+  so the record survives a crash and concurrent writers on shared storage
+  cannot lose each other's entries without relying on file locks. A marker is
+  cleared only after its file is indexed again; an unreadable or damaged
+  marker triggers a full reconcile instead of being ignored. Query and search
+  paths never modify the index, and immutable versioned snapshots are never
+  repaired in place. Writer serialization across operation types remains
+  tracked separately in #1970.
+- **Bug #1971**: `cidx index --reconcile` now reads the whole collection. The
+  snapshot loop compared its cursor with itself after advancing it, so every
+  reconcile stopped after the first 5000 points, logged a false "Pagination
+  stuck" error, and re-embedded files that were already indexed.
+
+## [12.72.1] - 2026-09-25
+
+### Security
+
+- **Self-registration can now be disabled, and is off by default.**
+  `POST /auth/register` let any unauthenticated caller create a live
+  `normal_user` account, with no setting to turn it off. A new
+  `self_registration_enabled` setting (Web UI: Config > Web Security)
+  gates the endpoint; when it is off, the endpoint returns 403 before any
+  account lookup or creation. The setting defaults to off, including on
+  upgraded servers whose stored config predates it, so deployments that
+  rely on `cidx auth register` must have an admin switch it on after
+  upgrading. The setting is read on every request and takes effect
+  without a restart; in a cluster, other nodes pick it up on their next
+  config reload (about 30 seconds).
+
 ## [12.72.0] - 2026-09-24
 
 ### Fixed

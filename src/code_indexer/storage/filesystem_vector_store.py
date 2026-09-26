@@ -14,7 +14,18 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
+from typing import (
+    List,
+    Dict,
+    Any,
+    FrozenSet,
+    Iterable,
+    Optional,
+    Tuple,
+    Union,
+    Set,
+    TYPE_CHECKING,
+)
 from datetime import datetime
 
 if TYPE_CHECKING:
@@ -386,6 +397,20 @@ class PathIndex:
             if not self._path_index[file_path]:
                 del self._path_index[file_path]
 
+    def remove_path(self, file_path: str) -> None:
+        """Remove a file's ENTIRE entry (every point_id it maps to) from
+        the index in one step.
+
+        Bug #1969 Round 5 (R4-F2): used to purge a whole-file-wipe
+        self-heal's wiped paths from the live, session-shared PathIndex
+        -- unlike ``remove_point``, the caller does not know (and does
+        not need to enumerate) the specific point_ids that were deleted.
+
+        Note:
+            Safe no-op if file_path is not present.
+        """
+        self._path_index.pop(file_path, None)
+
     def get_point_ids(self, file_path: str) -> Set[str]:
         """Get all point_ids for a given file_path.
 
@@ -728,6 +753,18 @@ class FilesystemVectorStore:
         # ID index cache: {collection_name: {point_id: file_path}}
         self._id_index: Dict[str, Dict[str, Path]] = {}
         self._id_index_lock = threading.Lock()
+
+        # Bug #1969 Round 5 (R4-F1): Round 4's in-memory
+        # _pending_self_heal_reprocess_paths queue (drained by exactly
+        # ONE code path, lost on process exit) was superseded by a
+        # DURABLE sidecar recorded inside collection_dedup_repair.py's
+        # recover_from_corrupt_id_index_by_wiping_files() itself -- the
+        # single choke point every self-heal call site (upsert_points,
+        # end_indexing, scroll_points) already funnels through. See
+        # get_pending_self_heal_reprocess_paths() / clear_self_heal_
+        # reprocess_paths() below, which read/clear that durable sidecar
+        # via collection_dedup_repair's read/clear functions. No
+        # in-memory state to declare here anymore.
 
         # Bug #1583: cache_keys for which get_point()'s reactive stale-index
         # rebuild has already been attempted this process. id_index.bin is a
@@ -1649,8 +1686,11 @@ class FilesystemVectorStore:
                     _end_indexing_id_cache_key not in self._id_index
                     or not self._id_index[_end_indexing_id_cache_key]
                 ):
+                    # Bug #1969 F1: end_indexing() is a genuine write/
+                    # indexing-path caller -- opt in to the one-shot
+                    # dedup-repair self-heal.
                     self._id_index[_end_indexing_id_cache_key] = self._load_id_index(
-                        collection_name, subdirectory
+                        collection_name, subdirectory, self_heal=True
                     )
 
                 if _end_indexing_id_cache_key in self._id_index:
@@ -2840,8 +2880,11 @@ class FilesystemVectorStore:
         # Ensure ID index exists for this collection (also loads file path cache)
         with self._id_index_lock:
             if _upsert_cache_key not in self._id_index:
+                # Bug #1969 F1: upsert_points() is a genuine write/
+                # indexing-path caller -- opt in to the one-shot
+                # dedup-repair self-heal.
                 self._id_index[_upsert_cache_key] = self._load_id_index(
-                    collection_name, subdirectory
+                    collection_name, subdirectory, self_heal=True
                 )
             # Ensure file path cache exists (in case ID index was manually populated)
             if collection_name not in self._file_path_cache:
@@ -3364,10 +3407,22 @@ class FilesystemVectorStore:
         with self._id_index_lock:
             if _delete_points_cache_key not in self._id_index:
                 self._id_index[_delete_points_cache_key] = self._load_id_index(
-                    collection_name, _delete_points_subdirectory
+                    collection_name, _delete_points_subdirectory, self_heal=True
                 )
 
             index = self._id_index[_delete_points_cache_key]
+
+            _delete_missing_point_id = next(
+                (pid for pid in point_ids if pid not in index), None
+            )
+            if _delete_missing_point_id is not None:
+                index = self._reactive_self_heal_reload_on_miss(
+                    collection_name,
+                    _delete_points_subdirectory,
+                    _delete_points_cache_key,
+                    index,
+                    _delete_missing_point_id,
+                )
 
             for point_id in point_ids:
                 if point_id in index:
@@ -3675,7 +3730,11 @@ class FilesystemVectorStore:
         return set(id_index.keys())
 
     def _load_id_index(
-        self, collection_name: str, subdirectory: Optional[str] = None
+        self,
+        collection_name: str,
+        subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> Dict[str, Path]:
         """Load ID index from persistent binary file for fast loading.
 
@@ -3698,6 +3757,15 @@ class FilesystemVectorStore:
                 ``id_index.bin`` (and its ``vector_*.json`` rglob fallback)
                 is read from its REAL location instead of a non-existent
                 top-level directory.
+            self_heal: Bug #1969 F1 -- forwarded to
+                ``IDIndexManager.rebuild_from_vectors()``'s ``self_heal``
+                kwarg when the on-disk index is corrupt AND the scan finds
+                a duplicate point_id. Defaults to False (the original
+                hard-fail-immediately behavior): this method is called from
+                BOTH write paths (upsert_points/end_indexing) AND
+                query-time read paths (search, count_points, list_files,
+                the daemon cache) -- only the genuine write-path callers
+                pass True.
 
         Returns:
             Dictionary mapping point IDs to file paths
@@ -3716,7 +3784,32 @@ class FilesystemVectorStore:
                 collection_name,
                 exc,
             )
-            return index_manager.rebuild_from_vectors(collection_path)
+            result = index_manager.rebuild_from_vectors(
+                collection_path, self_heal=self_heal
+            )
+            # Bug #1969 Round 5 (R4-F1): the durable self-heal-reprocess
+            # sidecar is now written by recover_from_corrupt_id_index_by_
+            # wiping_files() itself (collection_dedup_repair.py), so no
+            # in-memory queue population is needed here -- every trigger
+            # site funnels through that single choke point.
+            #
+            # R4-F2 / R3-F4: a same-run wipe physically deletes a file's
+            # vector_*.json records, but the in-memory, session-live
+            # PathIndex (if an indexing session is active) still thinks
+            # that file's OLD point_ids exist -- distinct_content_paths()
+            # trusts that live PathIndex during an active session (Bug
+            # #1575 Part A), which made hide_files_not_in_branch_thread_
+            # safe() see a stale picture and skip hiding a file that was
+            # actually deleted from git. Purge each wiped path from the
+            # live PathIndex right away so this and any later
+            # distinct_content_paths() call in the SAME session sees the
+            # correct, wipe-aware picture.
+            wiped_paths = index_manager.last_self_heal_wiped_relative_paths
+            if wiped_paths:
+                self._purge_paths_from_live_session_path_index(
+                    collection_name, wiped_paths, subdirectory
+                )
+            return result
 
         if index:
             return index
@@ -3730,6 +3823,103 @@ class FilesystemVectorStore:
                 fallback[point_id] = json_file
 
         return fallback
+
+    def get_pending_self_heal_reprocess_paths(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> FrozenSet[str]:
+        """Bug #1969 Round 5 (R4-F1): read (never mutate) the DURABLE
+        self-heal-reprocess sidecar for this collection -- the set of
+        relative file paths whose indexed chunks were wiped by a
+        whole-file-wipe self-heal escalation, from ANY trigger site
+        (``upsert_points``, ``end_indexing``, ``scroll_points``), in THIS
+        run or a PRIOR one that crashed or otherwise never got to
+        reprocess them. The indexing orchestrator (``smart_indexer.py``)
+        consults this at the start of every strategy so even a "plain
+        rerun" with zero other changes still reprocesses a previously
+        wiped, unchanged file -- durability is what makes that possible
+        (Round 4's in-memory queue could not survive a process
+        boundary).
+        """
+        from .shared.collection_dedup_repair import (
+            read_pending_self_heal_reprocess_paths,
+        )
+
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        return read_pending_self_heal_reprocess_paths(collection_path)
+
+    def clear_self_heal_reprocess_paths(
+        self,
+        collection_name: str,
+        paths: Iterable[str],
+        subdirectory: Optional[str] = None,
+    ) -> None:
+        """Bug #1969 Round 5 (R4-F1): remove `paths` from the durable
+        self-heal-reprocess sidecar. Callers MUST call this ONLY after
+        those paths have been successfully (not merely attempted, and
+        not cancelled -- R4-F3) reprocessed, so a crash or a cancelled
+        run before reprocessing actually finishes leaves the durable
+        record intact for the next attempt.
+        """
+        from .shared.collection_dedup_repair import clear_self_heal_reprocess_paths
+
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        clear_self_heal_reprocess_paths(collection_path, paths)
+
+    def is_self_heal_reprocess_sidecar_corrupt(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> bool:
+        """Bug #1969 Round 6 (P1-4): true when this collection's durable
+        self-heal-reprocess sidecar exists but is corrupt/unreadable/
+        malformed (distinct from genuinely absent). See
+        ``collection_dedup_repair.is_self_heal_reprocess_sidecar_corrupt``
+        for the full invariant.
+        """
+        from .shared.collection_dedup_repair import (
+            is_self_heal_reprocess_sidecar_corrupt,
+        )
+
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        return is_self_heal_reprocess_sidecar_corrupt(collection_path)
+
+    def quarantine_corrupt_self_heal_reprocess_sidecar(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Optional[Path]:
+        """Bug #1969 Round 6 (P1-4): move a corrupt self-heal-reprocess
+        sidecar aside for forensics -- callers MUST call this ONLY after
+        the reconcile forced by the corruption has completed
+        successfully.
+        """
+        from .shared.collection_dedup_repair import (
+            quarantine_corrupt_self_heal_reprocess_sidecar,
+        )
+
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        return quarantine_corrupt_self_heal_reprocess_sidecar(collection_path)
+
+    def _purge_paths_from_live_session_path_index(
+        self,
+        collection_name: str,
+        wiped_relative_paths: FrozenSet[str],
+        subdirectory: Optional[str] = None,
+    ) -> None:
+        """Bug #1969 Round 5 (R4-F2 / R3-F4): remove each wiped path's
+        entry from the LIVE, session-shared ``PathIndex`` (if an
+        indexing session is currently active for this collection), so a
+        same-session ``distinct_content_paths()`` call (trusted during
+        an active session, Bug #1575 Part A) does not keep reporting a
+        just-deleted file's chunks as still present. A no-op when no
+        session is active for this collection (nothing cached to purge)
+        or when nothing was wiped.
+        """
+        if not wiped_relative_paths:
+            return
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+        with self._path_index_lock:
+            path_index = self._path_indexes.get(cache_key)
+            if path_index is None:
+                return
+            for rel_path in wiped_relative_paths:
+                path_index.remove_path(rel_path)
 
     def _load_file_paths(self, collection_name: str, id_index: Dict[str, Path]) -> set:
         """Load file paths from JSON files using ID index.
@@ -4112,11 +4302,46 @@ class FilesystemVectorStore:
             result["chunk_text"] = record["chunk_text"]
         return result
 
+    def _reactive_self_heal_reload_on_miss(
+        self,
+        collection_name: str,
+        subdirectory: Optional[str],
+        cache_key: str,
+        index: Dict[str, Path],
+        missing_point_id: str,
+    ) -> Dict[str, Path]:
+        """Bug #1969 P1-1: a genuine write-path caller (self_heal=True) can
+        miss a point_id against the LIVE cached id index even though the
+        caller already asked ``_load_id_index``/``get_point`` for
+        ``self_heal=True`` at the top of the method -- because that call is
+        skipped entirely when a cache entry already exists (e.g.
+        ``create_collection`` seeds an empty ``{}`` for a brand-new
+        collection). This mirrors ``get_point``'s existing Bug #1583
+        reactive-rebuild trigger, but forces a REAL reload via
+        ``_load_id_index(self_heal=True)`` (re-reads id_index.bin fresh and
+        self-heals a corrupt/duplicate index), not the side-effect-free
+        ``scan_vectors_for_id_map`` used for read-only callers. Bounded to
+        one reactive reload per cache_key per process via the same
+        ``_id_index_reactive_rebuild_done`` marker.
+        """
+        if (
+            missing_point_id in index
+            or cache_key in self._id_index_reactive_rebuild_done
+        ):
+            return index
+        reloaded = self._load_id_index(collection_name, subdirectory, self_heal=True)
+        self._id_index[cache_key] = reloaded
+        if missing_point_id not in reloaded:
+            self._id_index_reactive_rebuild_done.add(cache_key)
+        return reloaded
+
     def get_point(
         self,
         point_id: str,
         collection_name: str,
         subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Get a specific point by ID.
 
@@ -4128,6 +4353,14 @@ class FilesystemVectorStore:
                 nested collection hydrates from its real location; None
                 (every existing caller) is byte-identical to the pre-fix
                 top-level resolution.
+            self_heal: Bug #1969 Round 5 (R4-F2) -- forwarded to
+                ``_load_id_index()``'s ``self_heal`` kwarg when the
+                on-disk index is corrupt. Defaults to False: this method
+                is called from many genuinely read-only contexts. Only
+                genuine write-adjacent callers (hide/delete paths that
+                need to mutate ``hidden_branches`` or remove a point,
+                e.g. ``scroll_points``/``fetch_points_for_paths`` when
+                THEY were asked to self-heal) pass True.
 
         Returns:
             Point data with id, vector, and payload, or None if not found
@@ -4165,7 +4398,7 @@ class FilesystemVectorStore:
             cache_key = self._id_cache_key(collection_name, subdirectory)
             if cache_key not in self._id_index:
                 self._id_index[cache_key] = self._load_id_index(
-                    collection_name, subdirectory
+                    collection_name, subdirectory, self_heal=self_heal
                 )
 
             index = self._id_index[cache_key]
@@ -4236,26 +4469,58 @@ class FilesystemVectorStore:
                 # point_id, or a scan that FAILS (exception), leaves the
                 # marker unset and the collection eligible for a future
                 # reactive scan.
-                try:
-                    rebuilt_index = IDIndexManager().scan_vectors_for_id_map(
-                        collection_path
+                if self_heal:
+                    # Bug #1969 P1-1: a genuine write-path caller can hit
+                    # this SAME cache-miss shape when the cache was
+                    # already seeded (e.g. create_collection()'s empty
+                    # {}) before an out-of-band write or a corrupt
+                    # id_index.bin appeared. Unlike the default
+                    # side-effect-free scan below, this reload goes
+                    # through _load_id_index()'s corrupt-index catch and
+                    # actually self-heals (durable write, bounded
+                    # retry) -- safe here because only an opted-in
+                    # write-path caller reaches this branch.
+                    #
+                    # Fail-loud correction (P1-1 review): deliberately NOT
+                    # wrapped in the broad except below. An opted-in caller
+                    # asked for real repair; a genuine repair failure
+                    # (DuplicateSourceIdError, DedupRepairAmbiguousError --
+                    # including a P1-5 no-valid-replay-path refusal -- or any
+                    # other _load_id_index failure) must propagate, never
+                    # silently degrade to "point not found". Swallowing it
+                    # here would let a write-path caller believe a point is
+                    # genuinely absent when the truth is "repair refused to
+                    # touch it", violating this project's no-silent-search-
+                    # coverage-loss invariant.
+                    rebuilt_index = self._load_id_index(
+                        collection_name, subdirectory, self_heal=True
                     )
-                except Exception as scan_exc:
-                    self.logger.warning(
-                        "get_point(): reactive id-index scan failed for "
-                        "collection %r (point_id=%r): %s -- degrading to a "
-                        "plain miss; a later lookup may retry once the "
-                        "underlying condition is corrected",
-                        collection_name,
-                        point_id,
-                        scan_exc,
-                    )
-                else:
                     self._id_index[cache_key] = rebuilt_index
                     index = rebuilt_index
                     vector_file = index.get(point_id)
                     if vector_file is None:
                         self._id_index_reactive_rebuild_done.add(cache_key)
+                else:
+                    try:
+                        rebuilt_index = IDIndexManager().scan_vectors_for_id_map(
+                            collection_path
+                        )
+                    except Exception as scan_exc:
+                        self.logger.warning(
+                            "get_point(): reactive id-index scan failed for "
+                            "collection %r (point_id=%r): %s -- degrading to a "
+                            "plain miss; a later lookup may retry once the "
+                            "underlying condition is corrected",
+                            collection_name,
+                            point_id,
+                            scan_exc,
+                        )
+                    else:
+                        self._id_index[cache_key] = rebuilt_index
+                        index = rebuilt_index
+                        vector_file = index.get(point_id)
+                        if vector_file is None:
+                            self._id_index_reactive_rebuild_done.add(cache_key)
             if vector_file is not None and vector_file.exists():
                 try:
                     with open(vector_file) as f:
@@ -4806,6 +5071,8 @@ class FilesystemVectorStore:
         collection_name: str,
         paths: Set[str],
         subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> List[Dict[str, Any]]:
         """Bug #1575 Part A: targeted, payload-only fetch of the points
         stored under ``paths`` -- never a full collection scan.
@@ -4813,6 +5080,13 @@ class FilesystemVectorStore:
         Returns ``{"id": ..., "payload": {...}}`` dicts (never vectors,
         matching the memory-bounded ``with_vectors=False`` contract
         ``_fetch_all_content_points`` used).
+
+        Args:
+            self_heal: Bug #1969 Round 5 (R4-F2) -- forwarded to
+                ``get_point()``'s ``self_heal`` kwarg. Defaults to False;
+                write-adjacent callers (e.g. branch-isolation hiding,
+                which needs to mutate ``hidden_branches`` on the fetched
+                points) pass True.
         """
         if not paths:
             return []
@@ -4845,7 +5119,9 @@ class FilesystemVectorStore:
 
         points: List[Dict[str, Any]] = []
         for point_id in point_ids:
-            point = self.get_point(point_id, collection_name, subdirectory)
+            point = self.get_point(
+                point_id, collection_name, subdirectory, self_heal=self_heal
+            )
             if point is not None:
                 points.append({"id": point["id"], "payload": point.get("payload", {})})
         return points
@@ -5866,6 +6142,8 @@ class FilesystemVectorStore:
         offset: Optional[str] = None,
         filter_conditions: Optional[Dict[str, Any]] = None,
         subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> tuple:
         """Scroll through points in collection with pagination.
 
@@ -5874,6 +6152,12 @@ class FilesystemVectorStore:
             limit: Maximum number of points to return
             with_payload: Include payload in results
             with_vectors: Include vectors in results
+            self_heal: Bug #1969 Round 5 (R4-F2) -- forwarded to the
+                PathIndex-fast-path's ``get_point()`` calls. Defaults to
+                False (every existing caller keeps read-only behavior);
+                a write-adjacent caller that needs to mutate what it
+                fetches (e.g. per-file branch-isolation hiding) passes
+                True.
             subdirectory: Optional subdirectory path within base_path (e.g.
                     "multimodal_index"). When None, falls back to the
                     active-indexing subdirectory recorded for this collection
@@ -6058,7 +6342,7 @@ class FilesystemVectorStore:
                 last_examined_idx_fp = idx_fp
                 idx_fp += 1
                 point_data = self.get_point(
-                    pid, collection_name, subdirectory=subdirectory
+                    pid, collection_name, subdirectory=subdirectory, self_heal=self_heal
                 )
                 if point_data is None:
                     # The id was enumerated by the PathIndex but cannot be
@@ -6214,7 +6498,25 @@ class FilesystemVectorStore:
                 except ScrollDataIntegrityError:
                     if dedup_repair_attempted:
                         raise
+                    # Bug #1969 Round 6 (P1-1, Codex BLOCKING): this whole
+                    # repair block -- including the pre-existing Bug #1579
+                    # repair_duplicate_and_shifted_points call, NOT just the
+                    # whole-file-wipe escalation below it -- is destructive
+                    # (it can delete every chunk of a file). It must be an
+                    # explicit opt-in exactly like _load_id_index's
+                    # self_heal-gated corrupt-index branch. Without this
+                    # gate, a DEFAULT scroll_points() call (every read-only
+                    # caller) silently ran full dedup repair/wipe recovery
+                    # just from hitting a pre-existing duplicate point_id.
+                    # When self_heal is False, propagate the integrity
+                    # error immediately -- exactly as it did before any
+                    # self-heal existed.
+                    if not self_heal:
+                        raise
                     from code_indexer.storage.shared.collection_dedup_repair import (
+                        DedupRepairAmbiguousError,
+                        DedupRepairAmbiguousReason,
+                        recover_from_corrupt_id_index_by_wiping_files,
                         repair_duplicate_and_shifted_points,
                     )
 
@@ -6225,12 +6527,59 @@ class FilesystemVectorStore:
                         "the scroll.",
                         collection_name,
                     )
-                    # DedupRepairAmbiguousError (e.g. a malformed record the
-                    # repair refuses to touch) is deliberately NOT caught
-                    # here -- it is a more specific, more actionable error
-                    # than the ScrollDataIntegrityError it would otherwise
-                    # mask, and must propagate to the caller unchanged.
-                    repair_duplicate_and_shifted_points(collection_path)
+                    # Bug #1969 Round 4 (R3-F2): this is a SEPARATE self-heal
+                    # call site from IDIndexManager.rebuild_from_vectors()
+                    # (Round 3's original escalation) -- --reconcile drives
+                    # this one via scroll_points, so it needs the SAME
+                    # escalation wiring or it still hard-fails on the exact
+                    # corrupt-id_index.bin scenario Round 3 was meant to fix
+                    # everywhere. Every OTHER DedupRepairAmbiguousError
+                    # reason (malformed record, foreign identity scheme,
+                    # etc.) is deliberately NOT caught here -- more
+                    # specific/actionable than ScrollDataIntegrityError,
+                    # must propagate to the caller unchanged.
+                    # Bug #1969 Round 6 (P1-2): every OTHER corrupt-
+                    # id_index escalation in this class (get_point,
+                    # upsert_points, delete_points, etc, all via
+                    # _load_id_index) already runs under
+                    # self._id_index_lock -- this was the one call site
+                    # that did not, so a thread here could race a
+                    # concurrent write-path escalation on the same
+                    # collection_dedup_repair.py sidecar's unsynchronized
+                    # read-merge-write cycle and lose an entry. Mirrors
+                    # _load_id_index's own corrupt-index branch, which
+                    # likewise calls _purge_paths_from_live_session_path_
+                    # index (acquires self._path_index_lock) while still
+                    # holding this lock -- same nesting already live in
+                    # production via get_point/upsert_points.
+                    with self._id_index_lock:
+                        try:
+                            repair_duplicate_and_shifted_points(collection_path)
+                        except DedupRepairAmbiguousError as ambiguous_exc:
+                            if (
+                                ambiguous_exc.reason
+                                != DedupRepairAmbiguousReason.CORRUPT_ID_INDEX
+                            ):
+                                raise
+                            self.logger.warning(
+                                "Bug #1969 Round 4: scroll_points' dedup repair "
+                                "could not resolve %r (id_index.bin itself is "
+                                "corrupt/unreadable, AC30) -- escalating to "
+                                "whole-file-wipe recovery.",
+                                collection_name,
+                            )
+                            wipe_result = recover_from_corrupt_id_index_by_wiping_files(
+                                collection_path
+                            )
+                            # R4-F2 / R3-F4: same live-PathIndex staleness fix
+                            # as _load_id_index's corrupt-index branch -- this
+                            # is a SEPARATE call site into the same wipe
+                            # recovery, so it needs the same purge.
+                            self._purge_paths_from_live_session_path_index(
+                                collection_name,
+                                wipe_result.wiped_relative_paths,
+                                subdirectory,
+                            )
                     dedup_repair_attempted = True
                     read_cache = False
                     continue
@@ -7667,13 +8016,19 @@ class FilesystemVectorStore:
             True if deletion successful
         """
         try:
-            # Scroll through vectors with filter applied
+            # Scroll through vectors with filter applied.
+            # Bug #1969 Round 6 (P1-1 caller audit): this is an inherently
+            # write/delete operation -- self_heal=True so a pre-existing
+            # corrupt-duplicate collection is repaired here instead of
+            # this method's broad except-Exception handler silently
+            # masking the failure as an ordinary "delete failed" (False).
             points, _ = self.scroll_points(
                 collection_name=collection_name,
                 limit=10000,
                 with_payload=True,
                 with_vectors=False,
                 filter_conditions=filter_conditions,
+                self_heal=True,
             )
 
             # All returned points match the filter, so delete them all
@@ -7749,7 +8104,7 @@ class FilesystemVectorStore:
                 new_payload = point["payload"]
 
                 # Get existing point
-                existing = self.get_point(point_id, collection_name)
+                existing = self.get_point(point_id, collection_name, self_heal=True)
                 if not existing:
                     continue
 
@@ -7872,9 +8227,21 @@ class FilesystemVectorStore:
             with self._id_index_lock:
                 if _batch_update_cache_key not in self._id_index:
                     self._id_index[_batch_update_cache_key] = self._load_id_index(
-                        collection_name, _batch_update_subdirectory
+                        collection_name, _batch_update_subdirectory, self_heal=True
                     )
                 index = self._id_index[_batch_update_cache_key]
+
+                _batch_update_missing_point_id = next(
+                    (p["id"] for p in points if p["id"] not in index), None
+                )
+                if _batch_update_missing_point_id is not None:
+                    index = self._reactive_self_heal_reload_on_miss(
+                        collection_name,
+                        _batch_update_subdirectory,
+                        _batch_update_cache_key,
+                        index,
+                        _batch_update_missing_point_id,
+                    )
 
             for point in points:
                 point_id = point["id"]
