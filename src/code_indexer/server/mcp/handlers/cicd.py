@@ -108,21 +108,34 @@ def _get_personal_credential_for_host(
         return None
 
 
-def _resolve_cicd_project_access(
+def _resolve_cicd_project_access_detailed(
     project_identifier: str, platform: str, username: str
-) -> Optional[str]:
+) -> Tuple[Optional[str], bool]:
     """Map CI/CD project identifier to golden repo and enforce group access.
 
     Story #404 AC1: Group access control for CI/CD handlers.
+    The result is three-way (denied / registered-and-allowed / unregistered)
+    so callers can tell an ad-hoc, non-CIDX-tracked repo apart from a real
+    golden repo the caller is allowed to see -- only the latter may use a
+    shared/global credential (see the GitHub legacy read handlers).
 
     Algorithm:
-    1. Extract owner/project from clone URLs in registry
-    2. Match project_identifier against registered golden repos
-    3. If no match: allow (ad-hoc query)
-    4. If match but no AccessFilteringService: allow
+    1. Extract owner/project from clone URLs in registry, via the same
+       extract_owner_repo() parser the unified ci_* path uses -- covering
+       https, ssh://, and scp-style (git@host:owner/repo) clone URL forms
+       consistently.
+    2. Match project_identifier against registered golden repos.
+    3. If no match: unregistered (ad-hoc query, no error -- allowed, but the
+       caller must not treat this as eligible for a global credential).
+    4. If match but no AccessFilteringService: registered + allowed.
     5. If match and AccessFilteringService: check group membership
-       - Allowed -> return None
-       - Denied -> return "not found" error (invisible repo pattern)
+       - Allowed -> registered + allowed
+       - Denied -> registered + denied ("not found" error, invisible repo
+         pattern)
+
+    A registry load failure fails CLOSED (denied) rather than open -- the
+    registry being unavailable must never be treated as "nothing to check
+    against, so allow everything".
 
     Args:
         project_identifier: GitLab "namespace/project" or GitHub "owner/repo"
@@ -130,33 +143,23 @@ def _resolve_cicd_project_access(
         username: CIDX username for group membership check
 
     Returns:
-        None if allowed, error message string if denied
+        (error, is_registered) tuple.
+        error: None if allowed, error message string if denied.
+        is_registered: True iff project_identifier matched a golden repo in
+            the registry (regardless of allow/deny outcome). False when
+            unregistered (ad-hoc) OR when the registry failed to load.
     """
+    from code_indexer.server.clients.forge_client import extract_owner_repo
 
     def _extract_project_path(repo_url: str) -> Optional[str]:
-        """Extract owner/project from a clone URL."""
+        """Extract owner/project from a clone URL (https, ssh://, scp-style)."""
         if not repo_url:
             return None
-        url = repo_url.strip()
-        # Strip .git suffix
-        if url.endswith(".git"):
-            url = url[:-4]
-        # SSH format: git@github.com:owner/repo
-        if url.startswith("git@"):
-            colon_idx = url.find(":")
-            if colon_idx != -1:
-                return url[colon_idx + 1 :]
+        try:
+            owner, repo_name = extract_owner_repo(repo_url)
+        except ValueError:
             return None
-        # HTTPS format: https://github.com/owner/repo
-        for prefix in ("https://", "http://"):
-            if url.startswith(prefix):
-                url = url[len(prefix) :]
-                break
-        # Remove host: first path component is host
-        slash_idx = url.find("/")
-        if slash_idx != -1:
-            return url[slash_idx + 1 :]
-        return None
+        return f"{owner}/{repo_name}"
 
     try:
         repos = _list_global_repos()
@@ -165,7 +168,13 @@ def _resolve_cicd_project_access(
             f"Failed to load golden repos registry for CI/CD access check: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return None  # Fail open on registry errors
+        # Fail closed on registry errors -- an unavailable registry must
+        # never be treated as "allow everything".
+        return (
+            f"Unable to verify repository access for '{project_identifier}': "
+            "golden repo registry unavailable.",
+            False,
+        )
 
     # Match project_identifier against repo clone URLs
     matched_alias: Optional[str] = None
@@ -177,14 +186,15 @@ def _resolve_cicd_project_access(
             break
 
     if matched_alias is None:
-        # No registered golden repo matches: allow ad-hoc query
-        return None
+        # No registered golden repo matches: allow ad-hoc query, but flag
+        # as unregistered so callers know NOT to use a global credential.
+        return None, False
 
     # Check group access via AccessFilteringService
     access_svc = _get_access_filtering_service()
     if access_svc is None:
         # No groups configured: allow all
-        return None
+        return None, True
 
     accessible = access_svc.get_accessible_repos(username)
     # Strip -global suffix to get base name for comparison
@@ -193,9 +203,27 @@ def _resolve_cicd_project_access(
         base_alias = base_alias[: -len("-global")]
 
     if base_alias not in accessible:
-        return f"Project '{project_identifier}' not found."
+        return f"Project '{project_identifier}' not found.", True
 
-    return None  # Allowed
+    return None, True  # Allowed
+
+
+def _resolve_cicd_project_access(
+    project_identifier: str, platform: str, username: str
+) -> Optional[str]:
+    """Backward-compatible two-way wrapper over
+    _resolve_cicd_project_access_detailed() for callers that only need to
+    know allow/deny (GitLab legacy handlers, unified ci_* handlers) --
+    those always operate on an already-resolved golden repo alias, so the
+    unregistered/registered distinction does not change their behavior.
+
+    Returns:
+        None if allowed, error message string if denied
+    """
+    error, _is_registered = _resolve_cicd_project_access_detailed(
+        project_identifier, platform, username
+    )
+    return error
 
 
 def _resolve_cicd_read_token(
@@ -251,16 +279,20 @@ def _resolve_cicd_write_token(
 
     Returns:
         (token, None) on success
-        (None, error_message) when no personal credential configured
+        (None, error_message) when no personal credential is configured, OR
+        when the stored credential record is missing its "token" field --
+        that case is treated as "no credential configured", never as
+        success with a None token silently handed to the outbound client.
     """
     credential = _get_personal_credential_for_host(user.username, forge_host)
-    if credential:
-        return credential.get("token"), None
+    token = credential.get("token") if credential else None
 
     error_msg = (
         f"Configure personal git credential for {forge_host} to perform "
         "write operations. Use configure_git_credential tool."
     )
+    if token:
+        return token, None
     return None, error_msg
 
 
@@ -290,7 +322,6 @@ async def handle_gh_actions_list_runs(
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -300,15 +331,42 @@ async def handle_gh_actions_list_runs(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Access check: denied / registered-and-allowed / unregistered. Only
+        # a registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token; an unregistered repo must use the
+        # caller's own personal credential, or be refused.
+        access_error, is_registered = _resolve_cicd_project_access_detailed(
+            repository, "github", user.username
+        )
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        forge_host = _derive_forge_host(None, "github")
+        if is_registered:
+            token = _resolve_cicd_read_token("github", user, forge_host)
+            if not token:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
+                    }
+                )
+        else:
+            # Unregistered repo: personal PAT ONLY -- reuses the write-token
+            # resolver's never-use-global-token guarantee for this read.
+            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+            if token_error:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Repository '{repository}' is not a registered "
+                            "CIDX golden repo. Configure a personal git "
+                            f"credential for {forge_host} to query CI/CD "
+                            "data for it. Use configure_git_credential tool."
+                        ),
+                    }
+                )
 
         # Extract optional parameters
         branch = args.get("branch")
@@ -393,7 +451,6 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -408,15 +465,42 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Access check: denied / registered-and-allowed / unregistered. Only
+        # a registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token; an unregistered repo must use the
+        # caller's own personal credential, or be refused.
+        access_error, is_registered = _resolve_cicd_project_access_detailed(
+            repository, "github", user.username
+        )
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        forge_host = _derive_forge_host(None, "github")
+        if is_registered:
+            token = _resolve_cicd_read_token("github", user, forge_host)
+            if not token:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
+                    }
+                )
+        else:
+            # Unregistered repo: personal PAT ONLY -- reuses the write-token
+            # resolver's never-use-global-token guarantee for this read.
+            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+            if token_error:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Repository '{repository}' is not a registered "
+                            "CIDX golden repo. Configure a personal git "
+                            f"credential for {forge_host} to query CI/CD "
+                            "data for it. Use configure_git_credential tool."
+                        ),
+                    }
+                )
 
         # Create client and get run details
         client = GitHubActionsClient(token)
@@ -493,7 +577,6 @@ async def handle_gh_actions_search_logs(
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -513,15 +596,43 @@ async def handle_gh_actions_search_logs(
                 {"success": False, "error": "Missing required parameter: pattern"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Access check: denied / registered-and-allowed / unregistered. Only
+        # a registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token; an unregistered repo must use the
+        # caller's own personal credential, or be refused.
+        access_error, is_registered = _resolve_cicd_project_access_detailed(
+            repository, "github", user.username
+        )
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        forge_host = _derive_forge_host(None, "github")
+        if is_registered:
+            token = _resolve_cicd_read_token("github", user, forge_host)
+            if not token:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
+                    }
+                )
+        else:
+            # Unregistered repo: personal credential only (reuses the
+            # write-token resolver, which never falls back to the shared
+            # global credential).
+            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+            if token_error:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Repository '{repository}' is not a registered "
+                            "CIDX golden repo. Configure a personal git "
+                            f"credential for {forge_host} to query CI/CD "
+                            "data for it. Use configure_git_credential tool."
+                        ),
+                    }
+                )
 
         # Create client and search logs
         client = GitHubActionsClient(token)
@@ -602,7 +713,6 @@ async def handle_gh_actions_get_job_logs(
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -617,15 +727,43 @@ async def handle_gh_actions_get_job_logs(
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Access check: denied / registered-and-allowed / unregistered. Only
+        # a registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token; an unregistered repo must use the
+        # caller's own personal credential, or be refused.
+        access_error, is_registered = _resolve_cicd_project_access_detailed(
+            repository, "github", user.username
+        )
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        forge_host = _derive_forge_host(None, "github")
+        if is_registered:
+            token = _resolve_cicd_read_token("github", user, forge_host)
+            if not token:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
+                    }
+                )
+        else:
+            # Unregistered repo: personal credential only (reuses the
+            # write-token resolver, which never falls back to the shared
+            # global credential).
+            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+            if token_error:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Repository '{repository}' is not a registered "
+                            "CIDX golden repo. Configure a personal git "
+                            f"credential for {forge_host} to query CI/CD "
+                            "data for it. Use configure_git_credential tool."
+                        ),
+                    }
+                )
 
         # Create client and get job logs
         client = GitHubActionsClient(token)
@@ -701,7 +839,6 @@ async def handle_gh_actions_retry_run(
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -716,15 +853,27 @@ async def handle_gh_actions_retry_run(
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Group access check (Story #404 AC1 parity with the GitLab and
+        # unified ci_* handlers) before any credential use.
+        access_error = _resolve_cicd_project_access(repository, "github", user.username)
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        # Mutating operations use a per-user write token only (never the
+        # shared global CI token). forge_host is always "github.com" --
+        # GitHubActionsClient targets api.github.com, so a caller-supplied
+        # args["base_url"] is not used to resolve or store this credential.
+        forge_host = _derive_forge_host(None, "github")
+        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+        if token_error:
+            return _mcp_response({"success": False, "error": token_error})
+
+        # Story #404 AC3 parity: audit log BEFORE API call
+        logger.info(
+            f"CI/CD write operation: user={user.username} op=retry_run "
+            f"repository={repository} run_id={run_id}",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
         # Create client and retry run
         client = GitHubActionsClient(token)
@@ -800,7 +949,6 @@ async def handle_gh_actions_cancel_run(
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
-    from code_indexer.server.services.git_state_manager import TokenAuthenticator
 
     try:
         # Validate required parameters
@@ -815,15 +963,27 @@ async def handle_gh_actions_cancel_run(
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Resolve GitHub token
-        token = TokenAuthenticator.resolve_token("github")
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                }
-            )
+        # Group access check (Story #404 AC1 parity with the GitLab and
+        # unified ci_* handlers) before any credential use.
+        access_error = _resolve_cicd_project_access(repository, "github", user.username)
+        if access_error:
+            return _mcp_response({"success": False, "error": access_error})
+
+        # Mutating operations use a per-user write token only (never the
+        # shared global CI token). forge_host is always "github.com" --
+        # GitHubActionsClient targets api.github.com, so a caller-supplied
+        # args["base_url"] is not used to resolve or store this credential.
+        forge_host = _derive_forge_host(None, "github")
+        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
+        if token_error:
+            return _mcp_response({"success": False, "error": token_error})
+
+        # Story #404 AC3 parity: audit log BEFORE API call
+        logger.info(
+            f"CI/CD write operation: user={user.username} op=cancel_run "
+            f"repository={repository} run_id={run_id}",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
         # Create client and cancel run
         client = GitHubActionsClient(token)
