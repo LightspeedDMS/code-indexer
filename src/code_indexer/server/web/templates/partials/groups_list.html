@@ -24,7 +24,7 @@
                 {% if not group.is_default %}
                 <button class="outline small" onclick="toggleEditGroupForm('{{ group.id }}')">Edit</button>
                 {% if group.user_count == 0 %}
-                <button class="outline small danger" onclick="confirmDeleteGroup('{{ group.id }}', '{{ group.name }}')">Delete</button>
+                <button class="outline small danger" data-group-id="{{ group.id }}" data-group-name="{{ group.name }}" onclick="confirmDeleteGroup(this.dataset.groupId, this.dataset.groupName)">Delete</button>
                 {% else %}
                 <button class="outline small" disabled title="Cannot delete group with active users">Delete</button>
                 {% endif %}

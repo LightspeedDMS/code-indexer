@@ -727,20 +727,44 @@
                     return;
                 }
 
-                // Build files list HTML
-                let html = '<h4>Attached Files</h4>';
+                // Build the files list via real DOM elements -- the
+                // filename is passed to the delete handler as a value,
+                // never embedded in markup.
+                filesList.innerHTML = '';
+                const heading = document.createElement('h4');
+                heading.textContent = 'Attached Files';
+                filesList.appendChild(heading);
                 files.forEach(file => {
-                    html += '<div class="file-item">';
-                    html += '  <a href="/admin/research/sessions/' + currentSessionId + '/files/' + encodeURIComponent(file.filename) + '" ';
-                    html += '     target="_blank" class="file-link">' + escapeHtml(file.filename) + '</a>';
-                    html += '  <span class="file-size">' + formatFileSize(file.size) + '</span>';
-                    html += '  <span class="file-time">' + formatTimestamp(file.uploaded_at) + '</span>';
-                    html += '  <button onclick="deleteFile(\'' + encodeURIComponent(file.filename) + '\')" ';
-                    html += '          class="delete-file-btn" title="Delete">×</button>';
-                    html += '</div>';
+                    const item = document.createElement('div');
+                    item.className = 'file-item';
+
+                    const link = document.createElement('a');
+                    link.href = '/admin/research/sessions/' + currentSessionId + '/files/' + encodeURIComponent(file.filename);
+                    link.target = '_blank';
+                    link.className = 'file-link';
+                    link.textContent = file.filename;
+                    item.appendChild(link);
+
+                    const sizeSpan = document.createElement('span');
+                    sizeSpan.className = 'file-size';
+                    sizeSpan.textContent = formatFileSize(file.size);
+                    item.appendChild(sizeSpan);
+
+                    const timeSpan = document.createElement('span');
+                    timeSpan.className = 'file-time';
+                    timeSpan.textContent = formatTimestamp(file.uploaded_at);
+                    item.appendChild(timeSpan);
+
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'delete-file-btn';
+                    deleteBtn.title = 'Delete';
+                    deleteBtn.textContent = '×';
+                    deleteBtn.addEventListener('click', () => deleteFile(encodeURIComponent(file.filename)));
+                    item.appendChild(deleteBtn);
+
+                    filesList.appendChild(item);
                 });
 
-                filesList.innerHTML = html;
                 container.style.display = 'block';
             })
             .catch(error => {

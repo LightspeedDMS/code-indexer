@@ -27,7 +27,7 @@
                     <option value="{{ cat.id }}" {% if repo.category_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
                     {% endfor %}
                 </select>
-                <button class="outline small category-ok" onclick="saveCategory('{{ repo.alias }}', this)" title="Save" style="display: none;">OK</button>
+                <button class="outline small category-ok" data-repo-alias="{{ repo.alias }}" onclick="saveCategory(this.dataset.repoAlias, this)" title="Save" style="display: none;">OK</button>
                 <button class="outline small category-cancel" onclick="cancelCategory(this)" title="Cancel" style="display: none;">Cancel</button>
             </td>
             <td>
@@ -68,13 +68,13 @@
                 {% endif %}
             </td>
             <td class="actions-cell">
-                <button class="outline small" onclick="toggleDetails('{{ repo.alias }}')" title="View details">Details</button>
-                <button class="small" onclick="showActivateModal('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Activate for a user"{% endif %}>Activate</button>
-                <button class="outline small" onclick="confirmRefresh('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Re-index repository"{% endif %}>Refresh</button>
+                <button class="outline small" data-repo-alias="{{ repo.alias }}" onclick="toggleDetails(this.dataset.repoAlias)" title="View details">Details</button>
+                <button class="small" data-repo-alias="{{ repo.alias }}" onclick="showActivateModal(this.dataset.repoAlias)" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Activate for a user"{% endif %}>Activate</button>
+                <button class="outline small" data-repo-alias="{{ repo.alias }}" onclick="confirmRefresh(this.dataset.repoAlias)" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Re-index repository"{% endif %}>Refresh</button>
                 {% if not repo.repo_url.startswith('local://') %}
-                <button class="outline small warning" onclick="confirmForceResync('{{ repo.alias }}')" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Force reset and re-sync from remote (discards local divergence)"{% endif %}>Force Re-sync</button>
+                <button class="outline small warning" data-repo-alias="{{ repo.alias }}" onclick="confirmForceResync(this.dataset.repoAlias)" {% if repo.status == 'indexing' %}disabled title="Currently indexing"{% else %}title="Force reset and re-sync from remote (discards local divergence)"{% endif %}>Force Re-sync</button>
                 {% endif %}
-                <button class="outline small danger" onclick="confirmDelete('{{ repo.alias }}')" title="Delete repository">Delete</button>
+                <button class="outline small danger" data-repo-alias="{{ repo.alias }}" onclick="confirmDelete(this.dataset.repoAlias)" title="Delete repository">Delete</button>
             </td>
         </tr>
 
@@ -634,11 +634,19 @@ async function loadGlobalHealthDetails(repoAlias, globalAlias, forceRefresh = fa
                 </p>
             `;
         } else {
-            // Error state for actual errors
+            // Error state for actual errors. repoAlias/globalAlias are
+            // captured as real closure variables -- never serialized into
+            // an HTML/JS-string attribute at all.
             detailsContainer.innerHTML = `
                 <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
-                <button class="outline small" onclick="loadGlobalHealthDetails('${escapeHtml(repoAlias)}', '${escapeHtml(globalAlias)}', false)">Retry</button>
             `;
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'outline small';
+            retryBtn.textContent = 'Retry';
+            retryBtn.addEventListener('click', () => {
+                loadGlobalHealthDetails(repoAlias, globalAlias, false);
+            });
+            detailsContainer.appendChild(retryBtn);
         }
 
         if (refreshBtn) {

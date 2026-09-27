@@ -11,7 +11,9 @@
         <div class="session-timestamp">{{ session.updated_at | relative_time }}</div>
         <div class="session-actions">
             <button class="rename-btn"
-                    onclick="event.stopPropagation(); renameSession('{{ session.id }}', '{{ session.name }}')"
+                    data-session-id="{{ session.id }}"
+                    data-session-name="{{ session.name }}"
+                    onclick="event.stopPropagation(); renameSession(this.dataset.sessionId, this.dataset.sessionName)"
                     title="Rename">R</button>
             <button class="delete-btn"
                     hx-delete="/admin/research/sessions/{{ session.id }}"
