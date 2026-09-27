@@ -757,9 +757,10 @@ class ActivatedRepoIndexManager:
             args = ["cidx", "index"]
             if clear:
                 args.append("--clear")
+            args = append_server_layout_args(args)
             clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
-                append_server_layout_args(args),
+                args,
                 repo_path,
                 cancel_check=cancel_check,
             )
