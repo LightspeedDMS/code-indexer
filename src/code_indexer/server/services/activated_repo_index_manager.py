@@ -426,12 +426,23 @@ class ActivatedRepoIndexManager:
 
             update_progress(100, message, phase="complete")
 
-            return {
+            job_result: Dict[str, Any] = {
                 "success": all_success,
                 "message": message,
                 "results": results,
                 "failed_types": failed_types if failed_types else None,
             }
+            if not all_success:
+                # Bug #1978: BackgroundJobManager derives the JobTracker-visible
+                # error via job.result.get("error", "job failed")
+                # (repositories/background_jobs.py) -- without a top-level
+                # "error" key here, every failed reindex surfaced the generic
+                # "job failed" string, and the real cause (e.g. an EACCES
+                # permission error) was visible only in server logs.
+                job_result["error"] = self._summarize_failed_index_types(
+                    failed_types, results
+                )
+            return job_result
 
         except Exception as e:
             error_msg = f"Failed to execute reindex job for '{repo_alias}': {str(e)}"
@@ -449,6 +460,35 @@ class ActivatedRepoIndexManager:
                 "results": {},
                 "error": str(e),
             }
+
+    #: Bug #1978: per-type and overall caps on the summarized job "error"
+    #: field -- a verbose subprocess diagnostic (the common case for a
+    #: permission or provider failure) must reach the job record, but never
+    #: unbounded: one failing type must not be able to blow up job storage.
+    _MAX_PER_TYPE_ERROR_CHARS = 1000
+    _MAX_JOB_ERROR_CHARS = 4000
+
+    @classmethod
+    def _summarize_failed_index_types(
+        cls, failed_types: List[str], results: Dict[str, Dict[str, Any]]
+    ) -> str:
+        """Bug #1978: build the job's top-level "error" text from the REAL
+        per-type failures (each already carries its own real cause, e.g. the
+        EACCES text from a cluster CoW-clone permission failure) instead of
+        the generic "job failed" string BackgroundJobManager otherwise falls
+        back to via ``job.result.get("error", "job failed")``.
+        """
+        parts = []
+        for index_type in failed_types:
+            detail = str(results.get(index_type, {}).get("error") or "unknown error")
+            if len(detail) > cls._MAX_PER_TYPE_ERROR_CHARS:
+                detail = detail[: cls._MAX_PER_TYPE_ERROR_CHARS] + "... [truncated]"
+            parts.append(f"{index_type}: {detail}")
+
+        summary = "; ".join(parts)
+        if len(summary) > cls._MAX_JOB_ERROR_CHARS:
+            summary = summary[: cls._MAX_JOB_ERROR_CHARS] + "... [truncated]"
+        return summary
 
     def _execute_all_index_types(
         self,
