@@ -54,15 +54,15 @@ class TestServiceAvailabilityCheckedBeforeEmptyAliasShortCircuit:
         hard failure."""
         service = MagicMock()
         service.is_admin_user.return_value = False
-        result = require_repo_access(service, "some_user", None)
-        assert result is None
+        # Must complete without raising (require_repo_access returns None).
+        require_repo_access(service, "some_user", None)
         service.get_accessible_repos.assert_not_called()
 
     def test_empty_list_with_available_service_still_returns_none(self):
         service = MagicMock()
         service.is_admin_user.return_value = False
-        result = require_repo_access(service, "some_user", [])
-        assert result is None
+        # Must complete without raising (require_repo_access returns None).
+        require_repo_access(service, "some_user", [])
         service.get_accessible_repos.assert_not_called()
 
     def test_denied_alias_with_available_service_still_raises_denied(self):

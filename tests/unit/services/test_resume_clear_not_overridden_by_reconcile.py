@@ -120,7 +120,7 @@ def _run_git(repo: Path, *args: str) -> None:
 
 
 def _make_indexer(repo: Path, metadata_path: Path) -> SmartIndexer:
-    config = Config(codebase_dir=str(repo))
+    config = Config(codebase_dir=repo)
     embedding_provider = _DeterministicHashEmbeddingProvider()
     vector_store = FilesystemVectorStore(base_path=repo / ".code-indexer" / "index")
     vector_store.ensure_provider_aware_collection(config, embedding_provider)
@@ -184,9 +184,10 @@ class TestClearForceFullNotOverriddenByInterruptedReconcileFallback:
         clear_calls: List[str] = []
         real_clear_collection = indexer.vector_store_client.clear_collection
 
-        def _spy_clear_collection(collection_name: str) -> None:
+        def _spy_clear_collection(collection_name: str) -> bool:
             clear_calls.append(collection_name)
-            return real_clear_collection(collection_name)
+            cleared: bool = real_clear_collection(collection_name)
+            return cleared
 
         indexer.vector_store_client.clear_collection = _spy_clear_collection  # type: ignore[method-assign]
 

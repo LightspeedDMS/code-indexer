@@ -101,7 +101,10 @@ class TestAdminRestCreateFrontDoorRejectsTraversalUsername:
         # Reuse the shared fixture's setup/teardown logic directly since
         # this file intentionally stays independent of that module's
         # fixture-collection wiring.
-        gen = admin_client_fixture.__wrapped__()
+        # pytest's FixtureFunctionDefinition exposes the undecorated generator
+        # function as ``__wrapped__`` at runtime but does not declare it in its
+        # type stubs, so fetch it via getattr for the type checker.
+        gen = getattr(admin_client_fixture, "__wrapped__")()
         client = next(gen)
         try:
             resp = client.post(

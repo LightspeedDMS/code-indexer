@@ -117,7 +117,7 @@ def _run_git(repo: Path, *args: str) -> None:
 
 
 def _make_indexer(repo: Path, metadata_path: Path) -> SmartIndexer:
-    config = Config(codebase_dir=str(repo))
+    config = Config(codebase_dir=repo)
     embedding_provider = _DeterministicHashEmbeddingProvider()
     vector_store = FilesystemVectorStore(base_path=repo / ".code-indexer" / "index")
     vector_store.ensure_provider_aware_collection(config, embedding_provider)

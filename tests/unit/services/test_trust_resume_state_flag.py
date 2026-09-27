@@ -56,7 +56,7 @@ def _create_git_repo(path: Path) -> None:
 
 
 def _make_indexer(repo: Path, tmp_path: Path, store: MagicMock) -> SmartIndexer:
-    config = Config(codebase_dir=str(repo))
+    config = Config(codebase_dir=repo)
     mock_embedding = MagicMock()
     # smart_index() (unlike _do_resume_interrupted() called directly) reads
     # these into ProgressiveMetadata and JSON-serializes them -- must be

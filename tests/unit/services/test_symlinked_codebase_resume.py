@@ -92,7 +92,8 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
             model_name="voyage-code-3",
         )
 
-    return captured.get("files", [])
+    files: List[Path] = captured.get("files", [])
+    return files
 
 
 class TestSymlinkedCodebaseDirResumeParity:

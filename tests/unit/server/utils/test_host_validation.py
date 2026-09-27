@@ -42,7 +42,7 @@ REJECTED_HOSTS = [
     "\x1bexample.com",  # ESC control char
 ]
 
-NON_STRING_HOSTS = [None, 123, 1.5, ["example.com"], {}]
+NON_STRING_HOSTS: list[object] = [None, 123, 1.5, ["example.com"], {}]
 
 
 class TestAcceptedHosts:

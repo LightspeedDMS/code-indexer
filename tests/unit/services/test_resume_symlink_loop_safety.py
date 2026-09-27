@@ -53,7 +53,7 @@ def _create_git_repo(path: Path) -> None:
 
 def _make_indexer(repo: Path, tmp_path: Path, store: MagicMock) -> SmartIndexer:
     """Create a SmartIndexer wired to a real repo with mocked external services."""
-    config = Config(codebase_dir=str(repo))
+    config = Config(codebase_dir=repo)
     mock_embedding = MagicMock()
     metadata_path = tmp_path / "metadata.json"
     return SmartIndexer(
@@ -116,7 +116,8 @@ def _run_resume_and_capture(indexer: SmartIndexer) -> List[Path]:
             model_name="voyage-code-3",
         )
 
-    return captured_files.get("files", [])
+    files: List[Path] = captured_files.get("files", [])
+    return files
 
 
 class TestResumeSymlinkLoopSafety:

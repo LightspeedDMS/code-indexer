@@ -39,6 +39,7 @@ import contextlib
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,7 +105,8 @@ def elevation_manager():
 def _restore_elevated_session_manager():
     original = getattr(_deps, "elevated_session_manager", None)
     yield
-    _deps.elevated_session_manager = original
+    # Typing-only cast: restore exactly what was there before the test.
+    _deps.elevated_session_manager = cast(ElevatedSessionManager, original)
 
 
 @pytest.fixture
