@@ -76,6 +76,7 @@
 - [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop, no pre-flight questions
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - ask before ANY change to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
+- [feedback_validation_runs_stay_on_scope.md](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer; green tests never substitute for a review gate
 - [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - opus for code-reviewer only; tdd/implementation stays on Sonnet
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - dual review (Claude + independent Codex) for every review gate
