@@ -155,9 +155,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 9863/10234/10715). 12.73.0's CI run failed (missing `requests`
         # dependency) so it was never tagged; 12.74.0's changelog entry
         # documents that and supersedes it.
-        "CHANGELOG.md:9863",
-        "CHANGELOG.md:10234",
-        "CHANGELOG.md:10715",
+        # 12.75.0 shifted them another +7 (9863/10234/10715 ->
+        # 9870/10241/10722).
+        "CHANGELOG.md:9870",
+        "CHANGELOG.md:10241",
+        "CHANGELOG.md:10722",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

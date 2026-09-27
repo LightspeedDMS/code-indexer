@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.75.0] - 2026-09-27
+
+### Fixed
+
+- **#1979: `clear=true` always rebuilds from scratch and never ends with a blank index.** An activated-repo semantic reindex with `clear=true` deleted the index directory but kept per-provider progress metadata, then ran an incremental index that found no changes, so the repo ended with an empty semantic index that later writes turned into the legacy per-file layout. The server now passes `--clear` to the child, so clear is a true full rebuild. A clear also clears each provider's multimodal collection and fails loudly if a clear fails. `--clear` builds CHUNKS_DB collections by default (foreground and daemon). `--clear` combined with `--new-collection-layout=sharded_json`, `--reconcile` or a `--rebuild-*` flag is rejected before any work. After every clear, on the CLI, daemon and server paths, one shared check requires each configured provider to have completed progress and real committed rows, or the run fails. A cancelled clear exits non-zero. Daemon-mode clears require exactly one provider matching the daemon's (multi-provider daemon support is tracked in #1980).
+- **#1978: a failed activated-repo reindex reports the real error.** The job's error field now carries each failed index type's actual error (truncated) instead of the generic "job failed". The storage-side fix, which grants the cidx service group write access on every copy-on-write clone so cluster reindexes stop failing with a permission error, ships in cow-storage-daemon 0.3.0.
+
 ## [12.74.0] - 2026-09-26
 
 12.73.0 was never tagged or released: its CI run failed because `requests`, which the server's auto-updater imports, was not a declared dependency. This release declares it and supersedes 12.73.0.
