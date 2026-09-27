@@ -821,6 +821,29 @@ class SmartIndexer(HighThroughputProcessor):
             # Always release the lock, even on exception
             indexing_lock.release()
 
+    def _clear_current_provider_multimodal_collection(self, provider_name: str) -> None:
+        """Bug #1979 P1: a `--clear` full run must clear THIS run's
+        provider's multimodal collection too, or a removed image's stale
+        point (and the collection's pre-clear layout) survives what the
+        maintainer defines as "indexing from scratch". Only the CURRENT
+        provider's fixed-name collection is cleared -- never both
+        unconditionally -- because a multi-provider `cidx index` run
+        constructs and runs one SmartIndexer per provider sequentially
+        (cli.py's `--extra-provider` loop); clearing every multimodal
+        collection here would wipe out a provider that already finished
+        its own full-index pass earlier in the same run."""
+        multimodal_collection = {
+            "voyage-ai": VOYAGE_MULTIMODAL_MODEL,
+            "cohere": COHERE_MULTIMODAL_MODEL,
+        }.get(provider_name)
+        if multimodal_collection and self.vector_store_client.collection_exists(
+            multimodal_collection
+        ):
+            if not self.vector_store_client.clear_collection(multimodal_collection):
+                raise RuntimeError(
+                    f"Failed to clear existing multimodal collection '{multimodal_collection}'"
+                )
+
     def _abort_multimodal_collections(self) -> None:
         """Bug #1746 Change 3: abort_indexing() for every existing
         multimodal collection (discard, mirrors the finalize-side loop)."""
@@ -1186,7 +1209,20 @@ class SmartIndexer(HighThroughputProcessor):
             enhanced_callback = None
 
         # Clear collection - enhanced callback will provide clear, non-duplicate messaging
-        self.vector_store_client.clear_collection(collection_name)
+        # Bug #1979 P1 (round 5): clear=true is "index from scratch" -- a
+        # failed clear of the TEXT collection must abort the run exactly
+        # like a failed multimodal-collection clear already does below,
+        # instead of silently leaving stale rows in place while indexing
+        # proceeds and later reports success.
+        if not self.vector_store_client.clear_collection(collection_name):
+            raise RuntimeError(
+                f"Failed to clear existing collection '{collection_name}'"
+            )
+        # Bug #1979 P1: clear=true is "index from scratch" -- this
+        # provider's multimodal collection must not survive with stale
+        # points/layout just because only the TEXT collection was cleared
+        # above.
+        self._clear_current_provider_multimodal_collection(provider_name)
         if enhanced_callback and points_before_clear > 0:
             enhanced_callback(
                 0,
@@ -1480,11 +1516,6 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
             )
 
-        # Ensure provider-aware collection exists for incremental indexing
-        self.vector_store_client.ensure_provider_aware_collection(
-            self.config, self.embedding_provider, quiet
-        )
-
         # NOTE: start_indexing() moved to after work determination to fix idempotency bug
 
         # DUAL-TRACK APPROACH: Git log + filesystem timestamps
@@ -1517,6 +1548,9 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # Handle deletions FIRST (critical for git pull scenarios)
                 if git_delta.deleted:
+                    self.vector_store_client.ensure_provider_aware_collection(
+                        self.config, self.embedding_provider, quiet
+                    )
                     collection_name = self.vector_store_client.resolve_collection_name(
                         self.config, self.embedding_provider
                     )
@@ -1639,6 +1673,12 @@ class SmartIndexer(HighThroughputProcessor):
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()
+
+        # A zero-change run must not create a collection that will never reach
+        # end_indexing(), which commits a fresh CHUNKS_DB layout on disk.
+        self.vector_store_client.ensure_provider_aware_collection(
+            self.config, self.embedding_provider, quiet
+        )
 
         # CRITICAL: Now that we know work is needed, start the indexing session
         if self.progressive_metadata.metadata["status"] != "in_progress":

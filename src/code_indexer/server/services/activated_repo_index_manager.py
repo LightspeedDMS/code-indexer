@@ -11,8 +11,8 @@ from code_indexer.server.logging_utils import format_error_log, get_log_extra
 import json
 import logging
 import os
-import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Tuple, cast
@@ -748,24 +748,18 @@ class ActivatedRepoIndexManager:
             if not (repo_path_obj / ".code-indexer" / "config.json").exists():
                 return self._uninitialized_repo_error(repo_path, "Semantic")
 
-            index_dir = repo_path_obj / ".code-indexer" / "index"
-
-            # Clear index if requested
-            if clear and index_dir.exists():
-                self.logger.info(
-                    f"Clearing semantic index: {index_dir}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                shutil.rmtree(index_dir)
-
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
             )
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = ["cidx", "index"]
+            if clear:
+                args.append("--clear")
+            clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
-                append_server_layout_args(["cidx", "index"]),
+                append_server_layout_args(args),
                 repo_path,
                 cancel_check=cancel_check,
             )
@@ -778,6 +772,63 @@ class ActivatedRepoIndexManager:
                         f"{format_completed_process_diagnostic(result)}"
                     ),
                 }
+
+            # clear=true must refresh every configured provider's metadata
+            # and leave each provider's TEXT collection non-empty. Existing
+            # multimodal directories may be empty when images were removed.
+            if clear:
+                # Bug #1979 (codex review findings, turns 13 and 15): a
+                # configured provider that the child skipped for ANY reason
+                # (missing API key, a failed health check, or anything else)
+                # must not let this job report success. Matching individual
+                # skip-reason stdout strings proved fragile -- turn 13's
+                # "no API key found" regex missed turn 15's differently-
+                # worded "health check failed ... skipping" path entirely.
+                # The robust, reason-agnostic signal is each provider's OWN
+                # progress metadata (cli.py's per-provider
+                # metadata-<provider>.json): if it was not updated to a
+                # timestamp at or after this clear started, that provider
+                # was not genuinely rebuilt this run -- regardless of
+                # whether its collection happens to hold OLD points from a
+                # prior run (a positive point count alone is not proof of a
+                # fresh rebuild). Config is read via the same
+                # json.load + Config(**data) pattern already used elsewhere
+                # in this file, then get_embedding_providers() is the real,
+                # authoritative method -- no credential-resolution logic is
+                # re-derived here.
+                config_json_path = repo_path_obj / ".code-indexer" / "config.json"
+                with open(config_json_path) as f:
+                    repo_config = Config(**json.load(f))
+
+                from code_indexer.services.provider_rebuild_check import (
+                    find_providers_not_rebuilt_since,
+                )
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
+
+                index_dir = repo_path_obj / ".code-indexer" / "index"
+                store = FilesystemVectorStore(index_dir, project_root=repo_path_obj)
+
+                stale_or_missing_providers = find_providers_not_rebuilt_since(
+                    repo_path_obj / ".code-indexer",
+                    repo_config.get_embedding_providers(),
+                    clear_start_time,
+                    config=repo_config,
+                    vector_store=store,
+                )
+
+                if stale_or_missing_providers:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Semantic indexing reported success but "
+                            f"provider(s) {stale_or_missing_providers} were "
+                            "not genuinely rebuilt during clear=true "
+                            "(skipped, stale metadata, or empty TEXT collection); "
+                            "treating as failure."
+                        ),
+                    }
 
             return {"success": True, "message": "Semantic indexing completed"}
 

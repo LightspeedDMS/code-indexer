@@ -7878,10 +7878,20 @@ class FilesystemVectorStore:
             )
             from code_indexer.storage.shared.collection_migration import (
                 strip_authoritative_vector_count,
+                strip_stale_hnsw_index_block,
             )
 
+            # Bug #1979: an EXPLICIT --new-collection-layout=chunks_db
+            # request (self._new_collection_layout_explicit is True --
+            # always the case for the server's activated-repo clear path,
+            # see append_server_layout_args) must recover a collection
+            # already stuck on the legacy layout, not just preserve
+            # whichever layout happened to be on disk pre-clear. A plain
+            # clear with no explicit flag (_new_collection_layout_explicit
+            # is None) keeps the existing sticky-preserve behavior exactly.
             was_chunks_db = (
                 resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+                or self._new_collection_layout_explicit is True
             )
 
             # Save projection matrix and metadata if we need to preserve them
@@ -7897,6 +7907,21 @@ class FilesystemVectorStore:
                     metadata_data = metadata_file.read_bytes()
                     metadata_data = clear_chunks_db_discriminator(metadata_data)
                     metadata_data = strip_authoritative_vector_count(metadata_data)
+                    # Bug #1979: a collection that ends this run with
+                    # genuinely zero real vectors (e.g. this run's only
+                    # image was removed) never gets end_indexing() to
+                    # rewrite hnsw_index.vector_count -- HNSWIndexManager's
+                    # default (clear_stale=True) empty-shard path is a
+                    # documented fleet-wide no-op that intentionally leaves
+                    # existing metadata untouched
+                    # (test_default_zero_files_returns_zero_without_touching_disk).
+                    # Stripping the stale block here, at the ONE place that
+                    # actually knows real data was just wiped, makes
+                    # count_points()'s fast path fall through to counting
+                    # the real (now-empty) store instead of trusting a
+                    # pre-clear cached count -- without touching that
+                    # shared, explicitly fleet-wide-guarded default.
+                    metadata_data = strip_stale_hnsw_index_block(metadata_data)
 
             # Remove entire collection directory
             shutil.rmtree(collection_path)
