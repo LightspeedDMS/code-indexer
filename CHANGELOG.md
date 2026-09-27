@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.76.0] - 2026-09-27
+
+### Security
+
+- Repository access is enforced on every REST route that names repositories: regex search, multi-repository query, the SCIP multi-repository queries, X-Ray search and batch, and the repository description, index-status and health routes. Access is checked against group grants before any work is done, and fails closed when the access service is unavailable.
+- MCP tool calls authorize every repository argument they carry, not only the first one.
+- Git argument validation now rejects only option-position and control-character hazards: a caller-supplied value may not be read as an option by git, and may not contain a control character. Pathspecs always follow `--`, remotes must be configured remotes of the repository, and every git REST route declares the same permission tier as its MCP counterpart.
+- SSH host names and key names are validated where they are written into `~/.ssh/config`: no value may end or extend a config line or trigger OpenSSH token or variable expansion, and key names may not coincide with OpenSSH-managed files in the ssh directory.
+- Usernames must be a single path component, and server-owned directory names under the activated-repositories directory are reserved. Every per-user repository path is verified to stay inside that user's directory, and a clone never proceeds into an already-existing destination directory.
+- Indexed and searched files stay inside the repository root; symlinks that resolve outside it are skipped. Server-spawned indexing ignores repository-stored resume state and always uses server-managed embedding provider endpoints.
+- TOTP elevation is required for the admin MCP-credential routes, SSH key create, delete and assign-host over MCP, global and git settings changes, and bulk provider-index adds. An elevation window applies only to the user who opened it. Creating or deleting your own MCP credential requires your own elevation window, and user self-service pages offer the elevation prompt.
+- Every login path completes the MFA step when MFA is enabled.
+- Managing another user's MCP credentials requires the admin role, and the admin diagnostics page and its status partial require admin authentication.
+- CI/CD read tools check repository access first. The server-wide token is used only for registered golden repositories the caller may access, and is sent only to that repository's own forge host.
+- Server host, port and worker settings are validated on every write path and again before the auto-updater rewrites the service unit.
+- Repository analysis agents run from a neutral working directory with an explicit MCP configuration, so repository instruction and settings files are never loaded as CLI configuration. The self-monitoring scan runs with a read-only tool allowlist.
+- Web pages pass user-supplied values to page handlers as data, never as markup.
+
+### Changed
+
+- Git: revisions, ranges, refspecs, branch names and pathspecs are passed to git unchanged apart from the two checks above, so git itself resolves or rejects them; validation errors return HTTP 400 on REST and a structured error on MCP.
+- SSH: key names accept `@`, `+`, `#`, non-ASCII letters and a leading `.`, and host names accept `_` and a trailing `.`. Existing keys stay listed, deletable and written to disk; a value that cannot be written safely is left out of the generated config and logged once per key, and a sync refuses unsafe rows one by one without aborting.
+- Usernames: display-style names with spaces, accents, apostrophes and non-Latin characters are accepted, including through OIDC provisioning.
+- Analysis agents keep one stable working directory per target and load the service user's own CLI settings; dependency-map prompts reference the workspace orientation and guideline files by absolute path.
+- MCP credential management treats the caller's own username as self-service.
+
+### Tests
+
+- Several test files were renamed to describe the behaviour they cover.
+- Git push and merge service tests run against real repositories, elevation tests no longer change shared server state, and SSH and git argument tests use neutral example values.
+
 ## [12.75.0] - 2026-09-27
 
 ### Fixed

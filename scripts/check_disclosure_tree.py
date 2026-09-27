@@ -157,9 +157,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # documents that and supersedes it.
         # 12.75.0 shifted them another +7 (9863/10234/10715 ->
         # 9870/10241/10722).
-        "CHANGELOG.md:9870",
-        "CHANGELOG.md:10241",
-        "CHANGELOG.md:10722",
+        # 12.76.0 shifted them another +31 (9870/10241/10722 ->
+        # 9901/10272/10753).
+        "CHANGELOG.md:9901",
+        "CHANGELOG.md:10272",
+        "CHANGELOG.md:10753",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.
