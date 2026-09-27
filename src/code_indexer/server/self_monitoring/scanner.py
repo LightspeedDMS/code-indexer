@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional, cast
 from code_indexer.server.self_monitoring.llm_response_parser import (
     extract_json_from_llm_response,
 )
+from code_indexer.server.services.agent_cli_isolation import (
+    build_self_monitoring_log_query_command_prefix,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
@@ -127,9 +130,16 @@ class LogScanner:
         # Assemble deduplication context
         dedup_context = self.assemble_dedup_context(existing_issues=existing_issues)
 
-        # Format template - pass database path so Claude can query directly
+        # Format template. log_db_path is kept for backward-compatible
+        # templates that still reference it directly; the production
+        # prompt instead uses log_query_command_prefix, the server-pinned
+        # entry-point command -- the log database path itself is never
+        # shown to the agent, it
+        # reaches the entry point only via an environment variable the
+        # invoker sets.
         prompt = self.prompt_template.format(
             log_db_path=self.log_db_path,
+            log_query_command_prefix=build_self_monitoring_log_query_command_prefix(),
             last_scan_log_id=last_scan_log_id,
             dedup_context=dedup_context,
         )
@@ -824,9 +834,13 @@ class LogScanner:
             RuntimeError: If the dispatcher reports failure or raises unexpectedly.
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
-        # calling subprocess.run directly.
+        # calling subprocess.run directly. log_db_path lets the
+        # ClaudeInvoker it constructs set the CIDX_LOG_QUERY_DB_PATH
+        # environment variable to the exact log database this scan queries.
         dispatcher = build_dep_map_dispatcher(
-            get_config_service().get_config(), analysis_model=self.model
+            get_config_service().get_config(),
+            analysis_model=self.model,
+            log_db_path=self.log_db_path,
         )
         result = dispatcher.dispatch(
             flow="self_monitoring_scan",

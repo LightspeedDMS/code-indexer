@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from typing import Dict, List, Optional
@@ -55,8 +56,20 @@ MCP_CONFIG_DIR_PREFIX = "cidx-mcp-config-"
 # no --strict-mcp-config). This is not a claim that the data involved is
 # free of request-supplied values — log rows can contain values taken from
 # incoming requests — only that this flow's isolation treatment is handled
-# separately (tracked as its own follow-up).
+# separately: self_monitoring_scan gets its OWN narrower permission policy
+# (see build_self_monitoring_claude_args below) rather than the
+# --add-dir/--strict-mcp-config treatment build_claude_isolation_args gives
+# every other, non-exempt flow.
 _ISOLATION_EXEMPT_FLOWS: frozenset = frozenset({"self_monitoring_scan"})
+
+# Permission mode for the self-monitoring scan: "dontAsk"
+# auto-denies every call that would otherwise need a prompt, instead of
+# hanging or interactively prompting in headless `-p` mode, while still
+# running pre-approved (--allowedTools) calls and Claude Code's own
+# approval-free defaults (file reads inside the working directory) with no
+# delay. Verified against the installed `claude --help` (v2.1.283): one of
+# the documented --permission-mode choices.
+_SELF_MONITORING_PERMISSION_MODE = "dontAsk"
 
 
 def is_isolation_exempt_flow(flow: str) -> bool:
@@ -393,3 +406,104 @@ def build_claude_isolation_args(
         args += ["--mcp-config", mcp_config_path]
     args.append("--dangerously-skip-permissions")
     return args
+
+
+_LOG_QUERY_MODULE = "code_indexer.server.self_monitoring.log_query"
+
+
+def build_self_monitoring_log_query_command_prefix() -> str:
+    """Return the exact, literal Bash command prefix the self-monitoring
+    scan is pinned to.
+
+    Uses this server process's OWN interpreter (``sys.executable``) rather
+    than a bare ``python3`` or ``python`` — those names are resolved
+    against PATH at call time and could name a different interpreter than
+    the one that actually has ``code_indexer`` importable.
+    ``sys.executable`` is the exact absolute path of the interpreter
+    already running this server process, so the pinned rule cannot be
+    satisfied by any other interpreter the agent's Bash command text might
+    spell.
+    """
+    return f"{sys.executable} -m {_LOG_QUERY_MODULE}"
+
+
+def build_self_monitoring_claude_allowed_tools() -> List[str]:
+    """Return the --allowedTools patterns for the self-monitoring scan.
+
+    Bash is pinned to ``code_indexer.server.self_monitoring.log_query``
+    (see build_self_monitoring_log_query_command_prefix), a module that
+    goes through Python's sqlite3 API directly -- no shell, so no
+    dot-commands exist at all -- and enforces read-only access, one
+    statement, and a row cap itself via ``set_authorizer``. The log
+    database path is not part of the command at all (it is supplied to
+    the module only via an environment variable the invoker sets), so
+    there is nothing path-shaped left for this rule to pin, and this
+    function takes no parameters.
+
+    Read/Glob/Grep are deliberately NOT included here: a bare allow rule
+    for either tool makes EVERY call for that tool execute without a
+    prompt, anywhere on the filesystem — which would UNDO the working-
+    directory confinement this flow gets from Claude Code's own default
+    behaviour (file reads inside the working directory never prompt;
+    outside it, they do, and get denied under the "dontAsk" permission
+    mode this flow also sets, together with the --settings entry in
+    build_self_monitoring_claude_args). Leaving them off keeps that
+    default confinement instead of overriding it with an unbounded grant.
+    """
+    return [f"Bash({build_self_monitoring_log_query_command_prefix()} *)"]
+
+
+def build_self_monitoring_claude_settings_json() -> str:
+    """Return the --settings JSON string for the self-monitoring scan.
+
+    ``permissions.blockReadsOutsideWorkingDirectories`` (a real, documented
+    setting: "Make the file tools refuse reads outside the working
+    directories in every permission mode") fences both the Read tool AND
+    Claude Code's built-in always-approved read-only Bash commands (cat,
+    head, tail, grep, find, ...) to the working directory, in every
+    permission mode. Those Bash commands are exactly how this flow
+    explores the codebase (Claude Code has no separate Glob/Grep tool), so
+    they must keep working INSIDE the working directory; this setting
+    closes the outside-working-directory read gap without touching that
+    in-repo use at all -- unlike a --disallowedTools deny list for those
+    commands, which would block them everywhere, including in-repo.
+    """
+    return json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
+
+
+def build_self_monitoring_claude_args() -> List[str]:
+    """Build the argv fragment for the self-monitoring scan's `claude` call.
+
+    Replaces --dangerously-skip-permissions with an explicit allowlist
+    (build_self_monitoring_claude_allowed_tools) pinned to the log-query
+    entry point, a --settings entry that fences reads to the working
+    directory in every mode (build_self_monitoring_claude_settings_json),
+    a permission mode ("dontAsk") that auto-denies — rather than prompts or
+    hangs — on anything the allowlist doesn't cover, and --strict-mcp-config
+    with no --mcp-config: this flow calls no MCP tool today, so it runs
+    with zero MCP servers rather than inheriting whatever the account has
+    registered.
+
+    --setting-sources 'user' (matching build_claude_isolation_args, which
+    every other flow already gets) restricts settings loading to ONLY the
+    service account's own user-level settings.json. Without it, a
+    project-level or local .claude/settings*.json reachable from the
+    working directory would merge its own allow lists and
+    additionalDirectories entries in on top of the ones set here, widening
+    this flow's permissions beyond what --allowedTools/--settings alone
+    grant. 'user' is deliberately never '' (empty): an empty value would
+    also drop the service user's own hooks, which is not this change's
+    call to make.
+    """
+    allowed_tools = ",".join(build_self_monitoring_claude_allowed_tools())
+    return [
+        "--permission-mode",
+        _SELF_MONITORING_PERMISSION_MODE,
+        "--allowedTools",
+        allowed_tools,
+        "--settings",
+        build_self_monitoring_claude_settings_json(),
+        "--strict-mcp-config",
+        "--setting-sources",
+        "user",
+    ]

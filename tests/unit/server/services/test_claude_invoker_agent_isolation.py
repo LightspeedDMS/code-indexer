@@ -21,9 +21,15 @@ from unittest.mock import MagicMock, patch
 from code_indexer.server.services.claude_invoker import ClaudeInvoker
 
 
-def _make_invoker(analysis_model: str = "opus", soft_timeout_seconds: int = 90):
+def _make_invoker(
+    analysis_model: str = "opus",
+    soft_timeout_seconds: int = 90,
+    log_db_path=None,
+):
     return ClaudeInvoker(
-        analysis_model=analysis_model, soft_timeout_seconds=soft_timeout_seconds
+        analysis_model=analysis_model,
+        soft_timeout_seconds=soft_timeout_seconds,
+        log_db_path=log_db_path,
     )
 
 
@@ -236,10 +242,15 @@ class TestClaudeInvokerStrictMcpConfig:
 
 
 class TestClaudeInvokerSelfMonitoringExemption:
+    """self_monitoring_scan keeps its neutral-cwd exemption
+    (still runs with cwd as given, no --add-dir) but no longer gets
+    --dangerously-skip-permissions -- it gets its own narrow allowlist
+    instead, built from the ClaudeInvoker's constructor-time log_db_path."""
+
     def test_self_monitoring_scan_keeps_original_cwd(self):
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="out")
-            invoker = _make_invoker()
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
             invoker.invoke(
                 flow="self_monitoring_scan",
                 cwd="/opt/cidx-server",
@@ -249,10 +260,10 @@ class TestClaudeInvokerSelfMonitoringExemption:
             _, kwargs = mock_run.call_args
             assert kwargs.get("cwd") == "/opt/cidx-server"
 
-    def test_self_monitoring_scan_keeps_dangerously_skip_permissions(self):
+    def test_self_monitoring_scan_never_gets_dangerously_skip_permissions(self):
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="out")
-            invoker = _make_invoker()
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
             invoker.invoke(
                 flow="self_monitoring_scan",
                 cwd="/opt/cidx-server",
@@ -260,5 +271,151 @@ class TestClaudeInvokerSelfMonitoringExemption:
                 timeout=30,
             )
             cmd_str = " ".join(mock_run.call_args[0][0])
-            assert "--dangerously-skip-permissions" in cmd_str
-            assert "--strict-mcp-config" not in cmd_str
+            assert "--dangerously-skip-permissions" not in cmd_str
+
+    def test_self_monitoring_scan_gets_allowed_tools_pinned_to_log_query_entry_point(
+        self,
+    ):
+        import sys
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "--allowedTools" in cmd_str
+            assert "code_indexer.server.self_monitoring.log_query" in cmd_str
+            assert sys.executable in cmd_str
+
+    def test_self_monitoring_scan_log_db_path_never_appears_in_command_text(self):
+        """The log database path is no longer a CLI
+        argument at all -- it must never appear in the Bash command text,
+        only in the subprocess environment (see the env-var test below)."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "/opt/cidx-server/logs.db" not in cmd_str
+
+    def test_self_monitoring_scan_sets_log_query_db_path_env_var(self):
+        from code_indexer.server.self_monitoring import log_query
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            env = mock_run.call_args[1].get("env")
+            assert env.get(log_query.ENV_VAR_DB_PATH) == "/opt/cidx-server/logs.db"
+
+    def test_non_self_monitoring_flow_never_sets_log_query_db_path_env_var(self):
+        from code_indexer.server.self_monitoring import log_query
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="repo_lifecycle",
+                cwd="/golden-repos/repo-a",
+                prompt="p",
+                timeout=30,
+            )
+            env = mock_run.call_args[1].get("env")
+            assert log_query.ENV_VAR_DB_PATH not in env
+
+    def test_self_monitoring_scan_never_gets_disallowed_tools(self):
+        """A --disallowedTools deny list for cat/grep/find/ls would also
+        block them INSIDE the working directory, where they are how the
+        agent searches the codebase (Claude Code has no separate Glob/Grep
+        tool)."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "--disallowedTools" not in cmd_str
+
+    def test_self_monitoring_scan_gets_settings_blocking_outside_cwd_reads(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "--settings" in cmd_str
+            assert "blockReadsOutsideWorkingDirectories" in cmd_str
+
+    def test_self_monitoring_scan_gets_dont_ask_permission_mode(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "--permission-mode" in cmd_str
+            assert "dontAsk" in cmd_str
+
+    def test_self_monitoring_scan_gets_strict_mcp_config(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = _completed_process(stdout="out")
+            invoker = _make_invoker(log_db_path="/opt/cidx-server/logs.db")
+            invoker.invoke(
+                flow="self_monitoring_scan",
+                cwd="/opt/cidx-server",
+                prompt="p",
+                timeout=30,
+            )
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "--strict-mcp-config" in cmd_str
+
+    def test_self_monitoring_scan_without_log_db_path_fails_loud(self):
+        """No silent fallback to an unrestricted invocation: a ClaudeInvoker
+        built without log_db_path must refuse to run this flow rather than
+        quietly reopening the --dangerously-skip-permissions hole."""
+        invoker = _make_invoker()  # no log_db_path
+        result = invoker.invoke(
+            flow="self_monitoring_scan",
+            cwd="/opt/cidx-server",
+            prompt="p",
+            timeout=30,
+        )
+        assert result.success is False
+
+    def test_non_self_monitoring_exempt_flow_would_be_unaffected(self):
+        """Regression guard: this test documents that today's exempt set
+        contains only self_monitoring_scan, so there is no other flow whose
+        argv this change could have silently altered."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            is_isolation_exempt_flow,
+        )
+
+        assert is_isolation_exempt_flow("repo_lifecycle") is False
+        assert is_isolation_exempt_flow("dependency_map_pass_1") is False

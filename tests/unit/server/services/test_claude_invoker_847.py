@@ -32,13 +32,17 @@ if TYPE_CHECKING:
 
 
 def _make_invoker(
-    analysis_model: str = "opus", soft_timeout_seconds: int = 90
+    analysis_model: str = "opus",
+    soft_timeout_seconds: int = 90,
+    log_db_path=None,
 ) -> "ClaudeInvoker":
     """Import here so import errors surface as test failures, not collection errors."""
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
 
     return ClaudeInvoker(
-        analysis_model=analysis_model, soft_timeout_seconds=soft_timeout_seconds
+        analysis_model=analysis_model,
+        soft_timeout_seconds=soft_timeout_seconds,
+        log_db_path=log_db_path,
     )
 
 
@@ -332,7 +336,7 @@ class TestClaudeInvokerNoFrontmatterTruncation:
         )
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout=raw)
-            invoker = _make_invoker()
+            invoker = _make_invoker(log_db_path="/tmp/logs.db")
             result = invoker.invoke(
                 flow="self_monitoring_scan", cwd="/tmp", prompt="p", timeout=30
             )

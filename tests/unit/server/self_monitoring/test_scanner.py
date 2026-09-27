@@ -177,6 +177,21 @@ class TestPromptAssembly:
         # Template includes "Analyze logs from"
         assert "Analyze logs" in prompt
 
+    def test_assemble_prompt_includes_log_query_command_prefix(self, scanner):
+        """The prompt template can reference
+        {log_query_command_prefix}, the server-owned read-only entry point
+        pinned to this process's own interpreter -- not a raw sqlite3 path."""
+        import sys
+
+        scanner.prompt_template = (
+            "Query via {log_query_command_prefix} where id > "
+            "{last_scan_log_id}. Context: {dedup_context}"
+        )
+        prompt = scanner.assemble_prompt(last_scan_log_id=0, existing_issues=[])
+
+        assert "code_indexer.server.self_monitoring.log_query" in prompt
+        assert sys.executable in prompt
+
 
 class TestDeduplicationContext:
     """Test deduplication context assembly (AC5b)."""

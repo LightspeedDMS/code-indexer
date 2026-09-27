@@ -3,9 +3,9 @@ Tests asserting the isolation control CodexInvoker applies when analyzing a
 golden repository: a neutral working directory, so the repository's own
 AGENTS.md is not auto-loaded as trusted CLI configuration. Codex keeps its
 full command capability (--dangerously-bypass-approvals-and-sandbox is
-unconditional) — that flag is unchanged from before this control existed.
-
-self_monitoring_scan keeps the pre-existing invocation shape unchanged.
+unconditional) — that flag is unchanged from before this control existed,
+including for self_monitoring_scan: that flow is routed to Claude only by
+CliDispatcher, so CodexInvoker itself carries no flow-specific behaviour.
 
 All subprocess calls are mocked via unittest.mock.patch — no real CLI runs.
 """
@@ -118,11 +118,27 @@ class TestCodexInvokerFullCommandCapability:
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 
-class TestCodexInvokerSelfMonitoringExemption:
-    def test_self_monitoring_scan_keeps_original_cwd_and_bypass_flag(self):
-        cmd, kwargs = _invoke_and_capture_popen(
+class TestCodexInvokerSelfMonitoringScanUnaffected:
+    """self_monitoring_scan is routed to Claude only by CliDispatcher (never
+    reaches CodexInvoker.invoke() through any supported code path). Codex
+    itself carries no special case for it: the bypass flag and command
+    shape are exactly the same as every other flow."""
+
+    def test_self_monitoring_scan_keeps_original_cwd(self):
+        result = _invoke_and_capture_popen(
             _make_invoker(), flow="self_monitoring_scan", cwd="/opt/cidx-server"
         )
-        actual_cwd = kwargs.get("cwd")
-        assert actual_cwd == "/opt/cidx-server"
+        cwd_value = result[1].get("cwd")
+        assert cwd_value == "/opt/cidx-server"
+
+    def test_self_monitoring_scan_still_gets_bypass_flag(self):
+        cmd, _ = _invoke_and_capture_popen(
+            _make_invoker(), flow="self_monitoring_scan", cwd="/opt/cidx-server"
+        )
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "--sandbox" not in cmd
+
+    def test_other_flows_still_get_bypass_flag_unaffected(self):
+        cmd, _ = _invoke_and_capture_popen(_make_invoker(), flow="repo_lifecycle")
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "--sandbox" not in cmd

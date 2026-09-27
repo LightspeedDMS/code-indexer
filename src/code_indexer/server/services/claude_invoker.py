@@ -37,6 +37,7 @@ from typing import Mapping, Optional
 
 from code_indexer.server.services.agent_cli_isolation import (
     build_claude_isolation_args,
+    build_self_monitoring_claude_args,
     is_isolation_exempt_flow,
     prepare_stable_neutral_cwd,
     remove_mcp_config_file,
@@ -49,12 +50,20 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 from code_indexer.server.services.pace_maker_guard import (  # Story #997
     enforce_pace_maker_config,
 )
+from code_indexer.server.self_monitoring import log_query
 
 logger = logging.getLogger(__name__)
 
 _CLI_USED = "claude"
 _DEFAULT_SOFT_TIMEOUT_SECONDS = 1800
 _STDERR_SNIPPET_LEN = 200
+# The one isolation-exempt flow that gets its OWN narrow
+# permission policy (build_self_monitoring_claude_args) instead of
+# --dangerously-skip-permissions. Kept as a literal-string constant here,
+# mirroring agent_cli_isolation._ISOLATION_EXEMPT_FLOWS, so a future SECOND
+# exempt flow (should one ever be added there) does not silently inherit
+# this self-monitoring-specific policy by accident.
+_SELF_MONITORING_SCAN_FLOW = "self_monitoring_scan"
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +93,22 @@ def _build_claude_command(
     with ``--dangerously-skip-permissions`` (needed for those tools to run
     non-interactively) plus the isolation flags from
     ``build_claude_isolation_args`` — a neutral working directory (via
-    --add-dir) and an explicit MCP server list. Exempt flows keep the
-    pre-existing invocation shape unchanged.
+    --add-dir) and an explicit MCP server list.
+
+    The one flow in that exempt set, ``self_monitoring_scan``, does NOT
+    keep the pre-existing --dangerously-skip-permissions shape: its log-DB
+    content can carry request-supplied text, so this flow instead gets the
+    narrow policy from ``build_self_monitoring_claude_args``: an
+    --allowedTools entry pinned to the server-owned log-query entry point
+    (see agent_cli_isolation.build_self_monitoring_log_query_command_prefix),
+    a --settings entry that fences file reads (including Claude Code's
+    built-in read-only Bash commands) to the working directory in every
+    permission mode, a "dontAsk" --permission-mode (auto-denies anything
+    else instead of prompting or hanging), and --strict-mcp-config with
+    zero MCP servers. The log database path is NOT part of this command at
+    all: it reaches the log-query entry point only via the
+    CIDX_LOG_QUERY_DB_PATH environment variable, which invoke() sets on the
+    subprocess -- see _build_claude_env.
 
     Args:
         prompt:          Prompt string to pass to Claude.
@@ -113,7 +136,11 @@ def _build_claude_command(
         f"{max_turns_flag}"
         f" --print"
     )
-    if is_isolation_exempt_flow(flow):
+    if flow == _SELF_MONITORING_SCAN_FLOW:
+        self_mon_args = build_self_monitoring_claude_args()
+        quoted_self_mon_args = " ".join(shlex.quote(arg) for arg in self_mon_args)
+        claude_cmd = f"{base_cmd} {quoted_self_mon_args}"
+    elif is_isolation_exempt_flow(flow):
         claude_cmd = base_cmd + " --dangerously-skip-permissions"
     else:
         iso_args = build_claude_isolation_args(analysis_dir, mcp_config_path)
@@ -223,6 +250,7 @@ class ClaudeInvoker:
         self,
         analysis_model: str = "opus",
         soft_timeout_seconds: int = _DEFAULT_SOFT_TIMEOUT_SECONDS,
+        log_db_path: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -230,6 +258,14 @@ class ClaudeInvoker:
                                   a non-empty string. Defaults to "opus".
             soft_timeout_seconds: Inner shell timeout budget. Must be exactly
                                   int (not bool) and > 0. Defaults to 90.
+            log_db_path:          Path to the server's log database. Only
+                                  consumed for flow == "self_monitoring_scan"
+                                  : set as the CIDX_LOG_QUERY_DB_PATH
+                                  environment variable for that subprocess.
+                                  Every other flow ignores it entirely. Optional
+                                  so every other caller (dep-map passes,
+                                  lifecycle description generation, ...) is
+                                  unaffected.
 
         Raises:
             ValueError: if analysis_model is not a non-empty str, or
@@ -248,6 +284,7 @@ class ClaudeInvoker:
             )
         self._analysis_model = analysis_model
         self._soft_timeout_seconds = soft_timeout_seconds
+        self._log_db_path = log_db_path
 
     def invoke(
         self, flow: str, cwd: str, prompt: str, timeout: int, max_turns: int = 0
@@ -307,6 +344,20 @@ class ClaudeInvoker:
             subprocess_cwd = scratch_dir
             mcp_config_path = try_build_mcp_config_file()
 
+        if flow == _SELF_MONITORING_SCAN_FLOW and not self._log_db_path:
+            # Never fall back to an unrestricted invocation
+            # just because the caller forgot log_db_path -- fail loud so
+            # the gap is visible immediately, not discovered later as an
+            # obscure "env var not set" failure deep inside the log-query
+            # entry point.
+            error_msg = (
+                "ClaudeInvoker: flow 'self_monitoring_scan' requires "
+                "log_db_path (construct ClaudeInvoker with log_db_path=...) "
+                "-- refusing to run this flow without it"
+            )
+            logger.error(error_msg)
+            return _make_failure(error_msg, FailureClass.RETRYABLE_ON_OTHER)
+
         cmd = _build_claude_command(
             prompt,
             self._analysis_model,
@@ -317,6 +368,11 @@ class ClaudeInvoker:
             mcp_config_path=mcp_config_path,
         )
         env = _build_claude_env(os.environ)
+        if flow == _SELF_MONITORING_SCAN_FLOW:
+            # The log-query entry point takes the database path ONLY via
+            # this environment variable -- never a CLI argument, so the
+            # agent cannot redirect it elsewhere.
+            env[log_query.ENV_VAR_DB_PATH] = self._log_db_path
 
         try:
             result = subprocess.run(

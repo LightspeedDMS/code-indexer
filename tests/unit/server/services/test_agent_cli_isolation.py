@@ -625,3 +625,181 @@ class TestBuildClaudeIsolationArgs:
 
         with pytest.raises(ValueError):
             build_claude_isolation_args(analysis_dir="", mcp_config_path=None)
+
+
+# ---------------------------------------------------------------------------
+# build_self_monitoring_claude_args / build_self_monitoring_claude_allowed_tools
+# The self-monitoring scan queries the server's own
+# log DB through a server-owned read-only entry point
+# (code_indexer.server.self_monitoring.log_query) instead of the raw sqlite3
+# CLI -- the installed sqlite3 build has no -safe flag, so .shell/.system/
+# ATTACH/load_extension could not be closed by CLI flags alone. The Bash
+# allow rule is pinned to this server process's own interpreter running that
+# module; the log database path is never a CLI argument (env var only, set
+# by the invoker), so there is nothing path-shaped for the rule to pin.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSelfMonitoringLogQueryCommandPrefix:
+    def test_pinned_to_this_process_own_interpreter(self):
+        import sys
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_log_query_command_prefix,
+        )
+
+        prefix = build_self_monitoring_log_query_command_prefix()
+        assert prefix.startswith(sys.executable)
+
+    def test_pinned_to_the_log_query_module(self):
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_log_query_command_prefix,
+        )
+
+        prefix = build_self_monitoring_log_query_command_prefix()
+        assert prefix.endswith("-m code_indexer.server.self_monitoring.log_query")
+
+
+class TestBuildSelfMonitoringClaudeAllowedTools:
+    def test_pins_bash_to_the_log_query_entry_point(self):
+        import sys
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_allowed_tools,
+        )
+
+        tools = build_self_monitoring_claude_allowed_tools()
+        joined = " ".join(tools)
+        assert (
+            f"Bash({sys.executable} -m code_indexer.server.self_monitoring.log_query *)"
+        ) in joined
+
+    def test_takes_no_log_db_path_argument(self):
+        """The log database path is never a CLI argument -- there is
+        nothing path-shaped left in the allow rule for the caller to
+        supply, and the function signature reflects that."""
+        import inspect
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_allowed_tools,
+        )
+
+        assert (
+            inspect.signature(build_self_monitoring_claude_allowed_tools).parameters
+            == {}
+        )
+
+    def test_does_not_allowlist_bare_read_glob_grep(self):
+        """A bare Read/Glob/Grep allow entry makes every call execute
+        without a prompt, anywhere on the filesystem -- which would UNDO
+        the repo_root confinement this flow already gets for free from the
+        default (no-rule) behaviour. They are deliberately absent here."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_allowed_tools,
+        )
+
+        tools = build_self_monitoring_claude_allowed_tools()
+        assert "Read" not in tools
+        assert "Glob" not in tools
+        assert "Grep" not in tools
+
+
+class TestBuildSelfMonitoringClaudeArgs:
+    def test_never_includes_dangerously_skip_permissions(self):
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--dangerously-skip-permissions" not in args
+
+    def test_includes_allowed_tools_with_the_log_query_pin(self):
+        import sys
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--allowedTools" in args
+        allowed_value = args[args.index("--allowedTools") + 1]
+        assert "code_indexer.server.self_monitoring.log_query" in allowed_value
+        assert sys.executable in allowed_value
+
+    def test_never_includes_disallowed_tools(self):
+        """A --disallowedTools deny list for cat/grep/find/ls would also
+        block them INSIDE the working directory, where they are how the
+        agent searches the codebase (Claude Code 2.1.283 has no Glob/Grep
+        tools). --disallowedTools must never appear in these args."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--disallowedTools" not in args
+
+    def test_includes_settings_blocking_reads_outside_working_directories(self):
+        """permissions.blockReadsOutsideWorkingDirectories (verified against
+        the official settings reference) fences file tools AND the
+        built-in read-only Bash commands outside the working directory, in
+        every permission mode -- closing the outside-cwd read gap without
+        touching in-repo code search."""
+        import json
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--settings" in args
+        settings_value = args[args.index("--settings") + 1]
+        parsed = json.loads(settings_value)
+        assert parsed["permissions"]["blockReadsOutsideWorkingDirectories"] is True
+
+    def test_includes_permission_mode_dont_ask(self):
+        """dontAsk auto-denies every call that would otherwise prompt,
+        rather than hanging or interactively prompting in headless -p mode,
+        while still running pre-approved (allowedTools) calls."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--permission-mode" in args
+        assert args[args.index("--permission-mode") + 1] == "dontAsk"
+
+    def test_includes_strict_mcp_config_with_zero_mcp_servers(self):
+        """This flow calls no MCP tool today, so no --mcp-config is ever
+        added; --strict-mcp-config alone means zero MCP servers."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--strict-mcp-config" in args
+        assert "--mcp-config" not in args
+
+    def test_takes_no_log_db_path_argument(self):
+        import inspect
+
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        assert inspect.signature(build_self_monitoring_claude_args).parameters == {}
+
+    def test_includes_setting_sources_user(self):
+        """Without --setting-sources, project/local .claude/settings*.json
+        allow lists and additionalDirectories entries merge in and widen
+        this flow's permissions beyond --allowedTools/--settings. 'user'
+        (never '' -- an empty value would also drop the service user's own
+        hooks) restricts loading to ONLY the service account's user-level
+        settings.json, matching what every other flow already gets via
+        build_claude_isolation_args."""
+        from code_indexer.server.services.agent_cli_isolation import (
+            build_self_monitoring_claude_args,
+        )
+
+        args = build_self_monitoring_claude_args()
+        assert "--setting-sources" in args
+        assert args[args.index("--setting-sources") + 1] == "user"
