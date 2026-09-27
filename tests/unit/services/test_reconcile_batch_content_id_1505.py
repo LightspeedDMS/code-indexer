@@ -21,7 +21,7 @@ observed for real, not inferred.
 
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 
@@ -163,6 +163,15 @@ class FakeVectorStoreClient:
     def delete_by_filter(self, collection_name, filter_conditions):
         return True
 
+    def get_pending_self_heal_reprocess_paths(
+        self, collection_name: str
+    ) -> FrozenSet[str]:
+        """Bug #1969 Round 5 (R4-F1): this fake never corrupts its own
+        in-memory ``points`` list, so it never has a durable self-heal
+        sidecar to report -- always empty, matching a healthy collection
+        that has never needed a corrupt-id-index wipe."""
+        return frozenset()
+
     def scroll_points(
         self,
         filter_conditions: Optional[Dict[str, Any]] = None,
@@ -171,6 +180,8 @@ class FakeVectorStoreClient:
         with_payload: bool = True,
         with_vectors: bool = False,
         collection_name: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> Tuple[List[Dict[str, Any]], Optional[Any]]:
         # Codex #1505 review Finding 1: count every scroll_points call so a
         # test can assert reconcile's branch-visibility check no longer

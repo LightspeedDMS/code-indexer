@@ -8,7 +8,7 @@ import logging
 import os
 import struct
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, FrozenSet, List, Tuple
 import threading
 
 from code_indexer.services.temporal.temporal_structure_marker import (
@@ -64,9 +64,22 @@ class DuplicateSourceIdError(Exception):
     silently picking one file as "the winner" would discard the other
     file's data, and downstream cleanup would then delete BOTH source
     files, permanently losing whichever record lost the silent race.
-    This must never be auto-resolved; it requires explicit operator
-    intervention to determine which file is correct (or whether both
-    need to be re-indexed under distinct ids).
+    It must never be SILENTLY auto-resolved by simply picking a winner.
+
+    Bug #1969: IDIndexManager.rebuild_from_vectors(self_heal=True) (used
+    by genuine write-path callers: cidx index / upsert / end-of-indexing /
+    temporal reconciliation) attempts a one-shot metadata-only repair
+    (repair_duplicate_and_shifted_points()) before re-raising this error --
+    so by the time this exception actually reaches a caller, it means
+    EITHER (a) self_heal was not requested at all (every read/query-path
+    caller, which must never attempt to mutate the collection), or (b)
+    the one-shot self-heal already ran and could NOT resolve the
+    ambiguity (e.g. a foreign/missing identity scheme the repair's
+    whole-collection identity gate refuses to touch, or an immutable
+    versioned snapshot). In either case, explicit operator intervention
+    (or the fleet-migration consolidation path) is the only remaining
+    recovery to determine which file is correct (or whether both need to
+    be re-indexed under distinct ids).
     """
 
 
@@ -87,6 +100,16 @@ class IDIndexManager:
     def __init__(self):
         """Initialize IDIndexManager."""
         self._lock = threading.RLock()  # Reentrant lock to allow nested locking
+        # Bug #1969 Round 4 (R3-F1): the relative paths a self-heal
+        # escalation (recover_from_corrupt_id_index_by_wiping_files) wiped
+        # during the MOST RECENT rebuild_from_vectors() call on THIS
+        # instance -- reset to empty at the start of every call, populated
+        # only when that specific escalation actually runs. Read by
+        # FilesystemVectorStore._load_id_index() off the SAME
+        # IDIndexManager instance it already holds a reference to, so the
+        # indexing orchestrator can guarantee same-run reprocessing
+        # instead of leaving a wiped file permanently unsearchable.
+        self.last_self_heal_wiped_relative_paths: FrozenSet[str] = frozenset()
 
     @staticmethod
     def _read_exact(f, size: int, context: str) -> bytes:
@@ -442,21 +465,169 @@ class IDIndexManager:
 
         return id_index, rejected_count
 
-    def rebuild_from_vectors(self, collection_path: Path) -> Dict[str, Path]:
+    def rebuild_from_vectors(
+        self, collection_path: Path, *, self_heal: bool = False
+    ) -> Dict[str, Path]:
         """Rebuild ID index by scanning all vector JSON files.
 
         Uses BackgroundIndexRebuilder for atomic file swapping with exclusive
         locking. Index loads can continue using old index during rebuild.
 
+        Bug #1969: a legacy SHARDED_JSON collection can carry a duplicate
+        point_id (two vector_*.json records sharing the same point_id but
+        different content -- the pre-Bug-#1502 chunk-index collision
+        shape), which makes the scan raise DuplicateSourceIdError. Unlike
+        FilesystemVectorStore.scroll_points() (Bug #1579) and
+        consolidate_collection_in_place(), this entry point had no
+        self-heal, hard-aborting every caller (cidx index via
+        FilesystemVectorStore._load_id_index(), and
+        temporal_reconciliation.py's _reconcile_shard_legacy) with
+        "operator intervention required" -- unacceptable on an unattended
+        production deployment.
+
+        Code review round 1 (F1, P2 BLOCKING): rebuild_from_vectors() is
+        shared by BOTH write paths (cidx index / upsert / end-of-indexing /
+        temporal reconciliation) AND query-time read paths (search,
+        count_points, list_files, the daemon cache -- all via
+        FilesystemVectorStore._load_id_index()'s corrupt-index branch). An
+        unconditional self-heal there would let a plain query DELETE and
+        rewrite vector_*.json files and rebuild the whole HNSW index from
+        inside a query thread -- with no rollout gate, no query drain, and
+        (worst case) targeting an immutable ``.versioned/`` snapshot, which
+        this project's CLAUDE.md marks an absolute "NEVER modify/checkout/
+        index inside .versioned/" invariant. Self-heal is therefore OPT-IN:
+        ``self_heal`` defaults to False, so every existing caller that does
+        not explicitly request it keeps the original hard-fail-immediately
+        behavior (zero mutation, repair never attempted). Only genuine
+        write-path callers (FilesystemVectorStore.upsert_points()/
+        end_indexing() and temporal_reconciliation.py's
+        _reconcile_shard_legacy) pass self_heal=True.
+
+        When self_heal=True, mirror the scroll_points self-heal exactly:
+        attempt repair_duplicate_and_shifted_points() ONCE, then retry the
+        scan ONCE. A second DuplicateSourceIdError always propagates (the
+        retry never re-attempts the repair), bounding this to at most one
+        repair attempt per call -- never an infinite loop.
+        DedupRepairAmbiguousError (e.g. a malformed record the repair
+        refuses to touch) is deliberately NOT caught here -- it is more
+        specific and actionable than DuplicateSourceIdError and must
+        propagate to the caller unchanged. Defense-in-depth: even with
+        self_heal=True, an immutable versioned snapshot path is NEVER
+        mutated -- the original DuplicateSourceIdError propagates instead.
+
+        Bug #1969 Round 3 (the REAL corrupt-index self-heal): code review
+        round 2 found that in the EXACT bug-report scenario -- a corrupt/
+        unreadable id_index.bin -- repair_duplicate_and_shifted_points()'s
+        own AC30 safety rule (_plan_dedup) can never pick a per-chunk
+        winner, because it needs to read the very id_index.bin that is
+        corrupt to know "who is currently being served". It raises
+        DedupRepairAmbiguousError(reason=DedupRepairAmbiguousReason.
+        CORRUPT_ID_INDEX) instead of DuplicateSourceIdError -- a better-
+        labeled hard failure, but still a hard failure, not a recovery.
+        This method now escalates ONLY that one specific reason: it calls
+        collection_dedup_repair.recover_from_corrupt_id_index_by_wiping_
+        files(), which deletes EVERY vector_*.json record belonging to
+        EVERY file implicated by any duplicate point_id group (not just
+        the colliding chunks -- see that function's docstring for why a
+        wholly-missing file is the safe outcome for this project's
+        smart_indexer.py reconcile, which has no notion of "partially
+        indexed"), then rebuilds id_index.bin/HNSW from the remaining,
+        conflict-free records. The scan is then retried ONE more time --
+        the SAME bounded-retry slot the normal repair uses, never an
+        additional one. Every OTHER DedupRepairAmbiguousError reason
+        (malformed record, foreign identity scheme, undeterminable HNSW
+        parameter, etc.) still propagates immediately, unchanged from
+        round 2 -- those signal data whose identity assumptions this
+        repair cannot trust, and auto-resolving them would be unsafe.
+
         Args:
             collection_path: Path to collection directory
+            self_heal: opt-in for the one-shot dedup-repair self-heal
+                (see above). Defaults to False -- callers on a read/query
+                path must never pass True.
 
         Returns:
             Dictionary mapping point IDs to file paths
         """
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
-        id_index = self.scan_vectors_for_id_map(collection_path)
+        # Bug #1969 Round 4 (R3-F1): reset at the START of every call so a
+        # reused instance never leaks a PRIOR call's wiped paths into a
+        # later call that had nothing to wipe.
+        self.last_self_heal_wiped_relative_paths = frozenset()
+
+        try:
+            id_index = self.scan_vectors_for_id_map(collection_path)
+        except DuplicateSourceIdError:
+            if not self_heal:
+                raise
+
+            # Defense-in-depth: never mutate an immutable .versioned/
+            # snapshot, even though a genuine write-path caller should
+            # never target one in the first place (Bug #1969 F1).
+            from code_indexer.server.services.query_path_cache import (
+                is_immutable_versioned_snapshot,
+            )
+
+            if is_immutable_versioned_snapshot(str(collection_path)):
+                logger.warning(
+                    "Bug #1969: rebuild_from_vectors hit a duplicate "
+                    "point_id inside an immutable versioned snapshot %r -- "
+                    "refusing to self-heal a snapshot; propagating the "
+                    "original error.",
+                    collection_path,
+                )
+                raise
+
+            from code_indexer.storage.shared.collection_dedup_repair import (
+                DedupRepairAmbiguousError,
+                DedupRepairAmbiguousReason,
+                recover_from_corrupt_id_index_by_wiping_files,
+                repair_duplicate_and_shifted_points,
+            )
+
+            logger.warning(
+                "Bug #1969: rebuild_from_vectors hit a duplicate point_id "
+                "while scanning collection %r -- attempting a one-shot "
+                "dedup repair before failing the rebuild.",
+                collection_path,
+            )
+            try:
+                repair_duplicate_and_shifted_points(collection_path)
+            except DedupRepairAmbiguousError as ambiguous_exc:
+                if ambiguous_exc.reason != DedupRepairAmbiguousReason.CORRUPT_ID_INDEX:
+                    # Every OTHER reason (malformed record, foreign
+                    # identity scheme, undeterminable HNSW parameter,
+                    # etc.) signals data whose identity assumptions this
+                    # repair cannot trust -- more specific/actionable than
+                    # DuplicateSourceIdError, must propagate unchanged.
+                    raise
+                # Bug #1969 Round 3: the ONE reason safe to escalate --
+                # id_index.bin itself failed to load, so the repair's own
+                # winner-lookup had no trustworthy reference. Fall back to
+                # the whole-file-wipe recovery, which does not depend on
+                # id_index.bin at all. This is the SAME bounded-retry slot
+                # as the normal repair -- a failure from the escalation
+                # itself propagates below, never triggering another
+                # attempt.
+                logger.warning(
+                    "Bug #1969 Round 3: repair_duplicate_and_shifted_"
+                    "points could not resolve %r (id_index.bin itself is "
+                    "corrupt/unreadable, AC30) -- escalating to whole-"
+                    "file-wipe recovery.",
+                    collection_path,
+                )
+                wipe_result = recover_from_corrupt_id_index_by_wiping_files(
+                    collection_path
+                )
+                self.last_self_heal_wiped_relative_paths = (
+                    wipe_result.wiped_relative_paths
+                )
+            # Retry exactly once -- a second failure of any kind
+            # propagates unchanged (bounded, never a loop), whether the
+            # repair above ran normally or was escalated to the whole-
+            # file wipe.
+            id_index = self.scan_vectors_for_id_map(collection_path)
 
         # Use BackgroundIndexRebuilder for atomic swap with locking
         rebuilder = BackgroundIndexRebuilder(collection_path)

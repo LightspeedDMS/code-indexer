@@ -662,6 +662,40 @@ def strip_authoritative_vector_count(metadata_bytes: bytes) -> bytes:
     return json.dumps(meta).encode("utf-8")
 
 
+def strip_stale_hnsw_index_block(metadata_bytes: bytes) -> bytes:
+    """Strip the ``hnsw_index`` block from raw ``collection_meta.json``
+    bytes.
+
+    Used by ``FilesystemVectorStore.clear_collection()`` (Bug #1979) when
+    restoring metadata for a collection whose real data was just wiped by
+    that same clear. ``count_points()``'s fast path
+    (``FilesystemVectorStore.count_points``) trusts
+    ``hnsw_index.vector_count`` unconditionally when the key is present --
+    if it survived the clear untouched, a collection that ends this run
+    with genuinely zero real vectors (e.g. a multimodal collection whose
+    only image was removed) would report its STALE pre-clear count
+    forever, because nothing else rewrites this field for a shard that
+    stays empty for the rest of the run. Once this key is absent,
+    ``count_points()`` falls through to counting the real, now-empty
+    store directly. Mirrors :func:`strip_authoritative_vector_count`
+    exactly, but for the HNSW cache block instead of the migration
+    cross-check field.
+
+    Byte-identical no-op when the ``hnsw_index`` key is absent, or when
+    ``metadata_bytes`` is not valid JSON / not a JSON object -- restoring
+    such content verbatim is the pre-existing behavior for that case, and
+    this helper must never turn a readable-but-odd file into an error.
+    """
+    try:
+        meta = json.loads(metadata_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return metadata_bytes
+    if not isinstance(meta, dict) or "hnsw_index" not in meta:
+        return metadata_bytes
+    del meta["hnsw_index"]
+    return json.dumps(meta).encode("utf-8")
+
+
 def _read_authoritative_vector_count(collection_dir: Path) -> Optional[int]:
     """Bug #1486 Critical Finding 2: read the independent authoritative
     ``vector_count`` cross-check field, or None if

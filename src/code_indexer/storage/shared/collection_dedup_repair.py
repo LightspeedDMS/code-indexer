@@ -132,13 +132,16 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.id_index_manager import (
     CorruptIDIndexError,
+    DuplicateSourceIdError,
     IDIndexManager,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
@@ -181,6 +184,62 @@ _MAX_MALFORMED_SAMPLE_SIZE = 5
 _MAX_SKIPPED_GROUP_SAMPLE_SIZE = 5
 
 
+class DedupRepairAmbiguousReason(Enum):
+    """Bug #1969 Round 3: distinguishes WHY DedupRepairAmbiguousError was
+    raised, so a caller can decide PROGRAMMATICALLY (never by parsing the
+    exception's message text) whether automatic escalation is safe. One
+    member per raise site in this module.
+
+    Only CORRUPT_ID_INDEX is safe for IDIndexManager.rebuild_from_
+    vectors()'s self-heal escalation (Round 3): id_index.bin itself
+    failed to load, so _plan_dedup's own winner-lookup has no
+    trustworthy reference and cannot pick a per-chunk winner -- but that
+    recovery (a whole-file wipe of every implicated file) does not
+    depend on id_index.bin at all, so it can proceed safely.
+
+    Every OTHER reason means this repair's own identity/metadata
+    assumptions do not hold for this collection's data (a malformed
+    record, a foreign/inconsistent unique_key shape, an undeterminable
+    HNSW build parameter, an internal invariant violation, or an
+    anomalous stale-marker-plus-empty-tree state). Auto-resolving those
+    would be genuinely unsafe -- they must continue to propagate as hard
+    failures requiring human review, exactly as before this attribute
+    existed."""
+
+    #: id_index.bin itself failed to load (_plan_dedup, AC30) -- the ONLY
+    #: reason safe for automatic whole-file-wipe escalation.
+    CORRUPT_ID_INDEX = "corrupt_id_index"
+    #: A genuinely malformed/unreadable/undecodable vector record was
+    #: found during the pre-mutation scan.
+    MALFORMED_RECORDS = "malformed_records"
+    #: A stale crash marker survives alongside a now-empty JSON tree.
+    STALE_MARKER_EMPTY_TREE = "stale_marker_empty_tree"
+    #: One file group has a mix of records with and without line_start.
+    MIXED_LINE_START_PRESENCE = "mixed_line_start_presence"
+    #: A survivor passed the whole-collection identity gate but its
+    #: unique_key is unparseable during renumber planning -- an internal
+    #: invariant violation (the gate itself would have a bug), not a
+    #: legitimate foreign-format record.
+    INTERNAL_INVARIANT_VIOLATION = "internal_invariant_violation"
+    #: collection_meta.json could not be read/parsed to determine the
+    #: authoritative HNSW build parameters.
+    HNSW_PARAMS_META_UNREADABLE = "hnsw_params_meta_unreadable"
+    #: collection_meta.json does not contain a JSON object.
+    HNSW_PARAMS_META_NOT_OBJECT = "hnsw_params_meta_not_object"
+    #: Neither hnsw_index.vector_dim nor top-level vector_size is a valid
+    #: positive integer.
+    HNSW_PARAMS_VECTOR_DIM_UNDETERMINABLE = "hnsw_params_vector_dim_undeterminable"
+    #: hnsw_index.space is missing or not a recognized distance metric.
+    HNSW_PARAMS_SPACE_UNDETERMINABLE = "hnsw_params_space_undeterminable"
+    #: Bug #1969 Round 6 (P1-5): an implicated (project_id, file_hash)
+    #: group in ``recover_from_corrupt_id_index_by_wiping_files`` has NO
+    #: record with a valid, project-confined relative ``payload.path``
+    #: (missing, empty, absolute, or a ``..`` path-traversal escape) --
+    #: deleting its records would lose the only durably nameable replay
+    #: path with zero mutation to show for it.
+    UNRESOLVABLE_REPLAY_PATH = "unresolvable_replay_path"
+
+
 class DedupRepairAmbiguousError(Exception):
     """Raised when a shifted-label file group cannot be safely,
     unambiguously repaired from metadata alone, when a malformed vector
@@ -193,7 +252,16 @@ class DedupRepairAmbiguousError(Exception):
     stale-marker-plus-empty-tree case, WITHOUT ever touching the
     pre-existing marker) -- the collection is guaranteed to be left
     byte-for-byte untouched. Requires manual operator review; never
-    auto-resolved."""
+    auto-resolved.
+
+    Bug #1969 Round 3: carries a `reason` attribute (a
+    DedupRepairAmbiguousReason member) identifying exactly which raise
+    site fired -- see that enum's docstring for which single reason is
+    safe for automatic escalation and why every other one is not."""
+
+    def __init__(self, message: str, *, reason: DedupRepairAmbiguousReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -371,6 +439,13 @@ def _extract_lightweight_identity_fields(
             "has_path": "path" in payload,
             "has_content": "content" in payload,
             "has_hidden_branches_key": "hidden_branches" in payload,
+            # Bug #1969 Round 4 (R3-F1): the path VALUE (a small, bounded
+            # string) -- never a memory concern like the large `content`/
+            # `vector` fields Bug #1558 excludes above. Needed by
+            # recover_from_corrupt_id_index_by_wiping_files() to surface
+            # WHICH relative paths it wiped, so a same-run reprocessing
+            # caller can re-queue them.
+            "path": payload.get("path"),
         }
     return {
         "id": point_id,
@@ -692,6 +767,323 @@ def clear_pending_dedup_outcome(collection_dir: "Path | str") -> bool:
     return True
 
 
+# Bug #1969 Round 5 (R4-F1, P2 BLOCKING): durable, crash-safe replacement
+# for Round 4's in-memory-only FilesystemVectorStore._pending_self_heal_
+# reprocess_paths queue. That queue was populated ad hoc by whichever
+# caller happened to trigger a wipe and was drained by exactly ONE code
+# path (smart_indexer.py's _do_incremental_index post-pass drain) --
+# every OTHER trigger site (end_indexing's finally block, upsert_points
+# during a resumed run, scroll_points under a non-git detect_deletions
+# reconcile) populated it too, but nothing ever drained it there, AND the
+# in-memory queue itself is lost on process exit regardless. Recording
+# here instead -- INSIDE recover_from_corrupt_id_index_by_wiping_files(),
+# the SINGLE choke point every self-heal call site already funnels
+# through -- guarantees the record exists regardless of which caller
+# triggered the wipe, and a fsynced sidecar file survives a process
+# crash/restart. Mirrors this module's own established durable-marker
+# pattern (`.dedup-repair-pending`, `.dedup-outcome-pending`) -- this is
+# operational bookkeeping, not a new "setting".
+#
+#: Bug #1969 Round 6 (P1-2, Amendment 6): a lock-free, per-event marker
+#: directory. Amendment 6 disproved Lead 1 (cluster job dedup does NOT
+#: serialize writers of one collection across nodes -- filed separately as
+#: issue #1970, out of #1969's scope) and adopted Lead 2: the sidecar
+#: itself must be correct with ZERO mutual exclusion available, since
+#: NFSv3 `nolock` gives no cross-node lock and no cross-node writer gate
+#: exists. Each self-heal wipe event gets its OWN marker file
+#: (name = sha256(path) + a random nonce, so two concurrent events for the
+#: SAME path never collide), created via a single atomic rename -- there
+#: is no shared file to read-merge-write, so there is nothing for two
+#: concurrent writers to race on, with or without a lock. This is the
+#: ONLY sidecar storage format: a single-file `.self-heal-reprocess-
+#: pending` design was drafted for Round 5 but NEVER SHIPPED (Amendment 8
+#: -- verified absent from every remote branch and every real index on
+#: this machine), so there is no legacy format and no migration.
+SELF_HEAL_REPROCESS_PENDING_DIR_NAME = ".self-heal-reprocess-pending.d"
+
+
+def _self_heal_reprocess_pending_dir(collection_dir: Path) -> Path:
+    return collection_dir / SELF_HEAL_REPROCESS_PENDING_DIR_NAME
+
+
+def _write_self_heal_reprocess_marker(collection_dir: Path, rel_path: str) -> None:
+    """Atomically create ONE new marker file recording `rel_path` as
+    pending. Never reads or overwrites any other marker -- two concurrent
+    calls (same or different processes, same or different paths) each
+    create their OWN file and cannot collide or lose each other's write.
+    """
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_name = f"{hashlib.sha256(rel_path.encode()).hexdigest()}.{uuid.uuid4().hex}"
+    marker_path = marker_dir / marker_name
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(marker_dir), suffix=".tmp")
+    fd_owned = False
+    try:
+        try:
+            tmp_f = os.fdopen(tmp_fd, "w")
+            fd_owned = True
+            with tmp_f:
+                tmp_f.write(rel_path)
+                tmp_f.flush()
+                nfs_safe_fsync(tmp_f.fileno())
+            os.replace(tmp_path, str(marker_path))
+        finally:
+            if not fd_owned:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(marker_dir)
+
+
+def _is_valid_self_heal_marker_content(marker_path: Path, content: str) -> bool:
+    """Bug #1969 Round 6 (P1-4, Amendment 9): true when `content` is
+    trustworthy for `marker_path` -- its sha256 digest matches the digest
+    embedded in the marker's own filename (`_write_self_heal_reprocess_
+    marker` always names a marker after ITS OWN content's digest, so a
+    mismatch proves the bytes were damaged after the fact, not a
+    legitimate marker for a different path), AND it independently passes
+    the same project-confinement check P1-5 already applies at record
+    time (`_is_project_confined_relative_path`) -- a marker is never
+    trusted as a replay path just because some record-time check once
+    passed for different bytes.
+    """
+    if not _is_project_confined_relative_path(content):
+        return False
+    expected_digest = marker_path.name.split(".", 1)[0]
+    return hashlib.sha256(content.encode()).hexdigest() == expected_digest
+
+
+def _read_self_heal_reprocess_markers(collection_dir: Path) -> Dict[Path, str]:
+    """Read every marker file's recorded path, tolerating one bad marker
+    without losing the rest -- an unreadable, malformed, or digest-
+    mismatched individual marker is skipped with a WARNING (full P1-4
+    quarantine of a marker happens separately, in
+    ``quarantine_corrupt_self_heal_reprocess_sidecar``). Returns
+    {marker_file_path: rel_path}.
+
+    An already-quarantined marker (name contains ``.corrupt.``, produced
+    by ``quarantine_corrupt_self_heal_reprocess_sidecar``/
+    ``_quarantine_one_corrupt_file``) is skipped silently, with no WARNING
+    -- it was already logged and quarantined once, at the moment it was
+    found corrupt; treating it as a live marker on every subsequent read
+    would re-attempt to parse it (and, for real UTF-8 corruption, re-raise
+    and re-log its decode failure) forever. Mirrors the same exclusion
+    ``_find_corrupt_self_heal_reprocess_markers`` already applies so a
+    quarantined marker is never rediscovered as newly corrupt either.
+    """
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    result: Dict[Path, str] = {}
+    try:
+        entries = list(marker_dir.iterdir())
+    except FileNotFoundError:
+        return result
+    for marker_path in entries:
+        if marker_path.suffix == ".tmp" or ".corrupt." in marker_path.name:
+            continue
+        try:
+            content = marker_path.read_text().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "self-heal-reprocess marker %s could not be read (%s) -- "
+                "skipping this marker only",
+                marker_path,
+                exc,
+            )
+            continue
+        if content and _is_valid_self_heal_marker_content(marker_path, content):
+            result[marker_path] = content
+    return result
+
+
+def _find_corrupt_self_heal_reprocess_markers(collection_dir: Path) -> List[Path]:
+    """Bug #1969 Round 6 (P1-4, Amendment 9): find per-event markers that
+    exist but are corrupt -- unreadable (including containing bytes that
+    are not valid UTF-8), empty, or holding content whose sha256 digest
+    does not match the digest embedded in the marker's own filename (the
+    atomic writer always names a marker after its OWN content's digest,
+    so a mismatch, like an empty or unreadable marker, means the file was
+    damaged after the fact). ``_read_self_heal_reprocess_markers`` silently
+    drops such a marker (it only cares about the paths it CAN trust),
+    which would permanently lose that file's only replay record.
+    Already-quarantined markers (name contains ``.corrupt.``, this
+    function's own prior output) are excluded so a marker is quarantined
+    exactly once, never re-detected and re-quarantined on every
+    subsequent run.
+    """
+    marker_dir = _self_heal_reprocess_pending_dir(collection_dir)
+    corrupt: List[Path] = []
+    try:
+        entries = list(marker_dir.iterdir())
+    except FileNotFoundError:
+        return corrupt
+    for marker_path in entries:
+        if marker_path.suffix == ".tmp" or ".corrupt." in marker_path.name:
+            continue
+        try:
+            content = marker_path.read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            corrupt.append(marker_path)
+            continue
+        if not content or not _is_valid_self_heal_marker_content(marker_path, content):
+            corrupt.append(marker_path)
+    return corrupt
+
+
+def read_pending_self_heal_reprocess_paths(
+    collection_dir: "Path | str",
+) -> FrozenSet[str]:
+    """Read the durable self-heal reprocess sidecar for `collection_dir`
+    -- the union of every Round 6 per-event marker's recorded path. Never
+    mutates. A bad individual marker is skipped, not fatal to the rest."""
+    collection_dir = Path(collection_dir)
+    return frozenset(_read_self_heal_reprocess_markers(collection_dir).values())
+
+
+def record_self_heal_reprocess_pending(
+    collection_dir: "Path | str", paths: FrozenSet[str]
+) -> None:
+    """Durably record `paths` as needing reprocessing -- each path gets
+    its OWN independent marker file (Bug #1969 Round 6 P1-2, Amendment 6),
+    so two wipes recorded before anything drains either one never lose
+    the first one's paths, and neither can two CONCURRENT recorders lose
+    each other's write. No-op for an empty `paths`.
+
+    CONCURRENCY INVARIANT (Bug #1969 Round 6, P1-2, Amendment 6): earlier
+    designs considered a shared-file read-merge-write, serialized first by
+    ``self._id_index_lock``/``IndexingLock`` (both disproven -- see git
+    history), then a same-node file lock (which cannot help on the
+    cluster's NFSv3 ``nolock`` mount with no cross-node writer gate --
+    Amendment 6 disproved that gate too, filed separately as issue
+    #1970). This function has NO read-merge-write cycle AT ALL: each call
+    creates one brand-new marker file per path via
+    ``_write_self_heal_reprocess_marker`` and never reads or overwrites
+    any other marker, so there is nothing for two concurrent recorders
+    (same process, different processes, or different NODES) to race on --
+    correct with zero mutual exclusion.
+    """
+    if not paths:
+        return
+    collection_dir = Path(collection_dir)
+    for rel_path in paths:
+        _write_self_heal_reprocess_marker(collection_dir, rel_path)
+
+
+def clear_self_heal_reprocess_paths(
+    collection_dir: "Path | str", paths: Iterable[str]
+) -> None:
+    """Remove `paths` from the durable pending set -- callers MUST call
+    this ONLY after those paths have been successfully (not merely
+    attempted, and not cancelled) reprocessed; clearing any earlier would
+    lose the record on a crash before reprocessing actually finished.
+    Idempotent. A no-op (including when nothing is pending) when nothing
+    changes.
+
+    Bug #1969 Round 6 (P1-2, Amendment 6): deletes every per-event marker
+    file (`_write_self_heal_reprocess_marker`'s output) whose recorded
+    path is in `paths` -- best-effort per file, tolerating a marker
+    already removed by a concurrent clear. The clear-vs-record race PROOF
+    (a marker recorded by another writer AFTER this clear listed its
+    markers must never be touched) is a separate, deferred behavior --
+    this call only reads the marker directory ONCE per invocation and
+    only ever deletes files it saw containing a path this caller asked to
+    clear, never anything it didn't enumerate.
+    """
+    collection_dir = Path(collection_dir)
+    to_clear = set(paths)
+    if not to_clear:
+        return
+
+    for marker_path, rel_path in _read_self_heal_reprocess_markers(
+        collection_dir
+    ).items():
+        if rel_path in to_clear:
+            try:
+                marker_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def is_self_heal_reprocess_sidecar_corrupt(collection_dir: "Path | str") -> bool:
+    """Bug #1969 Round 6 (P1-4): true when at least one Round 6 per-event
+    marker exists but is unreadable or empty (see
+    ``_find_corrupt_self_heal_reprocess_markers``). Distinct from a
+    genuinely ABSENT/clean sidecar (no self-heal has ever fired, or its
+    reprocessing was already fully cleared), which returns False here.
+
+    ``read_pending_self_heal_reprocess_paths`` cannot distinguish "empty
+    because nothing is pending" from "empty because a marker is corrupt"
+    -- both can return ``frozenset()``. This function is the
+    discriminator callers use to decide whether they must fall back to a
+    broader detection strategy: Bug #1969 Round 6 P1-4 forces the run
+    into reconcile-with-database mode when this returns True, since
+    ``_do_reconcile_with_database`` classifies any file with zero points
+    as missing and reindexes it -- a complete superset of whatever the
+    lost marker might have listed (a self-heal-wiped file has zero
+    points regardless of whether its marker survives).
+    """
+    return bool(_find_corrupt_self_heal_reprocess_markers(Path(collection_dir)))
+
+
+def _quarantine_one_corrupt_file(source_path: Path) -> Optional[Path]:
+    """Move `source_path` aside to `<name>.corrupt.<timestamp>` in the same
+    directory (never delete), with a numeric suffix on collision. Returns
+    the destination, or None if the move failed (source untouched)."""
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    quarantine_path = source_path.parent / f"{source_path.name}.corrupt.{timestamp}"
+    suffix = 0
+    while quarantine_path.exists():
+        suffix += 1
+        quarantine_path = (
+            source_path.parent / f"{source_path.name}.corrupt.{timestamp}.{suffix}"
+        )
+    try:
+        os.replace(str(source_path), str(quarantine_path))
+    except OSError as exc:
+        logger.error(
+            "Bug #1969 Round 6 (P1-4): failed to quarantine corrupt "
+            "self-heal-reprocess file %s -> %s (%s) -- leaving it in "
+            "place.",
+            source_path,
+            quarantine_path,
+            exc,
+        )
+        return None
+    _fsync_dir(source_path.parent)
+    return quarantine_path
+
+
+def quarantine_corrupt_self_heal_reprocess_sidecar(
+    collection_dir: "Path | str",
+) -> Optional[Path]:
+    """Bug #1969 Round 6 (P1-4): move every CORRUPT Round 6 per-event
+    marker aside for forensics -- NEVER deletes any of them -- after a
+    reconcile-with-database run forced specifically because the sidecar
+    could not be trusted completes SUCCESSFULLY. Each marker found
+    corrupt (empty or unreadable) by
+    ``_find_corrupt_self_heal_reprocess_markers`` is quarantined
+    independently, so one corrupt marker never blocks the others' valid
+    replay paths from being read normally. Returns the first corrupt
+    marker's quarantine destination, or None if nothing needed
+    quarantining or every move failed (the corrupt artifact stays in
+    place either way -- never lost).
+    """
+    collection_dir = Path(collection_dir)
+    marker_quarantine_path: Optional[Path] = None
+    for marker_path in _find_corrupt_self_heal_reprocess_markers(collection_dir):
+        result = _quarantine_one_corrupt_file(marker_path)
+        if marker_quarantine_path is None:
+            marker_quarantine_path = result
+
+    return marker_quarantine_path
+
+
 def _accumulate_pending_outcome_durably(
     collection_dir: Path, new_counts: Dict[str, int]
 ) -> None:
@@ -942,7 +1334,8 @@ def _plan_dedup(
             f"Dedup repair refused for {collection_dir}: id_index.bin is "
             f"corrupt ({exc}) -- cannot resolve {len(duplicated)} "
             f"duplicate point_id(s) without a trustworthy winner "
-            f"reference. Collection left untouched."
+            f"reference. Collection left untouched.",
+            reason=DedupRepairAmbiguousReason.CORRUPT_ID_INDEX,
         ) from exc
 
     winners: Dict[str, Optional[Path]] = {}
@@ -1040,7 +1433,8 @@ def _plan_renumber(
                 f"passed the whole-collection identity gate but its "
                 f"unique_key ({unique_key!r}) is unparseable here "
                 f"({exc}). Collection left untouched; requires manual "
-                f"review."
+                f"review.",
+                reason=DedupRepairAmbiguousReason.INTERNAL_INVARIANT_VIOLATION,
             ) from exc
 
         groups.setdefault((project_id, file_hash), []).append(
@@ -1066,7 +1460,8 @@ def _plan_renumber(
                 f"{project_id!r}/{file_hash!r} has a mix of records with "
                 f"and without line_start -- cannot reliably order them "
                 f"for canonical renumbering. Collection left untouched; "
-                f"requires manual review."
+                f"requires manual review.",
+                reason=DedupRepairAmbiguousReason.MIXED_LINE_START_PRESENCE,
             )
 
         if all(has_line_start):
@@ -1178,14 +1573,16 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"Dedup repair refused for {collection_dir}: could not read "
             f"{meta_path} to determine the authoritative HNSW build "
             f"parameters (vector dimension / distance metric) -- "
-            f"refusing to guess ({exc}). Collection left untouched."
+            f"refusing to guess ({exc}). Collection left untouched.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_META_UNREADABLE,
         ) from exc
     if not isinstance(meta, dict):
         raise DedupRepairAmbiguousError(
             f"Dedup repair refused for {collection_dir}: {meta_path} does "
             f"not contain a JSON object -- cannot determine the "
             f"authoritative HNSW build parameters. Collection left "
-            f"untouched."
+            f"untouched.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_META_NOT_OBJECT,
         )
 
     hnsw_index = meta.get("hnsw_index")
@@ -1222,7 +1619,8 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"vector_size is a valid positive integer) -- refusing to "
             f"guess and rebuild the HNSW index with a potentially WRONG "
             f"dimension. Collection left untouched; requires manual "
-            f"review."
+            f"review.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_VECTOR_DIM_UNDETERMINABLE,
         )
     if space is None:
         raise DedupRepairAmbiguousError(
@@ -1230,7 +1628,8 @@ def _resolve_hnsw_build_params(collection_dir: Path) -> Tuple[int, str]:
             f"determine the authoritative HNSW distance metric from "
             f"{meta_path}'s hnsw_index.space -- refusing to guess "
             f"(defaulting could rebuild with the WRONG metric). "
-            f"Collection left untouched; requires manual review."
+            f"Collection left untouched; requires manual review.",
+            reason=DedupRepairAmbiguousReason.HNSW_PARAMS_SPACE_UNDETERMINABLE,
         )
 
     return vector_dim, space
@@ -1320,8 +1719,14 @@ def _rebuild_derived_artifacts(
     branch-isolation semantics (Bug #306) survive the rebuild unchanged
     (closes Codex HIGH finding 1), and durably restores that same branch
     context in collection_meta.json afterward so it survives for a LATER
-    rebuild too (closes Codex MEDIUM round-3 finding)."""
-    IDIndexManager().rebuild_from_vectors(collection_dir)
+    rebuild too (closes Codex MEDIUM round-3 finding).
+
+    Bug #1969 F2: self_heal=False is EXPLICIT here -- a duplicate found by
+    THIS internal rebuild must never trigger a SECOND repair_duplicate_
+    and_shifted_points() call recursively; it must raise
+    DuplicateSourceIdError immediately, exactly as it did before Bug
+    #1969's self-heal existed."""
+    IDIndexManager().rebuild_from_vectors(collection_dir, self_heal=False)
 
     current_branch = _infer_current_branch(collection_dir)
     HNSWIndexManager(vector_dim=vector_dim, space=space).rebuild_from_vectors(
@@ -1385,7 +1790,8 @@ def repair_duplicate_and_shifted_points(
             f"(sample: {[(str(p), reason) for p, reason in sample]}) -- "
             f"refusing to mutate ANY record in this collection before "
             f"the malformed one(s) can be reviewed. Collection left "
-            f"untouched."
+            f"untouched.",
+            reason=DedupRepairAmbiguousReason.MALFORMED_RECORDS,
         )
 
     if not id_to_paths:
@@ -1407,7 +1813,8 @@ def repair_duplicate_and_shifted_points(
                 f"may have been unexpectedly lost mid-repair). Refusing "
                 f"to silently converge over a potentially stale HNSW "
                 f"index. Collection left untouched (marker NOT "
-                f"deleted); requires manual review."
+                f"deleted); requires manual review.",
+                reason=DedupRepairAmbiguousReason.STALE_MARKER_EMPTY_TREE,
             )
         return DedupRepairResult()
 
@@ -1670,4 +2077,268 @@ def repair_duplicate_and_shifted_points(
         hnsw_rebuilt=True,
         groups_skipped_renumber=len(skipped_groups),
         skipped_renumber_file_hashes=skipped_sample,
+    )
+
+
+@dataclass
+class DuplicateFileWipeResult:
+    """Outcome of one :func:`recover_from_corrupt_id_index_by_wiping_files`
+    call."""
+
+    #: Number of distinct (project_id, file_hash) files wholly wiped.
+    file_hashes_wiped: int = 0
+    #: Total physical vector_*.json records deleted across all wiped
+    #: files (every chunk of each implicated file, not just the
+    #: colliding ones).
+    records_deleted: int = 0
+    #: Bug #1969 Round 4 (R3-F1): the relative path (``payload.path``) of
+    #: every wiped file, so a caller (IDIndexManager.rebuild_from_
+    #: vectors(), and ultimately smart_indexer.py's incremental indexing
+    #: loop) can re-queue these files for reprocessing within the SAME
+    #: run instead of leaving them permanently unsearchable until an
+    #: unrelated edit or a manual --reconcile.
+    wiped_relative_paths: FrozenSet[str] = field(default_factory=frozenset)
+
+
+def _try_parse_record_file_identity(
+    record: Dict[str, Any],
+) -> Optional[Tuple[str, str]]:
+    """Best-effort (project_id, file_hash) extraction from one raw
+    lightweight identity record's payload.unique_key -- returns None
+    (never raises) for anything unparseable, so callers can uniformly
+    skip records this recovery cannot safely classify."""
+    payload = record.get("payload") or {}
+    unique_key = payload.get("unique_key")
+    try:
+        project_id, file_hash, _old_index = parse_unique_key(unique_key)
+    except ValueError:
+        return None
+    return project_id, file_hash
+
+
+def _is_project_confined_relative_path(rel_path: Any) -> bool:
+    """Bug #1969 Round 6 (P1-5): true when `rel_path` is a nonempty
+    string that is safely usable as a project-relative replay path --
+    NOT absolute, and does not escape its base via a `..` path-traversal
+    segment. Validated syntactically against a synthetic root (this
+    module has no access to the real codebase root -- it only ever sees
+    the vector store's own collection directory), so this proves the
+    path COULD be a valid relative path within a project, without
+    needing the actual filesystem tree.
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        return False
+    candidate = Path(rel_path)
+    if candidate.is_absolute():
+        return False
+    synthetic_root = Path("/__self_heal_replay_path_validation_root__")
+    resolved = (synthetic_root / candidate).resolve()
+    try:
+        resolved.relative_to(synthetic_root)
+    except ValueError:
+        return False
+    return True
+
+
+def recover_from_corrupt_id_index_by_wiping_files(
+    collection_dir: "Path | str",
+) -> DuplicateFileWipeResult:
+    """Bug #1969 Round 3: whole-file-wipe escalation for the ONE
+    DedupRepairAmbiguousError reason that is safe to auto-resolve --
+    ``DedupRepairAmbiguousReason.CORRUPT_ID_INDEX``. Called ONLY by
+    ``IDIndexManager.rebuild_from_vectors``'s self-heal escalation, and
+    ONLY after :func:`repair_duplicate_and_shifted_points` has already
+    raised that specific reason: ``id_index.bin`` itself failed to load,
+    so ``_plan_dedup`` has no trustworthy reference to pick a per-chunk
+    winner among a duplicate point_id's colliding copies.
+
+    Recovery here does NOT depend on ``id_index.bin`` at all: for every
+    duplicate point_id group, every conflicting record's ``unique_key``
+    is parsed to its ``(project_id, file_hash)`` identity -- a point_id
+    collision can ONLY occur between chunks of the SAME source file
+    (identical project_id + file_hash + chunk_index), so recovery is
+    naturally bounded to those implicated files. Because this function
+    is only reached after ``repair_duplicate_and_shifted_points`` has
+    already run its whole-collection identity gate and malformed-record
+    pre-check, every duplicate-group record here is guaranteed to carry
+    a parseable, self-consistent ``unique_key``.
+
+    EVERY vector_*.json record belonging to any implicated
+    ``(project_id, file_hash)`` -- not just the colliding chunks -- is
+    deleted, so the file ends up with ZERO indexed chunks rather than a
+    partial/inconsistent set. This is deliberate: smart_indexer.py's
+    reconcile decides whether a file needs reprocessing using ONLY a
+    file-level identity comparison (git blob hash / mtime) -- it has no
+    notion of "does this file have all its expected chunks present". A
+    half-deleted file with an unchanged blob hash would never be
+    reprocessed again (a silent, permanent search-coverage gap). A
+    WHOLLY missing file is instead correctly detected as "needs
+    reprocessing" and fully re-indexed on the next real run.
+
+    Metadata-only: no re-chunking, no re-embedding, no provider calls.
+    Each deletion fsyncs its containing directory (reuses
+    :func:`_delete_loser`). ``id_index.bin`` and the HNSW index are then
+    rebuilt from the remaining, now conflict-free records via the SAME
+    already-battle-tested :func:`_rebuild_derived_artifacts` machinery
+    this module's normal repair uses -- its internal
+    ``IDIndexManager.rebuild_from_vectors`` call already passes
+    ``self_heal=False`` explicitly (Round 2's F2 fix), preventing this
+    escalation from ever recursing into itself.
+
+    Applies the SAME ``.versioned/`` snapshot guard as the rest of this
+    project (defense-in-depth: the caller already checks this before
+    ever reaching here, but this function must be safe to call
+    standalone too) -- raises ``DuplicateSourceIdError`` for that case,
+    matching that exception's own documented "an immutable versioned
+    snapshot" cause.
+
+    Returns:
+        A :class:`DuplicateFileWipeResult` describing what was wiped.
+        Zero-valued (no mutation) when the collection currently has no
+        duplicate point_id at all.
+
+    Raises:
+        DuplicateSourceIdError: ``collection_dir`` is at or inside an
+            immutable ``.versioned/`` snapshot.
+        DedupRepairAmbiguousError: a malformed record is found during
+            this function's own re-scan (defensive; should not happen
+            given the caller's own pre-checks already passed), or the
+            authoritative HNSW build parameters cannot be determined --
+            both propagate unchanged, exactly like the normal repair
+            path.
+    """
+    collection_dir = Path(collection_dir)
+
+    from code_indexer.server.services.query_path_cache import (
+        is_immutable_versioned_snapshot,
+    )
+
+    if is_immutable_versioned_snapshot(str(collection_dir)):
+        logger.warning(
+            "Bug #1969 Round 3: recover_from_corrupt_id_index_by_wiping_"
+            "files refused for %r -- immutable versioned snapshot; "
+            "refusing to mutate regardless of what was requested.",
+            collection_dir,
+        )
+        raise DuplicateSourceIdError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: path is an immutable versioned snapshot "
+            f"-- refusing to mutate a snapshot regardless of what was "
+            f"requested."
+        )
+
+    id_to_paths, malformed, identity_by_path = _scan_raw_records(collection_dir)
+
+    if malformed:
+        sample = malformed[:_MAX_MALFORMED_SAMPLE_SIZE]
+        raise DedupRepairAmbiguousError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: {len(malformed)} malformed vector "
+            f"record(s) found (sample: "
+            f"{[(str(p), r) for p, r in sample]}) -- refusing to mutate "
+            f"ANY record before the malformed one(s) can be reviewed.",
+            reason=DedupRepairAmbiguousReason.MALFORMED_RECORDS,
+        )
+
+    duplicated = {
+        point_id: paths for point_id, paths in id_to_paths.items() if len(paths) > 1
+    }
+    if not duplicated:
+        return DuplicateFileWipeResult()
+
+    implicated_files = set()
+    for paths in duplicated.values():
+        for path in paths:
+            identity = _try_parse_record_file_identity(identity_by_path[path])
+            if identity is not None:
+                implicated_files.add(identity)
+
+    if not implicated_files:
+        # No duplicate group had a parseable unique_key -- this recovery
+        # cannot safely identify which files to wipe. Should not happen
+        # in practice (the caller only reaches here after the whole-
+        # collection identity gate already passed), but a genuine no-op
+        # is safer than guessing.
+        return DuplicateFileWipeResult()
+
+    # Codex LOW finding 5 pattern (mirrors repair_duplicate_and_shifted_
+    # points): resolve the authoritative HNSW build parameters BEFORE any
+    # mutation -- an undeterminable value must fail loud, pre-mutation,
+    # leaving the collection untouched, never after files have already
+    # been deleted.
+    vector_dim, space = _resolve_hnsw_build_params(collection_dir)
+
+    # Pure planning pass: compute which relative paths will be wiped, PER
+    # implicated identity -- NO deletion happens here.
+    valid_paths_by_identity: Dict[Tuple[str, str], set] = {}
+    for path, record in identity_by_path.items():
+        identity = _try_parse_record_file_identity(record)
+        if identity is not None and identity in implicated_files:
+            payload = record.get("payload") or {}
+            rel_path = payload.get("path")
+            if _is_project_confined_relative_path(rel_path):
+                valid_paths_by_identity.setdefault(identity, set()).add(rel_path)
+
+    # Bug #1969 Round 6 (P1-5): refuse -- BEFORE recording the sidecar or
+    # deleting anything -- if ANY implicated identity has NO record with
+    # a valid, project-confined replay path (missing, empty, absolute, or
+    # a `..` path-traversal escape). Deleting such a group's records
+    # would lose the only durably nameable replay path with zero
+    # mutation to show for it -- unlike a genuinely malformed record
+    # (caught earlier by the whole-collection scan), this shape is
+    # syntactically valid JSON with a parseable identity, so it slips
+    # past every OTHER precheck in this module.
+    unresolvable_identities = implicated_files - set(valid_paths_by_identity.keys())
+    if unresolvable_identities:
+        raise DedupRepairAmbiguousError(
+            f"recover_from_corrupt_id_index_by_wiping_files refused for "
+            f"{collection_dir}: {len(unresolvable_identities)} implicated "
+            f"file-hash group(s) have NO record with a valid, "
+            f"project-confined replay path (sample identities: "
+            f"{sorted(unresolvable_identities)[:_MAX_MALFORMED_SAMPLE_SIZE]}) "
+            f"-- refusing to delete records that cannot be durably "
+            f"recorded for reprocessing.",
+            reason=DedupRepairAmbiguousReason.UNRESOLVABLE_REPLAY_PATH,
+        )
+
+    wiped_relative_paths: set = set()
+    for paths in valid_paths_by_identity.values():
+        wiped_relative_paths |= paths
+
+    # Bug #1969 Round 5 (R4-F1): durably record the about-to-be-wiped
+    # paths BEFORE the first physical deletion below -- a crash anywhere
+    # after this point (mid-deletion, or during the HNSW rebuild's long
+    # lock hold, R3-F5) still leaves a durable record for the NEXT run's
+    # own consult-and-fold-in step to pick up, so the file is never
+    # silently, permanently lost regardless of which caller (upsert_
+    # points, end_indexing, scroll_points, in this run or a future one)
+    # triggered this wipe.
+    record_self_heal_reprocess_pending(collection_dir, frozenset(wiped_relative_paths))
+
+    records_deleted = 0
+    for path, record in identity_by_path.items():
+        identity = _try_parse_record_file_identity(record)
+        if identity is not None and identity in implicated_files:
+            _delete_loser(path)
+            records_deleted += 1
+
+    logger.warning(
+        "Bug #1969 Round 4: recover_from_corrupt_id_index_by_wiping_files "
+        "wiped %d record(s) across %d implicated file(s) in %s -- "
+        "id_index.bin was corrupt/unreadable so no per-chunk winner "
+        "could be resolved; every chunk of each implicated file was "
+        "deleted (not just the colliding ones) so the file is fully "
+        "MISSING rather than half-indexed. Wiped relative paths: %s.",
+        records_deleted,
+        len(implicated_files),
+        collection_dir,
+        sorted(wiped_relative_paths),
+    )
+
+    _rebuild_derived_artifacts(collection_dir, vector_dim, space)
+
+    return DuplicateFileWipeResult(
+        file_hashes_wiped=len(implicated_files),
+        records_deleted=records_deleted,
+        wiped_relative_paths=frozenset(wiped_relative_paths),
     )

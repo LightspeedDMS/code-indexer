@@ -155,6 +155,10 @@ class TestCreateWatchHandlerSucceedsWithGenuineOwnConfig:
         assert handler is not None
         # SmartIndexer(config, embedding_provider, vector_store_client, metadata_path)
         called_metadata_path = smart_indexer_mock.call_args[0][3]
+        # Bug #1979 (round 4, reverted): bare filename, matching the SAME
+        # convention daemon/service.py's own index path uses -- the point
+        # of THIS test (project_path's own .code-indexer dir, never an
+        # ancestor's) is unaffected by the filename suffix.
         expected_metadata_path = (
             project_path.resolve() / ".code-indexer" / "metadata.json"
         )

@@ -1163,6 +1163,149 @@ class TestIntegration:
         pass
 
 
+class TestJobResultErrorFieldBug1978:
+    """Regression tests for Bug #1978's secondary defect: a failed reindex
+    job's ``error`` field showed only the generic string "job failed" -- the
+    real cause (e.g. an EACCES permission error) was visible only in server
+    logs. BackgroundJobManager derives the JobTracker-visible error via
+    ``job.result.get("error", "job failed")``
+    (repositories/background_jobs.py), so ``_execute_indexing_job``'s
+    returned dict MUST carry a top-level "error" key whenever any index type
+    fails.
+    """
+
+    def test_result_includes_top_level_error_on_single_type_failure(
+        self, index_manager, temp_data_dir
+    ):
+        """The real per-type failure text must reach the top-level 'error'
+        key, not just be buried inside results[type]['error']."""
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        real_error = (
+            "Semantic indexing failed: cidx index exited 1: "
+            "[Errno 13] Permission denied: "
+            "'.code-indexer/.index-mutation.lock'"
+        )
+
+        def _fake_single(rp, index_type, clear):
+            return {"success": False, "error": real_error}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            result = index_manager._execute_indexing_job(
+                repo_alias="test-repo",
+                repo_path=repo_path,
+                index_types=["semantic"],
+                clear=False,
+            )
+
+        assert result["success"] is False
+        assert "error" in result, (
+            "Bug #1978: job result must carry a top-level 'error' key on "
+            f"failure so JobTracker never falls back to the generic 'job "
+            f"failed' string. Got keys: {list(result.keys())}"
+        )
+        assert "Permission denied" in result["error"], (
+            f"Bug #1978: the real failure text must reach the job's error "
+            f"field, got: {result['error']!r}"
+        )
+        assert result["error"] != "job failed"
+
+    def test_result_combines_multiple_failed_types_in_error_field(
+        self, index_manager, temp_data_dir
+    ):
+        """When several index types fail, each real error is identifiable in
+        the combined top-level error field, tagged by its index type."""
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        def _fake_single(rp, index_type, clear):
+            if index_type == "semantic":
+                return {"success": False, "error": "EACCES on chunks.db"}
+            if index_type == "fts":
+                return {"success": False, "error": "EACCES on trigrams.db"}
+            return {"success": True}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            result = index_manager._execute_indexing_job(
+                repo_alias="test-repo",
+                repo_path=repo_path,
+                index_types=["semantic", "fts"],
+                clear=False,
+            )
+
+        assert result["success"] is False
+        assert "semantic" in result["error"]
+        assert "EACCES on chunks.db" in result["error"]
+        assert "fts" in result["error"]
+        assert "EACCES on trigrams.db" in result["error"]
+
+    def test_result_has_no_error_key_on_full_success(
+        self, index_manager, temp_data_dir
+    ):
+        """Success path is unaffected: no top-level 'error' key is added."""
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        def _fake_single(rp, index_type, clear):
+            return {"success": True, "message": "ok"}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            result = index_manager._execute_indexing_job(
+                repo_alias="test-repo",
+                repo_path=repo_path,
+                index_types=["semantic"],
+                clear=False,
+            )
+
+        assert result["success"] is True
+        assert "error" not in result
+
+    def test_result_error_field_is_truncated_sensibly(
+        self, index_manager, temp_data_dir
+    ):
+        """An extremely verbose per-type diagnostic must not blow up the
+        job's error field unbounded -- it is truncated, not dropped."""
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        huge_error = "Permission denied: " + ("x" * 10000)
+
+        def _fake_single(rp, index_type, clear):
+            return {"success": False, "error": huge_error}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            result = index_manager._execute_indexing_job(
+                repo_alias="test-repo",
+                repo_path=repo_path,
+                index_types=["semantic"],
+                clear=False,
+            )
+
+        assert result["success"] is False
+        assert len(result["error"]) < len(huge_error), (
+            "Bug #1978: an oversized per-type error must be truncated, not "
+            "carried verbatim into the job's error field"
+        )
+        assert "Permission denied" in result["error"]
+
+
 class TestRepoAliasForwardingBug1154:
     """Regression tests for Bug #1154: repo_alias not forwarded to worker.
 

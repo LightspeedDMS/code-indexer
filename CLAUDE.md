@@ -70,6 +70,8 @@ No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, do
 
 ## Memory Files
 
+**MEMORIES ARE PUBLIC.** `.claude-memory/` is committed to this public open-source repository, so every memory file is world-readable. NEVER write secrets, credentials, or any sensitive information into a memory file -- not even temporarily, not even "to sanitize later".
+
 Memory notes in `.claude-memory/` are committed to version control. Before staging/committing ANY memory file, sanitize it: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IPs, network topology, cluster node ids, ports). Capture the lesson, never the environment -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
 
 ---
@@ -145,6 +147,12 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 | `e2e-automation.sh` | 6-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
+
+### Gate Timing -- Full Gates Only After Approval
+
+Full gates (`fast-`, `server-fast-`, `e2e-automation.sh`, full `./lint.sh`, directory-wide pytest) run ONCE, only after ALL code reviews are approved. In an epic, only after ALL stories are completed and approved. Running them before or between review rounds wastes the run whenever review rejects.
+
+In between, pick tests strategically: (1) tests for the specific capability being worked on, and (2) tests for capabilities you suspect the change could break (callers, shared state, sibling paths). Name the files; never run whole directories as a substitute for thinking. Put this rule in every engineer and pair brief.
 
 ### Hierarchy
 

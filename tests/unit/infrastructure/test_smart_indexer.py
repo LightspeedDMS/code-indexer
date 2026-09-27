@@ -64,6 +64,8 @@ def mock_filesystem_client():
     client.upsert_points.return_value = True
     # Mock scroll_points to return a tuple (points, metadata) as expected
     client.scroll_points.return_value = ([], None)
+    client.get_pending_self_heal_reprocess_paths.return_value = frozenset()
+    client.is_self_heal_reprocess_sidecar_corrupt.return_value = False
     return client
 
 

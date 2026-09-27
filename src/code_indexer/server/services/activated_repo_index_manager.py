@@ -11,8 +11,8 @@ from code_indexer.server.logging_utils import format_error_log, get_log_extra
 import json
 import logging
 import os
-import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Tuple, cast
@@ -426,12 +426,23 @@ class ActivatedRepoIndexManager:
 
             update_progress(100, message, phase="complete")
 
-            return {
+            job_result: Dict[str, Any] = {
                 "success": all_success,
                 "message": message,
                 "results": results,
                 "failed_types": failed_types if failed_types else None,
             }
+            if not all_success:
+                # Bug #1978: BackgroundJobManager derives the JobTracker-visible
+                # error via job.result.get("error", "job failed")
+                # (repositories/background_jobs.py) -- without a top-level
+                # "error" key here, every failed reindex surfaced the generic
+                # "job failed" string, and the real cause (e.g. an EACCES
+                # permission error) was visible only in server logs.
+                job_result["error"] = self._summarize_failed_index_types(
+                    failed_types, results
+                )
+            return job_result
 
         except Exception as e:
             error_msg = f"Failed to execute reindex job for '{repo_alias}': {str(e)}"
@@ -449,6 +460,35 @@ class ActivatedRepoIndexManager:
                 "results": {},
                 "error": str(e),
             }
+
+    #: Bug #1978: per-type and overall caps on the summarized job "error"
+    #: field -- a verbose subprocess diagnostic (the common case for a
+    #: permission or provider failure) must reach the job record, but never
+    #: unbounded: one failing type must not be able to blow up job storage.
+    _MAX_PER_TYPE_ERROR_CHARS = 1000
+    _MAX_JOB_ERROR_CHARS = 4000
+
+    @classmethod
+    def _summarize_failed_index_types(
+        cls, failed_types: List[str], results: Dict[str, Dict[str, Any]]
+    ) -> str:
+        """Bug #1978: build the job's top-level "error" text from the REAL
+        per-type failures (each already carries its own real cause, e.g. the
+        EACCES text from a cluster CoW-clone permission failure) instead of
+        the generic "job failed" string BackgroundJobManager otherwise falls
+        back to via ``job.result.get("error", "job failed")``.
+        """
+        parts = []
+        for index_type in failed_types:
+            detail = str(results.get(index_type, {}).get("error") or "unknown error")
+            if len(detail) > cls._MAX_PER_TYPE_ERROR_CHARS:
+                detail = detail[: cls._MAX_PER_TYPE_ERROR_CHARS] + "... [truncated]"
+            parts.append(f"{index_type}: {detail}")
+
+        summary = "; ".join(parts)
+        if len(summary) > cls._MAX_JOB_ERROR_CHARS:
+            summary = summary[: cls._MAX_JOB_ERROR_CHARS] + "... [truncated]"
+        return summary
 
     def _execute_all_index_types(
         self,
@@ -708,24 +748,19 @@ class ActivatedRepoIndexManager:
             if not (repo_path_obj / ".code-indexer" / "config.json").exists():
                 return self._uninitialized_repo_error(repo_path, "Semantic")
 
-            index_dir = repo_path_obj / ".code-indexer" / "index"
-
-            # Clear index if requested
-            if clear and index_dir.exists():
-                self.logger.info(
-                    f"Clearing semantic index: {index_dir}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                shutil.rmtree(index_dir)
-
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
             )
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = ["cidx", "index"]
+            if clear:
+                args.append("--clear")
+            args = append_server_layout_args(args)
+            clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
-                append_server_layout_args(["cidx", "index"]),
+                args,
                 repo_path,
                 cancel_check=cancel_check,
             )
@@ -738,6 +773,63 @@ class ActivatedRepoIndexManager:
                         f"{format_completed_process_diagnostic(result)}"
                     ),
                 }
+
+            # clear=true must refresh every configured provider's metadata
+            # and leave each provider's TEXT collection non-empty. Existing
+            # multimodal directories may be empty when images were removed.
+            if clear:
+                # Bug #1979 (codex review findings, turns 13 and 15): a
+                # configured provider that the child skipped for ANY reason
+                # (missing API key, a failed health check, or anything else)
+                # must not let this job report success. Matching individual
+                # skip-reason stdout strings proved fragile -- turn 13's
+                # "no API key found" regex missed turn 15's differently-
+                # worded "health check failed ... skipping" path entirely.
+                # The robust, reason-agnostic signal is each provider's OWN
+                # progress metadata (cli.py's per-provider
+                # metadata-<provider>.json): if it was not updated to a
+                # timestamp at or after this clear started, that provider
+                # was not genuinely rebuilt this run -- regardless of
+                # whether its collection happens to hold OLD points from a
+                # prior run (a positive point count alone is not proof of a
+                # fresh rebuild). Config is read via the same
+                # json.load + Config(**data) pattern already used elsewhere
+                # in this file, then get_embedding_providers() is the real,
+                # authoritative method -- no credential-resolution logic is
+                # re-derived here.
+                config_json_path = repo_path_obj / ".code-indexer" / "config.json"
+                with open(config_json_path) as f:
+                    repo_config = Config(**json.load(f))
+
+                from code_indexer.services.provider_rebuild_check import (
+                    find_providers_not_rebuilt_since,
+                )
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
+
+                index_dir = repo_path_obj / ".code-indexer" / "index"
+                store = FilesystemVectorStore(index_dir, project_root=repo_path_obj)
+
+                stale_or_missing_providers = find_providers_not_rebuilt_since(
+                    repo_path_obj / ".code-indexer",
+                    repo_config.get_embedding_providers(),
+                    clear_start_time,
+                    config=repo_config,
+                    vector_store=store,
+                )
+
+                if stale_or_missing_providers:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Semantic indexing reported success but "
+                            f"provider(s) {stale_or_missing_providers} were "
+                            "not genuinely rebuilt during clear=true "
+                            "(skipped, stale metadata, or empty TEXT collection); "
+                            "treating as failure."
+                        ),
+                    }
 
             return {"success": True, "message": "Semantic indexing completed"}
 

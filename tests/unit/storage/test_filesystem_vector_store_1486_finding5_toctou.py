@@ -127,9 +127,15 @@ class _MigrationOnExistsStore(FilesystemVectorStore):
     """
 
     def _load_id_index(
-        self, collection_name: str, subdirectory: Optional[str] = None
+        self,
+        collection_name: str,
+        subdirectory: Optional[str] = None,
+        *,
+        self_heal: bool = False,
     ) -> Dict[str, Path]:  # type: ignore[override]
-        real = super()._load_id_index(collection_name, subdirectory)
+        real = super()._load_id_index(
+            collection_name, subdirectory, self_heal=self_heal
+        )
         collection_path = self._get_collection_path(collection_name, subdirectory)
 
         def fire() -> None:
