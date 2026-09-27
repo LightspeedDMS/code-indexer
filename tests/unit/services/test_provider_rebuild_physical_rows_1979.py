@@ -4,10 +4,12 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
+from code_indexer.config import Config
 from code_indexer.services.provider_rebuild_check import (
     find_providers_not_rebuilt_since,
 )
@@ -42,7 +44,12 @@ def test_rebuild_check_uses_physical_rows_despite_stale_cached_count(
     store = SimpleNamespace(base_path=index_dir)
     store.resolve_collection_name = lambda config, provider: "example-text"
     store._get_collection_path = lambda name: index_dir / name
-    store.count_points = lambda name: FilesystemVectorStore.count_points(store, name)
+    # cast: `store` is a duck-typed SimpleNamespace fake exercising only the
+    # subset of FilesystemVectorStore's interface used here; there is no
+    # narrower static type to express that structural relationship.
+    store.count_points = lambda name: FilesystemVectorStore.count_points(
+        cast(FilesystemVectorStore, store), name
+    )
     assert store.count_points("example-text") == 7
 
     with patch(
@@ -52,8 +59,12 @@ def test_rebuild_check_uses_physical_rows_despite_stale_cached_count(
             config_dir,
             ["voyage-ai"],
             100.0,
-            config=SimpleNamespace(),
-            vector_store=store,
+            # cast: an empty SimpleNamespace stands in for Config here since
+            # this code path never reads any Config attribute.
+            config=cast(Config, SimpleNamespace()),
+            # cast: same duck-typed fake as above, satisfying the
+            # FilesystemVectorStore parameter type.
+            vector_store=cast(FilesystemVectorStore, store),
         )
 
     assert missing == ([] if has_rows else ["voyage-ai"])

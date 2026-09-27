@@ -43,6 +43,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import List, Optional
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -51,7 +52,7 @@ from code_indexer.cli import cli
 
 
 class _DaemonIndexCommitsTestBase(unittest.TestCase):
-    embedding_providers = None  # type: ignore[assignment]
+    embedding_providers: Optional[List[str]] = None
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(dir=Path.cwd() / ".tmp")

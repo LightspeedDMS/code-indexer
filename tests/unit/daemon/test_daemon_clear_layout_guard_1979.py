@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -111,7 +112,7 @@ class TestExposedIndexBlockingClearLayoutGuard:
     def test_force_full_with_false_layout_is_refused(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):
             result = CIDXDaemonService.exposed_index_blocking(
@@ -134,7 +135,7 @@ class TestExposedIndexBlockingClearLayoutGuard:
     def test_force_full_with_none_layout_defaults_to_chunks_db(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):
             result = CIDXDaemonService.exposed_index_blocking(
@@ -156,7 +157,7 @@ class TestExposedIndexBlockingClearLayoutGuard:
     def test_non_full_index_with_none_layout_stays_none(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):
             result = CIDXDaemonService.exposed_index_blocking(
@@ -180,7 +181,7 @@ class TestRunIndexingBackgroundClearLayoutGuard:
     def test_force_full_with_false_layout_is_refused(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
         fake_self = _make_fake_daemon_self_for_background()
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):
@@ -205,7 +206,7 @@ class TestRunIndexingBackgroundClearLayoutGuard:
     def test_force_full_with_none_layout_defaults_to_chunks_db(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
         fake_self = _make_fake_daemon_self_for_background()
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):
@@ -229,7 +230,7 @@ class TestRunIndexingBackgroundClearLayoutGuard:
     def test_non_full_index_with_none_layout_stays_none(self, tmp_path):
         from code_indexer.daemon.service import CIDXDaemonService
 
-        recorded = []
+        recorded: List[Optional[bool]] = []
         fake_self = _make_fake_daemon_self_for_background()
 
         with _daemon_index_env(tmp_path, _backend_spy(recorded)):

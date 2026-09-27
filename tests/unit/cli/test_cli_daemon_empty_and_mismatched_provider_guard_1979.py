@@ -35,6 +35,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import List, Optional
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -44,7 +45,7 @@ from code_indexer.cli import cli
 
 class _DaemonClearGuardTestBase(unittest.TestCase):
     embedding_provider = "voyage-ai"
-    embedding_providers = None  # type: ignore[assignment]
+    embedding_providers: Optional[List[str]] = None
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(dir=Path.cwd() / ".tmp")
