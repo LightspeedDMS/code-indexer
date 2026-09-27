@@ -43,6 +43,7 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
+from ..auth.elevation_decorator import require_mcp_elevation
 from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
 from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
 
@@ -2263,9 +2264,15 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"error": str(e)})
 
 
+@require_mcp_elevation()
 def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Bulk add provider index to all repositories (Story #490)."""
+    """Bulk add provider index to all repositories (Story #490).
+
+    Elevation-gated to match the REST twin (POST .../bulk-add carries
+    require_elevation()).
+    """
     try:
+        from code_indexer.server.auth.user_manager import UserRole
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
         )
@@ -2283,6 +2290,39 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
             )
 
         global_repos = _list_global_repos()
+
+        # Repo access must be consistent across every capability a role can
+        # reach -- a fleet-enumerating/fleet-mutating tool gets no carve-out.
+        # Filter to the repos this caller can access BEFORE any category
+        # filtering, status lookup, config mutation, or job submission.
+        # Mirrors the existing pattern in handle_list_global_repos /
+        # _append_global_repos_to_status (same file): matched on repo_name
+        # (the group-access grant key), admin ROLE bypasses unconditionally
+        # (independent of group membership, same rationale as those sibling
+        # handlers).
+        if user.role != UserRole.ADMIN:
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service is None:
+                # Fail closed (mirrors protocol.py's own AttributeError
+                # fail-closed rule, Story #331 AC9): an unavailable access
+                # service must never be treated as "nothing to filter".
+                return _mcp_response(
+                    {
+                        "error": (
+                            "Access denied: access control service unavailable, "
+                            "cannot verify access for tool "
+                            "'bulk_add_provider_index'"
+                        )
+                    }
+                )
+            repo_names = [r.get("repo_name", "") for r in global_repos]
+            accessible_names = access_filtering_service.filter_repo_listing(
+                repo_names, user.username
+            )
+            global_repos = [
+                r for r in global_repos if r.get("repo_name", "") in accessible_names
+            ]
+
         filter_pattern = params.get("filter")
         job_ids = []
         skipped = []
