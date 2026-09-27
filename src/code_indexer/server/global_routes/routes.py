@@ -13,7 +13,11 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Any, Optional, cast
 
-from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth import dependencies
+from code_indexer.server.auth.dependencies import (
+    get_current_admin_user_hybrid,
+    get_current_user,
+)
 from code_indexer.server.auth.user_manager import User
 from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
@@ -181,19 +185,29 @@ def get_global_config(user: User = Depends(get_current_user)) -> ConfigResponse:
     return ConfigResponse(refresh_interval=config["refresh_interval"])
 
 
-@router.put("/config", response_model=ConfigUpdateResponse)
+@router.put(
+    "/config",
+    response_model=ConfigUpdateResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_global_config(
-    config: GlobalConfigUpdate, user: User = Depends(get_current_user)
+    config: GlobalConfigUpdate,
+    user: User = Depends(get_current_admin_user_hybrid),
 ) -> ConfigUpdateResponse:
     """
     Update global configuration.
 
     Updates the global refresh interval.
 
+    This mutates server-wide config (the golden-repo refresh
+    interval used across the whole fleet), so it requires admin role AND an
+    active TOTP elevation window -- matching the MCP twin `set_global_config`
+    (`@require_mcp_elevation()` in `mcp/handlers/admin/__init__.py`).
+
     Args:
         config: GlobalConfigUpdate with new refresh_interval
 
-    Requires authentication.
+    Requires admin role + elevation.
 
     Returns:
         ConfigUpdateResponse with status="updated"

@@ -730,6 +730,10 @@ class GitSyncExecutor:
             )
 
             # Execute incremental smart indexing
+            # This runs server-side against a tenant/committer
+            # -writable repo, so resume state must not be trusted. No `cidx`
+            # subprocess is spawned here, so this is passed directly rather
+            # than via the append_server_layout_args() seam.
             stats = smart_indexer.smart_index(
                 force_full=False,  # Incremental indexing after git changes
                 reconcile_with_database=False,
@@ -738,6 +742,7 @@ class GitSyncExecutor:
                 safety_buffer_seconds=60,
                 vector_thread_count=config.voyage_ai.parallel_requests,
                 detect_deletions=False,
+                trust_resume_state=False,
             )
 
             # Check if indexing was successful

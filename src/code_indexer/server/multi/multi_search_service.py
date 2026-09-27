@@ -567,6 +567,16 @@ class MultiSearchService:
             # embedder/config settings for this repo.
             config = ConfigManager.load_verified_config(repo_path)
 
+            # This method only ever runs in server context, so the
+            # embedding-provider endpoint and daemon-mode fields are reset
+            # to server-managed values before the temporal fusion dispatch
+            # below constructs the per-commit embedder from them.
+            from ..utils.server_managed_provider_settings import (
+                enforce_server_managed_provider_settings,
+            )
+
+            enforce_server_managed_provider_settings(config)
+
             # Initialize vector store for temporal search.
             # Story #1170: mirror filesystem_backend.py get_vector_store_client()
             # pattern so the temporal path benefits from the same HNSW/ID cache

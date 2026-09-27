@@ -55,6 +55,8 @@ Applies to source, tests, **test fixtures and sample data**, docstrings, comment
 - Bug reports and epics cite BEHAVIOUR and code locations in THIS repository -- never a third party's file paths, type names, or source.
 - Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
 - Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
+- Security vulnerabilities are tracked out of band in the dedicated private repository `code-indexer-security`, never in this repository's issues, PRs, or docs.
+- Commit messages always use neutral, professional language. Security commits, and their code comments and tests, state the invariant enforced (e.g. "validate git remote and branch arguments"), never the flaw, exploit, payload, or impact.
 
 ### If something already leaked
 
@@ -222,7 +224,7 @@ Three CI sync constraints, all learned by breaking them:
 2. `lint` runs on **Python 3.9**, tracking `[tool.mypy] python_version`. `no_site_packages=false` means mypy PARSES third-party sources under that target -- a newer interpreter installs deps whose syntax 3.9 can't parse and the gate dies inside `site-packages`. Do NOT modernize to 3.12 without moving the mypy target. (mypy also flags `attr-defined` on a private third-party attr the CI-installed version lacks -- access such internals via `getattr(mod, "_X", fallback)`, not a bare import.)
 3. `rust` pins `dtolnay/rust-toolchain@<exact>` which must track `rust/rust-toolchain.toml`'s `channel`; rustup auto-installs it for any `cargo` invocation with cwd inside `rust/`, in CI and locally alike. Do not revert either to floating.
 
-**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing.
+**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing. **The pre-commit hook skips `tests/`, but `lint.sh` and CI type-check them** -- also run `python3 -m mypy --explicit-package-bases --check-untyped-defs <changed test files>` (typical hits: `str` passed where `Path`/an enum is expected, `Any` returned from a typed helper).
 
 ---
 

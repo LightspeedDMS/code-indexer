@@ -25,6 +25,11 @@ import platform
 import requests
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.config import write_json_atomic
+from code_indexer.server.utils.host_validation import is_valid_server_host
+from code_indexer.server.utils.config_manager import (
+    _SERVER_WORKERS_MIN,
+    _SERVER_WORKERS_MAX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3096,6 +3101,20 @@ class DeploymentExecutor:
             if values is None:
                 return None
             host, port, workers = values["host"], values["port"], values["workers"]
+            if (
+                not is_valid_server_host(host)
+                or not (1 <= int(port) <= 65535)
+                or not (_SERVER_WORKERS_MIN <= int(workers) <= _SERVER_WORKERS_MAX)
+            ):
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-223",
+                        "_ensure_launch_config: resolved host/port/workers failed "
+                        f"validation (host={host!r}, port={port!r}, "
+                        f"workers={workers!r}); refusing rewrite, unit left unchanged",
+                    )
+                )
+                return None
             service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
             lines = self._read_cidx_service_lines(service_path)
             if lines is None:

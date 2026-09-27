@@ -20,6 +20,11 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.server.services.branch_service import BranchService
+from code_indexer.server.services.git_argv_safety import (
+    GitArgumentValidationError,
+    validate_branch_name,
+    validate_remote_syntax,
+)
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
@@ -575,6 +580,8 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # cache TTL.
         BranchService.invalidate(repo_path)
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_branch_delete", e)
     except GitCommandError as e:
@@ -858,6 +865,8 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_reset")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_reset_hard", e)
     except Exception as e:
@@ -894,6 +903,8 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_clean")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_clean", e)
     except Exception as e:
@@ -926,6 +937,22 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "Failed to resolve repository path"}
             )
+
+        # _get_pat_credential_for_remote() below builds its own "git remote
+        # get-url <remote>" argv, a separate call site from
+        # GitOperationsService.git_push_with_pat's own validation. Apply both
+        # hazard checks to `remote` here too (a leading '-' other than
+        # exactly '-', and a control character), before that call and
+        # before the migration trigger, so no such value from the MCP front
+        # door ever reaches any git subprocess -- using the subprocess-free
+        # validate_remote_syntax() rather than the full
+        # validate_remote_name() membership check, since repo_path here has
+        # not yet been proven to be a real, initialized git repository. The
+        # membership check still runs, unconditionally, inside
+        # git_push_with_pat below before any of its own subprocesses. See
+        # git_argv_safety module docstring for the invariant.
+        validate_remote_syntax(remote)
+        branch = validate_branch_name(branch)
 
         # Trigger migration before push if needed (Bug #639)
         git_operations_service._trigger_migration_if_needed(

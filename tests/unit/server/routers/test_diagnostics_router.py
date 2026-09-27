@@ -9,11 +9,15 @@ Tests cover:
 - HTMX headers (HX-Stop-Polling)
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, MagicMock
+from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.diagnostics import router
 from code_indexer.server.services.diagnostics_service import (
     DiagnosticCategory,
@@ -38,12 +42,29 @@ def _bypass_elevation(app, router):
                 app.dependency_overrides[dep_callable] = lambda: None
 
 
+def _fake_admin_user() -> User:
+    """Stand-in admin user for the get_current_admin_user_hybrid override.
+
+    GET /admin/diagnostics and /admin/diagnostics/status now
+    require admin auth, so this suite (which pre-dates that fix and exercises
+    behavior unrelated to auth) overrides the dependency the same way the
+    elevation gates are bypassed above.
+    """
+    return User(
+        username="test-diagnostics-admin",
+        password_hash="hashed",
+        role=UserRole.ADMIN,
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+
+
 @pytest.fixture
 def app():
     """Create test FastAPI app with diagnostics router."""
     app = FastAPI()
     app.include_router(router)
     _bypass_elevation(app, router)
+    app.dependency_overrides[get_current_admin_user_hybrid] = _fake_admin_user
     return app
 
 

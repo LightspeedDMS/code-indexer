@@ -467,7 +467,10 @@ class TestRoleBasedAccessControl:
         assert response.status_code != 403  # Not forbidden (can list repos)
 
     def test_require_permission_decorator_admin_only(self):
-        """Test require_permission decorator for admin-only operations."""
+        """require_permission() is a FastAPI dependency factory: it returns
+        a dependency callable that resolves the current user and raises
+        HTTPException(403) when that user lacks the permission -- proving
+        a disallowed user is rejected."""
         from fastapi import HTTPException
 
         # Mock current user as power user
@@ -478,19 +481,20 @@ class TestRoleBasedAccessControl:
             created_at=datetime.now(timezone.utc),
         )
 
-        # Create a test function that requires admin permission
-        @require_permission("manage_users")
-        def test_admin_function(current_user):
-            return "admin_success"
+        # The dependency callable itself takes current_user (normally
+        # resolved by FastAPI via Depends(get_current_user)); called
+        # directly here with an explicit user, as routes' own tests do.
+        permission_dependency = require_permission("manage_users")
 
-        # Should raise HTTPException for admin-only permission
         with pytest.raises(HTTPException) as exc_info:
-            test_admin_function(power_user)
+            permission_dependency(current_user=power_user)
 
         assert exc_info.value.status_code == 403
 
     def test_require_permission_decorator_allowed_permission(self):
-        """Test require_permission decorator for allowed operations."""
+        """require_permission()'s dependency callable returns the resolved
+        user unchanged when the user DOES hold the permission -- proving an
+        allowed user passes through."""
 
         # Mock current user as power user
         power_user = User(
@@ -500,14 +504,10 @@ class TestRoleBasedAccessControl:
             created_at=datetime.now(timezone.utc),
         )
 
-        # Create a test function that requires power user permission
-        @require_permission("activate_repos")
-        def test_power_function(current_user):
-            return "power_success"
+        permission_dependency = require_permission("activate_repos")
 
-        # Should not raise exception for allowed permission
-        result = test_power_function(power_user)
-        assert result == "power_success"
+        result = permission_dependency(current_user=power_user)
+        assert result is power_user
 
 
 @pytest.mark.e2e

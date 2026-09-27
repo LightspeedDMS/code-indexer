@@ -146,13 +146,24 @@ def capture(analyzer, cfg, tmp_path):
 class TestCmdFlags:
     """--dangerously-skip-permissions, config timeout propagation, absence of --output-format json."""
 
-    def test_cmd_includes_dangerously_skip_permissions(self, capture):
-        """Every cmd must include --dangerously-skip-permissions."""
+    def test_cmd_includes_dangerously_skip_permissions_and_strict_mcp_config(
+        self, capture
+    ):
+        """Verification keeps its full command capability (the Edit tool
+        needs --dangerously-skip-permissions to run non-interactively) and
+        runs with --strict-mcp-config, never --restricted. See
+        test_claude_invoker_agent_isolation.py for the full suite."""
         cmds, _, _, _ = capture()
         assert cmds, "No subprocess.run calls were captured"
         for cmd in cmds:
             assert any("--dangerously-skip-permissions" in arg for arg in cmd), (
                 f"--dangerously-skip-permissions missing from cmd: {cmd}"
+            )
+            assert any("--strict-mcp-config" in arg for arg in cmd), (
+                f"--strict-mcp-config missing from cmd: {cmd}"
+            )
+            assert not any("--restricted" in arg for arg in cmd), (
+                f"--restricted must not appear in cmd: {cmd}"
             )
 
     def test_cmd_timeout_from_config(self, capture, cfg):

@@ -21,7 +21,8 @@ from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth.dependencies import (
     _is_elevation_enforcement_enabled,
-    get_current_admin_user_hybrid,
+    _mfa_setup_url_for_role,
+    get_current_user_hybrid,
 )
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
 from code_indexer.server.auth.user_manager import User
@@ -92,10 +93,16 @@ def _elev_error(request: Request, safe_next: str, message: str, http_status: int
     )
 
 
-def _redirect_to_setup(safe_next: str):
-    """Redirect to MFA setup, bouncing back to safe_next afterwards."""
+def _redirect_to_setup(safe_next: str, setup_path: str):
+    """Redirect to MFA setup, bouncing back to safe_next afterwards.
+
+    `setup_path` is the caller's own role-appropriate setup page (see
+    _mfa_setup_url_for_role) -- elevation is available to every TOTP-enrolled
+    user, and the admin setup page is gated to an admin-role session, so a
+    non-admin caller must never be redirected there.
+    """
     return RedirectResponse(
-        url=f"/admin/mfa/setup?next={quote(safe_next, safe='')}",
+        url=f"{setup_path}?next={quote(safe_next, safe='')}",
         status_code=_HTTP_SEE_OTHER,
     )
 
@@ -223,9 +230,13 @@ def _attempt_elevation(
 def elevate_page(
     request: Request,
     next: str = _DEFAULT_NEXT,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
-    """Render the elevation form. Redirect to TOTP setup if user has no MFA."""
+    """Render the elevation form. Redirect to TOTP setup if user has no MFA.
+
+    Elevation is available to every TOTP-enrolled user, not only admins --
+    this route only opens a window for the CALLER's own username.
+    """
     safe_next = _sanitize_next(next)
     totp_service = get_totp_service()
     if totp_service is not None and not totp_service.is_mfa_enabled(user.username):
@@ -234,7 +245,7 @@ def elevate_page(
             user.username,
             safe_next,
         )
-        return _redirect_to_setup(safe_next)
+        return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     return templates.TemplateResponse(
         request,
         "elevate.html",
@@ -248,7 +259,7 @@ def elevate_form(
     next: str = Form(_DEFAULT_NEXT),
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """Process Web UI form submission and redirect on success."""
     safe_next = _sanitize_next(next)
@@ -265,7 +276,7 @@ def elevate_form(
     if result == _ElevResult.NO_CODE:
         return _elev_error(request, safe_next, "Provide a code.", _HTTP_BAD_REQUEST)
     if result == _ElevResult.NO_MFA:
-        return _redirect_to_setup(safe_next)
+        return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     if result == _ElevResult.NO_SESSION:
         return _elev_error(request, safe_next, "No session.", _HTTP_FORBIDDEN)
     # INVALID_CODE
@@ -278,7 +289,7 @@ def elevate_ajax(
     request: Request,
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """AJAX endpoint for inline modal elevation — returns JSON, never redirects."""
     client_ip = request.client.host if request.client else "unknown"

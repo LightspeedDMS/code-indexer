@@ -11,6 +11,12 @@ from pathlib import Path
 import shutil
 from typing import List, Tuple
 
+from .ssh_input_validation import (
+    SSHConfigFormatError,
+    has_control_characters,
+    is_valid_hostname,
+)
+
 
 class CorruptedConfigError(Exception):
     """Raised when SSH config has CIDX start marker but missing end marker."""
@@ -184,12 +190,35 @@ class SSHConfigManager:
         """
         Format a single Host block for SSH config.
 
+        Format-time backstop: every caller (SSHKeyManager, SSHKeySyncService)
+        is expected to have already validated/filtered ``entry`` before it
+        ever reaches here -- this is a defensive-invariant assertion (Messi
+        Rule #15), not the primary rejection point. A value written into a
+        Host block must never contain a character that can end or extend
+        its config line (a newline or carriage return); the checks below
+        are what stops that.
+
         Args:
             entry: HostEntry with host, hostname, and key_path
 
         Returns:
             Formatted Host block string
+
+        Raises:
+            SSHConfigFormatError: ``entry.host``/``entry.hostname`` fails the
+                strict hostname grammar, or ``entry.key_path`` contains a
+                control character. Never let a rejected value reach
+                ``~/.ssh/config``.
         """
+        if not is_valid_hostname(entry.host):
+            raise SSHConfigFormatError(f"Invalid Host value: {entry.host!r}")
+        if not is_valid_hostname(entry.hostname):
+            raise SSHConfigFormatError(f"Invalid HostName value: {entry.hostname!r}")
+        if has_control_characters(entry.key_path):
+            raise SSHConfigFormatError(
+                f"Invalid IdentityFile value: {entry.key_path!r}"
+            )
+
         block = f"Host {entry.host}\n"
         block += f"  HostName {entry.hostname}\n"
         block += "  User git\n"

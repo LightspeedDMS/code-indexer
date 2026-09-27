@@ -5,6 +5,7 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: ede890d5-0358-4ba6-a741-0ed8d5e2db8f
+  modified: 2026-09-26T05:28:20.543Z
 ---
 
 During active implementation work (e.g. `/implement-backlog`), any issue discovered — including ones outside the original scope, like pre-existing test failures surfaced by a broader sweep — must be fixed before the work package is considered done. Filing a GitHub issue and moving on is not acceptable as a substitute for fixing.

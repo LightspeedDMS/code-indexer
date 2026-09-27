@@ -26,6 +26,24 @@ from code_indexer.server.mcp.handlers._utils import _mcp_response
 
 logger = logging.getLogger(__name__)
 
+_ADMIN_ROLE_REQUIRED_ERROR = "Permission denied: admin role required"
+
+
+def _require_admin_role(user: User) -> Dict[str, Any] | None:
+    """Gate for actions that manage another user's MCP credentials.
+
+    Managing another user's MCP credentials, or all users' credentials,
+    requires the admin role -- the same requirement the REST admin
+    MCP-credential routes enforce via get_current_admin_user. Returns an
+    MCP error response when the caller lacks that role, or None when the
+    caller may proceed.
+    """
+    if user.role != UserRole.ADMIN:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": _ADMIN_ROLE_REQUIRED_ERROR}
+        )
+    return None
+
 
 # =============================================================================
 # Private inner handlers
@@ -64,6 +82,9 @@ def _list_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
 def _list_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """List a specific user's credentials (admin) — elevation required."""
     try:
+        role_error = _require_admin_role(user)
+        if role_error is not None:
+            return role_error
         username = args.get("username", "")
         if not username:
             return _mcp_response(  # type: ignore[no-any-return]
@@ -98,6 +119,9 @@ def _list_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
 def _list_all(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """List all users' credentials (admin) — elevation required."""
     try:
+        role_error = _require_admin_role(user)
+        if role_error is not None:
+            return role_error
         all_credentials = []
         all_users = _utils.app_module.user_manager.get_all_users()
         for target_user in all_users:
@@ -209,6 +233,9 @@ def _delete_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
 def _create_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Create a credential for a target user (admin) — elevation required."""
     try:
+        role_error = _require_admin_role(user)
+        if role_error is not None:
+            return role_error
         target_user = args.get("target_user", "")
         if not target_user:
             return _mcp_response(  # type: ignore[no-any-return]
@@ -243,6 +270,9 @@ def _create_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
 def _delete_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Delete a target user's credential (admin) — elevation required."""
     try:
+        role_error = _require_admin_role(user)
+        if role_error is not None:
+            return role_error
         target_user = args.get("target_user", "")
         credential_id = args.get("credential_id", "")
         if not target_user:
@@ -279,7 +309,9 @@ def handle_list_mcp_credentials(
     """List MCP credentials by scope.
 
     scope='self'   — list caller's own (no elevation)
-    scope='user'   — list specific user's (admin, elevation required)
+    scope='user'   — list specific user's; username == caller routes to the
+                     self path (no admin role required, no elevation), any
+                     other username requires the admin role plus elevation
     scope='all'    — list all users' (admin, elevation required)
     scope='system' — list system-managed (admin role + elevation required)
     """
@@ -300,6 +332,11 @@ def handle_list_mcp_credentials(
                     "error": "Missing required parameter: username (required when scope='user')",
                 }
             )
+        # A caller naming their OWN username is self-service by definition --
+        # route to the self path (no admin role required) before the admin
+        # dispatch below. Any other username still requires the admin role.
+        if username == user.username:
+            return _list_self(args, user, **kwargs)
         return _list_user(args, user, **kwargs)  # type: ignore[no-any-return]
     elif scope == "all":
         return _list_all(args, user, **kwargs)  # type: ignore[no-any-return]
@@ -322,10 +359,14 @@ def handle_manage_mcp_credential(
 ) -> Dict[str, Any]:
     """Create or delete MCP credentials for self or another user.
 
-    action='create' without target_user — create for caller (elevation required)
-    action='delete' without target_user — delete for caller (elevation required)
-    action='create' with target_user    — admin create for user (elevation required)
-    action='delete' with target_user    — admin delete for user (elevation required)
+    action='create' without target_user, or target_user == caller — create
+        for caller (elevation required, no admin role required)
+    action='delete' without target_user, or target_user == caller — delete
+        for caller (elevation required, no admin role required)
+    action='create' with a DIFFERENT target_user — admin create for user
+        (admin role + elevation required)
+    action='delete' with a DIFFERENT target_user — admin delete for user
+        (admin role + elevation required)
     """
     action = args.get("action")
     if not action:
@@ -334,14 +375,18 @@ def handle_manage_mcp_credential(
         )
 
     target_user = args.get("target_user")
+    # A caller naming their OWN username as target_user is self-service by
+    # definition -- treat it exactly like omitting target_user (no admin
+    # role required). Any other target still goes through the admin path.
+    is_other_target = bool(target_user) and target_user != user.username
 
     if action == "create":
-        if target_user:
+        if is_other_target:
             return _create_user(args, user, **kwargs)  # type: ignore[no-any-return]
         else:
             return _create_self(args, user, **kwargs)  # type: ignore[no-any-return]
     elif action == "delete":
-        if target_user:
+        if is_other_target:
             return _delete_user(args, user, **kwargs)  # type: ignore[no-any-return]
         else:
             return _delete_self(args, user, **kwargs)  # type: ignore[no-any-return]

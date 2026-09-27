@@ -78,7 +78,7 @@
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
 - [feedback_validation_runs_stay_on_scope.md](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer; green tests never substitute for a review gate
-- [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - opus for code-reviewer only; tdd/implementation stays on Sonnet
+- [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - all agents on Opus 5.5 (model: "opus"); reviews go to Codex (supersedes Sonnet rule)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - dual review (Claude + independent Codex) for every review gate
 - [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs; cost accepted for blind-spot coverage
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs on one fix, dispatch Opus to judge materiality

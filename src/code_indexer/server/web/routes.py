@@ -6,6 +6,7 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
 import functools
@@ -54,6 +55,7 @@ from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
     SubmissionGateOverloadedError,
 )
+from ..utils.host_validation import is_valid_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -4425,6 +4427,9 @@ def _get_all_activated_repos() -> list:
 
         # Iterate over all user directories
         for username in os.listdir(activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(activated_repos_dir, username)
             if os.path.isdir(user_dir):
                 # Get repositories for this user
@@ -6930,6 +6935,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             host_str = str(host).strip()
             if not host_str:
                 return "Host cannot be empty"
+            if not is_valid_server_host(host_str):
+                return "Host must be a valid IPv4/IPv6 address or hostname"
 
         port = data.get("port")
         if port is not None:
@@ -11225,6 +11232,22 @@ def unified_login_submit(
             if user.role.value == "admin"
             else "/user/change-password?info=password_expired"
         )
+
+        # MFA enforcement -- check before creating session (same condition
+        # and helper as the standard login branch below).
+        if _get_user_mfa_status(user.username):
+            from ..auth.mfa_challenge import mfa_challenge_manager
+            from .mfa_routes import render_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url=redirect_url,
+            )
+            return render_mfa_challenge_page(challenge_token)
+
         session_manager = get_session_manager()
         expiry_response = RedirectResponse(
             url=redirect_url,

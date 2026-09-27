@@ -301,7 +301,15 @@ class TestPass1Synthesis:
         # ClaudeInvoker does not add --max-turns; it uses a soft inner timeout instead.
         assert any("-p" in arg for arg in cmd)
         assert "Identify domain clusters" in cmd[4]
-        assert call_args[1]["cwd"] == str(tmp_path)
+        # golden_repos_root is never the subprocess's own cwd, so the CLI
+        # does not auto-load a CLAUDE.md/AGENTS.md there as configuration —
+        # ClaudeInvoker runs from a neutral scratch directory and reaches
+        # golden_repos_root via --add-dir instead. See
+        # test_claude_invoker_agent_isolation.py.
+        actual_cwd = call_args[1]["cwd"]
+        assert actual_cwd != str(tmp_path)
+        assert "--add-dir" in cmd[4]
+        assert str(tmp_path) in cmd[4]
         assert (
             call_args[1]["timeout"] == 600
         )  # full pass_timeout (Pass 1 is heaviest phase)

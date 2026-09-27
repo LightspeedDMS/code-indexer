@@ -140,6 +140,45 @@ def test_codex_weight_propagated_when_codex_enabled(tmp_path: Path):
     )
 
 
+def test_log_db_path_forwarded_to_claude_invoker():
+    """
+    build_dep_map_dispatcher(config, log_db_path=...) must construct its
+    ClaudeInvoker with that same log_db_path, so the self_monitoring_scan
+    flow's restricted --allowedTools pin has the value it needs. Every
+    other caller omits log_db_path (defaults to None) and is unaffected.
+    Only ClaudeInvoker takes log_db_path -- self_monitoring_scan is routed
+    to Claude only, so CodexInvoker never needs it.
+    """
+    from code_indexer.server.services.dep_map_dispatcher_factory import (
+        build_dep_map_dispatcher,
+    )
+
+    config = _make_mock_config(codex_enabled=False)
+
+    dispatcher = build_dep_map_dispatcher(
+        config, log_db_path="/opt/cidx-server/logs.db"
+    )
+
+    # dispatcher.claude is typed as the IntelligenceCliInvoker Protocol,
+    # which has no _log_db_path attribute -- getattr avoids an attr-defined
+    # mypy error on this ClaudeInvoker-only internal.
+    assert (
+        getattr(dispatcher.claude, "_log_db_path", None) == "/opt/cidx-server/logs.db"
+    )
+
+
+def test_log_db_path_defaults_to_none():
+    from code_indexer.server.services.dep_map_dispatcher_factory import (
+        build_dep_map_dispatcher,
+    )
+
+    config = _make_mock_config(codex_enabled=False)
+
+    dispatcher = build_dep_map_dispatcher(config)
+
+    assert getattr(dispatcher.claude, "_log_db_path", None) is None
+
+
 def test_effective_weight_zero_when_codex_none():
     """
     When codex is None (disabled or CODEX_HOME absent), CliDispatcher collapses

@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from pathlib import Path
 from typing import Any, List, Tuple, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -482,6 +483,8 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
     @pytest.mark.asyncio
     async def test_xray_batch_handle_xray_search_batch(self):
         mock_bjm = MagicMock()
+        mock_access_service = MagicMock()
+        mock_access_service.is_admin_user.return_value = True
         with (
             patch(
                 "code_indexer.server.mcp.handlers.repos._resolve_golden_repo_path",
@@ -489,6 +492,16 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             ),
             patch.object(
                 xray_batch, "_get_background_job_manager", return_value=mock_bjm
+            ),
+            patch.object(
+                xray_batch,
+                "_get_access_filtering_service",
+                return_value=mock_access_service,
+            ),
+            patch.object(
+                xray_batch,
+                "_get_cidx_meta_path",
+                return_value=Path(_FAKE_REPO_PATH),
             ),
         ):
             params = {

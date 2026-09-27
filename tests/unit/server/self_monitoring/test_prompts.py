@@ -18,13 +18,19 @@ class TestGetDefaultPrompt:
         assert len(prompt) > 0
 
     def test_get_default_prompt_contains_required_placeholders(self):
-        """Test that prompt contains required placeholders for Claude to query database directly."""
+        """Test that prompt contains required placeholders.
+
+        The log database path is no longer shown to
+        the agent at all (it reaches the log-query entry point only via an
+        environment variable the invoker sets) -- the prompt instead
+        references {log_query_command_prefix}, the server-pinned entry
+        point command.
+        """
         from code_indexer.server.self_monitoring.prompts import get_default_prompt
 
         prompt = get_default_prompt()
 
-        # Claude needs the database path to query it directly via sqlite3
-        assert "{log_db_path}" in prompt
+        assert "{log_query_command_prefix}" in prompt
         assert "{last_scan_log_id}" in prompt
         assert "{dedup_context}" in prompt
 
@@ -249,10 +255,96 @@ class TestGetDefaultPrompt:
             f"Version comment must be within first 300 chars, found at position {version_pos}"
         )
 
-    def test_prompt_version_is_2(self):
-        """AC5: Prompt version must be 2 after this update."""
+    def test_prompt_version_is_5(self):
+        """Prompt version bumped to 5 for the corrected tool description
+        (Read plus in-repo read-only Bash, no Glob/Grep tool references)."""
         from code_indexer.server.self_monitoring.prompts import get_default_prompt
 
         prompt = get_default_prompt()
 
-        assert "Prompt version: 2" in prompt
+        assert "Prompt version: 5" in prompt
+
+    # --- log-query entry point + untrusted content ---
+
+    def test_all_example_commands_use_the_log_query_entry_point(self):
+        """The scan's own Bash allowlist is pinned to the log-query entry
+        point (agent_cli_isolation.build_self_monitoring_claude_allowed_
+        tools), not a raw sqlite3 invocation. Every example command in the
+        prompt must reference {log_query_command_prefix} so the agent's own
+        commands actually match the allowlist instead of being auto-denied
+        under the "dontAsk" permission mode."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+
+        example_commands = [
+            line for line in prompt.splitlines() if "{log_query_command_prefix}" in line
+        ]
+        assert len(example_commands) >= 3, (
+            f"expected at least 3 example commands using the log-query "
+            f"entry point, found {len(example_commands)}"
+        )
+
+    def test_prompt_never_shows_a_raw_sqlite3_invocation(self):
+        """The log database path is no longer shown to the agent at all,
+        and there must be no raw `sqlite3 ...` command left for the agent
+        to copy -- only the log-query entry point form."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+
+        assert "{log_db_path}" not in prompt
+        for line in prompt.splitlines():
+            assert "sqlite3 " not in line, f"raw sqlite3 invocation found: {line!r}"
+
+    def test_prompt_never_requests_safe_flag(self):
+        """The installed sqlite3 build does not support -safe (verified:
+        3.34.1, "unknown option: -safe"); the log-query entry point never
+        shells out to sqlite3 at all, so this must never appear either way."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+
+        assert "-safe" not in prompt
+
+    def test_prompt_states_log_text_is_data_not_instructions(self):
+        """Log message text can carry request-supplied values (e.g. a
+        user-chosen git branch name in a failed-checkout WARNING). The
+        prompt must tell the agent to treat it as data to analyse, never
+        as instructions to follow."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+
+        assert "data" in prompt.lower()
+        assert "never" in prompt.lower() and "instructions" in prompt.lower()
+
+    def test_prompt_instructs_against_chaining_around_the_entry_point(self):
+        """Even though the permission layer enforces this, the prompt
+        should tell the agent plainly that only the single log-query
+        command form is available -- no chaining, redirecting, or
+        substituting other commands around it -- to avoid confusing,
+        wasted denied-command turns."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+        lowered = prompt.lower()
+
+        assert "only" in lowered
+        assert any(word in lowered for word in ("chain", "redirect", "substitut"))
+
+    def test_prompt_describes_actual_available_tools(self):
+        """Claude Code 2.1.283 has no separate Glob/Grep tool -- in-repo
+        code search happens through the Read tool plus in-repo read-only
+        Bash commands (grep/find/ls), which stay available inside the
+        working directory. The prompt must describe that accurately and
+        must not reference a Glob or Grep tool that does not exist."""
+        from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
+        prompt = get_default_prompt()
+
+        assert "Read tool" in prompt or "Read Tool" in prompt
+        assert "grep" in prompt.lower()
+        assert "log_query" in prompt or "log-query" in prompt
+        assert "Glob" not in prompt
+        assert "Grep tool" not in prompt and "Grep Tool" not in prompt

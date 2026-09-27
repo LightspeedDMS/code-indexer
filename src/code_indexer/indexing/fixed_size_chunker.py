@@ -8,11 +8,13 @@ This module implements model-aware fixed-size chunking algorithm:
 - Multimodal image detection: extracts images from .md, .html, .htm, .htmx files for multimodal embeddings
 """
 
+import threading
 from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 
 from ..config import IndexingConfig, Config
 from .image_extractor import ImageExtractorFactory
+from ..utils.path_confinement import is_resolved_within_root
 
 
 class FixedSizeChunker:
@@ -81,6 +83,33 @@ class FixedSizeChunker:
         # Calculate derived values
         self.overlap_size = int(self.chunk_size * self.OVERLAP_PERCENTAGE)
         self.step_size = self.chunk_size - self.overlap_size
+
+        # Cache of the last-seen repo_root's resolved form, so a run that
+        # calls chunk_file() once per candidate (every discovery path
+        # funnels through here) resolves the root ONCE rather than once
+        # per file. Every production caller passes the same repo_root
+        # value for the whole run.
+        #
+        # A single FixedSizeChunker instance is shared across the
+        # high-throughput processor's worker thread pool, so the cache's
+        # check-then-populate must be atomic under a lock: an
+        # unsynchronized version can observe a stale/half-written cache
+        # under concurrent chunking.
+        self._repo_root_cache_lock = threading.Lock()
+        self._cached_repo_root: Optional[Path] = None
+        self._cached_resolved_repo_root: Optional[Path] = None
+
+    def _resolved_root_for(self, repo_root: Path) -> Path:
+        """Return the resolved form of repo_root, reusing the cached
+        value when repo_root is unchanged from the previous call.
+        Thread-safe: the check-then-set is atomic under a lock, since
+        this method is called concurrently by the worker thread pool."""
+        with self._repo_root_cache_lock:
+            if repo_root != self._cached_repo_root:
+                self._cached_repo_root = repo_root
+                self._cached_resolved_repo_root = Path(repo_root).resolve()
+            assert self._cached_resolved_repo_root is not None
+            return self._cached_resolved_repo_root
 
     def _extract_images(
         self, text: str, file_path: Path, repo_root: Optional[Path] = None
@@ -261,6 +290,18 @@ class FixedSizeChunker:
         self, file_path: Path, repo_root: Optional[Path] = None
     ) -> List[Dict[str, Any]]:
         """Standard file chunking - reads entire file into memory."""
+        # Containment against the codebase root is re-checked at the
+        # moment content is actually opened, since discovery-time
+        # filtering and this read are not atomic (the file at this path
+        # could have been replaced between the two). Every production
+        # caller passes repo_root; when it is omitted (test-only direct
+        # usage of this method) there is no root to check against, so
+        # the file is read unconditionally.
+        if repo_root is not None:
+            resolved_root = self._resolved_root_for(repo_root)
+            if not is_resolved_within_root(file_path, resolved_root):
+                raise ValueError("file does not resolve inside the codebase root")
+
         # Try different encodings
         encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
         text = None

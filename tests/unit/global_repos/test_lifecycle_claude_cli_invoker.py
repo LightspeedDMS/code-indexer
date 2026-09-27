@@ -143,6 +143,12 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     assert prompt_used, "prompt must be non-empty"
     assert "description" in prompt_used
     assert "lifecycle" in prompt_used
+    # The rendered prompt must tell the model the repository's absolute path:
+    # the agent's subprocess cwd is now a neutral scratch directory (isolation
+    # fix), never the repo itself, so a bare relative path like "README.md"
+    # would resolve against the wrong directory unless the prompt states the
+    # absolute path explicitly.
+    assert str(repo_path) in prompt_used
 
 
 # ---------------------------------------------------------------------------

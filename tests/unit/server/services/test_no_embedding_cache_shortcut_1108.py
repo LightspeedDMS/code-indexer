@@ -873,9 +873,15 @@ class TestTemporalEntryPointValueFlow:
         import code_indexer.proxy.config_manager as config_mod
         import code_indexer.backends.backend_factory as backend_mod
 
+        from code_indexer.config import CohereConfig, VoyageAIConfig
+
+        # Mirrors the real Config shape read on the server temporal path:
+        # voyage_ai / cohere are always-present sub-models (default_factory)
+        # and daemon defaults to None.
         class _FakeConfig:
-            voyage_ai = type("V", (), {"api_key": "k", "model": "voyage-code-3"})()
-            cohere = None
+            voyage_ai = VoyageAIConfig()
+            cohere = CohereConfig()
+            daemon = None
 
         class _FakeCM:
             @classmethod
@@ -977,8 +983,15 @@ class TestTemporalEntryPointValueFlow:
         import code_indexer.config as config_mod2
         import code_indexer.storage.filesystem_vector_store as fvs_mod
 
+        from code_indexer.config import CohereConfig, VoyageAIConfig
+
+        # Mirrors the real Config shape read on the server temporal path:
+        # voyage_ai / cohere are always-present sub-models (default_factory)
+        # and daemon defaults to None.
         class _FakeConfig:
-            pass
+            voyage_ai = VoyageAIConfig()
+            cohere = CohereConfig()
+            daemon = None
 
         class _FakeCM:
             @classmethod
