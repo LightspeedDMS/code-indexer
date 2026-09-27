@@ -121,7 +121,11 @@ def mock_vector_store() -> MagicMock:
     store.collection_exists.return_value = False
     store.delete_by_filter.return_value = True
     store.get_collection_info.return_value = {"points_count": 0}
-    store.clear_collection.return_value = None
+    # Bug #1979 P1 (round 5): _do_full_index now raises on a falsy
+    # clear_collection() return for the text collection. This fixture
+    # simulates a SUCCESSFUL clear -- these tests are about fatal
+    # chunk-store-error abort-vs-end handling, not clear failure.
+    store.clear_collection.return_value = True
     return store
 
 

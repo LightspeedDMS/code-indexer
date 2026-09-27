@@ -48,6 +48,58 @@ def legacy_temporal_refusal_response(pending_shards: List[Path]) -> Dict[str, An
     return {"status": "error", "message": message}
 
 
+def resolve_daemon_clear_layout(
+    force_full: bool, use_chunks_db_for_new_collections: Optional[bool]
+) -> Optional[bool]:
+    """Bug #1979 (round 8, P2): cheap defense-in-depth in the daemon's own
+    semantic-indexing entry points (``exposed_index_blocking``'s semantic
+    branch and ``_run_indexing_background``), so a full clear
+    (``force_full=True``) delivered directly over this RPC can never
+    silently rebuild a collection on the legacy SHARDED_JSON layout.
+
+    The coordinator verified `cli_daemon_delegation.py` (the CLI, over a
+    per-user local socket) is the ONLY caller of these RPCs -- this daemon
+    has no other user-facing front door -- so the authoritative "every
+    configured provider was genuinely rebuilt" verification correctly stays
+    in the CLI process after delegation returns
+    (``provider_rebuild_check.find_providers_not_rebuilt_since``) and is NOT
+    duplicated here. This helper only prevents this internal caller from
+    ever silently honoring the one combination the maintainer's acceptance
+    criterion for this issue forbids.
+
+    Args:
+        force_full: The caller's ``force_full`` (a.k.a. ``--clear``) flag.
+        use_chunks_db_for_new_collections: The caller's requested layout
+            (``True`` chunks_db, ``False`` sharded_json, ``None`` ambient
+            default).
+
+    Returns:
+        The layout value to actually pass to ``BackendFactory.create``:
+        unchanged when ``force_full`` is False; ``True`` when ``force_full``
+        is True and the caller passed ``None`` -- matching the CLI's own
+        ``--clear`` default (Bug #1979 round 6).
+
+    Raises:
+        ValueError: when ``force_full`` is True and the caller explicitly
+            requested the legacy ``sharded_json`` layout (``False``). The
+            CLI itself already rejects this combination before ever
+            delegating here (Bug #1979 round 7); this is defense in depth
+            only, for any other caller of this RPC.
+    """
+    if not force_full:
+        return use_chunks_db_for_new_collections
+    if use_chunks_db_for_new_collections is False:
+        raise ValueError(
+            "A full clear (force_full=True) cannot use the legacy "
+            "sharded_json layout (use_chunks_db_for_new_collections=False) "
+            "-- every successful clear must rebuild every collection as "
+            "CHUNKS_DB (Bug #1979)."
+        )
+    if use_chunks_db_for_new_collections is None:
+        return True
+    return use_chunks_db_for_new_collections
+
+
 class CIDXDaemonService(Service):
     """RPyC daemon service for in-memory index caching.
 
@@ -831,11 +883,19 @@ class CIDXDaemonService(Service):
             # like the foreground `cidx index` path. An explicit True/False wins;
             # None (flag absent) passes through so the daemon-side
             # CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default applies unchanged.
+            # Bug #1979 (round 8): resolve_daemon_clear_layout() is cheap
+            # defense-in-depth over that raw pass-through -- refuses an
+            # explicit legacy layout under force_full=True and defaults an
+            # absent one to CHUNKS_DB. The CLI (this RPC's only caller) is
+            # where the real "every provider was genuinely rebuilt"
+            # verification lives (provider_rebuild_check); this call never
+            # duplicates that check.
             backend = BackendFactory.create(
                 config,
                 Path(project_path),
-                use_chunks_db_for_new_collections=kwargs.get(
-                    "use_chunks_db_for_new_collections"
+                use_chunks_db_for_new_collections=resolve_daemon_clear_layout(
+                    kwargs.get("force_full", False),
+                    kwargs.get("use_chunks_db_for_new_collections"),
                 ),
             )
             vector_store_client = backend.get_vector_store_client()
@@ -845,6 +905,17 @@ class CIDXDaemonService(Service):
             # OWN (already-verified) .code-indexer directory, never from a
             # config_manager.config_path that no longer exists here --
             # mirrors #1713's established derivation pattern.
+            # Bug #1979 (P1, round 4 -- REVERTED from round 3): the daemon
+            # writes the SAME bare "metadata.json" it always did. Round 3
+            # switched this to the per-provider filename so
+            # find_providers_not_rebuilt_since could see it, but that broke
+            # every OTHER reader of this file (cidx status, foreground
+            # cidx watch, config_fixer), which all still expect the bare
+            # name -- a fresh daemon-only project would show "Not Found" in
+            # `cidx status` after a successful index. Smallest blast
+            # radius: keep the daemon's own filename unchanged and instead
+            # give find_providers_not_rebuilt_since a daemon_mode flag (see
+            # provider_rebuild_check.py) so IT reads this bare file.
             metadata_path = (
                 Path(project_path).resolve() / ".code-indexer" / "metadata.json"
             )
@@ -1101,11 +1172,19 @@ class CIDXDaemonService(Service):
             # explicit True/False wins; None (flag absent) passes through so
             # the daemon-side CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default
             # applies unchanged.
+            # Bug #1979 (round 8): resolve_daemon_clear_layout() is cheap
+            # defense-in-depth over that raw pass-through, matching
+            # `exposed_index_blocking` -- refuses an explicit legacy layout
+            # under force_full=True and defaults an absent one to
+            # CHUNKS_DB. The CLI (this RPC's only caller) owns the real
+            # "every provider was genuinely rebuilt" verification
+            # (provider_rebuild_check); this call never duplicates it.
             backend = BackendFactory.create(
                 config,
                 Path(project_path),
-                use_chunks_db_for_new_collections=kwargs.get(
-                    "use_chunks_db_for_new_collections"
+                use_chunks_db_for_new_collections=resolve_daemon_clear_layout(
+                    kwargs.get("force_full", False),
+                    kwargs.get("use_chunks_db_for_new_collections"),
                 ),
             )
             vector_store_client = backend.get_vector_store_client()
@@ -1118,6 +1197,10 @@ class CIDXDaemonService(Service):
             # OWN (already-verified) .code-indexer directory, never from a
             # config_manager.config_path that no longer exists here --
             # mirrors #1713's established derivation pattern.
+            # Bug #1979 (P1, round 4 -- REVERTED from round 3): bare
+            # filename, matching the blocking path above -- see that call
+            # site's comment for why round 3's per-provider filename was
+            # reverted rather than propagated to every reader.
             metadata_path = (
                 Path(project_path).resolve() / ".code-indexer" / "metadata.json"
             )

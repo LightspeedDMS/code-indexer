@@ -3003,22 +3003,53 @@ def reject_sharded_json_for_temporal(
         )
 
 
-def _resolve_new_collection_layout(choice: Optional[str]) -> Optional[bool]:
+def _resolve_new_collection_layout(
+    choice: Optional[str], *, clear: bool = False
+) -> Optional[bool]:
     """Story #1488: map the `--new-collection-layout` Click choice to the
     FilesystemVectorStore/BackendFactory `use_chunks_db_for_new_collections`
     param.
 
-    - None (flag absent) -> None, so the store falls back to the
-      CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default SHARDED_JSON).
+    - None (flag absent), `clear=False` -> None, so the store falls back to
+      the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default SHARDED_JSON).
     - "chunks_db" -> True (fresh collections built as consolidated chunks.db).
     - "sharded_json" -> False (legacy per-chunk vector_*.json files).
 
+    Bug #1979 (round 6): the maintainer's own acceptance criteria for this
+    issue are explicit and unconditional -- every `--clear` run must rebuild
+    every configured collection (all providers, plus multimodal) as
+    CHUNKS_DB, without requiring the caller to also pass
+    `--new-collection-layout=chunks_db`. This is a deliberate, issue-scoped
+    exception to the general CLI/daemon SHARDED_JSON-default rule above,
+    specific to `--clear`:
+
+    - None (flag absent), `clear=True` -> True. An EXPLICIT `chunks_db`
+      choice still wins over this clear-implied default the same way (see
+      test_cli_clear_recovers_damaged_layout_1979.py's mechanism, reused
+      here rather than replaced).
+
+    Bug #1979 (round 7): an explicit `sharded_json` choice together with
+    `clear=True` is REJECTED earlier, by a dedicated guard in the `index`
+    command body (before this helper is ever called), because the
+    maintainer's acceptance criterion for this issue is unconditional --
+    every successful `--clear` run must leave every collection on
+    CHUNKS_DB, with no legacy-layout escape hatch. That guard makes the
+    `choice == "sharded_json"` branch below UNREACHABLE with `clear=True`
+    in production; this function still returns `False` for it (as a pure,
+    directly-testable mapping) rather than asserting, since callers other
+    than the `index` command's own guarded call sites could in principle
+    pass `clear=True` deliberately to probe that mapping.
+
     Only governs the layout of BRAND-NEW collections; an existing
     collection's committed on-disk discriminator always wins (resolved
-    downstream by resolve_chunk_layout / _is_chunks_db_collection).
+    downstream by resolve_chunk_layout / _is_chunks_db_collection) UNLESS
+    this returns True, in which case `clear_collection()` treats it as an
+    explicit request and recovers even a legacy on-disk collection to
+    CHUNKS_DB (see `FilesystemVectorStore.clear_collection`'s
+    `_new_collection_layout_explicit` check).
     """
     if choice is None:
-        return None
+        return True if clear else None
     return choice == "chunks_db"
 
 
@@ -3273,6 +3304,60 @@ def index(
     if progress_json:
         console = Console(stderr=True)
 
+    # A clear must index from source; rebuild-only modes return before that pass.
+    if clear:
+        for enabled, flag in (
+            (rebuild_fts_index, "--rebuild-fts-index"),
+            (rebuild_index, "--rebuild-index"),
+            (rebuild_indexes, "--rebuild-indexes"),
+        ):
+            if enabled:
+                console.print(
+                    get_conflicting_flags_message("--clear", flag), style="red"
+                )
+                sys.exit(1)
+
+        # Bug #1979 (P2, round 3): reject --clear + --reconcile BEFORE the
+        # daemon_enabled split below, not just in the foreground branch --
+        # otherwise daemon mode forwards both flags straight to
+        # _index_via_daemon and never sees this guard. One check here
+        # covers daemon and foreground identically; the old duplicate
+        # inside the foreground branch is removed.
+        if reconcile:
+            console.print(
+                get_conflicting_flags_message("--clear", "--reconcile"),
+                style="red",
+            )
+            sys.exit(1)
+
+        # Bug #1979 (P2, round 7): the maintainer's acceptance criterion for
+        # this issue is unconditional -- "every configured collection ...
+        # uses the CHUNKS_DB layout" after a successful clear=true run. An
+        # explicit --new-collection-layout=sharded_json request cannot be
+        # honored together with --clear (it would leave legacy
+        # vector_*.json collections in place after a "successful" run), so
+        # reject the combination BEFORE any indexing or daemon delegation --
+        # same place/style as the --reconcile guard above, covering daemon
+        # and foreground identically. Plain --clear and
+        # --clear --new-collection-layout=chunks_db remain allowed.
+        #
+        # Bug #1979 (round 9): this is a SEMANTIC-only concern (Bug #1979 is
+        # about semantic collections). `not index_commits` so a temporal
+        # `--index-commits --clear --new-collection-layout=sharded_json`
+        # falls through to `reject_sharded_json_for_temporal` a few lines
+        # below instead -- temporal already has its OWN Bug #1529 rejection
+        # for exactly this combination, with its own message. Firing THIS
+        # guard first would double-reject with the wrong (semantic) message
+        # for a temporal request, changing pre-#1979 temporal behavior.
+        if new_collection_layout == "sharded_json" and not index_commits:
+            console.print(
+                get_conflicting_flags_message(
+                    "--clear", "--new-collection-layout=sharded_json"
+                ),
+                style="red",
+            )
+            sys.exit(1)
+
     # Bug #1529 finding #3: refuse an impossible flag combination BEFORE any
     # indexing work begins, so no legacy temporal shard is ever created.
     # Sits beside the sibling --diff-context validation below, and after the
@@ -3381,8 +3466,72 @@ def index(
             )
             sys.exit(1)
 
+        # Bug #1979 (P2, round 4): the daemon only ever constructs a single
+        # provider/SmartIndexer (daemon/service.py), so a multi-provider
+        # --clear would silently leave every non-primary provider unrebuilt.
+        # Coordinator ruling: reject up front rather than add a daemon-side
+        # provider loop (filed separately) -- never delegate a clear the
+        # daemon cannot fully honor.
+        #
+        # Bug #1979 (round 9): this is a SEMANTIC-only concern. `not
+        # index_commits` so a temporal `--index-commits --clear` is never
+        # rejected here -- the daemon's temporal branch
+        # (`exposed_index_blocking`'s `if kwargs.get("index_commits",
+        # False):`) never touches embedding_providers/multi-provider
+        # concerns at all; it builds one FilesystemVectorStore directly and
+        # returns before ever reaching the semantic BackendFactory.create
+        # branch this guard protects.
+        if clear and not index_commits:
+            _daemon_guard_providers = config.get_embedding_providers()
+            if len(_daemon_guard_providers) > 1:
+                console.print(
+                    "❌ Multi-provider --clear is not supported in daemon mode",
+                    style="red",
+                )
+                console.print(
+                    "💡 Use local mode for multi-provider clear: cidx config --no-daemon",
+                    style="yellow",
+                )
+                sys.exit(1)
+            # Bug #1979 (P2, round 5): `len([]) > 1` is False, so an EMPTY
+            # embedding_providers list bypassed the guard above entirely --
+            # the rebuild check below then iterates zero providers and
+            # reports success with no verification performed. A single
+            # entry can also legitimately name a DIFFERENT provider than
+            # `config.embedding_provider` (no cross-field validator ties
+            # them together -- see Config.get_embedding_providers()), while
+            # the daemon (daemon/service.py's
+            # EmbeddingProviderFactory.create(config=config)) always
+            # constructs its provider from config.embedding_provider alone.
+            # A mismatch would make the rebuild check below verify a
+            # completely different provider's metadata/rows than the one
+            # the daemon actually indexed. Reject both up front so the
+            # rebuild check is always verifying the SAME single provider
+            # the daemon is guaranteed to have just indexed.
+            elif _daemon_guard_providers != [config.embedding_provider]:
+                console.print(
+                    "❌ --clear in daemon mode requires embedding_providers to be "
+                    f"exactly [{config.embedding_provider!r}] (found "
+                    f"{_daemon_guard_providers!r}) -- the daemon only ever indexes "
+                    "config.embedding_provider",
+                    style="red",
+                )
+                console.print(
+                    "💡 Use local mode for multi-provider clear: cidx config --no-daemon",
+                    style="yellow",
+                )
+                sys.exit(1)
+
         # Delegate to daemon with all parameters
         from .cli_daemon_delegation import _index_via_daemon
+
+        # Bug #1979 (P1, round 3): captured BEFORE delegating, so the
+        # post-delegation rebuild check below (same one the foreground path
+        # runs) can tell "genuinely reindexed this run" apart from "stale
+        # metadata from a previous run" -- mirrors the foreground path's
+        # `_clear_start_time = time.time()`.
+        _daemon_clear_start_time = time.time()
+        _daemon_all_providers = config.get_embedding_providers()
 
         exit_code = _index_via_daemon(
             force_reindex=clear,
@@ -3402,11 +3551,58 @@ def index(
             # daemon so an explicit --new-collection-layout is honored by the
             # daemon's collection creation. None (flag absent) passes through so
             # the daemon-side env/default applies -- precedence identical to the
-            # foreground path.
+            # foreground path. Bug #1979 (round 6): `clear=clear` so a daemon-mode
+            # `--clear` with no explicit flag also defaults to CHUNKS_DB.
             use_chunks_db_for_new_collections=_resolve_new_collection_layout(
-                new_collection_layout
+                new_collection_layout, clear=clear
             ),
         )
+
+        # Bug #1979 (P1, round 3): the daemon writes to the SAME on-disk
+        # collections the foreground path reads, so this check can run here
+        # in the CLI process, right after delegation returns. Only when the
+        # daemon itself reported success -- a daemon failure is already a
+        # loud non-zero exit and must not be double-reported as a rebuild-
+        # check failure too.
+        # Bug #1979 (round 9): SEMANTIC-only check -- skip for a temporal
+        # (--index-commits) clear, whose daemon branch never writes the
+        # TEXT collection rows/metadata this check inspects.
+        if clear and not index_commits and exit_code == 0:
+            from .services.provider_rebuild_check import (
+                find_providers_not_rebuilt_since,
+            )
+
+            _daemon_backend = BackendFactory.create(
+                config=config,
+                project_root=Path(config.codebase_dir),
+                use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                    new_collection_layout, clear=clear
+                ),
+            )
+            _daemon_vector_store_client = _daemon_backend.get_vector_store_client()
+            # Bug #1979 (round 4): daemon_mode=True -- the daemon writes
+            # the bare legacy "metadata.json" (reverted from round 3's
+            # per-provider filename; see daemon/service.py), not the
+            # foreground path's metadata-<provider>.json. Safe because
+            # the multi-provider daemon-clear guard above guarantees
+            # exactly one provider reaches this call.
+            _daemon_stale_or_missing = find_providers_not_rebuilt_since(
+                config_manager.config_path.parent,
+                _daemon_all_providers,
+                _daemon_clear_start_time,
+                config=config,
+                vector_store=_daemon_vector_store_client,
+                daemon_mode=True,
+            )
+            if _daemon_stale_or_missing:
+                console.print(
+                    "❌ clear=true did not genuinely rebuild configured "
+                    f"provider(s) {_daemon_stale_or_missing} (skipped, stale, or "
+                    "empty TEXT collection) — index is not a full rebuild.",
+                    style="red",
+                )
+                sys.exit(1)
+
         sys.exit(exit_code)
     else:
         # Display mode indicator
@@ -4179,6 +4375,11 @@ def index(
 
     try:
         config = config_manager.load()
+        # Bug #1979: captured before any provider is touched, so the
+        # post-loop rebuild check below can tell "genuinely reindexed this
+        # run" apart from "stale metadata from a previous run" for every
+        # configured provider, not just the primary one.
+        _clear_start_time = time.time()
 
         # Multi-provider loop (Story #620): read embedding_providers, check API keys.
         # config.json is never mutated on disk — only in-memory override is used.
@@ -4200,8 +4401,12 @@ def index(
         # Codex Finding D2: resolve the new-collection layout ONCE so the SAME
         # value reaches every provider's backend (primary AND every secondary
         # provider in the multi-provider loop below), never just the primary.
+        # Bug #1979 (round 6): `clear=clear` so a plain foreground `--clear`
+        # (no explicit --new-collection-layout flag) also defaults to
+        # CHUNKS_DB for every provider, per the maintainer's own acceptance
+        # criteria for this issue.
         _resolved_new_collection_layout = _resolve_new_collection_layout(
-            new_collection_layout
+            new_collection_layout, clear=clear
         )
         backend = BackendFactory.create(
             config=config,
@@ -4446,11 +4651,9 @@ def index(
                 lambda: progress_manager.reset_progress_timers()
             )
 
-        # Check for conflicting flags
-        if clear and reconcile:
-            error_message = get_conflicting_flags_message("--clear", "--reconcile")
-            console.print(error_message, style="red")
-            sys.exit(1)
+        # Bug #1979 (P2, round 3): the --clear + --reconcile conflict check
+        # now runs BEFORE the daemon_enabled split above (so daemon mode is
+        # covered too) -- removed here to avoid a second copy of the guard.
 
         # Use graceful interrupt handling for the indexing operation
         operation_name = "Indexing"
@@ -4589,6 +4792,8 @@ def index(
         if stats is None:
             # Early cancellation before stats were initialized
             console.print("🛑 Operation cancelled before completion", style="yellow")
+            if clear:
+                sys.exit(1)
             return
 
         if getattr(stats, "cancelled", False):
@@ -4614,6 +4819,9 @@ def index(
             console.print(
                 f"🚀 Throughput: {files_per_min:.1f} files/min, {chunks_per_min:.1f} chunks/min"
             )
+
+        if clear and getattr(stats, "cancelled", False):
+            sys.exit(1)
 
         if stats.failed_files > 0:
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
@@ -4683,6 +4891,34 @@ def index(
                     f"{_extra_stats.chunks_created} chunks",
                     style="green",
                 )
+
+        # Bug #1979: clear=true is "index from scratch" -- a configured
+        # provider skipped for ANY reason (missing key, a failed health
+        # check, or anything else) must not let this operation exit 0.
+        # Mirrors the same check the server's ActivatedRepoIndexManager
+        # runs for the activated-repo clear path (Story via
+        # provider_rebuild_check.find_providers_not_rebuilt_since) so both
+        # front doors enforce one identical rule.
+        if clear:
+            from .services.provider_rebuild_check import (
+                find_providers_not_rebuilt_since,
+            )
+
+            _stale_or_missing = find_providers_not_rebuilt_since(
+                config_manager.config_path.parent,
+                _all_providers,
+                _clear_start_time,
+                config=config,
+                vector_store=vector_store_client,
+            )
+            if _stale_or_missing:
+                console.print(
+                    "❌ clear=true did not genuinely rebuild configured "
+                    f"provider(s) {_stale_or_missing} (skipped, stale, or "
+                    "empty TEXT collection) — index is not a full rebuild.",
+                    style="red",
+                )
+                sys.exit(1)
 
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
