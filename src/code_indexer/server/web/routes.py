@@ -10447,9 +10447,33 @@ def user_git_credentials_list_partial(request: Request):
     return response
 
 
-@user_router.post("/git-credentials")
+def _git_credential_self_elevation(request: Request) -> None:
+    """Self-service elevation gate for the caller's own git credentials.
+
+    An unauthenticated request is left to the route itself, so it keeps its
+    own 401 "Session expired" body. For an authenticated web session the
+    shared self-service gate applies: TOTP set up plus the caller's own
+    elevation window when enforcement is on. With enforcement off this is a
+    no-op.
+    """
+    if _require_authenticated_session(request) is None:
+        return
+    if not dependencies._is_elevation_enforcement_enabled():
+        return
+    user = dependencies.get_current_user_web_or_api(request, None)
+    dependencies.require_self_elevation(request, user, None)
+
+
+@user_router.post(
+    "/git-credentials",
+    dependencies=[Depends(_git_credential_self_elevation)],
+)
 async def user_git_credentials_add(request: Request):
-    """Add a new git credential via form submission."""
+    """Add a new git credential via form submission.
+
+    Requires TOTP plus the caller's own elevation window when enforcement is
+    on, matching the admin route and the MCP twin configure_git_credential.
+    """
     session = _require_authenticated_session(request)
     if not session:
         return JSONResponse(
@@ -10501,9 +10525,16 @@ async def user_git_credentials_add(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-@user_router.delete("/git-credentials/{credential_id}")
+@user_router.delete(
+    "/git-credentials/{credential_id}",
+    dependencies=[Depends(_git_credential_self_elevation)],
+)
 def user_git_credentials_delete(request: Request, credential_id: str):
-    """Delete a git credential."""
+    """Delete a git credential.
+
+    Requires TOTP plus the caller's own elevation window when enforcement is
+    on, matching the admin route and the MCP twin delete_git_credential.
+    """
     session = _require_authenticated_session(request)
     if not session:
         return JSONResponse(

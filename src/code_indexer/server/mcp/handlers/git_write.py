@@ -30,6 +30,7 @@ from code_indexer.server.services.git_operations_service import (
     git_operations_service,
 )
 
+from ..auth.elevation_decorator import require_mcp_elevation
 from ._utils import _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
@@ -477,8 +478,13 @@ def list_git_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@require_mcp_elevation()
 def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for delete_git_credential - remove a git forge credential."""
+    """Handler for delete_git_credential - remove a git forge credential.
+
+    Requires the caller's own elevation window when enforcement is on,
+    matching the REST twin DELETE /user/git-credentials/{credential_id}.
+    """
     credential_id = args.get("credential_id")
     if not credential_id:
         return _mcp_response(
@@ -500,8 +506,13 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@require_mcp_elevation()
 def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for configure_git_credential - store a git forge PAT with identity discovery."""
+    """Handler for configure_git_credential - store a git forge PAT with identity discovery.
+
+    Requires the caller's own elevation window when enforcement is on,
+    matching the REST twin POST /user/git-credentials.
+    """
     forge_type = args.get("forge_type")
     forge_host = args.get("forge_host")
     token = args.get("token")
