@@ -1,0 +1,74 @@
+{% if error %}
+<div class="audit-error" role="alert" data-audit-error="true">
+    <strong>The filters were refused:</strong> {{ error }}
+</div>
+{% else %}
+<div class="audit-results" data-export-query="{{ export_query }}" data-view="{{ view }}">
+    <div class="audit-summary">
+        <p class="audit-view-label"><strong>{% if view == 'security' %}Security events{% elif view == 'auth_activity' %}Authentication activity{% else %}All events{% endif %}</strong></p>
+        <p class="audit-window">Window: {{ window_label }}</p>
+        <p>Matching: <span class="audit-total" data-total="{{ total }}" data-total-capped="{{ 'true' if total_capped else 'false' }}">{% if total_capped %}{{ '{:,}'.format(total) }}+{% else %}{{ '{:,}'.format(total) }}{% endif %}</span></p>
+    </div>
+
+    <table class="audit-table striped">
+        <thead>
+            <tr>
+                <th>Time (UTC)</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>Outcome</th>
+                <th>Source</th>
+                <th>IP</th>
+                <th>Node</th>
+                <th>Correlation id</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr class="audit-row" data-row-id="{{ row.id }}">
+                <td class="audit-time">{{ row.time }}</td>
+                <td class="audit-actor audit-actor-{{ row.actor.kind }}">
+                    {% if row.actor.kind == 'system' %}<span class="audit-actor-badge">system</span>{{ row.actor.name }}
+                    {% elif row.actor.kind == 'attempted' %}attempted: {{ row.actor.name }}
+                    {% elif row.actor.kind == 'not_system' %}{{ row.actor.name }}<span class="audit-actor-marker">not a system actor</span>
+                    {% else %}{{ row.actor.name }}{% endif %}
+                </td>
+                <td>{{ row.action_type }}</td>
+                <td>{{ row.target }}</td>
+                <td><span class="audit-outcome audit-outcome-{{ row.outcome_class }}"{% if row.outcome_title %} title="{{ row.outcome_title }}"{% endif %}>{{ row.outcome_label }}</span></td>
+                <td>{{ row.source or '-' }}</td>
+                <td>{{ row.ip_address or '-' }}</td>
+                <td>{{ row.node_id or '-' }}</td>
+                <td>{% if row.correlation_id %}<a href="#" class="audit-correlation-link" data-correlation-id="{{ row.correlation_id }}">{{ row.correlation_id }}</a>{% else %}-{% endif %}</td>
+                <td class="audit-details">
+                    {% if row.details.expandable %}
+                    <details>
+                        <summary>{{ row.details.preview }}</summary>
+                        <pre>{{ row.details.full }}</pre>
+                        {% if row.details.truncated %}<small class="audit-details-truncated">truncated: the full value is available over REST and MCP by correlation id</small>{% endif %}
+                    </details>
+                    {% else %}{{ row.details.preview or '-' }}{% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="10" class="no-data">No audit events match these filters in this window.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <nav class="audit-pager" aria-label="Audit log pages">
+        {% if latest_url %}<button type="button" class="outline audit-page-latest" hx-get="{{ latest_url }}" hx-target="#audit-list-section" hx-swap="innerHTML">Latest</button>{% endif %}
+        {% if newer_url %}<button type="button" class="outline audit-page-newer" hx-get="{{ newer_url }}" hx-target="#audit-list-section" hx-swap="innerHTML">Newer</button>{% endif %}
+        {% if older_url %}<button type="button" class="outline audit-page-older" hx-get="{{ older_url }}" hx-target="#audit-list-section" hx-swap="innerHTML">Older</button>{% endif %}
+    </nav>
+</div>
+<datalist id="audit-actor-options">
+    {% for name in actor_options %}
+    <option value="{{ name }}"></option>
+    {% endfor %}
+</datalist>
+{% endif %}

@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, Tuple
 
 from code_indexer.server.services.audit_events import (
@@ -23,6 +24,14 @@ from code_indexer.server.services.audit_events import (
     AuditEvent,
     build_legacy_event,
     event_row_values,
+)
+from code_indexer.server.services.audit_log_query import (
+    POSTGRES_DIALECT,
+    AuditFilters,
+    build_aggregate_sql,
+    build_count_sql,
+    build_page_sql,
+    build_terminal_rows_sql,
 )
 
 from .pg_utils import sanitize_row
@@ -65,6 +74,22 @@ def _insert_event_rows(conn: Any, events: Sequence[AuditEvent]) -> None:
         cur.executemany(
             _INSERT_EVENT_SQL, [event_row_values(event) for event in events]
         )
+
+
+def _utc_row(row: dict) -> dict:
+    """Row with every TIMESTAMPTZ value as an ISO-8601 UTC string.
+
+    The session time zone must not leak into what readers see (or into a
+    keyset cursor): the same instant always renders the same way.
+    """
+    return {
+        key: (
+            value.astimezone(timezone.utc).isoformat()
+            if isinstance(value, datetime)
+            else value
+        )
+        for key, value in row.items()
+    }
 
 
 def _dict_row_factory() -> Any:
@@ -258,6 +283,59 @@ class AuditLogPostgresBackend:
                 rows = cur.fetchall()
 
         return [sanitize_row(row) for row in rows], total
+
+    # ------------------------------------------------------------------
+    # Shared read path (services/audit_log_query.py renders the SQL)
+    # ------------------------------------------------------------------
+
+    def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> List[dict]:
+        with self._conn() as conn:
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                cur.execute(sql, list(params))
+                return [_utc_row(row) for row in cur.fetchall()]
+
+    def query_page(
+        self,
+        filters: AuditFilters,
+        tier: str,
+        *,
+        seek: Optional[Tuple[str, int]],
+        direction: str,
+        limit: int,
+        offset: int = 0,
+    ) -> List[dict]:
+        """One keyset page of rows (see ``audit_log_query.build_page_sql``)."""
+        sql, params = build_page_sql(
+            filters,
+            tier,
+            POSTGRES_DIALECT,
+            seek=seek,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+        return self._fetch_dicts(sql, params)
+
+    def count_capped(self, filters: AuditFilters, tier: str, *, cap: int) -> int:
+        """Matching row count, reading at most ``cap + 1`` rows."""
+        sql, params = build_count_sql(filters, tier, POSTGRES_DIALECT, cap=cap)
+        return int(self._fetch_dicts(sql, params)[0]["cnt"])
+
+    def aggregate(
+        self, filters: AuditFilters, tier: str, *, max_groups: int
+    ) -> List[dict]:
+        """``GROUP BY (action_type, outcome)`` of the matching rows, in SQL."""
+        sql, params = build_aggregate_sql(
+            filters, tier, POSTGRES_DIALECT, max_groups=max_groups
+        )
+        return self._fetch_dicts(sql, params)
+
+    def find_terminal_rows(self, correlation_ids: Sequence[str]) -> List[dict]:
+        """Terminal rows sharing one of *correlation_ids* (pairing lookup)."""
+        if not correlation_ids:
+            return []
+        sql, params = build_terminal_rows_sql(correlation_ids, POSTGRES_DIALECT)
+        return self._fetch_dicts(sql, params)
 
     def get_pr_logs(
         self,

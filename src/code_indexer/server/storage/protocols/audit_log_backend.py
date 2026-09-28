@@ -12,6 +12,7 @@ from ._shared import List, Optional, Protocol, Tuple, runtime_checkable
 
 if TYPE_CHECKING:
     from code_indexer.server.services.audit_events import AuditEvent
+    from code_indexer.server.services.audit_log_query import AuditFilters
 
 
 @runtime_checkable
@@ -55,6 +56,35 @@ class AuditLogBackend(Protocol):
         limit: Optional[int] = None,
         offset: int = 0,
     ) -> Tuple[List[dict], int]: ...
+
+    # Shared read path (services/audit_log_query.py renders the SQL).
+
+    def query_page(
+        self,
+        filters: "AuditFilters",
+        tier: str,
+        *,
+        seek: Optional[Tuple[str, int]],
+        direction: str,
+        limit: int,
+        offset: int = 0,
+    ) -> List[dict]:
+        """One keyset page ordered by ``(timestamp, id)`` in *direction*."""
+        ...
+
+    def count_capped(self, filters: "AuditFilters", tier: str, *, cap: int) -> int:
+        """Matching row count, reading at most ``cap + 1`` rows."""
+        ...
+
+    def aggregate(
+        self, filters: "AuditFilters", tier: str, *, max_groups: int
+    ) -> List[dict]:
+        """SQL ``GROUP BY (action_type, outcome)`` of the matching rows."""
+        ...
+
+    def find_terminal_rows(self, correlation_ids: "Sequence[str]") -> List[dict]:
+        """Non-attempted rows sharing one of *correlation_ids*."""
+        ...
 
     def get_pr_logs(
         self,

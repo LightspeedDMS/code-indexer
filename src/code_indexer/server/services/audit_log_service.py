@@ -40,6 +40,14 @@ from code_indexer.server.services.audit_events import (
     build_legacy_event,
     event_row_values,
 )
+from code_indexer.server.services.audit_log_query import (
+    SQLITE_DIALECT,
+    AuditFilters,
+    build_aggregate_sql,
+    build_count_sql,
+    build_page_sql,
+    build_terminal_rows_sql,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 # Issue #1241 P1.3: async-batched audit writer constants.
@@ -528,6 +536,78 @@ class AuditLogService:
 
         logs = [dict(row) for row in rows]
         return logs, total
+
+    # ------------------------------------------------------------------
+    # Shared read path (services/audit_log_query.py renders the SQL)
+    # ------------------------------------------------------------------
+
+    def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> List[dict]:
+        cursor = self._get_connection().cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(sql, list(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def query_page(
+        self,
+        filters: "AuditFilters",
+        tier: str,
+        *,
+        seek: Optional[Tuple[str, int]],
+        direction: str,
+        limit: int,
+        offset: int = 0,
+    ) -> List[dict]:
+        """One keyset page of rows (see ``audit_log_query.build_page_sql``)."""
+        if self._backend is not None:
+            return self._backend.query_page(  # type: ignore[no-any-return]
+                filters,
+                tier,
+                seek=seek,
+                direction=direction,
+                limit=limit,
+                offset=offset,
+            )
+        sql, params = build_page_sql(
+            filters,
+            tier,
+            SQLITE_DIALECT,
+            seek=seek,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+        return self._fetch_dicts(sql, params)
+
+    def count_capped(self, filters: "AuditFilters", tier: str, *, cap: int) -> int:
+        """Matching row count, reading at most ``cap + 1`` rows."""
+        if self._backend is not None:
+            return int(self._backend.count_capped(filters, tier, cap=cap))
+        sql, params = build_count_sql(filters, tier, SQLITE_DIALECT, cap=cap)
+        return int(self._fetch_dicts(sql, params)[0]["cnt"])
+
+    def aggregate(
+        self, filters: "AuditFilters", tier: str, *, max_groups: int
+    ) -> List[dict]:
+        """``GROUP BY (action_type, outcome)`` of the matching rows, in SQL."""
+        if self._backend is not None:
+            return self._backend.aggregate(  # type: ignore[no-any-return]
+                filters, tier, max_groups=max_groups
+            )
+        sql, params = build_aggregate_sql(
+            filters, tier, SQLITE_DIALECT, max_groups=max_groups
+        )
+        return self._fetch_dicts(sql, params)
+
+    def find_terminal_rows(self, correlation_ids: Sequence[str]) -> List[dict]:
+        """Terminal rows sharing one of *correlation_ids* (pairing lookup)."""
+        if not correlation_ids:
+            return []
+        if self._backend is not None:
+            return self._backend.find_terminal_rows(  # type: ignore[no-any-return]
+                correlation_ids
+            )
+        sql, params = build_terminal_rows_sql(correlation_ids, SQLITE_DIALECT)
+        return self._fetch_dicts(sql, params)
 
     def get_pr_logs(
         self,
