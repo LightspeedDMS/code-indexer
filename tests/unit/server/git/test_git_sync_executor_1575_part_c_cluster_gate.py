@@ -17,6 +17,11 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+# Imported up front so the patch window below never performs the FIRST
+# import of smart_indexer (and high_throughput_processor): doing so while
+# FilesystemVectorStore is patched binds the mock into their module
+# namespaces for the rest of the session.
+import code_indexer.services.smart_indexer  # noqa: F401
 from code_indexer.server.git.git_sync_executor import GitSyncExecutor
 
 
@@ -69,6 +74,9 @@ def test_trigger_cidx_index_threads_postgres_storage_mode_to_disable_epoch(tmp_p
     # patch their DEFINING modules, not git_sync_executor's own namespace,
     # since the local import resolves the name at call time.
     with (
+        # Entered first: it imports the server app before any collaborator
+        # below is patched.
+        _app_state_storage_mode("postgres"),
         patch(
             "code_indexer.config.ConfigManager.create_with_backtrack",
             return_value=mock_config_manager,
@@ -81,7 +89,6 @@ def test_trigger_cidx_index_threads_postgres_storage_mode_to_disable_epoch(tmp_p
             "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore",
             return_value=mock_store,
         ) as mock_store_cls,
-        _app_state_storage_mode("postgres"),
     ):
         result = executor._trigger_cidx_index()
 

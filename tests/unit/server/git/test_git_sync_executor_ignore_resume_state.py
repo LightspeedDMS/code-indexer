@@ -24,6 +24,12 @@ import contextlib
 import subprocess
 from unittest.mock import MagicMock, patch
 
+# Imported up front so the patch windows below never perform the FIRST
+# import of these modules: patching SmartIndexer imports smart_indexer (and
+# high_throughput_processor) while FilesystemVectorStore is patched, which
+# would bind the mock into their module namespaces for the rest of the
+# session and break later tests that index for real.
+import code_indexer.services.smart_indexer  # noqa: F401
 from code_indexer.server.git.git_sync_executor import GitSyncExecutor
 
 
@@ -76,6 +82,9 @@ def test_trigger_cidx_index_passes_trust_resume_state_false(tmp_path):
     mock_indexer.smart_index.return_value = mock_stats
 
     with (
+        # Entered first: it imports the server app before any collaborator
+        # below is patched (see the module-level import note).
+        _app_state_storage_mode("sqlite"),
         patch(
             "code_indexer.config.ConfigManager.create_with_backtrack",
             return_value=mock_config_manager,
@@ -92,7 +101,6 @@ def test_trigger_cidx_index_passes_trust_resume_state_false(tmp_path):
             "code_indexer.services.smart_indexer.SmartIndexer",
             return_value=mock_indexer,
         ),
-        _app_state_storage_mode("sqlite"),
     ):
         result = executor._trigger_cidx_index()
 
