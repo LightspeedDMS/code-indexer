@@ -45,6 +45,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..auth.user_manager import UserRole, SSOPasswordChangeError
 from ..auth import dependencies
+from ..auth.login_outcome import complete_login, reject_login
 from .auth import (
     get_session_manager,
     SessionData,
@@ -1600,6 +1601,21 @@ def _get_users_list():
         return []
     users = user_manager.get_all_users()
     return sorted(users, key=lambda u: u.username.lower())
+
+
+# Login method recorded by the Web login form.
+_WEB_LOGIN_METHOD = "password"
+
+
+def _web_login_mfa_state() -> str:
+    """MFA state recorded for a Web login that issues a session directly.
+
+    Only called when the user has no MFA enrolled (an enrolled user gets a
+    challenge instead, recorded when it is answered).
+    """
+    from . import mfa_routes
+
+    return "not_applicable" if mfa_routes._totp_service is None else "not_enrolled"
 
 
 def _get_user_mfa_status(username: str) -> bool:
@@ -11283,6 +11299,15 @@ def unified_login_submit(
     user = user_manager.authenticate_user(username, password)
 
     if user is None:
+        # The attempt's one outcome row; the typed name is recorded only
+        # when it names an existing account.
+        reject_login(
+            username,
+            account_exists=user_manager.get_user(username) is not None,
+            method=_WEB_LOGIN_METHOD,
+            stage="credentials",
+            reason="bad_credentials",
+        )
         # Invalid credentials - show error with new CSRF token
         new_csrf_token = generate_csrf_token()
 
@@ -11340,10 +11365,16 @@ def unified_login_submit(
             url=redirect_url,
             status_code=status.HTTP_303_SEE_OTHER,
         )
-        session_manager.create_session(
-            expiry_response,
-            username=user.username,
-            role=user.role.value,
+        complete_login(
+            user.username,
+            method=_WEB_LOGIN_METHOD,
+            mfa=_web_login_mfa_state(),
+            flow="web_session",
+            issue=lambda: session_manager.create_session(
+                expiry_response,
+                username=user.username,
+                role=user.role.value,
+            ),
         )
         return expiry_response
 
@@ -11385,10 +11416,16 @@ def unified_login_submit(
         url=redirect_url,
         status_code=status.HTTP_303_SEE_OTHER,
     )
-    session_manager.create_session(
-        redirect_response,
-        username=user.username,
-        role=user.role.value,
+    complete_login(
+        user.username,
+        method=_WEB_LOGIN_METHOD,
+        mfa=_web_login_mfa_state(),
+        flow="web_session",
+        issue=lambda: session_manager.create_session(
+            redirect_response,
+            username=user.username,
+            role=user.role.value,
+        ),
     )
 
     return redirect_response

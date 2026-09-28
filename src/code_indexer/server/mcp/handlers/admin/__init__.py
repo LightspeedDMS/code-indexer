@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies as dependencies
+from code_indexer.server.auth.login_outcome import complete_login, reject_login
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -303,18 +304,33 @@ def handle_authenticate(
     # Validate API key
     user = user_manager.validate_user_api_key(username, api_key)
     if not user:
+        # The attempt's one outcome row; the typed name is recorded only
+        # when it names an existing account.
+        reject_login(
+            username,
+            account_exists=user_manager.get_user(username) is not None,
+            method="api_key",
+            stage="credentials",
+            reason="bad_credentials",
+        )
         return _mcp_response({"success": False, "error": "Invalid credentials"})  # type: ignore[no-any-return]
 
     # Successful authentication should refund the consumed token
     rate_limiter.refund(username)
 
-    # Create JWT token
-    token = jwt_manager.create_token(
-        {
-            "username": user.username,
-            "role": user.role.value,
-            "created_at": user.created_at.isoformat(),
-        }
+    # Create JWT token (the login's one success row is recorded with it)
+    token = complete_login(
+        user.username,
+        method="api_key",
+        mfa="not_applicable",
+        flow="mcp_jwt",
+        issue=lambda: jwt_manager.create_token(
+            {
+                "username": user.username,
+                "role": user.role.value,
+                "created_at": user.created_at.isoformat(),
+            }
+        ),
     )
 
     # Set JWT as HttpOnly cookie

@@ -826,7 +826,13 @@ def register_auth_routes(
         keys = user_manager.get_api_keys(current_user.username)
         return ApiKeyListResponse(keys=keys)
 
-    @app.delete("/api/keys/{key_id}", status_code=200)
+    # Deleting a personal API key requires the caller's own elevation window
+    # when enforcement is on, matching the MCP twin delete_api_key.
+    @app.delete(
+        "/api/keys/{key_id}",
+        status_code=200,
+        dependencies=[Depends(dependencies.require_self_elevation)],
+    )
     def delete_api_key(
         key_id: str,
         current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
