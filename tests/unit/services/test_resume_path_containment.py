@@ -54,9 +54,17 @@ def _create_git_repo(path: Path) -> None:
     )
 
 
-def _make_indexer(repo: Path, tmp_path: Path, store: MagicMock) -> SmartIndexer:
-    """Create a SmartIndexer wired to a real repo with mocked external services."""
+def _make_indexer(
+    repo: Path, tmp_path: Path, store: MagicMock, server_context: bool = False
+) -> SmartIndexer:
+    """Create a SmartIndexer wired to a real repo with mocked external services.
+
+    ``server_context`` marks the config the way the server seam does, so
+    out-of-root symlinks are confined; local CLI context follows them.
+    """
     config = Config(codebase_dir=repo)
+    if server_context:
+        config.confine_to_codebase_root()
     mock_embedding = MagicMock()
     metadata_path = tmp_path / "metadata.json"
     return SmartIndexer(
@@ -271,9 +279,9 @@ class TestResumePathTraversalContainment:
     def test_in_tree_symlink_escaping_codebase_dir_dropped(
         self, tmp_path: Path
     ) -> None:
-        """A file that LOOKS in-tree (a relative path under codebase_dir)
-        but is actually a symlink pointing outside must be rejected --
-        resolution must follow symlinks, not just collapse '..'."""
+        """Server context: a file that LOOKS in-tree (a relative path under
+        codebase_dir) but is actually a symlink pointing outside must be
+        rejected -- resolution must follow symlinks, not just collapse '..'."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _create_git_repo(repo)
@@ -284,7 +292,9 @@ class TestResumePathTraversalContainment:
         escape_link = repo / "escape_link.py"
         escape_link.symlink_to(outside_secret)
 
-        indexer = _make_indexer(repo, tmp_path, _mock_vector_store())
+        indexer = _make_indexer(
+            repo, tmp_path, _mock_vector_store(), server_context=True
+        )
         _seed_resumable_metadata(indexer, ["escape_link.py"])
 
         processed_files = _run_resume_and_capture(indexer)

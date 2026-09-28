@@ -1210,12 +1210,19 @@ def test_search_engine_passes_cache_to_rust_backend():
         """Pretend RustNativeBackend; records xray_cache_backend kwarg.
 
         Also accepts identity_cache=None (Bug #1784: XRaySearchEngine now
-        forwards an optional shared identity cache to RustNativeBackend) so
+        forwards an optional shared identity cache to RustNativeBackend) and
+        confine_to_repo_root (server-context repository-root confinement) so
         the real call signature doesn't raise TypeError against this stand-in.
         """
 
-        def __init__(self, xray_cache_backend=None, identity_cache=None):
+        def __init__(
+            self,
+            xray_cache_backend=None,
+            identity_cache=None,
+            confine_to_repo_root=True,
+        ):
             captured["xray_cache_backend"] = xray_cache_backend
+            captured["confine_to_repo_root"] = confine_to_repo_root
 
     mock_config = MagicMock()
     mock_config.storage_mode = "postgres"
@@ -1261,6 +1268,10 @@ def test_search_engine_passes_cache_to_rust_backend():
     assert captured.get("xray_cache_backend") is not None, (
         "XRaySearchEngine must pass a non-None xray_cache_backend to "
         "RustNativeBackend in postgres mode"
+    )
+    assert captured.get("confine_to_repo_root") is True, (
+        "The default (server-side) XRaySearchEngine must keep the backend "
+        "confined to the repository root"
     )
 
 

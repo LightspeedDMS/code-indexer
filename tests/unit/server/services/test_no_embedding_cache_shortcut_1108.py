@@ -882,6 +882,11 @@ class TestTemporalEntryPointValueFlow:
             voyage_ai = VoyageAIConfig()
             cohere = CohereConfig()
             daemon = None
+            confined_to_codebase_root = False
+
+            def confine_to_codebase_root(self) -> None:
+                # Mirrors Config: the server seam marks server context.
+                self.confined_to_codebase_root = True
 
         class _FakeCM:
             @classmethod
@@ -992,6 +997,11 @@ class TestTemporalEntryPointValueFlow:
             voyage_ai = VoyageAIConfig()
             cohere = CohereConfig()
             daemon = None
+            confined_to_codebase_root = False
+
+            def confine_to_codebase_root(self) -> None:
+                # Mirrors Config: the server seam marks server context.
+                self.confined_to_codebase_root = True
 
         class _FakeCM:
             @classmethod

@@ -80,6 +80,11 @@ class FixedSizeChunker:
             # IndexingConfig only - use default chunk size
             self.chunk_size = self.MODEL_CHUNK_SIZES["default"]
 
+        # Read-time containment applies to server context only (a full
+        # Config marked by the server seam); local CLI chunking reads
+        # symlinked files wherever they point.
+        self._config = config if isinstance(config, Config) else None
+
         # Calculate derived values
         self.overlap_size = int(self.chunk_size * self.OVERLAP_PERCENTAGE)
         self.step_size = self.chunk_size - self.overlap_size
@@ -290,14 +295,19 @@ class FixedSizeChunker:
         self, file_path: Path, repo_root: Optional[Path] = None
     ) -> List[Dict[str, Any]]:
         """Standard file chunking - reads entire file into memory."""
-        # Containment against the codebase root is re-checked at the
-        # moment content is actually opened, since discovery-time
-        # filtering and this read are not atomic (the file at this path
-        # could have been replaced between the two). Every production
-        # caller passes repo_root; when it is omitted (test-only direct
-        # usage of this method) there is no root to check against, so
-        # the file is read unconditionally.
-        if repo_root is not None:
+        # Server context: containment against the codebase root is
+        # re-checked at the moment content is actually opened, since
+        # discovery-time filtering and this read are not atomic (the file
+        # at this path could have been replaced between the two). Every
+        # production caller passes repo_root; when it is omitted (test-only
+        # direct usage of this method) there is no root to check against,
+        # so the file is read unconditionally. Local CLI context reads
+        # symlinked files wherever they point.
+        if (
+            repo_root is not None
+            and self._config is not None
+            and self._config.confined_to_codebase_root
+        ):
             resolved_root = self._resolved_root_for(repo_root)
             if not is_resolved_within_root(file_path, resolved_root):
                 raise ValueError("file does not resolve inside the codebase root")

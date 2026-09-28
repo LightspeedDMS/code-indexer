@@ -2663,13 +2663,22 @@ class SmartIndexer(HighThroughputProcessor):
         # independent resolve() call here.
         resolved_candidate = resolve_if_within_root(candidate, resolved_codebase)
         if resolved_candidate is None:
-            return False
+            # Local CLI context only: a fresh walk includes an in-tree
+            # symlink whose target lies outside the root (judged by its link
+            # name below), but never descends into a symlinked directory.
+            # Server context never follows a symlink out of the root.
+            if self.config.confined_to_codebase_root or not (
+                candidate.is_symlink()
+                and resolve_if_within_root(candidate.parent, resolved_codebase)
+                is not None
+            ):
+                return False
+        else:
+            relative_path = resolved_candidate.relative_to(resolved_codebase)
 
-        relative_path = resolved_candidate.relative_to(resolved_codebase)
-
-        eligibility_candidate = Path(self.config.codebase_dir) / relative_path
-        if not self.file_finder.is_eligible(eligibility_candidate):
-            return False
+            eligibility_candidate = Path(self.config.codebase_dir) / relative_path
+            if not self.file_finder.is_eligible(eligibility_candidate):
+                return False
 
         try:
             link_relative_path = candidate.relative_to(Path(self.config.codebase_dir))

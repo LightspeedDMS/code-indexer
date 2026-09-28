@@ -668,6 +668,9 @@ class GitSyncExecutor:
             # Get configuration for this repository
             config_manager = ConfigManager.create_with_backtrack(self.repository_path)
             config = config_manager.load()
+            # Server context: indexed files stay inside the repository root
+            # (no `cidx` subprocess here, so the spawn-seam flags do not apply).
+            config.confine_to_codebase_root()
 
             # Initialize required services (similar to CLI approach).
             # Bug #899: pass http_client_factory from app.state so FaultInjectingSyncTransport

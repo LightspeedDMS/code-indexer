@@ -212,11 +212,12 @@ class FileFinder:
             if not self.override_filter_service and not base_result:
                 return False
 
-            # Reject any candidate whose resolved location (following
-            # symlinks, collapsing '..') is not strictly inside the
-            # resolved codebase root -- a symlink in-tree can have an
-            # eligible name/extension while its real target lies outside
-            # the codebase directory entirely.
+            # Server context only (config.confined_to_codebase_root): reject
+            # any candidate whose resolved location (following symlinks,
+            # collapsing '..') is not strictly inside the resolved codebase
+            # root -- a symlink in-tree can have an eligible name/extension
+            # while its real target lies outside the codebase directory
+            # entirely. Local CLI indexing follows such symlinks.
             #
             # os.walk() is called with followlinks=False, which means it
             # never descends into a symlinked directory -- every
@@ -227,8 +228,10 @@ class FileFinder:
             # on that final component; the full resolve()+containment
             # check (several stats, one per path component) only runs
             # when it fires, instead of unconditionally on every file.
-            if file_path.is_symlink() and not is_resolved_within_root(
-                file_path, self.resolved_codebase_dir
+            if (
+                self.config.confined_to_codebase_root
+                and file_path.is_symlink()
+                and not is_resolved_within_root(file_path, self.resolved_codebase_dir)
             ):
                 return False
 

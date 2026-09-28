@@ -87,7 +87,13 @@ class DocumentProcessor:
         callers/tests replace the whole ``file_finder`` attribute with a
         test double, which would otherwise turn the containment root
         into an unrelated mock value and reject every real file.
+
+        Server context only (``config.confined_to_codebase_root``); local
+        CLI indexing keeps every candidate, following symlinks wherever
+        they point.
         """
+        if not self.config.confined_to_codebase_root:
+            return list(candidates)
         resolved_root = Path(self.config.codebase_dir).resolve()
         kept: List[Path] = []
         rejected_count = 0

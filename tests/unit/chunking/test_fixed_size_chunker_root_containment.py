@@ -1,6 +1,7 @@
-"""The point where a file's content is actually
+"""In server context, the point where a file's content is actually
 opened for chunking must re-check containment against the codebase root,
-independently of whatever discovery-time filtering already ran.
+independently of whatever discovery-time filtering already ran. (Local CLI
+context is covered by tests/unit/indexing/test_symlink_containment_context.py.)
 
 This closes the gap between file discovery and the file actually being
 read (TOCTOU): even if a path passed discovery-time filtering, the file on
@@ -22,12 +23,14 @@ from pathlib import Path
 import pytest
 
 from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
-from code_indexer.config import IndexingConfig
+from code_indexer.config import Config
 
 
 @pytest.fixture
 def chunker() -> FixedSizeChunker:
-    return FixedSizeChunker(IndexingConfig())
+    config = Config()
+    config.confine_to_codebase_root()
+    return FixedSizeChunker(config)
 
 
 class TestChunkFileRootContainment:

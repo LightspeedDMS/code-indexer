@@ -113,3 +113,52 @@ def test_trigger_cidx_index_passes_trust_resume_state_false(tmp_path):
         f"in-process indexing trigger must never trust repo-authored resume "
         f"state. Got kwargs: {kwargs}"
     )
+
+
+def test_trigger_cidx_index_confines_indexing_to_codebase_root(tmp_path):
+    """This in-process server indexing path must mark its Config as server
+    context, so out-of-root symlinks are never indexed."""
+    from code_indexer.config import Config
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    executor = GitSyncExecutor(repository_path=tmp_path)
+
+    real_config = Config(codebase_dir=tmp_path)
+    mock_config_manager = MagicMock()
+    mock_config_manager.load.return_value = real_config
+
+    mock_embedding_provider = MagicMock()
+    mock_embedding_provider.health_check.return_value = True
+    mock_store = MagicMock()
+    mock_store.health_check.return_value = True
+    mock_stats = MagicMock()
+    mock_stats.cancelled = False
+    mock_indexer = MagicMock()
+    mock_indexer.smart_index.return_value = mock_stats
+
+    with (
+        # Entered first: it imports the server app before any collaborator
+        # below is patched (see the module-level import note).
+        _app_state_storage_mode("sqlite"),
+        patch(
+            "code_indexer.config.ConfigManager.create_with_backtrack",
+            return_value=mock_config_manager,
+        ),
+        patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create",
+            return_value=mock_embedding_provider,
+        ),
+        patch(
+            "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore",
+            return_value=mock_store,
+        ),
+        patch(
+            "code_indexer.services.smart_indexer.SmartIndexer",
+            return_value=mock_indexer,
+        ) as smart_indexer_cls,
+    ):
+        assert executor._trigger_cidx_index() is True
+
+    passed_config = smart_indexer_cls.call_args.kwargs["config"]
+    assert passed_config is real_config
+    assert passed_config.confined_to_codebase_root

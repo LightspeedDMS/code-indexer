@@ -3334,6 +3334,10 @@ def index(
         rather than once after an early call whose result a later reload
         would silently discard. Every other provider setting is left
         exactly as loaded.
+
+        Either server flag also marks the config as server context, so
+        indexed files stay inside the repository root; a plain local run
+        follows symlinks wherever they point.
         """
         loaded_config = cast(Config, config_manager.load())
         if server_managed_provider_settings:
@@ -3342,6 +3346,8 @@ def index(
             )
 
             enforce_server_managed_provider_settings(loaded_config)
+        if ignore_resume_state:
+            loaded_config.confine_to_codebase_root()
         return loaded_config
 
     # Story #1418: install the embedding-stats writer BEFORE any

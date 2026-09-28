@@ -54,7 +54,9 @@ def _create_git_repo(path: Path) -> None:
 
 
 def _make_smart_indexer(codebase_dir: Path, metadata_path: Path) -> SmartIndexer:
+    # Server context: containment applies (local CLI follows symlinks).
     config = Config(codebase_dir=codebase_dir)
+    config.confine_to_codebase_root()
     mock_embedding_provider = MagicMock()
     mock_vector_store = MagicMock()
     mock_vector_store.resolve_collection_name.return_value = "test_collection"
