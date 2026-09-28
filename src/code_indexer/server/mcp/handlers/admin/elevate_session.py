@@ -2,7 +2,10 @@
 
 Exposes a single callable `elevate_session(args, user, session_key)` that
 verifies a TOTP or recovery code and opens an elevation window via
-ElevatedSessionManager.  All module-level names that must be patchable by
+ElevatedSessionManager.  It is the MCP twin of REST `POST /auth/elevate` and
+follows the same rules: any authenticated user with TOTP enrolled may open a
+window for their own username, keyed by the session key of the credential
+that made the call.  All module-level names that must be patchable by
 tests are imported at the top of this module so unittest.mock.patch can
 replace them in the handler's namespace.
 """
@@ -11,13 +14,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+from fastapi import Request
+
+from code_indexer.server.auth.dependencies import _mfa_setup_url_for_role
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.mcp.auth.elevation_decorator import (
     _is_elevation_enforcement_enabled,
-    _TOTP_SETUP_URL,
 )
+from code_indexer.server.mcp.handlers._utils import _mcp_response
 from code_indexer.server.web.mfa_routes import get_totp_service
 
 
@@ -43,11 +49,19 @@ def _validate_elevate_args(args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _client_ip(http_request: Optional[Request]) -> str:
+    """Client IP exactly as REST /auth/elevate derives it."""
+    if http_request is not None and http_request.client:
+        return str(http_request.client.host)
+    return "unknown"
+
+
 def _verify_mcp_elevation_code(
     totp_svc: Any,
     username: str,
     args: Dict[str, Any],
     limiter_key: str,
+    client_ip: str,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Verify TOTP or recovery code.
 
@@ -57,7 +71,9 @@ def _verify_mcp_elevation_code(
     recovery_code = args.get("recovery_code")
     totp_code = args.get("totp_code")
     if recovery_code:
-        if not totp_svc.verify_recovery_code(username, recovery_code, ip_address=None):
+        if not totp_svc.verify_recovery_code(
+            username, recovery_code, ip_address=client_ip
+        ):
             login_rate_limiter.check_and_record_failure(limiter_key)
             return None, {
                 "error": "elevation_failed",
@@ -73,17 +89,26 @@ def _verify_mcp_elevation_code(
     return "full", None
 
 
-def _build_elevate_success_response(
-    session_key: str, username: str, scope: str
+def _open_window(
+    session_key: str, username: str, scope: str, client_ip: str
 ) -> Dict[str, Any]:
-    """Create elevation window and return success payload with float timestamps."""
+    """Create the elevation window and return the payload describing it.
+
+    Returns an ``elevation_create_failed`` error, as REST /auth/elevate does,
+    when the window cannot be read back after create.
+    """
     elevated_session_manager.create(
         session_key=session_key,
         username=username,
-        elevated_from_ip=None,
+        elevated_from_ip=client_ip,
         scope=scope,
     )
     session = elevated_session_manager.get_status(session_key)
+    if session is None:
+        return {
+            "error": "elevation_create_failed",
+            "message": "Elevation window not retrievable after create.",
+        }
     elevated_until = float(
         session.last_touched_at + elevated_session_manager._idle_timeout
     )
@@ -102,9 +127,22 @@ def _build_elevate_success_response(
 
 
 def elevate_session(
-    args: Dict[str, Any], user: User, session_key: str = ""
+    args: Dict[str, Any],
+    user: User,
+    session_key: str = "",
+    http_request: Optional[Request] = None,
 ) -> Dict[str, Any]:
-    """Submit a TOTP or recovery code to open an MCP elevation window (Story #925 AC3)."""
+    """Submit a TOTP or recovery code to open an MCP elevation window (Story #925 AC3).
+
+    ``session_key`` and ``http_request`` are injected by the MCP dispatcher.
+    """
+    return _mcp_response(_elevate(args, user, session_key, _client_ip(http_request)))
+
+
+def _elevate(
+    args: Dict[str, Any], user: User, session_key: str, client_ip: str
+) -> Dict[str, Any]:
+    """Run the elevation checks and return the unwrapped result payload."""
     if not _is_elevation_enforcement_enabled():
         return {
             "error": "elevation_enforcement_disabled",
@@ -116,14 +154,29 @@ def elevate_session(
         return arg_error
 
     totp_svc = get_totp_service()
+    if totp_svc is None:
+        return {
+            "error": "elevation_enforcement_disabled",
+            "message": "TOTP service not available.",
+        }
     if not totp_svc.is_mfa_enabled(user.username):
         return {
             "error": "totp_setup_required",
-            "setup_url": _TOTP_SETUP_URL,
+            "setup_url": _mfa_setup_url_for_role(user.role),
             "message": "Set up TOTP before performing this action.",
         }
 
-    limiter_key = user.username
+    # Resolve the session key before any code is verified, so a code is never
+    # consumed on a request that cannot hold an elevation window.
+    if not session_key:
+        return {
+            "error": "missing_session_key",
+            "message": "No session key on MCP request.",
+        }
+
+    # Same key format as REST /auth/elevate, so failed attempts through
+    # either front door count against one lockout.
+    limiter_key = f"{client_ip}:{user.username}"
     is_locked, _ = login_rate_limiter.is_locked(limiter_key)
     if is_locked:
         return {
@@ -132,16 +185,12 @@ def elevate_session(
         }
 
     scope, code_error = _verify_mcp_elevation_code(
-        totp_svc, user.username, args, limiter_key
+        totp_svc, user.username, args, limiter_key, client_ip
     )
     if code_error is not None:
         return code_error
 
-    if not session_key:
-        return {
-            "error": "missing_session_key",
-            "message": "No session key on MCP request.",
-        }
-
-    login_rate_limiter.record_success(limiter_key)
-    return _build_elevate_success_response(session_key, user.username, scope or "full")
+    result = _open_window(session_key, user.username, scope or "full", client_ip)
+    if "error" not in result:
+        login_rate_limiter.record_success(limiter_key)
+    return result

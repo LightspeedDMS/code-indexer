@@ -7,7 +7,8 @@ structured MCP error dict instead of calling the handler.
 
 Error codes (mirror REST layer in dependencies.py):
   elevation_enforcement_disabled  - kill switch off or manager/TOTP unavailable
-  totp_setup_required             - admin has no TOTP configured (with setup_url)
+  totp_setup_required             - caller has no TOTP configured (with the
+                                    setup_url for the caller's role)
   elevation_required              - no active window or scope insufficient
 """
 
@@ -15,16 +16,14 @@ import logging
 from functools import wraps
 from typing import Any, Callable, Dict, Optional, cast
 
+from code_indexer.server.auth.dependencies import _mfa_setup_url_for_role
 from code_indexer.server.auth.elevated_session_manager import (
     elevated_session_manager,
 )
-from code_indexer.server.auth.user_manager import User
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.web.mfa_routes import get_totp_service
 
 logger = logging.getLogger(__name__)
-
-# Stable internal path for TOTP setup — matches REST layer constant.
-_TOTP_SETUP_URL = "/admin/mfa/setup"
 
 # Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
 # A session satisfies required_scope R when session_rank <= required_rank.
@@ -69,7 +68,8 @@ def _elevation_required_error(message: str) -> Dict[str, Any]:
     )
 
 
-def _totp_setup_required_error() -> Dict[str, Any]:
+def _totp_setup_required_error(role: UserRole) -> Dict[str, Any]:
+    """Point the caller at the TOTP setup page for their role, as REST does."""
     # cast: see _disabled_error rationale above.
     from code_indexer.server.mcp.handlers._utils import _mcp_response
 
@@ -78,7 +78,7 @@ def _totp_setup_required_error() -> Dict[str, Any]:
         _mcp_response(
             {
                 "error": "totp_setup_required",
-                "setup_url": _TOTP_SETUP_URL,
+                "setup_url": _mfa_setup_url_for_role(role),
                 "message": "Set up TOTP at the URL above before performing this action.",
             }
         ),
@@ -139,7 +139,7 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
 
             # Gate 4: TOTP setup check
             if not totp.is_mfa_enabled(user.username):
-                return _totp_setup_required_error()
+                return _totp_setup_required_error(user.role)
 
             # Gate 5: session key resolved above.
             if not session_key:
@@ -150,7 +150,9 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
             session = esm.touch_atomic_for_user(str(session_key), user.username)
             if session is None:
                 return _elevation_required_error(
-                    "No active elevation window. Call elevate_session first."
+                    "No active elevation window. Call the elevate_session tool "
+                    "with the user's current TOTP code (or REST POST "
+                    "/auth/elevate with the same credential), then retry."
                 )
 
             # Gate 7: scope check
