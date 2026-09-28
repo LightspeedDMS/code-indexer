@@ -25,6 +25,7 @@ from code_indexer.server.auth.dependencies import (
     get_current_user_hybrid,
 )
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.web.mfa_routes import get_totp_service
 
@@ -42,7 +43,11 @@ _HTTP_SEE_OTHER = status.HTTP_303_SEE_OTHER
 _HTTP_BAD_REQUEST = status.HTTP_400_BAD_REQUEST
 _HTTP_UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED
 _HTTP_FORBIDDEN = status.HTTP_403_FORBIDDEN
+_HTTP_TOO_MANY_REQUESTS = status.HTTP_429_TOO_MANY_REQUESTS
 _HTTP_SERVICE_UNAVAILABLE = status.HTTP_503_SERVICE_UNAVAILABLE
+
+# Same wording as REST POST /auth/elevate's rate_limited response.
+_RATE_LIMITED_MESSAGE = "Too many elevation attempts. Try again later."
 
 
 class _ElevResult(Enum):
@@ -51,6 +56,7 @@ class _ElevResult(Enum):
     NO_CODE = auto()
     NO_MFA = auto()
     NO_SESSION = auto()
+    RATE_LIMITED = auto()
     INVALID_CODE = auto()
 
 
@@ -152,8 +158,8 @@ def _attempt_elevation(
     """Run the shared elevation decision pipeline.
 
     Executes all validation steps (kill-switch, code presence, MFA config,
-    session key, credential verification) and — on success — creates the
-    elevated session.  All audit log entries are emitted here so both the
+    session key, failed-attempt lockout, credential verification) and — on
+    success — creates the elevated session.  All audit log entries are emitted here so both the
     form and AJAX callers share identical observability.
 
     Args:
@@ -201,10 +207,25 @@ def _attempt_elevation(
         )
         return _ElevResult.NO_SESSION, None
 
+    # Same limiter instance and key as REST /auth/elevate and MCP
+    # elevate_session, so failed attempts through any front door count
+    # against one lockout. Checked before any code is verified: a locked-out
+    # caller is refused even with a correct code.
+    limiter_key = f"{client_ip}:{username}"
+    is_locked, _ = login_rate_limiter.is_locked(limiter_key)
+    if is_locked:
+        logger.warning(
+            "Elevation attempt by %s from %s rejected — too many failed attempts",
+            username,
+            client_ip,
+        )
+        return _ElevResult.RATE_LIMITED, None
+
     scope = _verify_credentials(
         totp_service, username, totp_code, recovery_code, client_ip
     )
     if scope is None:
+        login_rate_limiter.check_and_record_failure(limiter_key)
         code_type = "recovery code" if recovery_code else "TOTP code"
         logger.warning(
             "Elevation attempt by %s from %s rejected — invalid %s",
@@ -220,6 +241,7 @@ def _attempt_elevation(
         elevated_from_ip=client_ip,
         scope=scope,
     )
+    login_rate_limiter.record_success(limiter_key)
     logger.info(
         "Elevation granted for %s from %s (scope=%s)", username, client_ip, scope
     )
@@ -279,6 +301,10 @@ def elevate_form(
         return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     if result == _ElevResult.NO_SESSION:
         return _elev_error(request, safe_next, "No session.", _HTTP_FORBIDDEN)
+    if result == _ElevResult.RATE_LIMITED:
+        return _elev_error(
+            request, safe_next, _RATE_LIMITED_MESSAGE, _HTTP_TOO_MANY_REQUESTS
+        )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."
     return _elev_error(request, safe_next, error_msg, _HTTP_UNAUTHORIZED)
@@ -316,6 +342,11 @@ def elevate_ajax(
         return JSONResponse(
             {"success": False, "error": "No session."},
             status_code=_HTTP_FORBIDDEN,
+        )
+    if result == _ElevResult.RATE_LIMITED:
+        return JSONResponse(
+            {"success": False, "error": _RATE_LIMITED_MESSAGE},
+            status_code=_HTTP_TOO_MANY_REQUESTS,
         )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."
