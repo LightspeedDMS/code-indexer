@@ -8,6 +8,9 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.server.repositories.user_dir_permissions import (
+    ensure_activated_user_dir,
+)
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
@@ -592,7 +595,7 @@ class ActivatedRepoManager:
     ) -> None:
         """Save metadata to JSON file (standalone mode)."""
         user_dir = self._safe_user_dir(username)
-        os.makedirs(user_dir, exist_ok=True)
+        ensure_activated_user_dir(user_dir)
         metadata_path = self._safe_user_scoped_path(
             username, f"{user_alias}_metadata.json"
         )
@@ -1054,7 +1057,7 @@ class ActivatedRepoManager:
             # created -- an unsafe username/user_alias raises here.
             composite_path_str = self._safe_user_scoped_path(username, user_alias)
             user_dir = self._safe_user_dir(username)
-            os.makedirs(user_dir, exist_ok=True)
+            ensure_activated_user_dir(user_dir)
 
             composite_path = Path(composite_path_str)
 
@@ -2647,7 +2650,9 @@ class ActivatedRepoManager:
             # one level too high).
             activated_repo_path = self._safe_user_scoped_path(username, user_alias)
             user_dir = self._safe_user_dir(username)
-            os.makedirs(user_dir, exist_ok=True)
+            # The CoW daemon (a different OS user, reached via the service
+            # group) must be able to create the clone inside this directory.
+            ensure_activated_user_dir(user_dir)
 
             update_progress(30, "Creating user directory structure")
 
