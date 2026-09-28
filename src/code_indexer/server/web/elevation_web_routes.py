@@ -45,9 +45,12 @@ _HTTP_UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED
 _HTTP_FORBIDDEN = status.HTTP_403_FORBIDDEN
 _HTTP_TOO_MANY_REQUESTS = status.HTTP_429_TOO_MANY_REQUESTS
 _HTTP_SERVICE_UNAVAILABLE = status.HTTP_503_SERVICE_UNAVAILABLE
+_HTTP_INTERNAL_SERVER_ERROR = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 # Same wording as REST POST /auth/elevate's rate_limited response.
 _RATE_LIMITED_MESSAGE = "Too many elevation attempts. Try again later."
+# Same wording as REST POST /auth/elevate's elevation_create_failed response.
+_CREATE_FAILED_MESSAGE = "Elevation window not retrievable after create."
 
 
 class _ElevResult(Enum):
@@ -58,6 +61,7 @@ class _ElevResult(Enum):
     NO_SESSION = auto()
     RATE_LIMITED = auto()
     INVALID_CODE = auto()
+    CREATE_FAILED = auto()
 
 
 def _sanitize_next(next_value: str) -> str:
@@ -241,6 +245,15 @@ def _attempt_elevation(
         elevated_from_ip=client_ip,
         scope=scope,
     )
+    # As REST does: clear the failure history only once the window is
+    # confirmed readable.
+    if elevated_session_manager.get_status(session_key) is None:
+        logger.error(
+            "Elevation window for %s from %s not retrievable after create",
+            username,
+            client_ip,
+        )
+        return _ElevResult.CREATE_FAILED, None
     login_rate_limiter.record_success(limiter_key)
     logger.info(
         "Elevation granted for %s from %s (scope=%s)", username, client_ip, scope
@@ -305,6 +318,10 @@ def elevate_form(
         return _elev_error(
             request, safe_next, _RATE_LIMITED_MESSAGE, _HTTP_TOO_MANY_REQUESTS
         )
+    if result == _ElevResult.CREATE_FAILED:
+        return _elev_error(
+            request, safe_next, _CREATE_FAILED_MESSAGE, _HTTP_INTERNAL_SERVER_ERROR
+        )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."
     return _elev_error(request, safe_next, error_msg, _HTTP_UNAUTHORIZED)
@@ -347,6 +364,11 @@ def elevate_ajax(
         return JSONResponse(
             {"success": False, "error": _RATE_LIMITED_MESSAGE},
             status_code=_HTTP_TOO_MANY_REQUESTS,
+        )
+    if result == _ElevResult.CREATE_FAILED:
+        return JSONResponse(
+            {"success": False, "error": _CREATE_FAILED_MESSAGE},
+            status_code=_HTTP_INTERNAL_SERVER_ERROR,
         )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."

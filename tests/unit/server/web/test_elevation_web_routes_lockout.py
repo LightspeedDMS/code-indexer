@@ -218,6 +218,31 @@ class TestSuccessPath:
         assert resp.status_code == 200, resp.text
 
 
+class TestWindowReadBackFailure:
+    """As REST does, the failure history is cleared only once the created
+    elevation window is confirmed readable; otherwise an error is returned
+    and prior failures still count."""
+
+    def test_unconfirmed_window_keeps_failure_history(self, door):
+        recovery_code = door.totp.generate_recovery_codes(_USERNAME)[0]
+        for _ in range(_MAX_ATTEMPTS - 1):
+            assert door.ajax(totp_code=door.wrong_code()).status_code == 401
+
+        with patch.object(door.esm, "get_status", return_value=None):
+            unconfirmed = door.ajax(totp_code=door.valid_code())
+        assert unconfirmed.status_code == 500, unconfirmed.text
+        assert unconfirmed.json()["success"] is False
+
+        assert door.ajax(totp_code=door.wrong_code()).status_code == 401
+        locked = door.ajax(recovery_code=recovery_code)
+        assert locked.status_code == 429, locked.text
+
+    def test_unconfirmed_window_form_returns_error(self, door):
+        with patch.object(door.esm, "get_status", return_value=None):
+            resp = door.form(totp_code=door.valid_code())
+        assert resp.status_code == 500, resp.text
+
+
 class TestEnforcementOff:
     def test_web_endpoints_unchanged_and_record_no_failures(self, door_enforcement_off):
         door = door_enforcement_off
