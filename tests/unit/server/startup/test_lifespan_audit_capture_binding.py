@@ -41,7 +41,28 @@ def test_bind_passes_the_started_service_and_node_id() -> None:
 def test_clear_follows_the_writer_drain_after_yield() -> None:
     source = _source()
     yield_pos = source.find("yield  # Server is now running")
-    stop = source.find("_audit_svc.stop()")
+    stop = source.find("run_sync(_audit_svc.stop)")
     clear = source.find("clear_audit_service()")
     assert -1 not in (yield_pos, stop, clear)
     assert yield_pos < stop < clear
+
+
+def test_writer_stop_and_unbind_follow_every_emitter_stop() -> None:
+    source = _source()
+    yield_pos = source.find("yield  # Server is now running")
+    shutdown = source[yield_pos:]
+    stop = shutdown.find("run_sync(_audit_svc.stop)")
+    clear = shutdown.find("clear_audit_service()")
+    emitter_stops = [
+        "_mcp_executor.shutdown(wait=False)",
+        "global_lifecycle_manager.stop()",
+        "data_retention_scheduler_state.stop()",
+        "description_refresh_scheduler_state.stop()",
+        "dependency_map_service_state.stop_scheduler()",
+        "self_monitoring_service.stop()",
+        "langfuse_sync_service.stop()",
+    ]
+    positions = {name: shutdown.find(name) for name in emitter_stops}
+    assert -1 not in positions.values(), positions
+    assert max(positions.values()) < stop < clear
+    assert clear < shutdown.find("DatabaseConnectionManager.stop_cleanup_daemon()")

@@ -38,6 +38,7 @@ import functools
 import logging
 import threading
 import time
+from collections import Counter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -46,6 +47,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
 )
 
@@ -75,6 +77,7 @@ WRITER_NOT_RUNNING = "audit writer not running"
 EVENT_REJECTED = "audit event rejected"
 SERVICE_UNRESOLVABLE = "audit service unresolvable (AuditServiceUnresolvable)"
 ON_EVENT_LOOP = "durable audit emitted on the event loop"
+WRITER_STOPPED = "audit records not written when the writer stopped"
 
 DROP_LOG_WINDOW_SECONDS = 60.0
 # Bound on distinct (situation, action_type) rate-limit windows kept.
@@ -155,6 +158,23 @@ class _DropReporter:
             field,
             suppressed,
             extra={"correlation_id": correlation_id} if correlation_id else None,
+        )
+
+    def report_many(self, situation: str, action_types: Sequence[str]) -> None:
+        """Count one lost record per entry and log ONE summary ERROR line.
+
+        Not rate-limited: used once per writer stop, where a per-row line
+        would flood the log.  Carries per-action-type counts only.
+        """
+        if not action_types:
+            return
+        with self._lock:
+            self._dropped += len(action_types)
+        logger.error(
+            "%s: count=%d action_types=%s",
+            situation,
+            len(action_types),
+            dict(sorted(Counter(action_types).items())),
         )
 
 
@@ -242,6 +262,11 @@ def report_drop(
         correlation_id=event.correlation_id,
         exc=exc,
     )
+
+
+def report_unwritten_at_stop(events: Sequence[AuditEvent]) -> None:
+    """Count every event the stopping writer did not write; ONE ERROR line."""
+    _reporter.report_many(WRITER_STOPPED, [event.action_type for event in events])
 
 
 def _event_loop_owns_this_thread() -> bool:

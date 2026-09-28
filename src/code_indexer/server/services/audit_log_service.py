@@ -31,8 +31,10 @@ from code_indexer.server.services.audit_capture import (
     QUEUE_SATURATED,
     WRITE_FAILED,
     WRITER_NOT_RUNNING,
+    is_server_process,
     record_legacy,
     report_drop,
+    report_unwritten_at_stop,
 )
 from code_indexer.server.services.audit_events import (
     AUDIT_ROW_COLUMNS,
@@ -139,6 +141,21 @@ def _insert_event_rows(conn: sqlite3.Connection, events: Sequence[AuditEvent]) -
     )
 
 
+class _WriterRun:
+    """State of one writer thread's run, guarded by the service's lock.
+
+    ``in_flight`` is the batch the writer took from the queue and has not
+    finished writing.  ``abandoned`` is set by stop() when the writer did not
+    exit in time: stop() has then counted ``in_flight`` as unwritten, so the
+    writer must not count those rows again, and must count (not write) any
+    batch it takes afterwards.
+    """
+
+    def __init__(self) -> None:
+        self.in_flight: List[AuditEvent] = []
+        self.abandoned = False
+
+
 class AuditLogService:
     """
     Service owning the audit_logs SQLite table.
@@ -158,6 +175,13 @@ class AuditLogService:
         self._queue: queue.Queue = queue.Queue(maxsize=_AUDIT_QUEUE_MAXSIZE)
         self._stop_event: threading.Event = threading.Event()
         self._writer_thread: Optional[threading.Thread] = None
+        # Guards the writer lifecycle state below and each run's in-flight
+        # batch, so a stop can never interleave with an enqueue or a claim.
+        self._state_lock = threading.Lock()
+        self._writer_run: Optional[_WriterRun] = None
+        # True once start() ran: a writer that is not running afterwards was
+        # stopped or died, which is not the same as one never started.
+        self._ever_started = False
 
         if self._backend is not None:
             # PG mode: backend owns its own schema; skip SQLite init
@@ -176,15 +200,20 @@ class AuditLogService:
         After start() is called, log() and log_raw() enqueue items rather
         than writing synchronously.  Call stop() at shutdown to drain.
         """
-        if self._writer_thread is not None and self._writer_thread.is_alive():
-            return  # idempotent
-        self._stop_event.clear()
-        self._writer_thread = threading.Thread(
-            target=self._writer_loop,
-            daemon=True,
-            name="audit-log-writer",
-        )
-        self._writer_thread.start()
+        with self._state_lock:
+            if self._writer_thread is not None and self._writer_thread.is_alive():
+                return  # idempotent
+            self._stop_event.clear()
+            run = _WriterRun()
+            self._writer_run = run
+            self._ever_started = True
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop,
+                args=(run,),
+                daemon=True,
+                name="audit-log-writer",
+            )
+            self._writer_thread.start()
 
     def flush(self) -> None:
         """Synchronously drain the writer queue without stopping.
@@ -199,22 +228,75 @@ class AuditLogService:
         self._queue.join()
 
     def stop(self, timeout: float = _AUDIT_STOP_TIMEOUT_S) -> None:
-        """Signal the writer to stop and wait for it to drain.
+        """Signal the writer to stop and wait up to *timeout* for it to drain.
 
-        Guarantees no audit rows are lost on graceful shutdown: the writer
-        drains its queue before the thread exits.
+        A writer that exits in time has written its whole queue.  A writer
+        that does not (the store is locked or stalled) is abandoned: the
+        batch it holds and every row still queued are counted as not
+        written -- ``records_dropped_since_boot`` plus ONE summary ERROR line
+        -- rather than lost silently.  Rows held or left queued by a writer
+        thread that ended on its own are counted the same way.
+
+        Counting semantics: rows still queued, and the batch the writer has
+        marked in flight, when stop() runs are counted before it returns.
+        One window is not: a row the writer has just taken off the queue
+        but not yet marked in flight at the moment stop() detaches it.  The
+        abandoned writer counts that row itself when it resumes -- possibly
+        after stop() has returned, or not at all if the process exits first.
+        Over-count is bounded by one batch: if the abandoned writer's
+        in-flight write later commits, those rows are both written and
+        counted.  Rows the abandoned writer takes afterwards are counted,
+        never written.
         """
+        # Unpublish the writer first: from here on every enqueue is a counted
+        # drop, so nothing can be put after the final drain below.
+        with self._state_lock:
+            thread = self._writer_thread
+            run = self._writer_run
+            self._writer_thread = None
+            self._writer_run = None
         self._stop_event.set()
-        thread = self._writer_thread
         if thread is not None:
             thread.join(timeout=timeout)
-        self._writer_thread = None
+        unwritten: List[AuditEvent] = []
+        with self._state_lock:
+            if run is not None:
+                # Non-empty only if the writer is still inside a write (it did
+                # not exit in time) or ended in the middle of one.
+                run.abandoned = True
+                unwritten.extend(run.in_flight)
+        unwritten.extend(self._drain_queue())
+        if unwritten:
+            report_unwritten_at_stop(unwritten)
+
+    def _drain_queue(self) -> List[AuditEvent]:
+        """Take every item left in the queue (bounded by its size now)."""
+        drained: List[AuditEvent] = []
+        for _ in range(self._queue.qsize()):
+            try:
+                drained.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+            self._queue.task_done()
+        return drained
 
     # ------------------------------------------------------------------
     # Internal: writer loop and batch write
     # ------------------------------------------------------------------
 
-    def _write_batch(self, batch: List[AuditEvent]) -> None:
+    def _report_write_failure(
+        self, event: AuditEvent, exc: Exception, run: Optional[_WriterRun]
+    ) -> None:
+        """Count a failed row unless stop() already counted it (abandoned)."""
+        if run is not None:
+            with self._state_lock:
+                if run.abandoned:
+                    return
+        report_drop(WRITE_FAILED, event, exc)
+
+    def _write_batch(
+        self, batch: List[AuditEvent], run: Optional[_WriterRun] = None
+    ) -> None:
         """Write a batch of events in ONE transaction via insert_events.
 
         M3: no failure is swallowed silently -- every lost row is counted
@@ -222,6 +304,8 @@ class AuditLogService:
             identifiers and the exception CLASS only, never row values).
         M4: when a multi-row batch fails it is retried row-by-row so one
             poison row cannot drop up to 511 valid audit records.
+        *run* is the writer run holding the batch (None for a synchronous
+        write); a row stop() already counted is not counted twice.
         """
         if not batch:
             return
@@ -230,7 +314,7 @@ class AuditLogService:
             return
         except Exception as exc:
             if len(batch) == 1:
-                report_drop(WRITE_FAILED, batch[0], exc)
+                self._report_write_failure(batch[0], exc, run)
                 return
             logger.warning(
                 "AuditLogService: batch insert failed (%d rows, %s); "
@@ -242,12 +326,13 @@ class AuditLogService:
             try:
                 self.insert_events([event])
             except Exception as row_exc:
-                report_drop(WRITE_FAILED, event, row_exc)
+                self._report_write_failure(event, row_exc, run)
 
-    def _writer_loop(self) -> None:
+    def _writer_loop(self, run: _WriterRun) -> None:
         """Background daemon: drain queue in batches and commit to DB.
 
-        Runs until stop_event is set AND the queue is empty.
+        Runs until stop_event is set AND the queue is empty, or until stop()
+        abandons *run*.
         """
         while True:
             try:
@@ -265,10 +350,22 @@ class AuditLogService:
                 except queue.Empty:
                     break
 
-            self._write_batch(batch)
+            with self._state_lock:
+                abandoned = run.abandoned
+                if not abandoned:
+                    run.in_flight = batch
+            if abandoned:
+                # stop() gave up on this writer: count, never write late.
+                report_unwritten_at_stop(batch)
+            else:
+                self._write_batch(batch, run)
+                with self._state_lock:
+                    run.in_flight = []
 
             for _ in batch:
                 self._queue.task_done()
+            if abandoned:
+                return
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -358,16 +455,20 @@ class AuditLogService:
 
         O(1) and never performs DB I/O on the caller's thread.  A writer
         that is not running, or a saturated queue, is a counted drop --
-        there is no synchronous fallback on this path.
+        there is no synchronous fallback on this path.  The check and the
+        put hold the lifecycle lock, so an event is never put after stop()
+        has begun (it would sit in a queue nobody drains).
         """
-        thread = self._writer_thread
-        if thread is None or not thread.is_alive():
-            report_drop(WRITER_NOT_RUNNING, event)
-            return
-        try:
-            self._queue.put_nowait(event)
-        except queue.Full:
-            report_drop(QUEUE_SATURATED, event)
+        with self._state_lock:
+            thread = self._writer_thread
+            running = thread is not None and thread.is_alive()
+            if running:
+                try:
+                    self._queue.put_nowait(event)
+                    return
+                except queue.Full:
+                    pass
+        report_drop(QUEUE_SATURATED if running else WRITER_NOT_RUNNING, event)
 
     def _deliver_legacy(self, event: AuditEvent) -> None:
         """Legacy log()/log_raw() delivery.
@@ -376,12 +477,17 @@ class AuditLogService:
         (``audit_capture.record_legacy``) -- a DURABLE row is committed on
         the caller's thread before the call returns; a QUEUED row goes to
         the writer thread, and a full queue is a counted drop (there is no
-        synchronous fallback).  Never started (tests and pre-start
-        callers): a direct synchronous write, as before.
+        synchronous fallback).  Stopped or dead after a start, in a server
+        process: a counted drop -- never a synchronous write, which could
+        block the event loop during shutdown.  Never started, or not a
+        server process (tests, pre-start callers, standalone CLI): a direct
+        synchronous write, as before.
         """
         thread = self._writer_thread
         if thread is not None and thread.is_alive():
             record_legacy(self, event)
+        elif self._ever_started and is_server_process():
+            report_drop(WRITER_NOT_RUNNING, event)
         else:
             self._write_batch([event])
 
@@ -430,8 +536,7 @@ class AuditLogService:
     ) -> None:
         """Insert an audit entry with an explicit timestamp (for migration use).
 
-        Delivered like log(): catalog delivery once started, synchronous
-        otherwise.
+        Delivered like log() (see ``_deliver_legacy``).
         """
         self._deliver_legacy(
             build_legacy_event(

@@ -192,7 +192,17 @@ def test_lockout_transition_writes_one_row_and_locked_refusals_none(env) -> None
     assert len(env.rows()) == 2
 
 
-def test_token_bucket_refusals_write_no_rows(env) -> None:
+def test_token_bucket_refusals_write_no_rows(env, monkeypatch) -> None:
+    from code_indexer.server.auth.token_bucket import TokenBucketManager
+    from code_indexer.server.routers import inline_auth
+
+    # A frozen clock: the bucket never refills, so exactly `capacity`
+    # attempts reach the credential check however slow each one is.
+    monkeypatch.setattr(
+        inline_auth,
+        "rate_limiter",
+        TokenBucketManager(capacity=10, time_fn=lambda: 0.0),
+    )
     _rebuild_app(env, LoginRateLimiter(enabled=False))
     statuses = [_login(env, _USER, "wrong-password").status_code for _ in range(13)]
     assert statuses.count(401) == 10 and statuses[-3:] == [429, 429, 429]
