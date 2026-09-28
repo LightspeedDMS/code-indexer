@@ -652,17 +652,12 @@ class GroupsPostgresBackend:
         target_id: str,
         details: Optional[str] = None,
     ) -> None:
-        """Insert an audit log entry."""
-        now = datetime.now(timezone.utc)
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (now, admin_id, action_type, target_type, target_id, details),
-                )
-            conn.commit()
+        """Insert an audit log entry through the audit backend's one write."""
+        from .audit_log_backend import AuditLogPostgresBackend
+
+        AuditLogPostgresBackend(self._pool).log(
+            admin_id, action_type, target_type, target_id, details
+        )
 
     def get_audit_logs(
         self,

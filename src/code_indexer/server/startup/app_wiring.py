@@ -135,6 +135,19 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
 
     app.add_middleware(CorrelationBridgeMiddleware)
 
+    # Unified audit capture: bind a per-request attribution holder (front
+    # door, peer address, auth method) and declare this process a server, so
+    # an audit capture with no bound audit service is a counted wiring defect
+    # rather than a silent CLI no-op.  The service itself is bound in the
+    # lifespan once it is constructed and started.
+    from code_indexer.server.middleware.audit_request_context import (
+        AuditRequestContextMiddleware,
+    )
+    from code_indexer.server.services.audit_capture import mark_server_process
+
+    app.add_middleware(AuditRequestContextMiddleware)
+    mark_server_process()
+
     # Request admission control / backpressure. Added last so it is the OUTERMOST
     # middleware -- it sheds excess load with 429 + Retry-After before any
     # downstream processing. Opt-in; only wired when enabled so there is zero

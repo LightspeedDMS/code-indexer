@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from ..models.api_models import HealthCheckResponse, HealthStatus
 from ..auth import dependencies
 from ..logging_utils import format_error_log
+from ..services import audit_capture
 from ..services.health_service import health_service
 from ..services.maintenance_service import get_maintenance_state
 from ..app_helpers import (
@@ -234,6 +235,14 @@ def register_misc_routes(
                 },
                 "started_at": get_server_start_time(),
                 "maintenance_mode": get_maintenance_state().is_maintenance_mode(),
+                # Unified audit capture telemetry: informational only, never
+                # part of the status decision above.
+                "audit": {
+                    "records_dropped_since_boot": (
+                        audit_capture.records_dropped_since_boot()
+                    ),
+                    "node_id": audit_capture.audit_node_id(),
+                },
             }
 
             # Add version if available

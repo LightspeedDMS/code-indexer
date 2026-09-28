@@ -6,12 +6,24 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Sequence
+
 from ._shared import List, Optional, Protocol, Tuple, runtime_checkable
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.audit_events import AuditEvent
 
 
 @runtime_checkable
 class AuditLogBackend(Protocol):
     """Protocol for audit log service storage (AuditLogService interface)."""
+
+    def insert_events(self, events: "Sequence[AuditEvent]") -> None:
+        """Insert *events* in ONE transaction; raise on failure.
+
+        The single write function of the unified audit capture path.
+        """
+        ...
 
     def log(
         self,

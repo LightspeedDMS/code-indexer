@@ -1365,6 +1365,25 @@ class GroupAccessManager:
             )
             return
 
+        from code_indexer.server.services import audit_capture
+        from code_indexer.server.services.audit_events import build_legacy_event
+
+        if audit_capture.is_server_process():
+            # A manager built without the lifespan audit service (for example
+            # per request) never writes to its own file inside a server: the
+            # row goes to the one bound audit store.
+            audit_capture.record(
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details_json,
+                )
+            )
+            return
+
+        # Outside a server (tests, tooling): direct write to this file.
         now = datetime.now(timezone.utc).isoformat()
 
         def _do_log(conn: sqlite3.Connection) -> None:

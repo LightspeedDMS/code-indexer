@@ -2828,7 +2828,9 @@ async def grant_repo_access(
         )
 
         if success:
-            group_manager.log_audit(
+            # Durable audit insert: off the event loop.
+            await asyncio.to_thread(
+                group_manager.log_audit,
                 admin_id=session.username,
                 action_type="repo_access_grant",
                 target_type="repo",
@@ -2911,7 +2913,9 @@ async def revoke_repo_access(
         )
 
         if success:
-            group_manager.log_audit(
+            # Durable audit insert: off the event loop.
+            await asyncio.to_thread(
+                group_manager.log_audit,
                 admin_id=session.username,
                 action_type="repo_access_revoke",
                 target_type="repo",

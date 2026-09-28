@@ -73,29 +73,37 @@ class TestProtocolCompliance:
 # ---------------------------------------------------------------------------
 
 
+def _single_row_params(cursor):
+    """The one row written by the backend's single write function."""
+    cursor.executemany.assert_called_once()
+    rows = cursor.executemany.call_args[0][1]
+    assert len(rows) == 1
+    return rows[0]
+
+
 class TestLog:
-    """Tests for log() method."""
+    """Tests for log() method (routed through insert_events)."""
 
     def test_log_inserts_row(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice", "some details")
-        cursor.execute.assert_called_once()
-        sql = cursor.execute.call_args[0][0]
+        _single_row_params(cursor)
+        sql = cursor.executemany.call_args[0][0]
         assert "INSERT INTO audit_logs" in sql
         assert "%s" in sql
 
-    def test_log_commits(self, mock_pool):
+    def test_log_runs_in_one_transaction(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice")
-        conn.commit.assert_called_once()
+        conn.transaction.assert_called_once()
 
     def test_log_passes_all_params(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice", "details")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[1] == "admin"
         assert params[2] == "user_created"
         assert params[3] == "user"
@@ -106,7 +114,7 @@ class TestLog:
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "login", "auth", "admin")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[5] is None
 
 
@@ -122,14 +130,14 @@ class TestLogRaw:
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log_raw("2026-01-01T00:00:00", "admin", "migrated", "system", "all")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[0] == "2026-01-01T00:00:00"
 
-    def test_log_raw_commits(self, mock_pool):
+    def test_log_raw_runs_in_one_transaction(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log_raw("2026-01-01T00:00:00", "admin", "migrated", "system", "all")
-        conn.commit.assert_called_once()
+        conn.transaction.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

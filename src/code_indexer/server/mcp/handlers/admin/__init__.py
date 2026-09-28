@@ -1597,6 +1597,17 @@ def _build_audit_log_entry(row: Dict[str, Any]) -> Dict[str, Any]:
         "admin_id": admin_id,
         "resource": resource,
         "details": details_obj,
+        # Unified audit attribution (additive; NULL on rows written before
+        # these columns existed).
+        "id": row.get("id"),
+        "outcome": row.get("outcome"),
+        "source": row.get("source"),
+        "ip_address": row.get("ip_address"),
+        "correlation_id": row.get("correlation_id"),
+        "node_id": row.get("node_id"),
+        "auth_method": row.get("auth_method"),
+        "actor_is_system": bool(row.get("actor_is_system") or 0),
+        "event_uuid": row.get("event_uuid"),
     }
 
 

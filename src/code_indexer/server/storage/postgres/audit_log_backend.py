@@ -16,8 +16,14 @@ Usage:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
+
+from code_indexer.server.services.audit_events import (
+    AUDIT_ROW_COLUMNS,
+    AuditEvent,
+    build_legacy_event,
+    event_row_values,
+)
 
 from .pg_utils import sanitize_row
 
@@ -34,8 +40,31 @@ _PR_ACTION_TYPES = (
 # Cleanup action_type value
 _CLEANUP_ACTION_TYPE = "git_cleanup"
 
-# Columns selected in every read query
-_SELECT_COLS = "id, timestamp, admin_id, action_type, target_type, target_id, details"
+# Columns selected in every read query: the original seven plus the
+# attribution columns (same names as the SQLite store).
+_SELECT_COLS = (
+    "id, timestamp, admin_id, action_type, target_type, target_id, details, "
+    "outcome, source, ip_address, correlation_id, node_id, auth_method, "
+    "actor_is_system, event_uuid"
+)
+
+_INSERT_EVENT_SQL = (
+    f"INSERT INTO audit_logs ({', '.join(AUDIT_ROW_COLUMNS)}) "
+    f"VALUES ({', '.join('%s' for _ in AUDIT_ROW_COLUMNS)})"
+)
+
+
+def _insert_event_rows(conn: Any, events: Sequence[AuditEvent]) -> None:
+    """The ONLY statement the capture path uses to insert audit rows.
+
+    Runs inside the caller's transaction.  A later capture step (for
+    example a delivery-queue insert) can join the same transaction next to
+    this call.
+    """
+    with conn.cursor() as cur:
+        cur.executemany(
+            _INSERT_EVENT_SQL, [event_row_values(event) for event in events]
+        )
 
 
 def _dict_row_factory() -> Any:
@@ -75,6 +104,17 @@ class AuditLogPostgresBackend:
     # Write
     # ------------------------------------------------------------------
 
+    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+        """Insert *events* in ONE transaction (not one commit per row).
+
+        Raises on failure; the whole batch is rolled back.
+        """
+        if not events:
+            return
+        with self._conn() as conn:
+            with conn.transaction():
+                _insert_event_rows(conn, events)
+
     def log(
         self,
         admin_id: str,
@@ -93,16 +133,17 @@ class AuditLogPostgresBackend:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        now = datetime.now(timezone.utc).isoformat()
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (now, admin_id, action_type, target_type, target_id, details),
+        self.insert_events(
+            [
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details,
                 )
-            conn.commit()
+            ]
+        )
 
     def log_raw(
         self,
@@ -124,15 +165,18 @@ class AuditLogPostgresBackend:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (timestamp, admin_id, action_type, target_type, target_id, details),
+        self.insert_events(
+            [
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details,
+                    occurred_at=timestamp,
                 )
-            conn.commit()
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Read

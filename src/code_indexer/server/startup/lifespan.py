@@ -1211,6 +1211,26 @@ def make_lifespan(
             # log_raw() enqueue records instead of blocking the request thread.
             audit_service.start()
             app.state.audit_service = audit_service
+            # Unified audit capture: bind the ONE started service as the
+            # process-wide sink.  No manager holds its own audit reference;
+            # every capture resolves this binding at emission time.  node_id
+            # is the bootstrap cluster.node_id (None in solo mode).
+            from code_indexer.server.services.audit_capture import (
+                bind_audit_service,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _audit_get_config_service,
+            )
+
+            _audit_cluster_cfg = _audit_get_config_service().get_config().cluster
+            bind_audit_service(
+                audit_service,
+                node_id=(
+                    _audit_cluster_cfg.node_id
+                    if _audit_cluster_cfg is not None
+                    else None
+                ),
+            )
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
             # calls from password_audit_logger also route to SQLite
@@ -1224,8 +1244,9 @@ def make_lifespan(
             # AC4: Migration is recoverable — historical data loss, not functional failure
             try:
                 flat_file = Path(server_data_dir) / "password_audit.log"
-                migrated, skipped = migrate_flat_file_to_sqlite(
-                    flat_file, audit_service
+                # Off the event loop: file reads plus durable audit writes.
+                migrated, skipped = await anyio.to_thread.run_sync(
+                    migrate_flat_file_to_sqlite, flat_file, audit_service
                 )
                 if migrated > 0 or skipped > 0:
                     logger.info(
@@ -5263,6 +5284,11 @@ def make_lifespan(
             _audit_svc = getattr(app.state, "audit_service", None)
             if _audit_svc is not None:
                 _audit_svc.stop()
+            from code_indexer.server.services.audit_capture import (
+                clear_audit_service,
+            )
+
+            clear_audit_service()
         except Exception as _audit_stop_exc:
             logger.warning(
                 "Issue #1241: failed to drain audit-log writer during shutdown: %s",

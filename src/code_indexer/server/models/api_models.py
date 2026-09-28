@@ -102,6 +102,22 @@ class SystemHealthInfo(BaseModel):
     )
 
 
+class AuditHealthInfo(BaseModel):
+    """Per-process audit capture telemetry (informational only)."""
+
+    records_dropped_since_boot: int = Field(
+        ...,
+        description="Audit records this server process could not write since "
+        "it started. Per-process; read it together with node_id. Never "
+        "affects the overall health status.",
+    )
+    node_id: Optional[str] = Field(
+        default=None,
+        description="Cluster node id stamped on this process's audit rows "
+        "(null in solo mode).",
+    )
+
+
 class HealthCheckResponse(BaseModel):
     """Health check endpoint response."""
 
@@ -146,6 +162,13 @@ class HealthCheckResponse(BaseModel):
         "on both backends (AC17/R3); 'affected_total' is the UNBOUNDED "
         "count. Cleared entries (AC8) are excluded. Populated from "
         "HealthCheckService.get_fleet_migration_dedup_state_summary().",
+    )
+    audit: Optional[AuditHealthInfo] = Field(
+        default=None,
+        description="Unified audit capture telemetry for this process: the "
+        "count of audit records dropped since boot and this node's id. "
+        "Informational only -- it never factors into `status` or "
+        "`failure_reasons`, so an audit store hiccup can never drain a node.",
     )
 
 

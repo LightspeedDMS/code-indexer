@@ -466,7 +466,8 @@ class TestLogAudit:
             details="some detail",
         )
 
-        all_sqls = [call[0][0] for call in cur.execute.call_args_list]
+        # Routed through the audit backend's single write (one transaction).
+        all_sqls = [call[0][0] for call in cur.executemany.call_args_list]
         assert any("INSERT INTO audit_logs" in sql for sql in all_sqls)
 
     def test_log_audit_uses_parameterized_query(self):
@@ -489,13 +490,14 @@ class TestLogAudit:
             target_id="oldgroup",
         )
 
-        all_calls = cur.execute.call_args_list
+        all_calls = cur.executemany.call_args_list
         insert_calls = [c for c in all_calls if "INSERT INTO audit_logs" in c[0][0]]
         assert len(insert_calls) == 1
-        sql, params = insert_calls[0][0]
+        sql, rows = insert_calls[0][0]
         assert "%s" in sql
-        assert "admin" in params
-        assert "group_deleted" in params
+        assert len(rows) == 1
+        assert "admin" in rows[0]
+        assert "group_deleted" in rows[0]
 
 
 # ---------------------------------------------------------------------------

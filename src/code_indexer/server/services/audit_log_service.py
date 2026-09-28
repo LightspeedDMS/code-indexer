@@ -25,8 +25,21 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
+from code_indexer.server.services.audit_capture import (
+    QUEUE_SATURATED,
+    WRITE_FAILED,
+    WRITER_NOT_RUNNING,
+    record_legacy,
+    report_drop,
+)
+from code_indexer.server.services.audit_events import (
+    AUDIT_ROW_COLUMNS,
+    AuditEvent,
+    build_legacy_event,
+    event_row_values,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 # Issue #1241 P1.3: async-batched audit writer constants.
@@ -57,6 +70,65 @@ _CLEANUP_ACTION_TYPE = "git_cleanup"
 # instead of re-declaring a third duplicate of these literals.
 PR_ACTION_TYPES = _PR_ACTION_TYPES
 CLEANUP_ACTION_TYPE = _CLEANUP_ACTION_TYPE
+
+# Attribution columns added to audit_logs (same names and types as the
+# PostgreSQL migration 053_audit_logs_attribution_columns.sql).  Legacy rows
+# keep NULL (0 for actor_is_system).
+AUDIT_ATTRIBUTION_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("outcome", "TEXT"),
+    ("source", "TEXT"),
+    ("ip_address", "TEXT"),
+    ("correlation_id", "TEXT"),
+    ("node_id", "TEXT"),
+    ("auth_method", "TEXT"),
+    ("actor_is_system", "INTEGER NOT NULL DEFAULT 0"),
+    ("event_uuid", "TEXT"),
+)
+
+# (index name, indexed columns) -- same names on both backends.
+AUDIT_ATTRIBUTION_INDEXES: Tuple[Tuple[str, str], ...] = (
+    ("idx_audit_logs_admin_id", "admin_id"),
+    ("idx_audit_logs_target_id", "target_id"),
+    ("idx_audit_logs_target_type_timestamp", "target_type, timestamp DESC"),
+    ("idx_audit_logs_timestamp_id", "timestamp DESC, id DESC"),
+    ("idx_audit_logs_correlation_id", "correlation_id"),
+    ("idx_audit_logs_event_uuid", "event_uuid"),
+)
+
+# Columns every read returns: the original seven plus the attribution columns.
+_SELECT_COLUMNS = ", ".join(
+    ("id", "timestamp", "admin_id", "action_type")
+    + ("target_type", "target_id", "details")
+    + tuple(name for name, _ in AUDIT_ATTRIBUTION_COLUMNS)
+)
+
+_SQLITE_INSERT_EVENT_SQL = (
+    f"INSERT INTO audit_logs ({', '.join(AUDIT_ROW_COLUMNS)}) "
+    f"VALUES ({', '.join('?' for _ in AUDIT_ROW_COLUMNS)})"
+)
+
+
+def add_audit_column_tolerating_race(
+    conn: sqlite3.Connection, name: str, ddl_type: str
+) -> None:
+    """``ALTER TABLE audit_logs ADD COLUMN``, tolerating a concurrent add.
+
+    Several workers can boot against the same file at once; the loser of
+    that race gets "duplicate column name", which means the column now
+    exists.  Any other error propagates so startup fails loudly.
+    """
+    try:
+        conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {name} {ddl_type}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
+def _insert_event_rows(conn: sqlite3.Connection, events: Sequence[AuditEvent]) -> None:
+    """The ONLY statement that inserts audit rows into SQLite."""
+    conn.executemany(
+        _SQLITE_INSERT_EVENT_SQL, [event_row_values(event) for event in events]
+    )
 
 
 class AuditLogService:
@@ -134,87 +206,35 @@ class AuditLogService:
     # Internal: writer loop and batch write
     # ------------------------------------------------------------------
 
-    def _write_batch(self, batch: List[Tuple]) -> None:
-        """Write a batch of audit items in ONE transaction (executemany).
+    def _write_batch(self, batch: List[AuditEvent]) -> None:
+        """Write a batch of events in ONE transaction via insert_events.
 
-        Each item is a 6-tuple: (timestamp, admin_id, action_type,
-        target_type, target_id, details).
-
-        M3: all failures are logged at WARNING — never swallowed silently.
-        M4: on executemany failure the SQLite path retries row-by-row so one
+        M3: no failure is swallowed silently -- every lost row is counted
+            and logged at ERROR through audit_capture.report_drop (event
+            identifiers and the exception CLASS only, never row values).
+        M4: when a multi-row batch fails it is retried row-by-row so one
             poison row cannot drop up to 511 valid audit records.
         """
         if not batch:
             return
-        if self._backend is not None:
-            # PG/delegated path: call log_raw per item (backend handles
-            # its own connection pooling and commit semantics).
-            for ts, aid, at, tt, tid, det in batch:
-                try:
-                    self._backend.log_raw(
-                        timestamp=ts,
-                        admin_id=aid,
-                        action_type=at,
-                        target_type=tt,
-                        target_id=tid,
-                        details=det,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "AuditLogService: PG log_raw failed (1 audit record dropped): %s",
-                        exc,
-                    )
-            return
-        # Direct-SQLite path: executemany in ONE transaction.
-        rows = list(batch)
-
-        def _do_batch(conn: sqlite3.Connection) -> None:
-            conn.executemany(
-                """
-                INSERT INTO audit_logs
-                    (timestamp, admin_id, action_type, target_type, target_id, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
         try:
-            self._conn_manager.execute_atomic(_do_batch)
+            self.insert_events(batch)
+            return
         except Exception as exc:
-            # M3: log so the failure is observable (audit subsystem must never
-            #     swallow its own write errors silently).
-            # M4: fall back to per-row inserts so one bad row cannot silently
-            #     drop an entire batch of up to 512 valid audit records.
+            if len(batch) == 1:
+                report_drop(WRITE_FAILED, batch[0], exc)
+                return
             logger.warning(
-                "AuditLogService: batch insert failed (%d rows); "
-                "retrying row-by-row: %s",
-                len(rows),
-                exc,
+                "AuditLogService: batch insert failed (%d rows, %s); "
+                "retrying row-by-row",
+                len(batch),
+                type(exc).__name__,
             )
-            for row in rows:
-                _row = row  # capture for closure
-
-                def _do_single(conn: sqlite3.Connection, r: Tuple = _row) -> None:
-                    conn.execute(
-                        """
-                        INSERT INTO audit_logs
-                            (timestamp, admin_id, action_type, target_type,
-                             target_id, details)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        r,
-                    )
-
-                try:
-                    self._conn_manager.execute_atomic(_do_single)
-                except Exception as row_exc:
-                    logger.warning(
-                        "AuditLogService: single-row fallback failed "
-                        "(1 audit record dropped): %s | ts=%s action=%s",
-                        row_exc,
-                        row[0] if row else "?",
-                        row[2] if len(row) > 2 else "?",
-                    )
+        for event in batch:
+            try:
+                self.insert_events([event])
+            except Exception as row_exc:
+                report_drop(WRITE_FAILED, event, row_exc)
 
     def _writer_loop(self) -> None:
         """Background daemon: drain queue in batches and commit to DB.
@@ -292,6 +312,16 @@ class AuditLogService:
                 ON audit_logs(action_type)
                 """
             )
+            # Additive attribution columns: the table may have been created
+            # by an older release or by GroupAccessManager's 7-column DDL.
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)")}
+            for name, ddl_type in AUDIT_ATTRIBUTION_COLUMNS:
+                if name not in existing:
+                    add_audit_column_tolerating_race(conn, name, ddl_type)
+            for index_name, columns in AUDIT_ATTRIBUTION_INDEXES:
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} ON audit_logs({columns})"
+                )
 
         self._conn_manager.execute_atomic(_do_schema)
 
@@ -299,25 +329,53 @@ class AuditLogService:
     # Write
     # ------------------------------------------------------------------
 
-    def _enqueue_or_write_sync(self, item: Tuple) -> None:
-        """Enqueue if the writer thread is running, else write synchronously.
+    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+        """Write *events* in ONE transaction on the calling thread.
 
-        This ensures backward compatibility: callers that never call start()
-        get the original synchronous write behavior (existing tests pass
-        unchanged).  Callers that call start() get non-blocking async writes.
+        This is the single write function: every audit row reaches the
+        store through here.  In PostgreSQL mode (and in solo mode, where the
+        injected backend is itself an unstarted AuditLogService on the same
+        file) it delegates to the backend's ``insert_events``.  Raises on
+        failure; callers decide how a failure is counted.
+        """
+        if not events:
+            return
+        if self._backend is not None:
+            self._backend.insert_events(events)
+            return
+        self._conn_manager.execute_atomic(lambda conn: _insert_event_rows(conn, events))
+
+    def enqueue_event(self, event: AuditEvent) -> None:
+        """Hand *event* to the writer thread (QUEUED delivery).
+
+        O(1) and never performs DB I/O on the caller's thread.  A writer
+        that is not running, or a saturated queue, is a counted drop --
+        there is no synchronous fallback on this path.
+        """
+        thread = self._writer_thread
+        if thread is None or not thread.is_alive():
+            report_drop(WRITER_NOT_RUNNING, event)
+            return
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            report_drop(QUEUE_SATURATED, event)
+
+    def _deliver_legacy(self, event: AuditEvent) -> None:
+        """Legacy log()/log_raw() delivery.
+
+        Started: the action type's catalog delivery through this service
+        (``audit_capture.record_legacy``) -- a DURABLE row is committed on
+        the caller's thread before the call returns; a QUEUED row goes to
+        the writer thread, and a full queue is a counted drop (there is no
+        synchronous fallback).  Never started (tests and pre-start
+        callers): a direct synchronous write, as before.
         """
         thread = self._writer_thread
         if thread is not None and thread.is_alive():
-            # Async mode: enqueue for background drain.
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                # Queue saturated (50k deep): write synchronously to preserve
-                # audit durability — this record is too important to discard.
-                self._write_batch([item])
+            record_legacy(self, event)
         else:
-            # Synchronous mode (not started): direct write — old behavior.
-            self._write_batch([item])
+            self._write_batch([event])
 
     def log(
         self,
@@ -330,9 +388,11 @@ class AuditLogService:
         """
         Insert one audit log entry.
 
-        Issue #1241 P1.3: when start() has been called, this enqueues the
-        record for async batched write (non-blocking).  Without start(), it
-        writes synchronously (backward-compatible for tests and simple callers).
+        The row is built as a legacy event (uuid and ambient attribution)
+        and delivered as its action type's catalog entry says once start()
+        has been called: DURABLE types are committed before this returns,
+        QUEUED types go to the async writer.  Without start(), it writes
+        synchronously (tests and pre-start callers).
 
         Args:
             admin_id:    Actor performing the action (username or 'system').
@@ -341,9 +401,14 @@ class AuditLogService:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        now = datetime.now(timezone.utc).isoformat()
-        self._enqueue_or_write_sync(
-            (now, admin_id, action_type, target_type, target_id, details)
+        self._deliver_legacy(
+            build_legacy_event(
+                actor=admin_id,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=target_id,
+                details_json=details,
+            )
         )
 
     def log_raw(
@@ -357,10 +422,18 @@ class AuditLogService:
     ) -> None:
         """Insert an audit entry with an explicit timestamp (for migration use).
 
-        Issue #1241 P1.3: async when writer thread is running, synchronous otherwise.
+        Delivered like log(): catalog delivery once started, synchronous
+        otherwise.
         """
-        self._enqueue_or_write_sync(
-            (timestamp, admin_id, action_type, target_type, target_id, details)
+        self._deliver_legacy(
+            build_legacy_event(
+                actor=admin_id,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=target_id,
+                details_json=details,
+                occurred_at=timestamp,
+            )
         )
 
     # ------------------------------------------------------------------
@@ -438,8 +511,7 @@ class AuditLogService:
         total = cursor.fetchone()["cnt"]
 
         query_sql = f"""
-            SELECT id, timestamp, admin_id, action_type, target_type,
-                   target_id, details
+            SELECT {_SELECT_COLUMNS}
             FROM audit_logs
             {where}
             ORDER BY timestamp DESC
@@ -496,8 +568,7 @@ class AuditLogService:
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             f"""
-            SELECT id, timestamp, admin_id, action_type, target_type,
-                   target_id, details
+            SELECT {_SELECT_COLUMNS}
             FROM audit_logs
             {where}
             ORDER BY timestamp DESC
@@ -545,8 +616,7 @@ class AuditLogService:
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             f"""
-            SELECT id, timestamp, admin_id, action_type, target_type,
-                   target_id, details
+            SELECT {_SELECT_COLUMNS}
             FROM audit_logs
             {where}
             ORDER BY timestamp DESC
