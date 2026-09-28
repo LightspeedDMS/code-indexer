@@ -15,10 +15,12 @@ import base64
 import html as html_module
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from code_indexer.server.auth import dependencies as _auth_dependencies
 from code_indexer.server.auth.elevated_session_manager import (
     elevated_session_manager,
     log_elevation_owner_mismatch,
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 _LOGIN_ROUTE = "/login"
 _ADMIN_ROUTE = "/admin/"
 _VERIFY_ROUTE = "/admin/mfa/verify"
+_ELEVATE_PAGE = "/admin/elevate"
 
 # Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
 # A session satisfies required_scope R when session_rank <= required_rank.
@@ -158,6 +161,35 @@ def _cross_user_setup_guard(
             400,
         )
     return None
+
+
+def _reenroll_factor_gate(request: Request, username: str) -> Optional[Any]:
+    """Require proof of the current factor before replacing an ACTIVE enrollment.
+
+    When elevation enforcement is on and `username` already has MFA enabled,
+    generating a new TOTP secret for that account requires an elevation
+    window owned by `username`. The elevation page opens one from a current
+    TOTP code (scope "full") or a recovery code (scope "totp_repair"), so
+    either scope is accepted.
+
+    Returns a redirect to the elevation page, which comes back to this same
+    URL afterwards, when no such window exists; returns None when the
+    request may proceed. First-time enrollment (MFA not enabled) and
+    deployments with enforcement off are not affected.
+    """
+    assert _totp_service is not None
+    if not _auth_dependencies._is_elevation_enforcement_enabled():
+        return None
+    if not _totp_service.is_mfa_enabled(username):
+        return None
+    if _check_elevation_window(request, username, required_scope="totp_repair") is None:
+        return None
+    return_to = request.url.path
+    if request.url.query:
+        return_to = f"{return_to}?{request.url.query}"
+    return RedirectResponse(
+        f"{_ELEVATE_PAGE}?next={quote(return_to, safe='')}", status_code=303
+    )
 
 
 mfa_router = APIRouter(prefix="/admin/mfa", tags=["mfa"])
@@ -367,6 +399,10 @@ def mfa_setup_page(
             guard_err = _cross_user_setup_guard(request, admin_username, target_user)
             if guard_err is not None:
                 return guard_err
+    elif mode != "show":
+        factor_err = _reenroll_factor_gate(request, admin_username)
+        if factor_err is not None:
+            return factor_err
 
     if mode == "show":
         uri = _totp_service.get_provisioning_uri(target_user)
@@ -597,6 +633,9 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
         is_show = True
     else:
         # New setup or explicit re-setup
+        factor_err = _reenroll_factor_gate(request, username)
+        if factor_err is not None:
+            return factor_err
         secret = _totp_service.generate_secret(username)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
