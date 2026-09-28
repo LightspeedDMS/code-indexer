@@ -12,12 +12,17 @@ replace them in the handler's namespace.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from fastapi import Request
 
 from code_indexer.server.auth.dependencies import _mfa_setup_url_for_role
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.elevation_step_up import (
+    StepUpOutcome,
+    StepUpResult,
+    step_up,
+)
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.mcp.auth.elevation_decorator import (
@@ -56,54 +61,23 @@ def _client_ip(http_request: Optional[Request]) -> str:
     return "unknown"
 
 
-def _verify_mcp_elevation_code(
-    totp_svc: Any,
-    username: str,
-    args: Dict[str, Any],
-    limiter_key: str,
-    client_ip: str,
-) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Verify TOTP or recovery code.
-
-    Returns (scope, None) on success or (None, error_dict) on failure.
-    Records a rate-limiter failure on bad codes.
-    """
-    recovery_code = args.get("recovery_code")
-    totp_code = args.get("totp_code")
-    if recovery_code:
-        if not totp_svc.verify_recovery_code(
-            username, recovery_code, ip_address=client_ip
-        ):
-            login_rate_limiter.check_and_record_failure(limiter_key)
-            return None, {
-                "error": "elevation_failed",
-                "message": "Invalid recovery code.",
-            }
-        return "totp_repair", None
-    if not totp_svc.verify_enabled_code(username, totp_code):
-        login_rate_limiter.check_and_record_failure(limiter_key)
-        return None, {
-            "error": "elevation_failed",
-            "message": "Invalid or expired code.",
+def _step_up_payload(result: StepUpResult) -> Dict[str, Any]:
+    """This door's payload for a step-up result (same shapes as REST)."""
+    if result.outcome is StepUpOutcome.LOCKED_OUT:
+        return {
+            "error": "rate_limited",
+            "message": "Too many elevation attempts. Try again later.",
         }
-    return "full", None
-
-
-def _open_window(
-    session_key: str, username: str, scope: str, client_ip: str
-) -> Dict[str, Any]:
-    """Create the elevation window and return the payload describing it.
-
-    Returns an ``elevation_create_failed`` error, as REST /auth/elevate does,
-    when the window cannot be read back after create.
-    """
-    elevated_session_manager.create(
-        session_key=session_key,
-        username=username,
-        elevated_from_ip=client_ip,
-        scope=scope,
-    )
-    session = elevated_session_manager.get_status(session_key)
+    if result.outcome is StepUpOutcome.INVALID_CODE:
+        return {
+            "error": "elevation_failed",
+            "message": (
+                "Invalid recovery code."
+                if result.used_recovery_code
+                else "Invalid or expired code."
+            ),
+        }
+    session = result.session
     if session is None:
         return {
             "error": "elevation_create_failed",
@@ -115,7 +89,7 @@ def _open_window(
     max_until = float(session.elevated_at + elevated_session_manager._max_age)
     return {
         "elevated": True,
-        "scope": scope,
+        "scope": result.scope,
         "elevated_until": elevated_until,
         "max_until": max_until,
     }
@@ -174,23 +148,17 @@ def _elevate(
             "message": "No session key on MCP request.",
         }
 
-    # Same key format as REST /auth/elevate, so failed attempts through
-    # either front door count against one lockout.
-    limiter_key = f"{client_ip}:{user.username}"
-    is_locked, _ = login_rate_limiter.is_locked(limiter_key)
-    if is_locked:
-        return {
-            "error": "rate_limited",
-            "message": "Too many elevation attempts. Try again later.",
-        }
-
-    scope, code_error = _verify_mcp_elevation_code(
-        totp_svc, user.username, args, limiter_key, client_ip
+    # The shared step-up: same limiter and key as REST /auth/elevate, so
+    # failed attempts through any front door count against one lockout.
+    return _step_up_payload(
+        step_up(
+            user.username,
+            totp_code=args.get("totp_code"),
+            recovery_code=args.get("recovery_code"),
+            session_key=session_key,
+            client_ip=client_ip,
+            totp_service=totp_svc,
+            sessions=elevated_session_manager,
+            limiter=login_rate_limiter,
+        )
     )
-    if code_error is not None:
-        return code_error
-
-    result = _open_window(session_key, user.username, scope or "full", client_ip)
-    if "error" not in result:
-        login_rate_limiter.record_success(limiter_key)
-    return result

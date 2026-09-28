@@ -15,6 +15,11 @@ from code_indexer.server.auth.elevated_session_manager import (
     ElevatedSession,
     elevated_session_manager,
 )
+from code_indexer.server.auth.elevation_step_up import (
+    StepUpOutcome,
+    StepUpResult,
+    step_up,
+)
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.web.mfa_routes import get_totp_service
@@ -109,28 +114,33 @@ def _require_totp_service():
     return svc
 
 
-def _verify_elevation_code(
-    totp_service, username: str, body: ElevateRequest, client_ip: str
-) -> str:
-    """Verify TOTP or recovery code. Returns scope string on success, raises 401/403 on failure."""
-    if body.recovery_code:
-        if not totp_service.verify_recovery_code(
-            username, body.recovery_code, ip_address=client_ip
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": "elevation_failed",
-                    "message": "Invalid recovery code.",
-                },
-            )
-        return "totp_repair"
-    if not totp_service.verify_enabled_code(username, body.totp_code):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "elevation_failed", "message": "Invalid or expired code."},
+def _step_up_error(result: StepUpResult) -> HTTPException:
+    """This door's error for a step-up that did not grant a window."""
+    if result.outcome is StepUpOutcome.LOCKED_OUT:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "rate_limited",
+                "message": "Too many elevation attempts. Try again later.",
+            },
         )
-    return "full"
+    if result.outcome is StepUpOutcome.INVALID_CODE:
+        message = (
+            "Invalid recovery code."
+            if result.used_recovery_code
+            else "Invalid or expired code."
+        )
+        return HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "elevation_failed", "message": message},
+        )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "error": "elevation_create_failed",
+            "message": "Elevation window not retrievable after create.",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,50 +192,27 @@ def elevate(
         )
 
     client_ip = request.client.host if request.client else "unknown"
-    limiter_key = f"{client_ip}:{user.username}"
-
-    is_locked, _ = login_rate_limiter.is_locked(limiter_key)
-    if is_locked:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "error": "rate_limited",
-                "message": "Too many elevation attempts. Try again later.",
-            },
-        )
-
-    try:
-        scope = _verify_elevation_code(totp_service, user.username, body, client_ip)
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            login_rate_limiter.check_and_record_failure(limiter_key)
-        raise
-
-    elevated_session_manager.create(
+    result = step_up(
+        user.username,
+        totp_code=body.totp_code,
+        recovery_code=body.recovery_code,
         session_key=session_key,
-        username=user.username,
-        elevated_from_ip=client_ip,
-        scope=scope,
+        client_ip=client_ip,
+        totp_service=totp_service,
+        sessions=elevated_session_manager,
+        limiter=login_rate_limiter,
     )
-    session = elevated_session_manager.get_status(session_key)
-    if session is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "elevation_create_failed",
-                "message": "Elevation window not retrievable after create.",
-            },
-        )
+    if result.session is None:
+        raise _step_up_error(result)
 
-    login_rate_limiter.record_success(limiter_key)
-    resp = _build_status_response(session)
+    resp = _build_status_response(result.session)
     assert resp.elevated_until is not None
     assert resp.max_until is not None
     return ElevateResponse(
         elevated=True,
         elevated_until=resp.elevated_until,
         max_until=resp.max_until,
-        scope=resp.scope or scope,
+        scope=resp.scope or result.scope,
     )
 
 

@@ -25,6 +25,7 @@ from code_indexer.server.auth.dependencies import (
     get_current_user_hybrid,
 )
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.elevation_step_up import StepUpOutcome, step_up
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.web.mfa_routes import get_totp_service
@@ -126,32 +127,6 @@ def _resolve_session_key(request: Request) -> Optional[str]:
     return str(cookie) if cookie is not None else None
 
 
-def _verify_credentials(
-    totp_service, username: str, totp_code, recovery_code, client_ip: str
-):
-    """Verify TOTP or recovery code; return scope string or None on failure.
-
-    Args:
-        totp_service: Active TOTPService instance.
-        username: Authenticated admin username.
-        totp_code: TOTP code from form (may be None).
-        recovery_code: Recovery code from form (may be None).
-        client_ip: Client IP for audit purposes.
-
-    Returns:
-        Elevation scope string ("full" or "totp_repair") on success, None on failure.
-    """
-    if recovery_code:
-        if totp_service.verify_recovery_code(
-            username, recovery_code, ip_address=client_ip
-        ):
-            return "totp_repair"
-        return None
-    if totp_service.verify_enabled_code(username, totp_code):
-        return "full"
-    return None
-
-
 def _attempt_elevation(
     request: Request,
     username: str,
@@ -211,25 +186,27 @@ def _attempt_elevation(
         )
         return _ElevResult.NO_SESSION, None
 
-    # Same limiter instance and key as REST /auth/elevate and MCP
-    # elevate_session, so failed attempts through any front door count
-    # against one lockout. Checked before any code is verified: a locked-out
-    # caller is refused even with a correct code.
-    limiter_key = f"{client_ip}:{username}"
-    is_locked, _ = login_rate_limiter.is_locked(limiter_key)
-    if is_locked:
+    # The shared step-up: same limiter instance and key as REST /auth/elevate
+    # and MCP elevate_session, so failed attempts through any front door
+    # count against one lockout, checked before any code is verified.
+    result = step_up(
+        username,
+        totp_code=totp_code,
+        recovery_code=recovery_code,
+        session_key=session_key,
+        client_ip=client_ip,
+        totp_service=totp_service,
+        sessions=elevated_session_manager,
+        limiter=login_rate_limiter,
+    )
+    if result.outcome is StepUpOutcome.LOCKED_OUT:
         logger.warning(
             "Elevation attempt by %s from %s rejected — too many failed attempts",
             username,
             client_ip,
         )
         return _ElevResult.RATE_LIMITED, None
-
-    scope = _verify_credentials(
-        totp_service, username, totp_code, recovery_code, client_ip
-    )
-    if scope is None:
-        login_rate_limiter.check_and_record_failure(limiter_key)
+    if result.outcome is StepUpOutcome.INVALID_CODE:
         code_type = "recovery code" if recovery_code else "TOTP code"
         logger.warning(
             "Elevation attempt by %s from %s rejected — invalid %s",
@@ -238,27 +215,20 @@ def _attempt_elevation(
             code_type,
         )
         return _ElevResult.INVALID_CODE, None
-
-    elevated_session_manager.create(
-        session_key=session_key,
-        username=username,
-        elevated_from_ip=client_ip,
-        scope=scope,
-    )
-    # As REST does: clear the failure history only once the window is
-    # confirmed readable.
-    if elevated_session_manager.get_status(session_key) is None:
+    if result.outcome is StepUpOutcome.WINDOW_NOT_CREATED:
         logger.error(
             "Elevation window for %s from %s not retrievable after create",
             username,
             client_ip,
         )
         return _ElevResult.CREATE_FAILED, None
-    login_rate_limiter.record_success(limiter_key)
     logger.info(
-        "Elevation granted for %s from %s (scope=%s)", username, client_ip, scope
+        "Elevation granted for %s from %s (scope=%s)",
+        username,
+        client_ip,
+        result.scope,
     )
-    return _ElevResult.SUCCESS, scope
+    return _ElevResult.SUCCESS, result.scope
 
 
 @router.get("/admin/elevate", response_class=HTMLResponse)
