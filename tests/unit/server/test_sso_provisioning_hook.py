@@ -12,11 +12,14 @@ Tests for the SSOProvisioningHook service:
 TDD: These tests are written FIRST, before implementation.
 """
 
+import json
+
 import pytest
 import tempfile
 from pathlib import Path
 
 
+from code_indexer.server.services.audit_log_service import AuditLogService
 from code_indexer.server.services.group_access_manager import (
     GroupAccessManager,
 )
@@ -25,6 +28,7 @@ from code_indexer.server.services.sso_provisioning_hook import (
     SystemConfigurationError,
     ensure_user_group_membership,
 )
+from tests.unit.server._audit_read_support import audit_logs
 
 
 @pytest.fixture
@@ -41,6 +45,12 @@ def temp_db_path():
 def group_manager(temp_db_path):
     """Create a GroupAccessManager with temp database."""
     return GroupAccessManager(temp_db_path)
+
+
+@pytest.fixture
+def audit_store(group_manager, temp_db_path):
+    """The audit store over the same file the manager writes to."""
+    return AuditLogService(temp_db_path)
 
 
 class TestAC1_NewSSOUsersAssignedToUsersGroup:
@@ -431,7 +441,9 @@ class TestAC7_AuditLoggingForSSOProvisioning:
     SSO auto-provisioning should record audit logs when new users are assigned.
     """
 
-    def test_audit_log_created_for_new_user_provisioning(self, group_manager):
+    def test_audit_log_created_for_new_user_provisioning(
+        self, group_manager, audit_store
+    ):
         """Test that an audit log entry is created when provisioning a new SSO user."""
         # Given: A new SSO user with no existing membership
         user_id = "audit-test-new-user"
@@ -445,10 +457,11 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         assert result is True
 
         # And: An audit log entry was created
-        logs, total = group_manager.get_audit_logs(
+        logs, total = audit_logs(
+            audit_store,
             action_type="user_assign",
             target_type="user",
-            admin_id="system:sso-provisioning",
+            actor="system:sso-provisioning",
         )
         assert total >= 1
 
@@ -466,7 +479,7 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         assert user_log["target_id"] == user_id
         assert "users" in user_log["details"].lower()  # Details mention 'users' group
 
-    def test_no_audit_log_for_existing_user_relogin(self, group_manager):
+    def test_no_audit_log_for_existing_user_relogin(self, group_manager, audit_store):
         """Test that no new audit log is created when existing user logs in again."""
         # Given: A user already assigned to admins group (by admin)
         user_id = "audit-test-existing-user"
@@ -474,9 +487,10 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         group_manager.assign_user_to_group(user_id, admins.id, "admin-assignment")
 
         # Capture audit log count before hook
-        logs_before, count_before = group_manager.get_audit_logs(
+        logs_before, count_before = audit_logs(
+            audit_store,
             target_type="user",
-            admin_id="system:sso-provisioning",
+            actor="system:sso-provisioning",
         )
 
         # When: The provisioning hook is called (simulating re-login)
@@ -487,15 +501,16 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         assert result is True
 
         # And: No new audit log was created by SSO provisioning
-        logs_after, count_after = group_manager.get_audit_logs(
+        logs_after, count_after = audit_logs(
+            audit_store,
             target_type="user",
-            admin_id="system:sso-provisioning",
+            actor="system:sso-provisioning",
         )
 
         # Count should be the same - no new SSO provisioning logs
         assert count_after == count_before
 
-    def test_audit_log_details_include_group_name(self, group_manager):
+    def test_audit_log_details_include_group_name(self, group_manager, audit_store):
         """Test that audit log details include the target group name."""
         # Given: A new SSO user
         user_id = "audit-details-test-user"
@@ -504,20 +519,19 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         hook = SSOProvisioningHook(group_manager)
         hook.ensure_group_membership(user_id)
 
-        # Then: The audit log details mention the group name
-        logs, _ = group_manager.get_audit_logs(
+        # Then: The audit log details carry the group name
+        logs, _ = audit_logs(
+            audit_store,
             action_type="user_assign",
-            admin_id="system:sso-provisioning",
+            actor="system:sso-provisioning",
         )
 
         user_log = next((log for log in logs if log["target_id"] == user_id), None)
         assert user_log is not None
-        # Details should mention "users" group
-        assert "users" in user_log["details"].lower()
-        assert (
-            "auto-provisioned" in user_log["details"].lower()
-            or "sso" in user_log["details"].lower()
-        )
+        details = json.loads(user_log["details"])
+        assert details["group"] == "users"
+        # The provisioning source is recorded; readers see only its name.
+        assert "source" in details["omitted_fields"]
 
 
 class TestGroupMapping:
@@ -639,7 +653,7 @@ class TestGroupMapping:
         user_group = group_manager.get_user_group(user_id)
         assert user_group.name == "users"
 
-    def test_audit_log_includes_group_mapping_info(self, group_manager):
+    def test_audit_log_includes_group_mapping_info(self, group_manager, audit_store):
         """Test that audit log includes external group mapping information."""
         # Given: Group mappings configured
         group_mappings = [{"external_group_id": "SSOAdmins", "cidx_group": "admins"}]
@@ -653,19 +667,19 @@ class TestGroupMapping:
         hook.ensure_group_membership(user_id, external_groups)
 
         # Then: Audit log includes mapping information
-        logs, _ = group_manager.get_audit_logs(
+        logs, _ = audit_logs(
+            audit_store,
             action_type="user_assign",
-            admin_id="system:sso-provisioning",
+            actor="system:sso-provisioning",
         )
 
         user_log = next((log for log in logs if log["target_id"] == user_id), None)
         assert user_log is not None
-        assert "admins" in user_log["details"].lower()
-        # Should mention that it was mapped from external groups
-        assert (
-            "mapped" in user_log["details"].lower()
-            or "ssoadmins" in user_log["details"].lower()
-        )
+        details = json.loads(user_log["details"])
+        assert details["group"] == "admins"
+        # The external groups it was mapped from are recorded; readers see
+        # only the field name.
+        assert "external_groups" in details["omitted_fields"]
 
     def test_existing_user_not_reassigned_with_group_mappings(self, group_manager):
         """Test that existing user's group is not changed even with different external groups."""

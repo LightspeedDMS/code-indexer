@@ -57,6 +57,22 @@ def group_manager(temp_db_path):
 
 
 @pytest.fixture
+def audit_store(group_manager, temp_db_path):
+    """The audit store over the same file the manager writes to."""
+    from code_indexer.server.services.audit_log_service import AuditLogService
+
+    return AuditLogService(temp_db_path)
+
+
+def _newest_audit_row(store):
+    from tests.unit.server._audit_read_support import audit_logs
+
+    logs, _ = audit_logs(store)
+    assert logs, "no audit row was written"
+    return logs[0]
+
+
+@pytest.fixture
 def test_client(group_manager):
     """Create a test client with mocked session and CSRF."""
     from fastapi import FastAPI
@@ -179,7 +195,9 @@ class TestAjaxGrantRepoAccess:
         repos = group_manager.get_group_repos(test_group.id)
         assert "test-repo" in repos
 
-    def test_ajax_grant_records_audit_log(self, test_client, group_manager):
+    def test_ajax_grant_records_audit_log(
+        self, test_client, group_manager, audit_store
+    ):
         """AC1: AJAX grant records audit log entry."""
         test_group = group_manager.create_group(
             name="developers",
@@ -207,10 +225,9 @@ class TestAjaxGrantRepoAccess:
             )
 
         # Verify audit log was created
-        logs, total = group_manager.get_audit_logs(limit=1)
-        assert len(logs) > 0
-        assert logs[0]["action_type"] == "repo_access_grant"
-        assert logs[0]["target_id"] == "test-repo"
+        newest = _newest_audit_row(audit_store)
+        assert newest["action_type"] == "repo_access_grant"
+        assert newest["target_id"] == "test-repo"
 
     def test_ajax_grant_returns_json_error_on_exception(
         self, test_client, group_manager
@@ -341,7 +358,9 @@ class TestAjaxRevokeRepoAccess:
         repos = group_manager.get_group_repos(test_group.id)
         assert "test-repo" not in repos
 
-    def test_ajax_revoke_records_audit_log(self, test_client, group_manager):
+    def test_ajax_revoke_records_audit_log(
+        self, test_client, group_manager, audit_store
+    ):
         """AC1: AJAX revoke records audit log entry."""
         test_group = group_manager.create_group(
             name="developers",
@@ -369,9 +388,8 @@ class TestAjaxRevokeRepoAccess:
                 },
             )
 
-        logs, total = group_manager.get_audit_logs(limit=1)
-        assert len(logs) > 0
-        assert logs[0]["action_type"] == "repo_access_revoke"
+        newest = _newest_audit_row(audit_store)
+        assert newest["action_type"] == "repo_access_revoke"
 
 
 @pytest.mark.slow

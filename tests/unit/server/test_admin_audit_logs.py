@@ -21,7 +21,9 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from code_indexer.server.services.audit_log_service import AuditLogService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from tests.unit.server._audit_read_support import audit_logs as _audit_logs
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 
@@ -53,9 +55,17 @@ def temp_db_path():
 
 
 @pytest.fixture
-def group_manager(temp_db_path):
-    """Create a GroupAccessManager instance."""
-    return GroupAccessManager(temp_db_path)
+def audit_service(temp_db_path):
+    """The real audit store the route reads (app.state.audit_service)."""
+    return AuditLogService(temp_db_path)
+
+
+@pytest.fixture
+def group_manager(temp_db_path, audit_service):
+    """Create a GroupAccessManager instance writing to the audit store."""
+    manager = GroupAccessManager(temp_db_path)
+    manager.set_audit_service(audit_service)
+    return manager
 
 
 @pytest.fixture
@@ -68,7 +78,7 @@ def mock_admin_user():
 
 
 @pytest.fixture
-def test_client(group_manager, mock_admin_user):
+def test_client(group_manager, audit_service, mock_admin_user):
     """Create a test client with mocked dependencies."""
     from code_indexer.server.routers.groups import (
         router as groups_router,
@@ -86,6 +96,7 @@ def test_client(group_manager, mock_admin_user):
     app.include_router(groups_router)
     app.include_router(users_router)
     app.include_router(audit_router)
+    app.state.audit_service = audit_service
 
     set_group_manager(group_manager)
 
@@ -148,7 +159,7 @@ class TestAC7AuditLogTable:
 class TestAC7AuditLogRecording:
     """Test that administrative actions are logged."""
 
-    def test_log_user_group_change(self, test_client, group_manager):
+    def test_log_user_group_change(self, test_client, group_manager, audit_service):
         """Test that user group changes are logged."""
         admins = group_manager.get_group_by_name("admins")
         users_group = group_manager.get_group_by_name("users")
@@ -161,13 +172,13 @@ class TestAC7AuditLogRecording:
         )
 
         # Check audit log
-        logs, total = group_manager.get_audit_logs(action_type="user_group_change")
+        logs, total = _audit_logs(audit_service, action_type="user_group_change")
         assert len(logs) > 0
         log = logs[0]
         assert log["action_type"] == "user_group_change"
         assert log["admin_id"] == "admin_user"
 
-    def test_log_repo_access_grant(self, test_client, group_manager):
+    def test_log_repo_access_grant(self, test_client, group_manager, audit_service):
         """Test that repo access grants are logged."""
         admins = group_manager.get_group_by_name("admins")
 
@@ -177,10 +188,10 @@ class TestAC7AuditLogRecording:
         )
 
         # Check audit log
-        logs, total = group_manager.get_audit_logs(action_type="repo_access_grant")
+        logs, total = _audit_logs(audit_service, action_type="repo_access_grant")
         assert len(logs) > 0
 
-    def test_log_repo_access_revoke(self, test_client, group_manager):
+    def test_log_repo_access_revoke(self, test_client, group_manager, audit_service):
         """Test that repo access revocations are logged."""
         admins = group_manager.get_group_by_name("admins")
 
@@ -192,10 +203,10 @@ class TestAC7AuditLogRecording:
         )
 
         # Check audit log
-        logs, total = group_manager.get_audit_logs(action_type="repo_access_revoke")
+        logs, total = _audit_logs(audit_service, action_type="repo_access_revoke")
         assert len(logs) > 0
 
-    def test_log_group_create(self, test_client, group_manager):
+    def test_log_group_create(self, test_client, group_manager, audit_service):
         """Test that group creation is logged."""
         # Create group via API
         test_client.post(
@@ -203,10 +214,10 @@ class TestAC7AuditLogRecording:
         )
 
         # Check audit log
-        logs, total = group_manager.get_audit_logs(action_type="group_create")
+        logs, total = _audit_logs(audit_service, action_type="group_create")
         assert len(logs) > 0
 
-    def test_log_group_delete(self, test_client, group_manager):
+    def test_log_group_delete(self, test_client, group_manager, audit_service):
         """Test that group deletion is logged."""
         # Create and then delete a group
         custom_group = group_manager.create_group("deletable", "To be deleted")
@@ -214,10 +225,12 @@ class TestAC7AuditLogRecording:
         test_client.delete(f"/api/v1/groups/{custom_group.id}")
 
         # Check audit log
-        logs, total = group_manager.get_audit_logs(action_type="group_delete")
+        logs, total = _audit_logs(audit_service, action_type="group_delete")
         assert len(logs) > 0
 
-    def test_audit_log_has_required_fields(self, test_client, group_manager):
+    def test_audit_log_has_required_fields(
+        self, test_client, group_manager, audit_service
+    ):
         """Test that audit log entries have all required fields."""
         admins = group_manager.get_group_by_name("admins")
 
@@ -226,7 +239,7 @@ class TestAC7AuditLogRecording:
             f"/api/v1/groups/{admins.id}/repos", json={"repos": ["test-repo"]}
         )
 
-        logs, total = group_manager.get_audit_logs()
+        logs, total = _audit_logs(audit_service)
         assert len(logs) > 0
         log = logs[0]
 

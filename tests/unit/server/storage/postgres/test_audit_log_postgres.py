@@ -141,60 +141,6 @@ class TestLogRaw:
 
 
 # ---------------------------------------------------------------------------
-# query()
-# ---------------------------------------------------------------------------
-
-
-class TestQuery:
-    """Tests for query() method."""
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_returns_tuple_of_list_and_count(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 5}
-        cursor.fetchall.return_value = [{"id": 1}, {"id": 2}]
-        backend = AuditLogPostgresBackend(pool)
-        rows, total = backend.query(limit=10)
-        assert total == 5
-        assert len(rows) == 2
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_action_type_filter(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 1}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(action_type="login")
-        count_sql = cursor.execute.call_args_list[0][0][0]
-        assert "action_type = %s" in count_sql
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_date_range(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 0}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(date_from="2026-01-01", date_to="2026-12-31")
-        count_sql = cursor.execute.call_args_list[0][0][0]
-        assert "timestamp >= %s" in count_sql
-        assert "timestamp <= %s" in count_sql
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_limit_and_offset(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 100}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(limit=10, offset=20)
-        query_sql = cursor.execute.call_args_list[1][0][0]
-        assert "LIMIT %s OFFSET %s" in query_sql
-
-
-# ---------------------------------------------------------------------------
 # get_pr_logs()
 # ---------------------------------------------------------------------------
 

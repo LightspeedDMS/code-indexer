@@ -31,11 +31,16 @@ from code_indexer.server.services.audit_log_query import AuditFilters
 from tests.unit.server._audit_read_support import make_event
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
-_NOW = datetime.now(timezone.utc)
 
 
 def _ago(**delta) -> str:
-    return (_NOW - timedelta(**delta)).isoformat()
+    """A time *delta* before NOW (the moment of the call, never import time:
+    a module-level clock ages out when this file runs late in a long batch)."""
+    return (datetime.now(timezone.utc) - timedelta(**delta)).isoformat()
+
+
+# Long, allowlisted details: config key names (> 2 KB as JSON).
+_MANY_KEYS = [f"example_setting_{i:03d}" for i in range(120)]
 
 
 class _Collector(HTMLParser):
@@ -186,12 +191,25 @@ def _seed_rows(store) -> Dict[str, int]:
             auth_method=None,
             details_json="L" * 3000,
         ),
+        "long_details": make_event(
+            ts=_ago(minutes=45),
+            action_type="config_changed",
+            target_type="config",
+            target_id="server",
+            actor="pageuser",
+            details_json=json.dumps(
+                {"change_kind": "update", "changed_keys": _MANY_KEYS}
+            ),
+        ),
         "xss": make_event(
             ts=_ago(minutes=40),
-            action_type="user_deleted",
+            action_type="security_incident",
+            target_type="auth",
             target_id="<script>alert(1)</script>",
             actor="pageuser",
-            details_json='{"note": "<script>alert(2)</script>"}',
+            details_json=json.dumps(
+                {"username": "<img src=x onerror=alert(2)>", "note": "hidden-note"}
+            ),
         ),
         "formula": make_event(
             ts=_ago(minutes=30),
@@ -551,16 +569,32 @@ class TestRowDisplay:
     def html(self, page_env) -> str:
         return _rows(page_env, view="all", window="all", limit="1000")
 
+    def test_a_fresh_attempted_row_reads_in_progress(self, page_env):
+        # Written now and rendered at once, so it is always inside the
+        # pairing grace window, however late this test runs.
+        event = make_event(
+            ts=datetime.now(timezone.utc).isoformat(),
+            action_type="mcp_credential_created",
+            target_type="mcp_credential",
+            target_id="cred-fresh",
+            outcome="attempted",
+            actor="freshuser",
+        )
+        page_env["app"].state.audit_service.insert_events([event])
+        html = _rows(page_env, view="all", window="all", actor="freshuser")
+        (row_id,) = _row_ids(html)
+        assert "in progress" in _row_html(html, row_id)
+        assert ">success<" not in html and ">failure<" not in html
+
     def test_outcome_labels(self, page_env, html):
         ids = page_env["ids"]
-        assert "in progress" in _row_html(html, ids["attempt_pending"])
         unknown = _row_html(html, ids["attempt_unknown"])
         assert "outcome unknown" in unknown and "title=" in unknown
         paired = _row_html(html, ids["paired_attempt"])
         assert ">attempted<" in paired
         assert "submitted" in _row_html(html, ids["job"])
         assert ">success<" not in _row_html(html, ids["job"])
-        for label in ("attempt_pending", "attempt_unknown", "paired_attempt"):
+        for label in ("attempt_unknown", "paired_attempt"):
             cell = _row_html(html, ids[label])
             assert ">success<" not in cell and ">failure<" not in cell
 
@@ -577,15 +611,25 @@ class TestRowDisplay:
         assert legacy.count("<td>-</td>") >= 3  # source, IP, node
 
     def test_details_are_previewed_and_capped(self, page_env, html):
-        legacy = _row_html(html, page_env["ids"]["legacy"])
-        summary_match = re.search(r"<summary>(.*?)</summary>", legacy, re.S)
-        full_match = re.search(r"<pre>(.*?)</pre>", legacy, re.S)
+        long_row = _row_html(html, page_env["ids"]["long_details"])
+        summary_match = re.search(r"<summary>(.*?)</summary>", long_row, re.S)
+        full_match = re.search(r"<pre>(.*?)</pre>", long_row, re.S)
         assert summary_match and full_match
         summary = unescape(summary_match.group(1))
         assert len(summary) == 203 and summary.endswith("...")
         full = unescape(full_match.group(1))
         assert len(full) == 2048
-        assert "audit-details-truncated" in legacy
+        assert "audit-details-truncated" in long_row
+
+    def test_legacy_free_text_details_are_summarised_not_shown(self, page_env, html):
+        legacy = _row_html(html, page_env["ids"]["legacy"])
+        assert "LLLL" not in legacy
+        assert "(unstructured)" in unescape(legacy)
+
+    def test_details_outside_the_allowlist_are_named_not_shown(self, page_env, html):
+        cell = unescape(_row_html(html, page_env["ids"]["xss"]))
+        assert "hidden-note" not in cell
+        assert '"omitted_fields": ["note"]' in cell
 
 
 class TestTemplateSafety:
@@ -605,8 +649,9 @@ class TestTemplateSafety:
     def test_row_values_render_escaped(self, page_env):
         html = _rows(page_env, view="all", window="all", actor="pageuser")
         assert "<script>alert(1)</script>" not in html
-        assert "<script>alert(2)</script>" not in html
+        assert "<img src=x onerror=alert(2)>" not in html
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+        assert "&lt;img src=x onerror=alert(2)&gt;" in html  # a details value
 
     def test_config_reaches_js_as_json_data(self, page_env):
         html = page_env["client"].get("/admin/audit-logs").text
@@ -657,6 +702,28 @@ class TestExport:
         assert sorted(int(r["id"]) for r in rows) == sorted(
             page_env["ids"][f"burst{i}"] for i in range(5)
         )
+
+    def test_export_carries_exactly_the_shared_row_fields(self, page_env):
+        from code_indexer.server.services.audit_log_query import AUDIT_ROW_FIELDS
+
+        response = self._export(
+            page_env, format="csv", view="all", window="all", actor="pageuser"
+        )
+        reader = csv.DictReader(io.StringIO(response.text))
+        assert tuple(reader.fieldnames or ()) == AUDIT_ROW_FIELDS
+        body = json.loads(
+            self._export(
+                page_env, format="json", view="all", window="all", actor="pageuser"
+            ).text
+        )
+        assert all(tuple(row) == AUDIT_ROW_FIELDS for row in body["rows"])
+        exported = {row["id"]: row for row in body["rows"]}
+        xss = json.loads(exported[page_env["ids"]["xss"]]["details"])
+        assert xss == {
+            "username": "<img src=x onerror=alert(2)>",
+            "omitted_fields": ["note"],
+        }
+        assert "LLLL" not in response.text and "hidden-note" not in response.text
 
     def test_csv_cells_never_start_a_formula(self, page_env):
         response = self._export(

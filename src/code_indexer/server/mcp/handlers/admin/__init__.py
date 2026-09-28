@@ -29,7 +29,21 @@ from code_indexer.server.mcp.handlers._utils import (
     _get_golden_repos_dir,
 )
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
-from code_indexer.server.storage.json_column import parse_json_column
+from code_indexer.server.services.audit_log_query import (
+    AUDIT_LOG_MAX_LIMIT,
+    DEFAULT_AUDIT_LOG_LIMIT,
+    DIRECTION_OLDER,
+    TIER_ALL,
+    AuditAggregate,
+    AuditQueryError,
+    CanonicalAuditRow,
+    aggregate_fields,
+    build_filters,
+    decode_details,
+    page_fields,
+    query_audit_log,
+    row_fields,
+)
 from . import elevate_session as _elevate_session_module
 from .mcp_credentials import (
     handle_list_mcp_credentials,
@@ -39,18 +53,12 @@ from .mcp_credentials import (
 logger = logging.getLogger(__name__)
 
 # Named constants for admin operations
-DEFAULT_AUDIT_LOG_LIMIT = 100
 JOB_ID_LENGTH = 8
 
-# Issue #1646: handle_query_audit_logs pushes `page` straight into
-# AuditLogService.query()'s `offset` parameter. This clamps `page` to a sane
-# maximum so a pathological caller-supplied value can't produce an
-# unbounded OFFSET.
+# Issue #1646: handle_query_audit_logs maps `page` onto the shared read
+# function's compatibility offset. This clamps `page` to a sane maximum so a
+# pathological caller-supplied value can't produce an unbounded OFFSET.
 _AUDIT_LOG_MAX_PAGE = 10_000
-
-# Matches the tool's own documented `limit` maximum (query_audit_logs.md)
-# so a caller-supplied `limit` can't force an unbounded SQL fetch.
-_AUDIT_LOG_MAX_LIMIT = 1000
 
 
 def _get_legacy():
@@ -1530,13 +1538,13 @@ def _resolve_audit_log_pagination(args: Dict[str, Any]) -> tuple:
     the same first-`limit` slice regardless of `page`. Both `limit` and
     `page` are clamped against named maxima to protect against a
     pathological caller-supplied value producing an unbounded SQL fetch or
-    OFFSET.
+    OFFSET (the shared read function clamps the offset once more).
     """
     limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
     if limit <= 0:
         limit = DEFAULT_AUDIT_LOG_LIMIT
-    elif limit > _AUDIT_LOG_MAX_LIMIT:
-        limit = _AUDIT_LOG_MAX_LIMIT
+    elif limit > AUDIT_LOG_MAX_LIMIT:
+        limit = AUDIT_LOG_MAX_LIMIT
     page = _coerce_int(args.get("page"), 1)
     if page < 1:
         page = 1
@@ -1556,88 +1564,72 @@ def _get_audit_service() -> Any:
     return audit_svc
 
 
-def _decode_audit_log_details(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Decode an audit_logs row's `details` column.
-
-    Bug #1802: every writer (GroupAccessManager.log_audit, and direct
-    AuditLogService.log() callers such as PasswordChangeAuditLogger) now
-    stores a JSON object. Rows written before that fix may still hold
-    legacy free text -- those are surfaced as {"raw": <original text>}
-    instead of being silently treated as empty, so recorded content is
-    never discarded, only left unstructured.
-    """
-    details_raw = row.get("details")
-    if details_raw is None:
-        return {}
-    decoded = parse_json_column(details_raw, dict, "audit_logs.details")
-    if decoded is not None:
-        return decoded
-    return {"raw": details_raw} if isinstance(details_raw, str) else {}
+def _audit_flag(args: Dict[str, Any], name: str) -> bool:
+    """A JSON boolean argument (absent means False); anything else is refused."""
+    value = args.get(name)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise AuditQueryError(f"{name} must be a boolean")
+    return value
 
 
-def _build_audit_log_entry(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Build one query_audit_logs response entry from an audit_logs row.
+def _build_audit_log_entry(row: CanonicalAuditRow) -> Dict[str, Any]:
+    """One query_audit_logs entry: the shared row fields, ``details``
+    decoded, plus the older ``user`` / ``action`` / ``resource`` aliases
+    (always the row's own ``admin_id`` / ``action_type`` / ``target_id``)."""
+    entry = row_fields(row)
+    entry["details"] = decode_details(row.details)
+    entry["user"] = row.admin_id
+    entry["action"] = row.action_type
+    entry["resource"] = row.target_id
+    return entry
 
-    PR creation (pr_creation_success/failure/disabled) and git cleanup
-    events carry a repo_alias/pr_url/repo_path inside their JSON `details`
-    blob (see PasswordChangeAuditLogger._log_to_service) -- when present,
-    `resource` surfaces that context. `user`/`action` always mirror the
-    row's own `admin_id`/`action_type` columns, the SAME columns
-    AuditLogService.query() filters on, so an entry can never disagree with
-    the SQL-level filter that selected it.
 
-    Issue #1647: this replaces a second, overlapping fetch via
-    get_pr_logs()/get_cleanup_logs() that used to re-select these SAME rows
-    (they live in the one audit_logs table, target_type="auth" like every
-    other event) and merge them on top of the general query, duplicating
-    every pr_creation_*/git_cleanup entry. There is now only one query.
-    """
-    from code_indexer.server.services.audit_log_service import (
-        PR_ACTION_TYPES,
-        CLEANUP_ACTION_TYPE,
+def _query_audit_log_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the MCP arguments onto the shared read function (one call)."""
+    limit, offset = _resolve_audit_log_pagination(args)
+    filters = build_filters(
+        # Both "action" and "action_type" name the action filter.
+        action_type=args.get("action") or args.get("action_type"),
+        actor=args.get("user"),
+        target_type=args.get("target_type"),
+        target_id=args.get("target_id"),
+        outcome=args.get("outcome"),
+        source=args.get("source"),
+        ip_address=args.get("ip_address"),
+        correlation_id=args.get("correlation_id"),
+        date_from=args.get("from_date"),
+        date_to=args.get("to_date"),
     )
-
-    details_obj = _decode_audit_log_details(row)
-    action = row.get("action_type", "")
-    admin_id = row.get("admin_id", "")
-    target_id = row.get("target_id", "")
-    resource = target_id
-    if action in PR_ACTION_TYPES and details_obj.get("pr_url") is not None:
-        resource = details_obj["pr_url"]
-    elif action == CLEANUP_ACTION_TYPE and details_obj.get("repo_path") is not None:
-        resource = details_obj["repo_path"]
-
+    result = query_audit_log(
+        _get_audit_service(),
+        filters,
+        tier=args.get("tier") or TIER_ALL,
+        cursor=args.get("cursor") or None,
+        direction=args.get("direction") or DIRECTION_OLDER,
+        limit=limit,
+        legacy_offset=offset or None,
+        aggregate=_audit_flag(args, "aggregate"),
+        all_time=_audit_flag(args, "all_time"),
+    )
+    if isinstance(result, AuditAggregate):
+        return {"success": True, "entries": [], **aggregate_fields(result)}
     return {
-        "timestamp": row.get("timestamp", ""),
-        "user": admin_id,
-        "action": action,
-        "action_type": action,
-        "target_type": row.get("target_type", ""),
-        "target_id": target_id,
-        "admin_id": admin_id,
-        "resource": resource,
-        "details": details_obj,
-        # Unified audit attribution (additive; NULL on rows written before
-        # these columns existed).
-        "id": row.get("id"),
-        "outcome": row.get("outcome"),
-        "source": row.get("source"),
-        "ip_address": row.get("ip_address"),
-        "correlation_id": row.get("correlation_id"),
-        "node_id": row.get("node_id"),
-        "auth_method": row.get("auth_method"),
-        "actor_is_system": bool(row.get("actor_is_system") or 0),
-        "event_uuid": row.get("event_uuid"),
+        "success": True,
+        "entries": [_build_audit_log_entry(row) for row in result.rows],
+        **page_fields(result),
     }
 
 
 @require_mcp_elevation()
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Query security audit logs with optional filtering (admin only).
+    """Query the audit log (admin only) through the shared read function.
 
-    Issues #1646/#1647: one AuditLogService.query() call is the sole source
-    for both `entries` and `total` -- see _resolve_audit_log_pagination and
-    _build_audit_log_entry for the fix details.
+    A thin adapter over ``services/audit_log_query.query_audit_log``, the
+    same function the REST route and the Web Audit Logs page read through:
+    one call returns both the entries and the capped ``total``.  A bad
+    argument (filter, tier, cursor, mode) returns ``success: false``.
     """
     try:
         if user.role != UserRole.ADMIN:
@@ -1647,25 +1639,9 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "error": "Permission denied. Admin role required to query audit logs.",
                 }
             )
-
-        # Support both "action" and "action_type" as filter parameter names
-        action_filter = args.get("action") or args.get("action_type")
-        limit, offset = _resolve_audit_log_pagination(args)
-        audit_svc = _get_audit_service()
-
-        audit_rows, total = audit_svc.query(
-            action_type=action_filter if action_filter else None,
-            admin_id=args.get("user"),
-            date_from=args.get("from_date"),
-            date_to=args.get("to_date"),
-            limit=limit,
-            offset=offset,
-        )
-        entries = [_build_audit_log_entry(row) for row in audit_rows]
-
-        return _mcp_response(  # type: ignore[no-any-return]
-            {"success": True, "entries": entries, "total": total}
-        )
+        return _mcp_response(_query_audit_log_from_args(args))  # type: ignore[no-any-return]
+    except AuditQueryError as e:
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
     except RuntimeError as e:
         logger.critical("AuditLogService configuration error: %s", e)
         return _mcp_response(  # type: ignore[no-any-return]

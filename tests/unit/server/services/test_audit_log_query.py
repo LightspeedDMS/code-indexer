@@ -7,6 +7,7 @@ SQLite shape, and PostgreSQL (when ``TEST_POSTGRES_DSN`` is set).
 from __future__ import annotations
 
 import base64
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -491,14 +492,107 @@ class TestRowSemantics:
         legacy, job = query_audit_log(store, tier="all").rows
         assert job.submitted_only is True and legacy.submitted_only is False
         assert job.actor_is_system is True and legacy.actor_is_system is False
-        assert job.details == '{"job_id": "j1"}'  # the RAW stored string
+        assert job.details == '{"job_id": "j1"}'  # allowlisted fields, as JSON
         assert job.node_id == "node-a"
         assert (legacy.outcome, legacy.source, legacy.ip_address) == (None, None, None)
-        assert legacy.details == "legacy free text"
-        assert decode_details(legacy.details) == {"raw": "legacy free text"}
+        assert "legacy free text" not in (legacy.details or "")
+        assert decode_details(legacy.details) == {"omitted_fields": ["(unstructured)"]}
         assert decode_details(job.details) == {"job_id": "j1"}
         assert decode_details(None) == {}
         assert job.timestamp.endswith("+00:00")
+
+
+class TestDetailsAllowlist:
+    """Only allowlisted ``details`` fields ever leave the read path."""
+
+    def _project(self, action_type, raw):
+        from code_indexer.server.services.audit_log_query import project_details
+
+        projected = project_details(action_type, raw)
+        return None if projected is None else json.loads(projected)
+
+    def test_catalog_type_keeps_conforming_fields_and_names_the_rest(self):
+        raw = json.dumps(
+            {
+                "job_id": "job-1",
+                "repo_host": "https://user:pw@example.com/x",  # not a hostname
+                "branch": "main",
+                "note": "free text",
+            }
+        )
+        assert self._project("golden_repo_added", raw) == {
+            "job_id": "job-1",
+            "branch": "main",
+            "omitted_fields": ["note", "repo_host"],
+        }
+
+    def test_legacy_only_type_uses_its_read_schema(self):
+        raw = json.dumps(
+            {"name": "ops-team", "description": "<b>free</b>", "source": "mcp"}
+        )
+        assert self._project("group_create", raw) == {
+            "name": "ops-team",
+            "omitted_fields": ["description", "source"],
+        }
+
+    @pytest.mark.parametrize("raw", ["legacy free text", "[1, 2]", "42", "null"])
+    def test_unstructured_content_is_summarised_never_echoed(self, raw):
+        assert self._project("group_create", raw) == {
+            "omitted_fields": ["(unstructured)"]
+        }
+
+    def test_unknown_action_type_keeps_nothing(self):
+        raw = json.dumps({"password": "hunter2", "username": "alice"})
+        assert self._project("not_in_catalog", raw) == {
+            "omitted_fields": ["password", "username"]
+        }
+
+    def test_field_names_that_are_not_identifiers_are_not_echoed(self):
+        raw = json.dumps({"token=abc123": 1, "name": "ops"})
+        assert self._project("group_delete", raw) == {
+            "name": "ops",
+            "omitted_fields": ["(non-identifier)"],
+        }
+
+    @pytest.mark.parametrize("raw", [None, "", "{}"])
+    def test_empty_details_stay_empty(self, raw):
+        assert self._project("group_create", raw) is None
+
+    def test_the_read_path_applies_the_allowlist_on_every_store(self, store):
+        secret = "sk-EXAMPLE-not-a-real-value"
+        seed(
+            store,
+            [
+                make_event(
+                    ts=_ts(1),
+                    action_type="password_change_failure",
+                    target_type="auth",
+                    target_id="alice",
+                    outcome="failure",
+                    details_json=json.dumps(
+                        {"username": "alice", "user_agent": secret, "reason": secret}
+                    ),
+                ),
+                make_event(
+                    ts=_ts(2),
+                    action_type="group_create",
+                    target_type="group",
+                    target_id="8",
+                    outcome=None,
+                    details_json=f"created with key {secret}",
+                ),
+            ],
+        )
+        legacy_text, legacy_json = query_audit_log(store, tier="all").rows
+        assert secret not in (legacy_text.details or "")
+        assert secret not in (legacy_json.details or "")
+        assert json.loads(legacy_json.details or "") == {
+            "username": "alice",
+            "omitted_fields": ["reason", "user_agent"],
+        }
+        assert decode_details(legacy_text.details) == {
+            "omitted_fields": ["(unstructured)"]
+        }
 
 
 class TestSecurityCountIsIndexServed:

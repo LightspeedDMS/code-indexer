@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from code_indexer.server.services.audit_log_service import AuditLogService
 from code_indexer.server.services.group_access_manager import GroupAccessManager
+from tests.unit.server._audit_read_support import audit_logs
 
 
 @pytest.fixture
@@ -40,6 +42,12 @@ def manager(temp_db_path):
     return GroupAccessManager(temp_db_path)
 
 
+@pytest.fixture
+def audit_store(manager, temp_db_path):
+    """The audit store over the same file the manager writes to."""
+    return AuditLogService(temp_db_path)
+
+
 class TestEnsureUserGroupMembershipAssignsNewUser:
     def test_assigns_user_to_given_group(self, manager):
         users_group = manager.get_group_by_name("users")
@@ -54,7 +62,9 @@ class TestEnsureUserGroupMembershipAssignsNewUser:
         assert membership.group_id == users_group.id
         assert membership.assigned_by == "admin"
 
-    def test_writes_audit_entry_with_given_action_type_and_details(self, manager):
+    def test_writes_audit_entry_with_given_action_type_and_details(
+        self, manager, audit_store
+    ):
         users_group = manager.get_group_by_name("users")
 
         manager.ensure_user_group_membership(
@@ -65,23 +75,24 @@ class TestEnsureUserGroupMembershipAssignsNewUser:
             audit_details={"group": "users", "source": "test"},
         )
 
-        logs, total = manager.get_audit_logs(target_type="user")
+        logs, total = audit_logs(audit_store, target_type="user")
         matching = [log for log in logs if log["target_id"] == "audited-user"]
         assert len(matching) == 1
         assert matching[0]["action_type"] == "user_assign"
+        # Readers see the allowlisted fields; the others are named.
         assert json.loads(matching[0]["details"]) == {
             "group": "users",
-            "source": "test",
+            "omitted_fields": ["source"],
         }
 
-    def test_default_action_type_is_user_group_assign(self, manager):
+    def test_default_action_type_is_user_group_assign(self, manager, audit_store):
         users_group = manager.get_group_by_name("users")
 
         manager.ensure_user_group_membership(
             "default-action-user", users_group, assigned_by="admin"
         )
 
-        logs, _ = manager.get_audit_logs(target_type="user")
+        logs, _ = audit_logs(audit_store, target_type="user")
         matching = [log for log in logs if log["target_id"] == "default-action-user"]
         assert matching[0]["action_type"] == "user_group_assign"
 
@@ -105,17 +116,17 @@ class TestEnsureUserGroupMembershipIsIdempotent:
         assert membership.group_id == admins_group.id
         assert membership.assigned_by == "system:pre-existing"
 
-    def test_noop_does_not_write_a_new_audit_entry(self, manager):
+    def test_noop_does_not_write_a_new_audit_entry(self, manager, audit_store):
         users_group = manager.get_group_by_name("users")
         admins_group = manager.get_group_by_name("admins")
         manager.assign_user_to_group(
             "idempotent-audit-user", admins_group.id, assigned_by="system:pre-existing"
         )
-        _, before_total = manager.get_audit_logs(target_type="user")
+        _, before_total = audit_logs(audit_store, target_type="user")
 
         manager.ensure_user_group_membership(
             "idempotent-audit-user", users_group, assigned_by="admin"
         )
 
-        _, after_total = manager.get_audit_logs(target_type="user")
+        _, after_total = audit_logs(audit_store, target_type="user")
         assert after_total == before_total

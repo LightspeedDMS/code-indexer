@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -68,6 +68,41 @@ def _pg_dsn_for(dbname: str) -> str:
     return make_conninfo(**params)  # type: ignore[arg-type]
 
 
+# One fully migrated database per test process; every test database is a
+# copy of it (running every migration per test costs seconds each).
+_PG_TEMPLATE: List[str] = []
+
+
+def _drop_pg_template() -> None:
+    import psycopg
+
+    for name in _PG_TEMPLATE:
+        with psycopg.connect(PG_DSN, autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+def _pg_template() -> str:
+    """The migrated template database, created on first use."""
+    if _PG_TEMPLATE:
+        return _PG_TEMPLATE[0]
+    import atexit
+
+    import psycopg
+
+    from code_indexer.server.storage.postgres.migrations.runner import (
+        MigrationRunner,
+    )
+
+    name = f"audit_read_tpl_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(PG_DSN, autocommit=True) as admin:
+        admin.execute(f'CREATE DATABASE "{name}"')
+    _PG_TEMPLATE.append(name)
+    atexit.register(_drop_pg_template)
+    with MigrationRunner(_pg_dsn_for(name)) as runner:
+        runner.run()
+    return name
+
+
 def _pg_store() -> Iterator[AuditLogService]:
     import psycopg
 
@@ -75,18 +110,14 @@ def _pg_store() -> Iterator[AuditLogService]:
         AuditLogPostgresBackend,
     )
     from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
-    from code_indexer.server.storage.postgres.migrations.runner import (
-        MigrationRunner,
-    )
 
+    template = _pg_template()
     name = f"audit_read_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(PG_DSN, autocommit=True) as admin:
-        admin.execute(f'CREATE DATABASE "{name}"')
+        admin.execute(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
     dsn = _pg_dsn_for(name)
     pool: Any = None
     try:
-        with MigrationRunner(dsn) as runner:
-            runner.run()
         pool = ConnectionPool(dsn, min_size=1, max_size=2)
         yield AuditLogService(
             Path("/nonexistent-unused"),
@@ -121,3 +152,44 @@ def seed(store: AuditLogService, events: List[AuditEvent]) -> None:
 
 def ids_of(page: Any) -> List[int]:
     return [row.id for row in page.rows]
+
+
+def audit_logs(
+    store: Any, *, tier: str = "all", **filters: Any
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Rows (as dicts) and the total, read through the shared read function.
+
+    For tests that assert what a write recorded.  Reads one page of up to
+    the maximum page size, newest first.
+    """
+    from code_indexer.server.services.audit_log_query import (
+        AUDIT_LOG_MAX_LIMIT,
+        build_filters,
+        query_audit_log,
+        row_fields,
+    )
+
+    page = query_audit_log(
+        store, build_filters(**filters), tier=tier, limit=AUDIT_LOG_MAX_LIMIT
+    )
+    assert page.total is not None
+    return [row_fields(row) for row in page.rows], page.total
+
+
+def stored_audit_rows(db_path: Path) -> List[Dict[str, Any]]:
+    """Every stored row of a SQLite audit file, newest first, AS STORED.
+
+    For write-contract tests that assert the exact stored ``details``; the
+    product's read path (:func:`audit_logs`) shows only allowlisted fields.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM audit_logs ORDER BY timestamp DESC, id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]

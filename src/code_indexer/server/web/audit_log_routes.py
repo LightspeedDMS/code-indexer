@@ -39,6 +39,7 @@ from code_indexer.server.services.audit_events import (
 )
 from code_indexer.server.services.audit_log_query import (
     AUDIT_COUNT_CAP,
+    AUDIT_ROW_FIELDS,
     AUDIT_SOURCES,
     AUTH_ACTIVITY_DEFAULT_WINDOW,
     PAIRING_PENDING,
@@ -56,6 +57,7 @@ from code_indexer.server.services.audit_log_query import (
     clamp_limit,
     decode_details,
     query_audit_log,
+    row_fields,
 )
 
 from .routes import _create_login_redirect, _require_admin_session, templates
@@ -489,30 +491,13 @@ def audit_logs_aggregate_partial(request: Request) -> Response:
 # Export: the filtered rows, bounded and streamed
 # ---------------------------------------------------------------------------
 
-EXPORT_COLUMNS = (
-    "id",
-    "timestamp",
-    "admin_id",
-    "actor_is_system",
-    "actor_is_authenticated",
-    "action_type",
-    "target_type",
-    "target_id",
-    "outcome",
-    "pairing_state",
-    "submitted_only",
-    "source",
-    "ip_address",
-    "node_id",
-    "correlation_id",
-    "auth_method",
-    "event_uuid",
-    "details",
-)
+# The export writes exactly the fields REST and MCP expose for a row, with
+# ``details`` already reduced to its allowlisted fields by the read path.
+EXPORT_COLUMNS = AUDIT_ROW_FIELDS
 
 
 def _export_record(row: CanonicalAuditRow) -> Dict[str, Any]:
-    return {column: getattr(row, column) for column in EXPORT_COLUMNS}
+    return row_fields(row)
 
 
 def _csv_cell(value: Any) -> Any:

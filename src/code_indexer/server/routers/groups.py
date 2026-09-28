@@ -13,12 +13,24 @@ Story #705: Default Group Bootstrap and User Assignment Infrastructure
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user
 from ..auth.user_manager import User
+from ..services.audit_log_query import (
+    DIRECTION_OLDER,
+    TIER_ALL,
+    TIER_SECURITY,
+    AuditAggregate,
+    AuditQueryError,
+    aggregate_fields,
+    build_filters,
+    page_fields,
+    query_audit_log,
+    row_fields,
+)
 from ..services.constants import CIDX_META_REPO
 from ..services.group_access_manager import (
     GroupAccessManager,
@@ -182,7 +194,12 @@ class CreateGroupRequest(BaseModel):
 
 
 class AuditLogResponse(BaseModel):
-    """Response model for a single audit log entry."""
+    """Response model for a single audit log entry.
+
+    ``details`` is a JSON string holding only the allowlisted fields of the
+    stored value (see ``services/audit_log_query.project_details``).  The
+    fields after ``details`` are additive and optional.
+    """
 
     id: int
     timestamp: str
@@ -191,13 +208,52 @@ class AuditLogResponse(BaseModel):
     target_type: str
     target_id: str
     details: Optional[str] = None
+    outcome: Optional[str] = None
+    source: Optional[str] = None
+    ip_address: Optional[str] = None
+    correlation_id: Optional[str] = None
+    node_id: Optional[str] = None
+    auth_method: Optional[str] = None
+    actor_is_system: Optional[bool] = None
+    event_uuid: Optional[str] = None
+    actor_is_authenticated: Optional[bool] = None
+    pairing_state: Optional[str] = None
+    submitted_only: Optional[bool] = None
+
+
+class AuditAggregateGroupResponse(BaseModel):
+    """One (action_type, outcome) group of an authentication-activity aggregate."""
+
+    action_type: str
+    outcome: Optional[str] = None
+    count: int
+    first_seen: str
+    last_seen: str
+    distinct_actors: int
+    distinct_ips: int
 
 
 class AuditLogsListResponse(BaseModel):
-    """Response model for paginated audit logs list."""
+    """Response model for one page of audit logs (or an aggregate).
+
+    ``total`` is exact up to the count cap; ``total_capped`` is true above
+    it.  ``next_cursor`` continues towards older rows; ``prev_cursor`` with
+    ``direction=newer`` towards newer rows.  With ``aggregate=true`` the
+    ``logs`` list is empty, ``groups`` holds the aggregate and ``total`` is
+    the number of events in those groups.
+    """
 
     logs: List[AuditLogResponse]
     total: int
+    total_capped: Optional[bool] = None
+    next_cursor: Optional[str] = None
+    prev_cursor: Optional[str] = None
+    has_more: Optional[bool] = None
+    groups: Optional[List[AuditAggregateGroupResponse]] = None
+    window_from: Optional[str] = None
+    window_to: Optional[str] = None
+    all_time: Optional[bool] = None
+    truncated: Optional[bool] = None
 
 
 class UpdateGroupRequest(BaseModel):
@@ -928,44 +984,86 @@ audit_router = APIRouter(prefix="/api/v1/audit-logs", tags=["audit"])
     dependencies=[Depends(dependencies.require_elevation())],
 )
 def get_audit_logs(
+    request: Request,
     action_type: Optional[str] = None,
     target_type: Optional[str] = None,
     admin_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    outcome: Optional[str] = None,
+    source: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    correlation_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tier: Optional[str] = None,
     limit: Optional[int] = None,
     offset: int = 0,
+    cursor: Optional[str] = None,
+    direction: str = DIRECTION_OLDER,
+    aggregate: bool = False,
+    all_time: bool = False,
     current_user: User = Depends(get_current_admin_user),
-    group_manager: GroupAccessManager = Depends(get_group_manager),
 ) -> AuditLogsListResponse:
     """
-    Get audit log entries with optional filters.
+    Get audit log entries, newest first (admin only, elevation required).
 
-    Story #710: AC8 - Get Audit Logs
-    Requires admin role. Returns paginated list sorted by timestamp descending.
+    A thin adapter over ``services/audit_log_query.query_audit_log``, the
+    same function MCP ``query_audit_logs`` and the Web Audit Logs page read
+    through.
 
-    Filters:
-    - action_type: Filter by action type (user_group_change, repo_access_grant, etc.)
-    - target_type: Filter by target type (user, group, repo)
-    - admin_id: Filter by admin who performed the action
-    - date_from: Filter logs from this date (YYYY-MM-DD)
-    - date_to: Filter logs up to this date (YYYY-MM-DD)
+    - Filters: action_type, target_type, admin_id, target_id, outcome,
+      source, ip_address, correlation_id, date_from / date_to (UTC,
+      YYYY-MM-DD or ISO-8601).
+    - tier: security (default), auth_activity or all.  With a target_type
+      and no tier, every row of that target type is read.
+    - Paging: limit (default 100, at most 1000) plus the next_cursor /
+      prev_cursor tokens (direction=newer with prev_cursor); offset stays as
+      a compatibility adapter and cannot be combined with a cursor.
+    - aggregate=true (tier auth_activity) groups authentication activity;
+      all_time lifts its default 24 h window.
+
+    A bad argument is refused with HTTP 400.
     """
-    # If no target_type specified, exclude auth events from groups audit
-    effective_exclude = None if target_type else "auth"
-
-    logs, total = group_manager.get_audit_logs(
-        action_type=action_type,
-        target_type=target_type,
-        admin_id=admin_id,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
-        offset=offset,
-        exclude_target_type=effective_exclude,
-    )
-
+    store = getattr(request.app.state, "audit_service", None)
+    if store is None:
+        logger.error("GET /api/v1/audit-logs: audit store is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audit log store unavailable",
+        )
+    if tier is None:
+        tier = TIER_ALL if target_type else TIER_SECURITY
+    try:
+        filters = build_filters(
+            action_type=action_type,
+            actor=admin_id,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            source=source,
+            ip_address=ip_address,
+            correlation_id=correlation_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        result = query_audit_log(
+            store,
+            filters,
+            tier=tier,
+            cursor=cursor or None,
+            direction=direction,
+            limit=limit,
+            legacy_offset=offset or None,
+            aggregate=aggregate,
+            all_time=all_time,
+        )
+    except AuditQueryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+    if isinstance(result, AuditAggregate):
+        return AuditLogsListResponse(logs=[], **aggregate_fields(result))
     return AuditLogsListResponse(
-        logs=[AuditLogResponse(**log) for log in logs],
-        total=total,
+        logs=[AuditLogResponse(**row_fields(row)) for row in result.rows],
+        **page_fields(result),
     )

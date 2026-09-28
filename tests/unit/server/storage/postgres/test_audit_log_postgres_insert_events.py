@@ -330,13 +330,19 @@ def test_query_returns_the_attribution_columns(fresh_db: str) -> None:
         ConnectionPool,
     )
 
+    from code_indexer.server.services.audit_log_query import AuditFilters
+
     _run_migrations(fresh_db)
     events = _events()
     pool = ConnectionPool(fresh_db, min_size=1, max_size=2)
     try:
         backend = AuditLogPostgresBackend(pool)
         backend.insert_events(events)
-        found, total = backend.query(action_type="user_deleted")
+        wanted = AuditFilters(action_type="user_deleted")
+        found = backend.query_page(
+            wanted, "all", seek=None, direction="older", limit=10
+        )
+        total = backend.count_capped(wanted, "all", cap=10)
     finally:
         pool.close()
     assert total == 1

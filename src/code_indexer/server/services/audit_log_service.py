@@ -10,7 +10,9 @@ Receives events from:
 
 Provides:
 - log()            : Insert an audit event
-- query()          : Filter/paginate audit events (replaces get_audit_logs)
+- query_page() / count_capped() / aggregate() / find_terminal_rows():
+                     the storage half of the shared read path
+                     (services/audit_log_query.query_audit_log)
 - get_pr_logs()    : Query PR creation events (replaces flat-file parse)
 - get_cleanup_logs(): Query git cleanup events (replaces flat-file parse)
 
@@ -550,100 +552,8 @@ class AuditLogService:
         )
 
     # ------------------------------------------------------------------
-    # Read
-    # ------------------------------------------------------------------
-
-    def query(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        exclude_target_type: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-    ) -> Tuple[List[dict], int]:
-        """
-        Query audit log entries with optional filters.
-
-        Args:
-            action_type:          Filter by exact action_type.
-            target_type:          Filter by exact target_type.
-            admin_id:             Filter by exact admin_id.
-            date_from:            ISO date string YYYY-MM-DD (inclusive lower bound).
-            date_to:              ISO date string YYYY-MM-DD (inclusive upper bound).
-            exclude_target_type:  Exclude rows where target_type equals this value.
-                                  Used by Groups UI to hide auth events (AC5).
-            limit:                Max rows returned (None = unlimited).
-            offset:               Rows to skip (for pagination).
-
-        Returns:
-            (list_of_dicts, total_matching_count)
-        """
-        if self._backend is not None:
-            return self._backend.query(  # type: ignore[no-any-return]
-                action_type=action_type,
-                target_type=target_type,
-                admin_id=admin_id,
-                date_from=date_from,
-                date_to=date_to,
-                exclude_target_type=exclude_target_type,
-                limit=limit,
-                offset=offset,
-            )
-
-        conn = self._get_connection()
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        if action_type:
-            conditions.append("action_type = ?")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = ?")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = ?")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= ?")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= ?")
-            params.append(f"{date_to}T23:59:59")
-        if exclude_target_type:
-            conditions.append("target_type != ?")
-            params.append(exclude_target_type)
-
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        cursor.execute(f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params)
-        total = cursor.fetchone()["cnt"]
-
-        query_sql = f"""
-            SELECT {_SELECT_COLUMNS}
-            FROM audit_logs
-            {where}
-            ORDER BY timestamp DESC
-        """
-        if limit is not None:
-            query_sql += " LIMIT ? OFFSET ?"
-            params = list(params) + [limit, offset]
-        elif offset > 0:
-            query_sql += " LIMIT -1 OFFSET ?"
-            params = list(params) + [offset]
-
-        cursor.execute(query_sql, params)
-        rows = cursor.fetchall()
-
-        logs = [dict(row) for row in rows]
-        return logs, total
-
-    # ------------------------------------------------------------------
-    # Shared read path (services/audit_log_query.py renders the SQL)
+    # Shared read path (services/audit_log_query.py renders the SQL); the
+    # ONE way rows are read for the Web page, MCP and REST.
     # ------------------------------------------------------------------
 
     def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> List[dict]:

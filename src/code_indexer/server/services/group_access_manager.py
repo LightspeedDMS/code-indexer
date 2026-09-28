@@ -180,8 +180,8 @@ class GroupAccessManager:
         """
         Inject AuditLogService for audit event delegation (Story #399).
 
-        When set, log_audit() and get_audit_logs() delegate to the service
-        instead of operating directly on the audit_logs table.
+        When set, log_audit() delegates to the service instead of writing
+        directly to the audit_logs table.
 
         Args:
             audit_service: AuditLogService instance
@@ -1473,114 +1473,6 @@ class GroupAccessManager:
             )
 
         self._conn_manager.execute_atomic(_do_log)
-
-    def get_audit_logs(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        exclude_target_type: Optional[str] = None,
-    ) -> tuple[List[dict], int]:
-        """
-        Get audit log entries with optional filters.
-
-        Story #710: AC8 - Get Audit Logs
-        Story #399: Delegates to AuditLogService when injected.
-
-        Args:
-            action_type: Filter by action type
-            target_type: Filter by target type
-            admin_id: Filter by admin who performed the action
-            date_from: Filter logs from this date (ISO format YYYY-MM-DD)
-            date_to: Filter logs up to this date (ISO format YYYY-MM-DD)
-            limit: Maximum number of entries to return
-            offset: Number of entries to skip
-            exclude_target_type: Exclude entries with this target_type (AC5)
-
-        Returns:
-            Tuple of (list of log dicts, total count)
-        """
-        if self._audit_service is not None:
-            return self._audit_service.query(  # type: ignore[no-any-return]
-                action_type=action_type,
-                target_type=target_type,
-                admin_id=admin_id,
-                date_from=date_from,
-                date_to=date_to,
-                limit=limit,
-                offset=offset,
-                exclude_target_type=exclude_target_type,
-            )
-
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-
-        # Build WHERE clause
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if action_type:
-            conditions.append("action_type = ?")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = ?")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = ?")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= ?")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= ?")
-            params.append(f"{date_to}T23:59:59")
-
-        where_clause = ""
-        if conditions:
-            where_clause = "WHERE " + " AND ".join(conditions)
-
-        # Get total count
-        count_query = f"SELECT COUNT(*) as count FROM audit_logs {where_clause}"
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()["count"]
-
-        # Build main query
-        query = f"""
-            SELECT id, timestamp, admin_id, action_type, target_type,
-                   target_id, details
-            FROM audit_logs
-            {where_clause}
-            ORDER BY timestamp DESC
-        """
-
-        if limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-        logs = []
-        for row in rows:
-            logs.append(
-                {
-                    "id": row["id"],
-                    "timestamp": row["timestamp"],
-                    "admin_id": row["admin_id"],
-                    "action_type": row["action_type"],
-                    "target_type": row["target_type"],
-                    "target_id": row["target_id"],
-                    "details": row["details"],
-                }
-            )
-
-        return logs, total
-
 
 def seed_users_to_groups(
     user_manager: Any, group_manager: "GroupAccessManager"

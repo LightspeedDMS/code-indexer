@@ -48,8 +48,17 @@ from code_indexer.server.middleware.audit_request_context import (
     SOURCE_WEB,
 )
 from code_indexer.server.services.audit_events import (
+    AUDIT_ACTION_CATALOG,
+    BOOL,
+    INT,
     JOB_BASED_ACTION_TYPES,
+    OPAQUE_ID,
     OUTCOMES,
+    REPO_ALIAS,
+    GIT_REF,
+    USERNAME,
+    FieldType,
+    conforms,
 )
 from code_indexer.server.storage.json_column import parse_json_column
 
@@ -489,7 +498,8 @@ def build_terminal_rows_sql(
 class CanonicalAuditRow:
     """What the shared function returns -- never a wire shape.
 
-    ``details`` is the RAW stored string; each door decides how to render it.
+    ``details`` is the ALLOWLISTED projection of the stored value, as a JSON
+    string (:func:`project_details`); each door decides how to render it.
     """
 
     id: int
@@ -510,6 +520,36 @@ class CanonicalAuditRow:
     actor_is_authenticated: bool
     pairing_state: Optional[str]
     submitted_only: bool
+
+
+# The fields every door exposes for one row, in export column order: the
+# REST and MCP entries carry exactly these (MCP adds its older aliases), and
+# the page's export writes exactly these columns.
+AUDIT_ROW_FIELDS: Tuple[str, ...] = (
+    "id",
+    "timestamp",
+    "admin_id",
+    "actor_is_system",
+    "actor_is_authenticated",
+    "action_type",
+    "target_type",
+    "target_id",
+    "outcome",
+    "pairing_state",
+    "submitted_only",
+    "source",
+    "ip_address",
+    "node_id",
+    "correlation_id",
+    "auth_method",
+    "event_uuid",
+    "details",
+)
+
+
+def row_fields(row: CanonicalAuditRow) -> Dict[str, Any]:
+    """*row* as the shared field set (``details`` still a JSON string)."""
+    return {name: getattr(row, name) for name in AUDIT_ROW_FIELDS}
 
 
 @dataclass(frozen=True)
@@ -548,18 +588,167 @@ class AuditAggregate:
     truncated: bool = field(default=False)
 
 
-def decode_details(raw: Any) -> Dict[str, Any]:
-    """Decode a stored ``details`` value for display.
+def page_fields(page: AuditPage) -> Dict[str, Any]:
+    """The navigation fields every door returns with a page of rows."""
+    return {
+        "total": page.total,
+        "total_capped": page.total_capped,
+        "next_cursor": page.next_cursor,
+        "prev_cursor": page.prev_cursor,
+        "has_more": page.has_more,
+    }
 
-    A JSON object is returned as-is; legacy free text becomes
-    ``{"raw": <text>}`` so recorded content is never discarded.
+
+def aggregate_fields(result: AuditAggregate) -> Dict[str, Any]:
+    """The fields every door returns for an aggregate; ``total`` is the
+    number of events in the returned groups."""
+    return {
+        "total": sum(group.count for group in result.groups),
+        "groups": [
+            {
+                "action_type": group.action_type,
+                "outcome": group.outcome,
+                "count": group.count,
+                "first_seen": group.first_seen,
+                "last_seen": group.last_seen,
+                "distinct_actors": group.distinct_actors,
+                "distinct_ips": group.distinct_ips,
+            }
+            for group in result.groups
+        ],
+        "window_from": result.window_from,
+        "window_to": result.window_to,
+        "all_time": result.all_time,
+        "truncated": result.truncated,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Details: only allowlisted fields ever leave the read path
+# ---------------------------------------------------------------------------
+
+OMITTED_FIELDS_KEY = "omitted_fields"
+# Markers in the omitted list.  Parenthesised, so they can never collide with
+# a real (identifier-shaped) field name.
+OMITTED_UNSTRUCTURED = "(unstructured)"
+OMITTED_NON_IDENTIFIER = "(non-identifier)"
+_FIELD_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+)
+_MAX_FIELD_NAME_LENGTH = 64
+
+# Read-side allowlist for the legacy-only catalog types (whose payloads
+# predate the write-side allowlist).  Names and ids only: free text, peer
+# addresses, client strings, session ids, URLs and filesystem paths are
+# never shown.  A type missing here shows no field at all.
+_GROUP_READ = {"name": OPAQUE_ID, "old_name": OPAQUE_ID, "new_name": OPAQUE_ID}
+_MEMBERSHIP_READ = {
+    "user_id": USERNAME,
+    "group": OPAQUE_ID,
+    "from_group": OPAQUE_ID,
+    "to_group": OPAQUE_ID,
+    "old_group": OPAQUE_ID,
+    "new_group": OPAQUE_ID,
+    "removed_from_group": OPAQUE_ID,
+}
+_REPO_ACCESS_READ = {"repo": REPO_ALIAS, "group": OPAQUE_ID}
+_ACCOUNT_READ = {"username": USERNAME}
+_OAUTH_READ = {"username": USERNAME, "client_id": OPAQUE_ID}
+_PR_READ = {"job_id": OPAQUE_ID, "repo_alias": REPO_ALIAS, "branch_name": GIT_REF}
+LEGACY_DETAILS_READ_SCHEMA: Dict[str, Dict[str, FieldType]] = {
+    "group_create": _GROUP_READ,
+    "group_update": _GROUP_READ,
+    "group_delete": _GROUP_READ,
+    "user_group_change": _MEMBERSHIP_READ,
+    "user_group_assign": _MEMBERSHIP_READ,
+    "user_assign": _MEMBERSHIP_READ,
+    "repo_access_grant": _REPO_ACCESS_READ,
+    "repo_access_revoke": _REPO_ACCESS_READ,
+    "impersonation_set": {"actor_username": USERNAME, "target_username": USERNAME},
+    "impersonation_cleared": {"actor_username": USERNAME, "previous_target": USERNAME},
+    "impersonation_denied": {"actor_username": USERNAME, "target_username": USERNAME},
+    "password_change_success": _ACCOUNT_READ,
+    "password_change_failure": _ACCOUNT_READ,
+    "password_change_concurrent_conflict": _ACCOUNT_READ,
+    "password_change_rate_limit": {"username": USERNAME, "attempt_count": INT},
+    "security_incident": {"username": USERNAME, "incident_type": OPAQUE_ID},
+    "token_refresh_success": _ACCOUNT_READ,
+    "token_refresh_failure": {"username": USERNAME, "security_incident": BOOL},
+    "oauth_client_registration": {"client_id": OPAQUE_ID},
+    "oauth_authorization": _OAUTH_READ,
+    "oauth_token_exchange": {**_OAUTH_READ, "grant_type": OPAQUE_ID},
+    "oauth_token_revocation": {"username": USERNAME, "token_type": OPAQUE_ID},
+    "registration_attempt": {"success": BOOL},
+    "pr_creation_success": {**_PR_READ, "commit_hash": OPAQUE_ID},
+    "pr_creation_failure": _PR_READ,
+    "pr_creation_disabled": {"job_id": OPAQUE_ID, "repo_alias": REPO_ALIAS},
+}
+
+
+def details_read_schema(action_type: str) -> Dict[str, FieldType]:
+    """The fields of *action_type* that a reader may see."""
+    spec = AUDIT_ACTION_CATALOG.get(action_type)
+    if spec is not None and spec.details_schema is not None:
+        return dict(spec.details_schema)
+    return LEGACY_DETAILS_READ_SCHEMA.get(action_type, {})
+
+
+def _omitted_name(key: Any) -> str:
+    text = key if isinstance(key, str) else ""
+    if 0 < len(text) <= _MAX_FIELD_NAME_LENGTH and set(text) <= _FIELD_NAME_CHARS:
+        return text
+    return OMITTED_NON_IDENTIFIER
+
+
+def _stored_object(raw: Any) -> Optional[Dict[str, Any]]:
+    """The stored JSON object, or None when the content is not one.
+
+    ``details`` is TEXT on both backends; a dict is accepted as-is.  The
+    value is never logged (it may be legacy free text).
     """
+    if isinstance(raw, dict):
+        return raw
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def project_details(action_type: str, raw: Any) -> Optional[str]:
+    """The allowlisted part of a stored ``details`` value, as JSON.
+
+    Fields of the action type's read schema whose values conform are kept.
+    Every other field is dropped and only its NAME is listed under
+    ``omitted_fields``; content that is not a JSON object is summarised as
+    ``["(unstructured)"]``.  A value is never passed through unchecked.
+    Returns None when nothing was stored.
+    """
+    if raw is None or raw == "":
+        return None
+    stored = _stored_object(raw)
+    if stored is None:
+        return json.dumps({OMITTED_FIELDS_KEY: [OMITTED_UNSTRUCTURED]})
+    schema = details_read_schema(action_type)
+    kept: Dict[str, Any] = {}
+    omitted: Set[str] = set()
+    for key, value in stored.items():
+        ftype = schema.get(key) if isinstance(key, str) else None
+        if ftype is not None and conforms(ftype, value):
+            kept[key] = value
+        else:
+            omitted.add(_omitted_name(key))
+    if omitted:
+        kept[OMITTED_FIELDS_KEY] = sorted(omitted)
+    return json.dumps(kept) if kept else None
+
+
+def decode_details(raw: Any) -> Dict[str, Any]:
+    """Decode a projected ``details`` value (:func:`project_details`)."""
     if raw is None:
         return {}
     decoded = parse_json_column(raw, dict, "audit_logs.details")
-    if decoded is not None:
-        return decoded
-    return {"raw": raw} if isinstance(raw, str) else {}
+    return decoded if decoded is not None else {}
 
 
 def _parse_row_time(value: str) -> Optional[datetime]:
@@ -606,15 +795,15 @@ def _pairing_state(row: Dict[str, Any], terminal: Set[Tuple], now: datetime) -> 
 def _to_canonical(
     row: Dict[str, Any], terminal: Set[Tuple], now: datetime
 ) -> CanonicalAuditRow:
-    details = row.get("details")
+    action_type = row.get("action_type") or ""
     return CanonicalAuditRow(
         id=int(row["id"]),
         timestamp=str(row["timestamp"]),
         admin_id=row.get("admin_id") or "",
-        action_type=row.get("action_type") or "",
+        action_type=action_type,
         target_type=row.get("target_type") or "",
         target_id=row.get("target_id") or "",
-        details=details if details is None else str(details),
+        details=project_details(action_type, row.get("details")),
         outcome=row.get("outcome"),
         source=row.get("source"),
         ip_address=row.get("ip_address"),
@@ -653,9 +842,9 @@ def _validate_mode(
     all_time: bool,
     filters: AuditFilters,
 ) -> None:
-    if tier not in AUDIT_TIERS:
+    if not isinstance(tier, str) or tier not in AUDIT_TIERS:
         raise AuditQueryError(f"tier must be one of {sorted(AUDIT_TIERS)}")
-    if direction not in AUDIT_DIRECTIONS:
+    if not isinstance(direction, str) or direction not in AUDIT_DIRECTIONS:
         raise AuditQueryError(f"direction must be one of {sorted(AUDIT_DIRECTIONS)}")
     if cursor and legacy_offset is not None:
         raise AuditQueryError("cursor and offset cannot be combined")

@@ -87,7 +87,7 @@ def test_entries_carry_the_attribution_columns(admin_user, wired_audit_service) 
             action_type="password_change_failure",
             target_type="auth",
             target_id="alice",
-            details='{"reason": "x"}',
+            details='{"username": "alice", "reason": "x"}',
         )
     finally:
         _correlation_id_var.reset(corr_token)
@@ -100,7 +100,8 @@ def test_entries_carry_the_attribution_columns(admin_user, wired_audit_service) 
     assert entry["action"] == entry["action_type"] == "password_change_failure"
     assert entry["target_type"] == "auth"
     assert entry["target_id"] == entry["resource"] == "alice"
-    assert entry["details"] == {"reason": "x"}
+    # Only allowlisted details fields are shown; the others are named.
+    assert entry["details"] == {"username": "alice", "omitted_fields": ["reason"]}
     # Additive attribution fields.
     assert isinstance(entry["id"], int)
     assert entry["outcome"] == "failure"

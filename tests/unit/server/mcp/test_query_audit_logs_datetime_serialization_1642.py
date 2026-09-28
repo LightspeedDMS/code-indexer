@@ -78,8 +78,8 @@ def backend(mock_pool):
     return AuditLogPostgresBackend(pool)
 
 
-# All three read paths accept `limit` and return datetime-bearing rows.
-_READ_METHODS = ["query", "get_pr_logs", "get_cleanup_logs"]
+# The PR/cleanup read paths accept `limit` and return datetime-bearing rows.
+_READ_METHODS = ["get_pr_logs", "get_cleanup_logs"]
 
 
 class TestAuditLogPostgresBackendDatetimeSerialization:
@@ -98,8 +98,7 @@ class TestAuditLogPostgresBackendDatetimeSerialization:
         cursor.fetchone.return_value = {"cnt": 1}
         cursor.fetchall.return_value = [_make_row(1)]
 
-        result = getattr(backend, method_name)(limit=10)
-        rows = result[0] if method_name == "query" else result
+        rows = getattr(backend, method_name)(limit=10)
 
         assert len(rows) == 1
         assert not isinstance(rows[0]["timestamp"], datetime), (
@@ -112,9 +111,26 @@ class TestAuditLogPostgresBackendDatetimeSerialization:
         # exact failure mode reported in issue #1642.
         json.dumps(rows[0])
 
+    def test_shared_read_page_returns_string_timestamp_not_datetime(
+        self, backend, mock_pool
+    ):
+        """The shared read path's page statement (one fetch) sanitizes too."""
+        from code_indexer.server.services.audit_log_query import AuditFilters
+
+        _, _, cursor = mock_pool
+        cursor.fetchall.return_value = [_make_row(1)]
+
+        rows = backend.query_page(
+            AuditFilters(), "all", seek=None, direction="older", limit=10
+        )
+
+        assert rows[0]["timestamp"] == REAL_DT.isoformat()
+        json.dumps(rows[0])
+
 
 # ---------------------------------------------------------------------------
-# Layer 2: handle_query_audit_logs MCP handler end-to-end reproduction
+# Layer 2: handle_query_audit_logs MCP handler end-to-end reproduction,
+# against a REAL PostgreSQL store (native TIMESTAMPTZ datetimes)
 # ---------------------------------------------------------------------------
 
 
@@ -131,37 +147,34 @@ def admin_user():
 
 
 @pytest.fixture
-def audit_service_cursor(mock_pool):
-    """Wire the REAL AuditLogPostgresBackend (backed by a fake psycopg pool)
-    onto app.state.audit_service for the duration of the test, restoring
-    whatever was there afterward, and pre-load it with one datetime-bearing
-    row on both the count and fetch paths.
+def audit_service_cursor(tmp_path):
+    """Wire a REAL PostgreSQL audit store onto app.state.audit_service for
+    the duration of the test, restoring whatever was there afterward, and
+    seed one row whose TIMESTAMPTZ psycopg returns as a native datetime.
 
     Direct attribute assignment (not monkeypatch) so the fixture's control
     flow -- install, configure, yield, restore -- stays explicit.
     """
     import code_indexer.server.app as app_module
+    from tests.unit.server._audit_read_support import build_store, make_event
 
-    pool, _, cursor = mock_pool
-    cursor.fetchone.return_value = {"cnt": 1}
-    cursor.fetchall.return_value = [_make_row(1)]
-
-    real_backend = AuditLogPostgresBackend(pool)
-    sentinel = object()
-    previous = getattr(app_module.app.state, "audit_service", sentinel)
-    app_module.app.state.audit_service = real_backend
-    try:
-        yield cursor
-    finally:
-        if previous is sentinel:
-            del app_module.app.state.audit_service
-        else:
-            app_module.app.state.audit_service = previous
+    for store in build_store("postgres", tmp_path):
+        store.insert_events([make_event(ts=REAL_DT.isoformat(), target_id="alice")])
+        sentinel = object()
+        previous = getattr(app_module.app.state, "audit_service", sentinel)
+        app_module.app.state.audit_service = store
+        try:
+            yield store
+        finally:
+            if previous is sentinel:
+                del app_module.app.state.audit_service
+            else:
+                app_module.app.state.audit_service = previous
 
 
 class TestHandleQueryAuditLogsDatetimeSerialization:
     """Reproduces GitHub issue #1642 end-to-end at the MCP handler boundary,
-    using the REAL AuditLogPostgresBackend (only the psycopg pool is faked).
+    using a REAL PostgreSQL store (skipped without ``TEST_POSTGRES_DSN``).
 
     Bypasses the @require_mcp_elevation() wrapper via .__wrapped__ since
     elevation is orthogonal to the datetime serialization bug under test.
@@ -191,9 +204,8 @@ class TestHandleQueryAuditLogsDatetimeSerialization:
         payload = json.loads(result["content"][0]["text"])
 
         assert payload["success"] is True
-        # The fake cursor returns the same datetime-bearing row on all three
-        # underlying read paths (get_pr_logs, get_cleanup_logs, and the main
-        # audit_logs table query), so every entry must carry the ISO string.
-        assert len(payload["entries"]) > 0
+        # psycopg returned the TIMESTAMPTZ as a datetime; the entry must
+        # carry the ISO string.
+        assert len(payload["entries"]) == 1
         for entry in payload["entries"]:
             assert entry["timestamp"] == REAL_DT.isoformat()

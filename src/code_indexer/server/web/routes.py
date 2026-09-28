@@ -2211,6 +2211,10 @@ def _get_groups_data() -> List[Dict[str, Any]]:
     return groups_data
 
 
+# The tabs of the Group Management page.
+_GROUPS_PAGE_TABS = frozenset({"groups", "users", "repos"})
+
+
 def _create_groups_page_response(
     request: Request,
     session: SessionData,
@@ -2218,7 +2222,13 @@ def _create_groups_page_response(
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
 ) -> HTMLResponse:
-    """Create groups page response with all necessary context."""
+    """Create groups page response with all necessary context.
+
+    A tab the page does not have (such as the removed audit tab) renders the
+    Groups tab; audit reading lives on the Audit Logs page.
+    """
+    if active_tab not in _GROUPS_PAGE_TABS:
+        active_tab = "groups"
     csrf_token = generate_csrf_token()
     group_manager = _get_group_manager()
 
@@ -2260,15 +2270,6 @@ def _create_groups_page_response(
         {"id": g.id, "name": g.name, "is_default": g.is_default}
         for g in group_manager.get_all_groups()
     ]
-
-    # Get audit logs (limited to 100 most recent, exclude auth events per AC5)
-    audit_logs, total_count = group_manager.get_audit_logs(
-        limit=100, exclude_target_type="auth"
-    )
-    for log in audit_logs:
-        log["timestamp"] = _format_datetime_display(
-            log.get("timestamp"), "%Y-%m-%d %H:%M:%S"
-        )
 
     # Get golden repos for repo access tab
     golden_repos = []
@@ -2328,8 +2329,6 @@ def _create_groups_page_response(
             "groups": groups_data,
             "users_with_groups": users_with_groups,
             "all_groups": all_groups,
-            "audit_logs": audit_logs,
-            "total_count": total_count,
             "golden_repos": golden_repos,
             "repo_access_map": repo_access_map,
             "success_message": success_message,
@@ -2636,39 +2635,6 @@ def groups_users_list_partial(request: Request):
     )
     set_csrf_cookie(response, csrf_token)
     return response
-
-
-@web_router.get("/partials/groups-audit-logs", response_class=HTMLResponse)
-def groups_audit_logs_partial(
-    request: Request,
-    action_type: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-):
-    """Partial refresh endpoint for audit logs section with filtering."""
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    group_manager = _get_group_manager()
-    audit_logs, total_count = group_manager.get_audit_logs(
-        action_type=action_type or None,
-        date_from=date_from or None,
-        date_to=date_to or None,
-        limit=100,
-        exclude_target_type="auth",
-    )
-
-    for log in audit_logs:
-        log["timestamp"] = _format_datetime_display(
-            log.get("timestamp"), "%Y-%m-%d %H:%M:%S"
-        )
-
-    return templates.TemplateResponse(
-        request,
-        "partials/groups_audit_logs.html",
-        {"request": request, "audit_logs": audit_logs, "total_count": total_count},
-    )
 
 
 @web_router.get("/partials/groups-repo-access", response_class=HTMLResponse)

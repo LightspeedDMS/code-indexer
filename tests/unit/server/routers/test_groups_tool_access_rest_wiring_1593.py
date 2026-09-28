@@ -168,8 +168,10 @@ def test_bulk_disable_affects_all_groups_and_writes_one_audit_entry_each(
         for group in all_groups:
             assert group_manager.is_tool_allowed(_NON_AUTH_TOOL, group.id) is False
 
-        logs, total = group_manager.get_audit_logs(
-            action_type="group_tool_access_revoked", target_type="group"
+        from tests.unit.server._audit_read_support import audit_logs
+
+        logs, total = audit_logs(
+            audit_service, action_type="group_tool_access_revoked", target_type="group"
         )
         assert total == len(all_groups)
         assert {log["target_id"] for log in logs} == {str(g.id) for g in all_groups}

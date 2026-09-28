@@ -45,19 +45,8 @@ class AuditLogBackend(Protocol):
         details: Optional[str] = None,
     ) -> None: ...
 
-    def query(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        exclude_target_type: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-    ) -> Tuple[List[dict], int]: ...
-
-    # Shared read path (services/audit_log_query.py renders the SQL).
+    # Shared read path (services/audit_log_query.py renders the SQL); the
+    # ONE way rows are read for the Web page, MCP and REST.
 
     def query_page(
         self,
