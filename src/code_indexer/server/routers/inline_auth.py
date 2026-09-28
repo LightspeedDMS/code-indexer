@@ -50,12 +50,16 @@ from ..auth.rate_limiter import refresh_token_rate_limiter
 from ..auth.token_bucket import rate_limiter
 from ..auth.audit_logger import password_audit_logger
 from ..auth.auth_error_handler import auth_error_handler, AuthErrorType
+from ..auth.login_outcome import complete_login, reject_login
 from ..auth.login_rate_limiter import (
     LoginRateLimiter,
     login_rate_limiter as _default_login_rate_limiter,
 )
 
 logger = logging.getLogger(__name__)
+
+# Login method recorded by the password-based REST login doors.
+_PASSWORD_METHOD = "password"
 
 SELF_REGISTRATION_DISABLED_DETAIL = (
     "Self-registration is disabled on this server. "
@@ -147,6 +151,10 @@ def register_auth_routes(
 
         # Story #555: Rate limit check BEFORE credential validation.
         # Uses the same TokenBucketManager singleton as MCP authenticate.
+        # A refused (rate-limited or locked) request writes no audit row: it
+        # never reaches the credential check, and a row per refusal would
+        # let a caller flood the audit store.  The lockout itself is
+        # recorded once, by the failure that starts it (below).
         allowed, retry_after = rate_limiter.consume(login_data.username)
         if not allowed:
             raise HTTPException(
@@ -176,15 +184,32 @@ def register_auth_routes(
                 auth_error_handler.perform_dummy_password_work()
 
                 # Story #557: Record failure in lockout limiter (audit-logs internally)
-                _lockout_limiter.check_and_record_failure(login_data.username)
+                failure = _lockout_limiter.record_failure(login_data.username)
 
-                # Create standardized error response with audit logging
+                # The attempt's one outcome row (inside the constant-time
+                # window); the error handler only shapes the response.  The
+                # failure that locks the account is recorded as the lockout.
+                # The typed name is recorded only if it is a real account.
+                reject_login(
+                    login_data.username,
+                    account_exists=(
+                        user_manager.get_user(login_data.username) is not None
+                    ),
+                    method=_PASSWORD_METHOD,
+                    stage="credentials",
+                    reason=(
+                        "account_locked"
+                        if failure.lockout_started
+                        else "bad_credentials"
+                    ),
+                )
                 error_response = auth_error_handler.create_error_response(
                     AuthErrorType.INVALID_CREDENTIALS,
                     login_data.username,
                     internal_message=f"Authentication failed for username: {login_data.username}",
                     ip_address=client_ip,
                     user_agent=user_agent,
+                    record_audit=False,
                 )
 
                 raise HTTPException(
@@ -216,6 +241,13 @@ def register_auth_routes(
         if expiry_config and user_manager.is_password_expired(
             user.username, expiry_config
         ):
+            reject_login(
+                user.username,
+                account_exists=True,
+                method=_PASSWORD_METHOD,
+                stage="issuance",
+                reason="password_expired",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="password_expired: Your password has expired. "
@@ -245,10 +277,19 @@ def register_auth_routes(
             "created_at": user.created_at.isoformat(),
         }
 
-        # Create token family and initial refresh token
-        family_id = refresh_token_manager.create_token_family(user.username)
-        token_data = refresh_token_manager.create_initial_refresh_token(
-            family_id=family_id, username=user.username, user_data=user_data
+        def _issue_tokens() -> dict:
+            # Create token family and initial refresh token
+            family_id = refresh_token_manager.create_token_family(user.username)
+            return refresh_token_manager.create_initial_refresh_token(  # type: ignore[no-any-return]
+                family_id=family_id, username=user.username, user_data=user_data
+            )
+
+        token_data = complete_login(
+            user.username,
+            method=_PASSWORD_METHOD,
+            mfa="not_applicable" if totp_svc is None else "not_enrolled",
+            flow="rest_token",
+            issue=_issue_tokens,
         )
 
         return LoginResponse(
@@ -294,6 +335,14 @@ def register_auth_routes(
         # Consume-first: atomically remove token before verifying
         challenge = _mfa_challenge_mgr.consume(verify_data.mfa_token)
         if challenge is None:
+            # No challenge means no known username for this attempt.
+            reject_login(
+                None,
+                account_exists=False,
+                method=_PASSWORD_METHOD,
+                stage="challenge",
+                reason="challenge_invalid_or_expired",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired MFA token",
@@ -302,6 +351,13 @@ def register_auth_routes(
         # Validate client IP matches challenge creation IP
         client_ip = request.client.host if request.client else "unknown"
         if challenge.client_ip != client_ip:
+            reject_login(
+                challenge.username,
+                account_exists=True,  # issued only after a correct password
+                method=_PASSWORD_METHOD,
+                stage="challenge",
+                reason="challenge_invalid_or_expired",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired MFA token",
@@ -319,6 +375,13 @@ def register_auth_routes(
             verified = totp_svc.verify_code(challenge.username, verify_data.totp_code)
 
         if not verified:
+            reject_login(
+                challenge.username,
+                account_exists=True,
+                method=_PASSWORD_METHOD,
+                stage="mfa_code",
+                reason="mfa_code_invalid",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid MFA code",
@@ -330,11 +393,21 @@ def register_auth_routes(
             "role": challenge.role,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        family_id = refresh_token_manager.create_token_family(challenge.username)
-        token_data = refresh_token_manager.create_initial_refresh_token(
-            family_id=family_id,
-            username=challenge.username,
-            user_data=user_data,
+
+        def _issue_tokens() -> dict:
+            family_id = refresh_token_manager.create_token_family(challenge.username)
+            return refresh_token_manager.create_initial_refresh_token(  # type: ignore[no-any-return]
+                family_id=family_id,
+                username=challenge.username,
+                user_data=user_data,
+            )
+
+        token_data = complete_login(
+            challenge.username,
+            method=_PASSWORD_METHOD,
+            mfa="recovery_code" if verify_data.recovery_code else "totp",
+            flow="rest_token",
+            issue=_issue_tokens,
         )
 
         return LoginResponse(

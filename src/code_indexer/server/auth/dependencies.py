@@ -5,6 +5,13 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.middleware.audit_request_context import (
+    AUTH_METHOD_JWT,
+    AUTH_METHOD_MCP_CREDENTIAL,
+    AUTH_METHOD_OAUTH_TOKEN,
+    AUTH_METHOD_WEB_SESSION,
+    note_auth_method,
+)
 from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -249,6 +256,8 @@ def get_current_user(
             # Validate cookie JWT using same logic as Bearer
             user = _validate_jwt_and_get_user(token)
             _check_non_sso_api_restriction(user)
+            # The session JWT cookie is set by the Web UI login.
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         # No auth method available
         raise HTTPException(
@@ -293,11 +302,13 @@ def get_current_user(
                         headers={"WWW-Authenticate": _build_www_authenticate_header()},
                     )
                 _check_non_sso_api_restriction(user)
+                note_auth_method(AUTH_METHOD_OAUTH_TOKEN)
                 return user
 
     # Fallback to JWT validation
     user = _validate_jwt_and_get_user(token)
     _check_non_sso_api_restriction(user)
+    note_auth_method(AUTH_METHOD_JWT)
     return user
 
 
@@ -542,6 +553,7 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             )
 
     # Success - verify_credential() already updated last_used_at (AC5)
+    note_auth_method(AUTH_METHOD_MCP_CREDENTIAL)
     return authenticated_user
 
 
@@ -605,6 +617,7 @@ def get_current_user_web_or_api(
                     # created it -- stash the authenticated username so any
                     # downstream elevation lookup binds to this identity.
                     request.state.elevation_username = user.username
+                    note_auth_method(AUTH_METHOD_WEB_SESSION)
                     return user
         except Exception as e:
             # Web session validation failed - fall through to JWT/Bearer auth
@@ -879,6 +892,7 @@ def _hybrid_auth_impl(
             # stash the authenticated username alongside the session key so
             # every downstream elevation lookup binds to this identity.
             request.state.elevation_username = user.username
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
