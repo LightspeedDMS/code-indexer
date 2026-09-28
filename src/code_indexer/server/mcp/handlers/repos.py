@@ -2318,11 +2318,30 @@ def bulk_add_provider_index(
 ) -> Dict[str, Any]:
     """Bulk add provider index to all repositories (Story #490).
 
+    Admin-only like the REST twin (POST .../bulk-add). The admin role is
+    checked here even when a group tool grant admits the call. ``kwargs``
+    carries ``session_key``.
+    """
+    if not user.has_permission("manage_users"):
+        return _mcp_response(
+            {"success": False, "error": "Permission denied: admin role required"}
+        )
+    return _bulk_add_provider_index(params, user, **kwargs)
+
+
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated body below consumes it.
+bulk_add_provider_index.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+@require_mcp_elevation()
+def _bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Elevation-gated body of bulk_add_provider_index.
+
     Elevation-gated to match the REST twin (POST .../bulk-add carries
     require_elevation()).
     """
     try:
-        from code_indexer.server.auth.user_manager import UserRole
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
         )
@@ -2339,39 +2358,9 @@ def bulk_add_provider_index(
                 {"error": error, "available_providers": [p["name"] for p in providers]}
             )
 
+        # Admin-only (checked by the public handler), so every golden
+        # repository is in scope, as with the REST twin.
         global_repos = _list_global_repos()
-
-        # Repo access must be consistent across every capability a role can
-        # reach -- a fleet-enumerating/fleet-mutating tool gets no carve-out.
-        # Filter to the repos this caller can access BEFORE any category
-        # filtering, status lookup, config mutation, or job submission.
-        # Mirrors the existing pattern in handle_list_global_repos /
-        # _append_global_repos_to_status (same file): matched on repo_name
-        # (the group-access grant key), admin ROLE bypasses unconditionally
-        # (independent of group membership, same rationale as those sibling
-        # handlers).
-        if user.role != UserRole.ADMIN:
-            access_filtering_service = _get_access_filtering_service()
-            if access_filtering_service is None:
-                # Fail closed (mirrors protocol.py's own AttributeError
-                # fail-closed rule, Story #331 AC9): an unavailable access
-                # service must never be treated as "nothing to filter".
-                return _mcp_response(
-                    {
-                        "error": (
-                            "Access denied: access control service unavailable, "
-                            "cannot verify access for tool "
-                            "'bulk_add_provider_index'"
-                        )
-                    }
-                )
-            repo_names = [r.get("repo_name", "") for r in global_repos]
-            accessible_names = access_filtering_service.filter_repo_listing(
-                repo_names, user.username
-            )
-            global_repos = [
-                r for r in global_repos if r.get("repo_name", "") in accessible_names
-            ]
 
         filter_pattern = params.get("filter")
         job_ids = []
