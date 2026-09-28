@@ -2428,7 +2428,13 @@ def _bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, An
 
 
 def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get provider health metrics (Story #491)."""
+    """Get provider health metrics (Story #491).
+
+    Admin-only, matching the REST provider-health routes.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
