@@ -26,8 +26,15 @@ from code_indexer.server.auth.elevated_session_manager import (
     log_elevation_owner_mismatch,
 )
 from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
+from code_indexer.server.auth.login_outcome import complete_login, reject_login
 
 logger = logging.getLogger(__name__)
+
+# First factor recorded for a login completed at the MFA challenge.  The
+# challenge does not carry how the first factor was proven, and the password
+# login is the door that issues it (an SSO login's challenge records the
+# same value).
+_CHALLENGE_LOGIN_METHOD = "password"
 
 _LOGIN_ROUTE = "/login"
 _ADMIN_ROUTE = "/admin/"
@@ -954,6 +961,14 @@ def mfa_challenge_verify(
     # This prevents duplicate session creation from concurrent requests.
     challenge_data = mfa_challenge_manager.consume(challenge_token)
     if challenge_data is None:
+        # No challenge means no known account for this attempt.
+        reject_login(
+            None,
+            account_exists=False,
+            method=_CHALLENGE_LOGIN_METHOD,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Validate client IP matches the one from password verification
@@ -965,13 +980,20 @@ def mfa_challenge_verify(
             challenge_data.client_ip,
             client_ip,
         )
+        reject_login(
+            challenge_data.username,
+            account_exists=True,  # issued only after a successful first factor
+            method=_CHALLENGE_LOGIN_METHOD,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Verify TOTP or recovery code
     verified = False
     method = "totp"
     if recovery_code:
-        method = "recovery"
+        method = "recovery_code"
         verified = _totp_service.verify_recovery_code(
             challenge_data.username, recovery_code, ip_address=client_ip
         )
@@ -985,10 +1007,16 @@ def mfa_challenge_verify(
         redirect_response = RedirectResponse(
             url=challenge_data.redirect_url, status_code=303
         )
-        session_mgr.create_session(
-            redirect_response,
-            username=challenge_data.username,
-            role=challenge_data.role,
+        complete_login(
+            challenge_data.username,
+            method=_CHALLENGE_LOGIN_METHOD,
+            mfa=method,
+            flow="web_session",
+            issue=lambda: session_mgr.create_session(
+                redirect_response,
+                username=challenge_data.username,
+                role=challenge_data.role,
+            ),
         )
         logger.info(
             "MFA login verified for %s (method=%s)", challenge_data.username, method
@@ -996,6 +1024,13 @@ def mfa_challenge_verify(
         return redirect_response
 
     # Verification failed — token is consumed, user must restart login
+    reject_login(
+        challenge_data.username,
+        account_exists=True,
+        method=_CHALLENGE_LOGIN_METHOD,
+        stage="mfa_code",
+        reason="mfa_code_invalid",
+    )
     logger.warning(
         "MFA verification failed for %s (method=%s)", challenge_data.username, method
     )
