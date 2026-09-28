@@ -3,6 +3,7 @@ Progressive metadata manager for resumable indexing operations.
 """
 
 import json
+import logging
 import time
 import fcntl
 from pathlib import Path
@@ -10,6 +11,14 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
 from code_indexer.utils.file_locking import nfs_safe_flock
+from code_indexer.services.resume_state_seal import (
+    RESUME_SEAL_FIELD,
+    compute_resume_seal,
+    content_digest,
+    seal_matches,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressiveMetadata:
@@ -17,6 +26,14 @@ class ProgressiveMetadata:
 
     def __init__(self, metadata_path: Path):
         self.metadata_path = metadata_path
+        # Seal of the on-disk state as loaded, and the digest of that state's
+        # content -- kept so enable_resume_seal() can verify it later, once
+        # the server-held key is known, without holding a second full copy.
+        self._loaded_seal: Optional[object] = None
+        self._loaded_digest: Optional[bytes] = None
+        self._resume_seal_key: Optional[bytes] = None
+        self._resume_seal_binding = ""
+        self._loaded_state_sealed = False
         self.metadata = self._load_metadata()
 
     def _load_metadata(self) -> Dict[str, Any]:
@@ -51,6 +68,11 @@ class ProgressiveMetadata:
                 with open(self.metadata_path, "r") as f:
                     loaded_data = json.load(f)
                     if isinstance(loaded_data, dict):
+                        # The seal is never part of the working metadata: it
+                        # is verified once (enable_resume_seal) and rewritten
+                        # on every sealed save.
+                        self._loaded_seal = loaded_data.pop(RESUME_SEAL_FIELD, None)
+                        self._loaded_digest = content_digest(loaded_data)
                         # Merge existing data with default structure to ensure new fields are present
                         merged_metadata = default_metadata.copy()
                         merged_metadata.update(loaded_data)
@@ -69,6 +91,16 @@ class ProgressiveMetadata:
         # Ensure parent directory exists
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
+        payload: Dict[str, Any] = {
+            k: v for k, v in self.metadata.items() if k != RESUME_SEAL_FIELD
+        }
+        if self._resume_seal_key is not None:
+            payload[RESUME_SEAL_FIELD] = compute_resume_seal(
+                self._resume_seal_key,
+                self._resume_seal_binding,
+                content_digest(payload),
+            )
+
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(self.metadata_path.parent), suffix=".tmp"
         )
@@ -78,7 +110,7 @@ class ProgressiveMetadata:
                 tmp_f = os.fdopen(tmp_fd, "w")
                 fd_owned = True
                 with tmp_f:
-                    json.dump(self.metadata, tmp_f, indent=2)
+                    json.dump(payload, tmp_f, indent=2)
                 os.replace(tmp_path, str(self.metadata_path))
             finally:
                 if not fd_owned:
@@ -94,6 +126,36 @@ class ProgressiveMetadata:
                 # Discard silently; the original exception propagates unmodified.
                 pass
             raise
+
+    def enable_resume_seal(self, key: bytes) -> None:
+        """Seal every subsequent save with the server-held ``key``, and
+        verify whether the state as LOADED from disk carried a valid seal.
+
+        The seal is bound to the resolved metadata path, so resume state
+        copied in from another repository never validates. Verification
+        uses the load-time snapshot; when it fails, the caller discards the
+        stored file lists (``discard_file_tracking``), so no file list from
+        state without a valid seal reaches a later sealed save.
+        """
+        try:
+            binding = str(self.metadata_path.resolve())
+        except (OSError, RuntimeError) as exc:
+            logger.warning(
+                "Cannot resolve the resume metadata path (%s); stored resume "
+                "state will not be trusted and saves will not be sealed.",
+                type(exc).__name__,
+            )
+            return
+        self._resume_seal_key = key
+        self._resume_seal_binding = binding
+        self._loaded_state_sealed = self._loaded_digest is not None and seal_matches(
+            key, binding, self._loaded_digest, self._loaded_seal
+        )
+
+    def loaded_state_is_sealed(self) -> bool:
+        """True only when the on-disk state loaded by this instance carried a
+        valid server seal (see ``enable_resume_seal``)."""
+        return self._loaded_state_sealed
 
     def start_indexing(
         self, provider_name: str, model_name: str, git_status: Dict[str, Any]
@@ -384,6 +446,32 @@ class ProgressiveMetadata:
         self.metadata["failed_files"] = len(failed_files)
 
         self._save_metadata()
+
+    def set_failed_file_paths(
+        self, file_paths: List[str], failed_count: Optional[int] = None
+    ) -> None:
+        """Replace the recorded list of files the last run could not index.
+
+        The next run retries every recorded file (see SmartIndexer), so the
+        list always describes the most recent run only. ``failed_count``,
+        when given, also sets ``failed_files`` for a run that records no
+        other progress.
+        """
+        unique: List[str] = []
+        for path in file_paths:
+            if str(path) not in unique:
+                unique.append(str(path))
+        self.metadata["failed_file_paths"] = unique
+        if failed_count is not None:
+            self.metadata["failed_files"] = failed_count
+        self._save_metadata()
+
+    def discard_file_tracking(self) -> None:
+        """Drop the stored file lists (work list, completed and failed
+        files) from this in-memory state without saving; used when the
+        stored state is not trusted, so none of its file lists are acted on
+        or carried into a later save."""
+        self._reset_file_tracking()
 
     def can_resume_interrupted_operation(self) -> bool:
         """Check if there's an interrupted indexing operation that can be resumed.

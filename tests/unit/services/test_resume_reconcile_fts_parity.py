@@ -29,6 +29,8 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import pytest
+
 from code_indexer.config import Config
 from code_indexer.services.embedding_provider import (
     BatchEmbeddingResult,
@@ -44,6 +46,13 @@ _BYTE_MAX_VALUE = 255.0
 _VECTOR_SCALE = 2.0
 _VECTOR_OFFSET = 1.0
 _FAKE_MAX_TOKENS = 8192
+
+
+@pytest.fixture(autouse=True)
+def _isolated_server_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server-context runs create the resume-seal key in the server data
+    directory; keep it inside the test's own temp dir."""
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "server-data"))
 
 
 def _deterministic_embedding(text: str) -> List[float]:

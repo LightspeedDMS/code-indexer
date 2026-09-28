@@ -3194,13 +3194,13 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     is_flag=True,
     default=False,
     hidden=True,
-    help="Internal: do not trust a stored interrupted-operation resume "
-    "state (.code-indexer/metadata-<provider>.json) -- fall through to a "
-    "normal incremental/full walk instead of resuming from it. Used by "
+    help="Internal: trust a stored interrupted-operation resume state "
+    "(.code-indexer/metadata-<provider>.json) only when it carries a valid "
+    "server-held seal, i.e. a previous server-spawned run wrote it; this "
+    "run's resume state is sealed the same way. Unsealed state is ignored "
+    "and an interrupted operation is completed with a reconcile. Used by "
     "the server for repos whose working tree a tenant/committer can "
-    "write to, since that resume state cannot be trusted as provenance "
-    "for what the server indexes on their behalf. "
-    "Does NOT force a full reindex (unlike --clear).",
+    "write to. Does NOT force a full reindex (unlike --clear).",
 )
 @click.option(
     "--server-managed-provider-settings",
