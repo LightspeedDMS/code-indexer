@@ -680,7 +680,15 @@ def register_auth_routes(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    @app.post("/api/keys", response_model=CreateApiKeyResponse, status_code=201)
+    # Creating a personal API key (a durable credential) requires TOTP set up
+    # plus the caller's own elevation window when enforcement is on, matching
+    # the MCP twin create_api_key. Listing and existing keys are unaffected.
+    @app.post(
+        "/api/keys",
+        response_model=CreateApiKeyResponse,
+        status_code=201,
+        dependencies=[Depends(dependencies.require_self_elevation)],
+    )
     def create_api_key(
         current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
         request: CreateApiKeyRequest = Body(...),

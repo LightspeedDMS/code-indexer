@@ -1207,6 +1207,57 @@ def require_elevation(required_scope: str = "full"):
     return _check
 
 
+def _bearer_jwt_jti(
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[str]:
+    """Return the jti of a Bearer JWT, or None for any other credential."""
+    if credentials is None or jwt_manager is None:
+        return None
+    try:
+        payload = jwt_manager.validate_token(credentials.credentials)
+    except (InvalidTokenError, TokenExpiredError):
+        return None
+    jti = payload.get("jti")
+    return str(jti) if jti else None
+
+
+def require_self_elevation(
+    request: Request,
+    current_user: User = Depends(get_current_user_web_or_api),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> User:
+    """TOTP-elevation gate for SELF-service credential mutations (any role).
+
+    Applies to actions on the caller's OWN account that every authenticated
+    user may perform (e.g. creating or deleting their own MCP credential or
+    personal API key, managing their own git-forge credential). It mirrors
+    require_elevation()'s kill-switch / TOTP-setup / session-window logic,
+    but resolves the caller via get_current_user_web_or_api (ANY
+    authenticated user) instead of the admin-only resolver, so it never
+    grants or requires a role. The MCP twins use @require_mcp_elevation(),
+    which has the same role-agnostic semantics.
+
+    The elevation window must be owned by the caller: the window lookup is
+    bound to `current_user.username`. The window key is the web-session
+    cookie for Web UI callers; for a Bearer JWT caller it is the token's jti,
+    the same key /auth/elevate stores that caller's window under.
+
+    With enforcement off (or no elevation manager wired) the request
+    proceeds unchanged.
+    """
+    if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
+        return current_user
+    _check_totp_setup(current_user)
+    if getattr(request.state, "user_jti", None) is None:
+        jti = _bearer_jwt_jti(credentials)
+        if jti is not None:
+            request.state.user_jti = jti
+    _check_session_window(
+        request, "full", elevated_session_manager, current_user.username
+    )
+    return current_user
+
+
 def require_localhost(request: Request) -> None:
     """Reject requests not originating from loopback (Story #924).
 

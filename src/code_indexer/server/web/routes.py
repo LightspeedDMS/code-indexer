@@ -360,6 +360,38 @@ templates.env.globals["get_server_time"] = _get_server_time_for_template
 # Cache busting: version appended to static asset URLs
 templates.env.globals["static_version"] = _cidx_version
 
+
+def _personal_api_keys_menu_visible(request: Any) -> bool:
+    """Whether the nav shows the personal API Keys entry to this viewer.
+
+    Creating a personal API key requires TOTP when elevation enforcement is
+    on, so the entry is hidden until the viewer has MFA enabled. It is shown
+    as before when enforcement is off, when the viewer's session cannot be
+    resolved, or when the TOTP service is not wired (the creation gate does
+    not block in that case either).
+    """
+    if not isinstance(request, Request):
+        return True
+    if not dependencies._is_elevation_enforcement_enabled():
+        return True
+    try:
+        session = get_session_manager().get_session(request)
+    except RuntimeError:
+        return True
+    if session is None:
+        return True
+    from . import mfa_routes
+
+    totp_service = mfa_routes.get_totp_service()
+    if totp_service is None:
+        return True
+    return bool(totp_service.is_mfa_enabled(session.username))
+
+
+templates.env.globals["personal_api_keys_menu_visible"] = (
+    _personal_api_keys_menu_visible
+)
+
 # Create router
 web_router = APIRouter()
 # Create user router for non-admin user routes
