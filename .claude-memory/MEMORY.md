@@ -83,6 +83,7 @@
 - [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs; cost accepted for blind-spot coverage
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs on one fix, dispatch Opus to judge materiality
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - when codex flags over-engineering, SIMPLIFY
+- [feedback_index_failures_are_transient.md](feedback_index_failures_are_transient.md) - index file failures = transient embedder calls; retry, no caps or loop guards
 - [feedback_codex_exhausted_fallback_to_claude.md](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [feedback_find_is_bfs_use_mmin.md](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
@@ -109,6 +110,7 @@
 - [project_config_default_flip_is_inert.md](project_config_default_flip_is_inert.md) - changing a dataclass default is inert on existing deployments
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - write mode is context-dependent (server=sqlite, CLI=json)
 - [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" is not what production runs
+- [project_staging_cluster_storage_owned_by_agent.md](project_staging_cluster_storage_owned_by_agent.md) - staging cluster storage is the agent's; clean it up (root cause first) without asking
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
 - [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)

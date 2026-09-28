@@ -22,10 +22,13 @@ second model for review.
   [[feedback_codex_interpreter_lacks_project_deps]]).
 - Opus 5.5 subagents tend to write their `INTENT:` declaration only inside thinking blocks, so the
   intent validator blocks every Write/Edit with "NO visible text". Proof: grouping the transcript
-  records by message id showed only thinking blocks plus the tool_use. When intent validation is
-  on, the Opus brief should say: "before each Write/Edit, state the INTENT: line in your reply
-  text". Do NOT phrase it as "move your reasoning into visible text". That wording coincided with
-  an API safeguard refusal (`reasoning_extraction`) that terminated a subagent.
+  records by message id showed only thinking blocks plus the tool_use. The owner then updated the
+  intent-validation guidance to suit Opus 5.5 (2026-09-27), so briefs need NO special INTENT
+  instruction. Only if blocks reappear, add a short "state the INTENT: line in your reply text"
+  note. Never phrase it as "move your reasoning into visible text": that wording coincided with an
+  API safeguard refusal (`reasoning_extraction`) that terminated a subagent.
+- After the owner changes hook configuration, restart the running agents (stop, then relaunch with
+  a takeover brief) so they run under the new setup.
 - A running agent keeps its model when resumed. To switch models, stop it and relaunch it with a
   brief that says the tree already contains its partial edits.
 
