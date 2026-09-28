@@ -108,11 +108,12 @@ def _create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.create_key(
-            name=name,
+        metadata = manager.create_key_audited(
+            name,
             key_type=key_type,
             email=email,
             description=description,
+            actor=user.username,
         )
         payload = _metadata_payload(metadata, include_public=True)
         payload["success"] = True
@@ -203,7 +204,7 @@ def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # was reported as a success -- a silent lie about a safety-critical
         # operation. The failure shape matches this handler's existing
         # convention for a rejected request (see the missing-name branch above).
-        if not manager.delete_key(name):
+        if not manager.delete_key_audited(name, actor=user.username):
             return _mcp_response(
                 {
                     "success": False,
@@ -295,10 +296,8 @@ def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.assign_key_to_host(
-            key_name=name,
-            hostname=hostname,
-            force=force,
+        metadata = manager.assign_key_to_host_audited(
+            name, hostname, force=force, actor=user.username
         )
         payload = _metadata_payload(metadata)
         payload["success"] = True

@@ -118,8 +118,11 @@ class TestWebUserCreationAutoGroupAssignment:
 
         dependencies.user_manager = original_user_manager
 
-        mock_user_manager.create_user.assert_called_once_with(
-            "new_admin", "password123", UserRole.ADMIN
+        mock_user_manager.create_user_audited.assert_called_once_with(
+            "new_admin",
+            "password123",
+            UserRole.ADMIN,
+            actor=mock_admin_session.username,
         )
 
         admins_group = group_manager.get_group_by_name("admins")
@@ -179,8 +182,11 @@ class TestWebUserCreationAutoGroupAssignment:
 
         dependencies.user_manager = original_user_manager
 
-        mock_user_manager.create_user.assert_called_once_with(
-            "new_user", "password123", UserRole.NORMAL_USER
+        mock_user_manager.create_user_audited.assert_called_once_with(
+            "new_user",
+            "password123",
+            UserRole.NORMAL_USER,
+            actor=mock_admin_session.username,
         )
 
         users_group = group_manager.get_group_by_name("users")

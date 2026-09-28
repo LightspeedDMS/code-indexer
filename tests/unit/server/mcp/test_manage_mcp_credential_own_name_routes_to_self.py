@@ -80,14 +80,14 @@ def totp_enabled() -> MagicMock:
 def mock_cred_manager() -> MagicMock:
     mgr = MagicMock()
     mgr.get_credentials.return_value = []
-    mgr.generate_credential.return_value = {
+    mgr.generate_credential_audited.return_value = {
         "credential_id": "cred-own-name-123",
         "client_id": "mcp_client_own_name",
         "client_secret": "mcp_secret_own_name",
         "name": "",
         "created_at": "2024-01-01T00:00:00Z",
     }
-    mgr.revoke_credential.return_value = True
+    mgr.revoke_credential_audited.return_value = True
     return mgr
 
 
@@ -189,8 +189,8 @@ class TestOwnNameRoutesToSelf:
             )
         content = _parse_mcp_response(result)
         assert content["success"] is True, content
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            normal_user.username, name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            normal_user.username, "", actor=normal_user.username
         )
 
     async def test_delete_with_target_user_equal_to_caller_succeeds(
@@ -212,8 +212,8 @@ class TestOwnNameRoutesToSelf:
             )
         content = _parse_mcp_response(result)
         assert content["success"] is True, content
-        mock_cred_manager.revoke_credential.assert_called_once_with(
-            normal_user.username, "cred-1"
+        mock_cred_manager.revoke_credential_audited.assert_called_once_with(
+            normal_user.username, "cred-1", actor=normal_user.username
         )
 
     async def test_list_scope_user_with_username_equal_to_caller_succeeds(
@@ -258,7 +258,7 @@ class TestOtherNameStillRequiresAdminRole:
         content = _parse_mcp_response(result)
         assert content["success"] is False
         assert content["error"] == mcp_credentials_handlers._ADMIN_ROLE_REQUIRED_ERROR
-        mock_cred_manager.generate_credential.assert_not_called()
+        mock_cred_manager.generate_credential_audited.assert_not_called()
 
     async def test_delete_with_a_different_target_user_is_denied(
         self, normal_user, elevation_manager, totp_enabled, mock_cred_manager
@@ -280,7 +280,7 @@ class TestOtherNameStillRequiresAdminRole:
         content = _parse_mcp_response(result)
         assert content["success"] is False
         assert content["error"] == mcp_credentials_handlers._ADMIN_ROLE_REQUIRED_ERROR
-        mock_cred_manager.revoke_credential.assert_not_called()
+        mock_cred_manager.revoke_credential_audited.assert_not_called()
 
     async def test_list_scope_user_with_a_different_username_is_denied(
         self, normal_user, elevation_manager, totp_enabled, mock_cred_manager
@@ -329,4 +329,4 @@ class TestCaseVariantIsADifferentUser:
         content = _parse_mcp_response(result)
         assert content["success"] is False
         assert content["error"] == mcp_credentials_handlers._ADMIN_ROLE_REQUIRED_ERROR
-        mock_cred_manager.generate_credential.assert_not_called()
+        mock_cred_manager.generate_credential_audited.assert_not_called()

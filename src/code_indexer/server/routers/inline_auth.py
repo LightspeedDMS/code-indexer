@@ -51,6 +51,7 @@ from ..auth.token_bucket import rate_limiter
 from ..auth.audit_logger import password_audit_logger
 from ..auth.auth_error_handler import auth_error_handler, AuthErrorType
 from ..auth.login_outcome import complete_login, reject_login
+from ..services.audit_events import SystemComponent
 from ..auth.login_rate_limiter import (
     LoginRateLimiter,
     login_rate_limiter as _default_login_rate_limiter,
@@ -471,10 +472,11 @@ def register_auth_routes(
             else:
                 # New account - actually create the user
                 try:
-                    user_manager.create_user(
+                    user_manager.create_user_audited(
                         registration_data.username,
                         registration_data.password,
                         UserRole.NORMAL_USER,  # Default role for new registrations
+                        actor=SystemComponent.SELF_REGISTRATION,
                     )
 
                     response = auth_error_handler.create_registration_response(
@@ -785,9 +787,8 @@ def register_auth_routes(
             api_key_manager = ApiKeyManager(user_manager=user_manager)
             name = request.name if request else None
 
-            raw_key, key_id = api_key_manager.generate_key(
-                username=current_user.username,
-                name=name,
+            raw_key, key_id = api_key_manager.generate_key_audited(
+                current_user.username, name=name, actor=current_user.username
             )
 
             # Get the created_at timestamp from the stored key
@@ -849,7 +850,9 @@ def register_auth_routes(
         Raises:
             HTTPException 404: If key not found
         """
-        deleted = user_manager.delete_api_key(current_user.username, key_id)
+        deleted = user_manager.delete_api_key_audited(
+            current_user.username, key_id, actor=current_user.username
+        )
         if not deleted:
             raise HTTPException(status_code=404, detail="API key not found")
         return {"message": "API key deleted successfully"}

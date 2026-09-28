@@ -181,8 +181,8 @@ def _create_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
     """Create a credential for the caller — elevation required."""
     try:
         description = args.get("description", "")
-        result = dependencies.mcp_credential_manager.generate_credential(
-            user.username, name=description
+        result = dependencies.mcp_credential_manager.generate_credential_audited(
+            user.username, description, actor=user.username
         )
         return _mcp_response(  # type: ignore[no-any-return]
             {
@@ -214,8 +214,8 @@ def _delete_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: credential_id"}
             )
-        result = dependencies.mcp_credential_manager.revoke_credential(
-            user.username, credential_id
+        result = dependencies.mcp_credential_manager.revoke_credential_audited(
+            user.username, credential_id, actor=user.username
         )
         return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
@@ -242,8 +242,8 @@ def _create_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                 {"success": False, "error": "Missing required parameter: target_user"}
             )
         description = args.get("description", "")
-        result = dependencies.mcp_credential_manager.generate_credential(
-            target_user, name=description
+        result = dependencies.mcp_credential_manager.generate_credential_audited(
+            target_user, description, actor=user.username
         )
         return _mcp_response(  # type: ignore[no-any-return]
             {
@@ -283,8 +283,8 @@ def _delete_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: credential_id"}
             )
-        result = dependencies.mcp_credential_manager.revoke_credential(
-            target_user, credential_id
+        result = dependencies.mcp_credential_manager.revoke_credential_audited(
+            target_user, credential_id, actor=user.username
         )
         return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:

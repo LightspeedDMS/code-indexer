@@ -28,9 +28,11 @@ from code_indexer.server.services.ssh_input_validation import InvalidHostnameErr
 
 
 class _StubManagerInvalidHostname:
-    """Stand-in for SSHKeyManager whose assign_key_to_host() rejects the hostname."""
+    """Stand-in for SSHKeyManager whose host assignment rejects the hostname."""
 
-    def assign_key_to_host(self, key_name: str, hostname: str, force: bool = False):
+    def assign_key_to_host_audited(
+        self, key_name: str, hostname: str, force: bool = False, *, actor: str
+    ):
         raise InvalidHostnameError(f"Invalid hostname: {hostname!r}")
 
 
@@ -44,6 +46,7 @@ def test_assign_host_returns_400_not_500_on_invalid_hostname(monkeypatch):
         ssh_keys.assign_host(
             "deploy-key_1.v2",
             ssh_keys.AssignHostRequest(hostname="example.com\nHost other"),
+            actor="example-admin",
         )
 
     assert exc_info.value.status_code == 400

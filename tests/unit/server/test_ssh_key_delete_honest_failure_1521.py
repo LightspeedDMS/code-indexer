@@ -81,7 +81,9 @@ class TestRestDeleteReportsRefusalHonestly:
 
         with patch.object(ssh_keys_router, "get_ssh_key_manager", return_value=manager):
             with pytest.raises(HTTPException) as excinfo:
-                ssh_keys_router.delete_ssh_key(UNTRACKED_KEY_NAME)
+                ssh_keys_router.delete_ssh_key(
+                    UNTRACKED_KEY_NAME, actor="example-admin"
+                )
 
         assert excinfo.value.status_code == 409
         assert UNTRACKED_KEY_NAME in str(excinfo.value.detail)
@@ -95,7 +97,9 @@ class TestRestDeleteReportsRefusalHonestly:
         manager = _manager_refusing_to_delete(tmp_path)
 
         with patch.object(ssh_keys_router, "get_ssh_key_manager", return_value=manager):
-            response = ssh_keys_router.delete_ssh_key("never_existed")
+            response = ssh_keys_router.delete_ssh_key(
+                "never_existed", actor="example-admin"
+            )
 
         assert response.success is True
         assert "never_existed" in response.message

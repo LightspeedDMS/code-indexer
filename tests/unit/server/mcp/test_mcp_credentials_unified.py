@@ -90,14 +90,14 @@ def mock_cred_manager():
             "created_at": "2024-01-01T00:00:00Z",
         }
     ]
-    mgr.generate_credential.return_value = {
+    mgr.generate_credential_audited.return_value = {
         "credential_id": "cred-uuid-123",
         "client_id": "mcp_full_client_id",
         "client_secret": "mcp_sec_full_secret_value",
         "name": "Test",
         "created_at": "2024-01-01T00:00:00Z",
     }
-    mgr.revoke_credential.return_value = True
+    mgr.revoke_credential_audited.return_value = True
     return mgr
 
 
@@ -690,8 +690,8 @@ class TestManageMCPCredentialCreateSelf:
                 session_key=_TEST_SESSION_KEY,
             )
 
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            normal_user.username, name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            normal_user.username, "", actor=normal_user.username
         )
 
     def test_create_self_without_elevation_is_blocked(self, normal_user, tmp_path):
@@ -778,8 +778,8 @@ class TestManageMCPCredentialDeleteSelf:
                 session_key=_TEST_SESSION_KEY,
             )
 
-        mock_cred_manager.revoke_credential.assert_called_once_with(
-            normal_user.username, "cred-123"
+        mock_cred_manager.revoke_credential_audited.assert_called_once_with(
+            normal_user.username, "cred-123", actor=normal_user.username
         )
 
 
@@ -838,8 +838,8 @@ class TestManageMCPCredentialCreateAdmin:
                 session_key=_TEST_SESSION_KEY,
             )
 
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            "alice", name="Admin cred"
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            "alice", "Admin cred", actor=admin_user.username
         )
 
 
@@ -920,7 +920,9 @@ class TestManageMCPCredentialDeleteAdmin:
                 session_key=_TEST_SESSION_KEY,
             )
 
-        mock_cred_manager.revoke_credential.assert_called_once_with("alice", "cred-456")
+        mock_cred_manager.revoke_credential_audited.assert_called_once_with(
+            "alice", "cred-456", actor=admin_user.username
+        )
 
 
 # =============================================================================

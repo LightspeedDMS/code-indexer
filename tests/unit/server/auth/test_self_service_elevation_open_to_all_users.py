@@ -192,14 +192,14 @@ def _elevate_route_ctx(
 
 def _fake_mcp_credential_manager():
     instance = MagicMock()
-    instance.generate_credential.return_value = {
+    instance.generate_credential_audited.return_value = {
         "client_id": "mcp_client_open_to_all",
         "client_secret": "mcp_secret_open_to_all",
         "credential_id": "cred-open-to-all-123",
         "name": "open-to-all-cred",
         "created_at": "2025-01-01T00:00:00Z",
     }
-    instance.revoke_credential.return_value = True
+    instance.revoke_credential_audited.return_value = True
     return instance
 
 

@@ -148,33 +148,12 @@ class BulkRemoveReposResponse(BaseModel):
     message: str
 
 
-def _audit_tool_mutation(
-    group_manager: GroupAccessManager,
-    admin_id: str,
-    action_type: str,
-    tool_name: str,
-    group: Optional[Group],
-) -> None:
-    """Record tool mutation audit without blocking the authoritative write."""
-    try:
-        group_manager.log_audit(
-            admin_id=admin_id,
-            action_type=action_type,
-            target_type="tool",
-            target_id=tool_name,
-            details={
-                "tool": tool_name,
-                "group": group.name if group is not None else None,
-                "group_id": group.id if group is not None else None,
-            },
-        )
-    except Exception:
-        logger.exception(
-            "Tool access mutation succeeded but audit write failed: "
-            "action=%s tool=%s group=%s",
-            action_type,
-            tool_name,
-            group.id if group is not None else None,
+def _require_tool_access_applied(applied: bool) -> None:
+    """Refuse to report success for a tool-access change that was not applied."""
+    if not applied:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Tool access change was not applied",
         )
 
 
@@ -313,18 +292,10 @@ def bulk_disable_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Tool '{tool_name}' not found",
         )
+    # The manager records one audit row per affected group.
     affected_group_ids = group_manager.set_tool_access_all_groups(
         tool_name, False, current_user.username
     )
-    groups_by_id = {group.id: group for group in group_manager.get_all_groups()}
-    for group_id in affected_group_ids:
-        _audit_tool_mutation(
-            group_manager,
-            current_user.username,
-            "tool_access_bulk_disable",
-            tool_name,
-            groups_by_id.get(group_id),
-        )
     return {"tool_name": tool_name, "affected_group_ids": affected_group_ids}
 
 
@@ -351,9 +322,9 @@ def grant_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-    group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
-    _audit_tool_mutation(
-        group_manager, current_user.username, "tool_access_grant", tool_name, group
+    # The manager records the change's audit row.
+    _require_tool_access_applied(
+        group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
     )
     return {"tool_name": tool_name, "group_id": group_id, "allowed": True}
 
@@ -381,9 +352,9 @@ def revoke_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-    group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
-    _audit_tool_mutation(
-        group_manager, current_user.username, "tool_access_revoke", tool_name, group
+    # The manager records the change's audit row.
+    _require_tool_access_applied(
+        group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
     )
     return {"tool_name": tool_name, "group_id": group_id, "allowed": False}
 

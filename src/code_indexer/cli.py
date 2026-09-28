@@ -12689,6 +12689,11 @@ def server_auto_update_status(ctx):
 
 
 # SSH Key Management commands
+# Actor passed to the audited SSH key operations from the standalone CLI.  The
+# CLI is never a server process, so these operations record no audit row.
+_CLI_LOCAL_ACTOR = "cli-local"
+
+
 @cli.group("ssh-key")
 @click.pass_context
 def ssh_key_group(ctx):
@@ -12736,11 +12741,13 @@ def ssh_key_create(ctx, name: str, key_type: str, email: str, description: str):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.create_key(
-            name=name,
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.create_key_audited(
+            name,
             key_type=key_type,
             email=email,
             description=description,
+            actor=_CLI_LOCAL_ACTOR,
         )
 
         console.print(f"[green]SSH key '{name}' created successfully[/green]")
@@ -12821,7 +12828,8 @@ def ssh_key_delete(ctx, name: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        manager.delete_key(name)
+        # Standalone CLI: no server process, so no audit row is written.
+        manager.delete_key_audited(name, actor=_CLI_LOCAL_ACTOR)
 
         console.print(f"[green]SSH key '{name}' deleted successfully[/green]")
 
@@ -12876,7 +12884,10 @@ def ssh_key_assign(ctx, name: str, host: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.assign_key_to_host(name, host, force=force)
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.assign_key_to_host_audited(
+            name, host, force=force, actor=_CLI_LOCAL_ACTOR
+        )
 
         console.print(f"[green]Key '{name}' assigned to '{host}'[/green]")
         console.print()

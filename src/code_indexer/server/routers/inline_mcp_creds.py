@@ -14,7 +14,9 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
 import logging
+from typing import Any, Dict
 
+import anyio
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -87,9 +89,8 @@ def register_mcp_credential_routes(
             mcp_manager = MCPCredentialManager(user_manager=user_manager)
             name = request.name if request else None
 
-            result = mcp_manager.generate_credential(
-                user_id=current_user.username,
-                name=name,
+            result = mcp_manager.generate_credential_audited(
+                current_user.username, name, actor=current_user.username
             )
 
             return CreateMCPCredentialResponse(
@@ -147,7 +148,9 @@ def register_mcp_credential_routes(
         from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        deleted = mcp_manager.revoke_credential(current_user.username, credential_id)
+        deleted = mcp_manager.revoke_credential_audited(
+            current_user.username, credential_id, actor=current_user.username
+        )
         if not deleted:
             raise HTTPException(status_code=404, detail="MCP credential not found")
         return {"message": "MCP credential deleted successfully"}
@@ -221,17 +224,28 @@ def register_mcp_credential_routes(
         Raises:
             HTTPException 404: If user not found
         """
-        from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
-
-        target_user = user_manager.get_user(username)
-        if not target_user:
-            raise HTTPException(status_code=404, detail="User not found")
+        from code_indexer.server.auth.mcp_credential_manager import (
+            MCPCredentialManager,
+            MCPCredentialOwnerNotFound,
+        )
 
         body = await request.json()
         name = body.get("name")
-
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        credential = mcp_manager.generate_credential(target_user.username, name)
+
+        def _mint() -> Dict[str, Any]:
+            # The audited mint (account lookup, credential write, durable
+            # audit row -- a failure row for an unknown account) is
+            # synchronous I/O: this runs off the event loop.
+            minted: Dict[str, Any] = mcp_manager.generate_credential_audited(
+                username, name, actor=current_user.username
+            )
+            return minted
+
+        try:
+            credential = await anyio.to_thread.run_sync(_mint)
+        except MCPCredentialOwnerNotFound:
+            raise HTTPException(status_code=404, detail="User not found")
 
         # Audit logging
         logger.info(
@@ -277,13 +291,15 @@ def register_mcp_credential_routes(
         """
         from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
-        target_user = user_manager.get_user(username)
-        if not target_user:
-            raise HTTPException(status_code=404, detail="User not found")
-
+        # Every attempt goes through the audited revocation, so an unknown
+        # account or credential still records its failure row.
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        success = mcp_manager.revoke_credential(target_user.username, credential_id)
+        success = mcp_manager.revoke_credential_audited(
+            username, credential_id, actor=current_user.username
+        )
         if not success:
+            if user_manager.get_user(username) is None:
+                raise HTTPException(status_code=404, detail="User not found")
             raise HTTPException(status_code=404, detail="Credential not found")
 
         # Audit logging

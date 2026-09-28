@@ -492,7 +492,9 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     try:
         manager = _get_credential_manager()
-        manager.delete_credential(user.username, credential_id)
+        manager.delete_credential_audited(
+            user.username, credential_id, actor=user.username
+        )
         return _mcp_response(
             {"success": True, "message": f"Credential {credential_id} deleted"}
         )
@@ -533,13 +535,15 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         manager = _get_credential_manager()
         loop = asyncio.new_event_loop()
         try:
+            # The audited method records its row off this private loop.
             result = loop.run_until_complete(
-                manager.configure_credential(
-                    username=user.username,
-                    forge_type=forge_type,
-                    forge_host=forge_host,
-                    token=token,
+                manager.configure_credential_audited(
+                    user.username,
+                    forge_type,
+                    forge_host,
+                    token,
                     name=name,
+                    actor=user.username,
                 )
             )
         finally:

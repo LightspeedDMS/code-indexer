@@ -308,7 +308,7 @@ class TestAdminMcpCredentialElevationRefusal:
             "/api/admin/users/{username}/mcp-credentials", "POST"
         )
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.generate_credential.return_value = {
+        mock_mcp_manager_instance.generate_credential_audited.return_value = {
             "credential_id": "cred-123",
             "client_id": "mcp_client_abc",
             "client_secret": "mcp_secret_xyz",
@@ -349,7 +349,7 @@ class TestAdminMcpCredentialElevationRefusal:
             "/api/admin/users/{username}/mcp-credentials/{credential_id}", "DELETE"
         )
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.revoke_credential.return_value = True
+        mock_mcp_manager_instance.revoke_credential_audited.return_value = True
 
         for client in _admin_client(app, admin_user):
             with (
@@ -431,7 +431,9 @@ class TestAdminMcpCredentialElevationSuccess:
             "created_at": "2025-01-01T00:00:00Z",
         }
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.generate_credential.return_value = fake_credential
+        mock_mcp_manager_instance.generate_credential_audited.return_value = (
+            fake_credential
+        )
 
         for client in _admin_client(app, admin_user):
             with (

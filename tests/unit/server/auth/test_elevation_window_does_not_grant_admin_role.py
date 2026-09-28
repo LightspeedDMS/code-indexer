@@ -226,7 +226,7 @@ class TestRestOwnWindowDeniedByRole:
         )
 
         mock_um = MagicMock()
-        mock_um.create_user.return_value = User(
+        mock_um.create_user_audited.return_value = User(
             username="irrelevant-target",
             password_hash="hashed",
             role=UserRole.NORMAL_USER,
@@ -357,8 +357,8 @@ class TestMcpOwnWindowDeniedByRole:
         content = _parse_mcp_response(result)
         assert content["success"] is False
         assert content["error"] == "Permission denied: admin role required"
-        mock_cred_manager.generate_credential.assert_not_called()
-        mock_cred_manager.revoke_credential.assert_not_called()
+        mock_cred_manager.generate_credential_audited.assert_not_called()
+        mock_cred_manager.revoke_credential_audited.assert_not_called()
 
     async def test_mutation_neutralising_admin_role_check_lets_it_succeed(
         self, elevation_manager, normal_user, admin_username
@@ -368,7 +368,7 @@ class TestMcpOwnWindowDeniedByRole:
         elevation_manager.create(_ELEVATION_KEY, normal_user.username, _IP, "full")
 
         mock_cred_manager = MagicMock()
-        mock_cred_manager.generate_credential.return_value = {
+        mock_cred_manager.generate_credential_audited.return_value = {
             "credential_id": "cred-mutation",
             "client_id": "mcp_client_mutation",
             "client_secret": "mcp_secret_mutation",
@@ -417,8 +417,8 @@ class TestMcpOwnWindowDeniedByRole:
             f"Mutation check failed: expected success once the role check "
             f"is neutralised, got {content}"
         )
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            admin_username, name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            admin_username, "", actor=normal_user.username
         )
 
     async def test_create_user_tool_denied_by_role(
@@ -466,7 +466,7 @@ class TestMcpOwnWindowDeniedByRole:
         elevation_manager.create(_ELEVATION_KEY, normal_user.username, _IP, "full")
 
         mock_user_manager = MagicMock()
-        mock_user_manager.create_user.return_value = User(
+        mock_user_manager.create_user_audited.return_value = User(
             username="irrelevant-target",
             password_hash="hashed",
             role=UserRole.NORMAL_USER,

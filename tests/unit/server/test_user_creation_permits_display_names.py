@@ -79,6 +79,10 @@ class _RecordingUserManager:
             created_at=datetime.now(timezone.utc),
         )
 
+    def create_user_audited(self, username, password, role, *, actor):
+        """The audited entry point the registration door calls."""
+        return self.create_user(username, password, role)
+
 
 class _Unused:
     """Placeholder for dependencies the register route never touches."""
@@ -134,6 +138,10 @@ class _StubUserManager:
             role=role,
             created_at=datetime.now(timezone.utc),
         )
+
+    def create_user_audited(self, username, password, role, *, actor):
+        """The audited entry point the admin create-user doors call."""
+        return self.create_user(username, password, role)
 
 
 class TestAdminRestCreateFrontDoorAcceptsDisplayStyleUsername:

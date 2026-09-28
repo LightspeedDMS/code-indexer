@@ -63,7 +63,7 @@ class SelfServiceStack:
         self.session_manager.create_session(
             resp, username=user.username, role=user.role.value
         )
-        header = resp.headers["set-cookie"]
+        header = str(resp.headers["set-cookie"])
         prefix = f"{SESSION_COOKIE_NAME}="
         assert header.startswith(prefix), header
         return header[len(prefix) :].split(";", 1)[0]
@@ -90,8 +90,11 @@ def build_stack(tmp_path: Any, monkeypatch: Any) -> SelfServiceStack:
 
     # Resolve the app module's lazily-built services FIRST: building them
     # rewires the dependencies singletons, which must happen before the
-    # isolated components below are installed over them.
-    getattr(mcp_utils.app_module, "user_manager")
+    # isolated components below are installed over them.  Resolve `app`
+    # itself: an earlier test can leave `user_manager` bound on the module
+    # while `app` is still unbuilt, and a later first touch of `app` would
+    # then rebuild it and rebind dependencies.jwt_manager over ours.
+    getattr(mcp_utils.app_module, "app")
 
     user_manager = UserManager(users_file_path=str(tmp_path / "users.json"))
     totp = TOTPService(db_path=str(tmp_path / "mfa.db"))

@@ -503,7 +503,7 @@ class TestTryBuildMcpConfigFile:
         mock_config_manager.load_config.return_value = mock_config
 
         mock_credential_manager = MagicMock()
-        mock_credential_manager.generate_credential.return_value = {
+        mock_credential_manager.generate_credential_audited.return_value = {
             "client_id": "test-client-id",
             "client_secret": "test-client-secret",
         }

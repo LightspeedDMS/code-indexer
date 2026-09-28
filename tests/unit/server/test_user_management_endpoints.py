@@ -753,7 +753,10 @@ class TestDeleteUserEndpoint:
             headers = {"Authorization": "Bearer admin.jwt.token"}
             response = client.delete("/api/admin/users/nonexistent", headers=headers)
 
-        mock_get_user.assert_called_once_with("nonexistent")
+        # The route (last-admin check) and the audited deletion (which
+        # records the failure row) each look the account up.
+        assert mock_get_user.call_args_list
+        assert all(c.args == ("nonexistent",) for c in mock_get_user.call_args_list)
 
         assert response.status_code == 404
         response_data = response.json()

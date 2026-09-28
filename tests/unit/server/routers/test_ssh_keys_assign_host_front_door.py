@@ -57,12 +57,16 @@ class _StubManagerInvalidHostname:
     end-to-end with a REAL manager in
     tests/unit/server/services/test_ssh_key_manager_hostname_validation.py)."""
 
-    def assign_key_to_host(self, key_name: str, hostname: str, force: bool = False):
+    def assign_key_to_host_audited(
+        self, key_name: str, hostname: str, force: bool = False, *, actor: str
+    ):
         raise InvalidHostnameError(f"Invalid hostname: {hostname!r}")
 
 
 class _StubManagerSuccess:
-    def assign_key_to_host(self, key_name: str, hostname: str, force: bool = False):
+    def assign_key_to_host_audited(
+        self, key_name: str, hostname: str, force: bool = False, *, actor: str
+    ):
         from code_indexer.server.services.ssh_key_manager import KeyMetadata
 
         return KeyMetadata(

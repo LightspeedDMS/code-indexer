@@ -152,8 +152,8 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         password = params["password"]
         role = UserRole(params["role"])
 
-        new_user = _utils.app_module.user_manager.create_user(
-            username=username, password=password, role=role
+        new_user = _utils.app_module.user_manager.create_user_audited(
+            username, password, role, actor=user.username
         )
 
         _assign_new_user_to_default_group(username, role, user.username)
@@ -1469,7 +1469,9 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         description = args.get("description", "")
         api_key_manager = ApiKeyManager(user_manager=_utils.app_module.user_manager)
-        api_key, key_id = api_key_manager.generate_key(user.username, name=description)
+        api_key, key_id = api_key_manager.generate_key_audited(
+            user.username, name=description, actor=user.username
+        )
         return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
@@ -1501,7 +1503,9 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        result = _utils.app_module.user_manager.delete_api_key(user.username, key_id)
+        result = _utils.app_module.user_manager.delete_api_key_audited(
+            user.username, key_id, actor=user.username
+        )
         return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(

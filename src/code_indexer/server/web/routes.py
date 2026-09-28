@@ -1759,7 +1759,9 @@ def create_user(
         )
 
     try:
-        user_manager.create_user(new_username, new_password, role_enum)
+        user_manager.create_user_audited(
+            new_username, new_password, role_enum, actor=session.username
+        )
 
         # Auto-assign new user to appropriate group based on role.
         # Story #1593 AC7: routed through the shared
@@ -1848,7 +1850,12 @@ def update_user_role(
         )
 
     try:
-        user_manager.update_user_role(username, role_enum)
+        if not user_manager.update_user_role_audited(
+            username, role_enum, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
         return RedirectResponse(
             url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
             status_code=303,
@@ -1896,7 +1903,12 @@ def change_user_password(
         )
 
     try:
-        user_manager.change_password(username, new_password)
+        if not user_manager.change_password_audited(
+            username, new_password, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
         return RedirectResponse(
             url=f"/admin/users?success=password_changed&u={quote(username, safe='')}",
             status_code=303,
@@ -1945,9 +1957,12 @@ def update_user_email(
     try:
         # Allow empty email to clear it
         email_value = new_email.strip() if new_email else None
-        user_manager.update_user(
-            username, new_email=email_value if email_value else None
-        )
+        if not user_manager.update_user_email_audited(
+            username, email_value if email_value else None, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
 
         return RedirectResponse(
             url=f"/admin/users?success=email_updated&u={quote(username, safe='')}",
@@ -1994,7 +2009,15 @@ async def delete_user(
         )
 
     try:
-        user_manager.delete_user(username)
+        # Account write plus its durable audit row: off the event loop.
+        deleted = await asyncio.to_thread(
+            user_manager.delete_user_audited, username, actor=session.username
+        )
+        if not deleted:
+            # Nothing was deleted: no identity-link or membership cleanup.
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
 
         # Clean up OIDC identity link if OIDC manager exists
         from ..auth.oidc import routes as oidc_routes
@@ -2011,10 +2034,10 @@ async def delete_user(
         # Clean up group membership (Bug fix: prevent orphaned group memberships)
         try:
             group_manager = _get_group_manager()
-            user_group = group_manager.get_user_group(username)
-            if user_group:
-                group_manager.remove_user_from_group(username, user_group.id)
-                logger.info(f"Cleaned up group membership for deleted user: {username}")
+            # Synchronous group store work: off the event loop.
+            await asyncio.to_thread(
+                _remove_deleted_user_membership, group_manager, username
+            )
         except RuntimeError:
             # group_manager not available - skip cleanup
             logger.warning(
@@ -2030,6 +2053,14 @@ async def delete_user(
         )
     except ValueError:
         return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
+
+
+def _remove_deleted_user_membership(group_manager: Any, username: str) -> None:
+    """Remove a deleted user's group membership (synchronous store work)."""
+    user_group = group_manager.get_user_group(username)
+    if user_group:
+        group_manager.remove_user_from_group(username, user_group.id)
+        logger.info(f"Cleaned up group membership for deleted user: {username}")
 
 
 @web_router.get(
@@ -2787,6 +2818,56 @@ def _repo_access_success_response(
     )
 
 
+def _grant_repo_access_recorded(
+    group_manager: Any, repo_name: str, group_id: int, actor: str
+) -> Tuple[Any, bool]:
+    """Grant *repo_name* to a group and record the grant (synchronous).
+
+    Returns ``(group, granted)``; ``group`` is None when it does not exist.
+    """
+    group = group_manager.get_group(group_id)
+    if not group:
+        return None, False
+    granted = bool(
+        group_manager.grant_repo_access(
+            repo_name=repo_name, group_id=group_id, granted_by=actor
+        )
+    )
+    if granted:
+        group_manager.log_audit(
+            admin_id=actor,
+            action_type="repo_access_grant",
+            target_type="repo",
+            target_id=repo_name,
+            details={"repo": repo_name, "group": group.name},
+        )
+    return group, granted
+
+
+def _revoke_repo_access_recorded(
+    group_manager: Any, repo_name: str, group_id: int, actor: str
+) -> Tuple[Any, bool]:
+    """Revoke *repo_name* from a group and record the revocation (synchronous).
+
+    Returns ``(group, revoked)``; ``group`` is None when it does not exist.
+    """
+    group = group_manager.get_group(group_id)
+    if not group:
+        return None, False
+    revoked = bool(
+        group_manager.revoke_repo_access(repo_name=repo_name, group_id=group_id)
+    )
+    if revoked:
+        group_manager.log_audit(
+            admin_id=actor,
+            action_type="repo_access_revoke",
+            target_type="repo",
+            target_id=repo_name,
+            details={"repo": repo_name, "group": group.name},
+        )
+    return group, revoked
+
+
 @web_router.post(
     "/groups/repo-access/grant",
     dependencies=[Depends(dependencies.require_elevation())],
@@ -2831,27 +2912,18 @@ async def grant_repo_access(
     group_manager = _get_group_manager()
 
     try:
-        group = group_manager.get_group(group_id)
+        # The whole synchronous operation (lookup, grant, durable audit row)
+        # runs off the event loop.
+        group, success = await asyncio.to_thread(
+            _grant_repo_access_recorded,
+            group_manager,
+            repo_name,
+            group_id,
+            session.username,
+        )
         if not group:
             return _repo_access_error_response(
                 is_ajax, request, session, "Group not found", 404
-            )
-
-        success = group_manager.grant_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
-            granted_by=session.username,
-        )
-
-        if success:
-            # Durable audit insert: off the event loop.
-            await asyncio.to_thread(
-                group_manager.log_audit,
-                admin_id=session.username,
-                action_type="repo_access_grant",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -2917,26 +2989,18 @@ async def revoke_repo_access(
     group_manager = _get_group_manager()
 
     try:
-        group = group_manager.get_group(group_id)
+        # The whole synchronous operation (lookup, revoke, durable audit row)
+        # runs off the event loop.
+        group, success = await asyncio.to_thread(
+            _revoke_repo_access_recorded,
+            group_manager,
+            repo_name,
+            group_id,
+            session.username,
+        )
         if not group:
             return _repo_access_error_response(
                 is_ajax, request, session, "Group not found", 404
-            )
-
-        success = group_manager.revoke_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
-        )
-
-        if success:
-            # Durable audit insert: off the event loop.
-            await asyncio.to_thread(
-                group_manager.log_audit,
-                admin_id=session.username,
-                action_type="repo_access_revoke",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -10166,6 +10230,27 @@ def admin_git_credentials_list_partial(request: Request):
     return response
 
 
+def _build_git_credential_manager() -> Any:
+    """Build this server's git credential manager (synchronous I/O).
+
+    Loads the bootstrap config and constructs the manager, which may read or
+    create the encryption salt file; async routes call this off the loop.
+    """
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import create_git_credential_manager
+
+    config_service = get_config_service()
+    server_dir = config_service.config_manager.server_dir
+    # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+    # flag .storage_mode access — config is always present when server is running.
+    storage_mode = cast(Any, config_service.config_manager.load_config()).storage_mode
+    return create_git_credential_manager(
+        db_path=str(server_dir / "data" / "cidx_server.db"),
+        server_dir=str(server_dir),
+        storage_mode=storage_mode,
+    )
+
+
 @web_router.post(
     "/git-credentials",
     dependencies=[Depends(dependencies.require_elevation())],
@@ -10178,8 +10263,6 @@ async def admin_git_credentials_add(request: Request):
             {"success": False, "error": "Session expired"}, status_code=401
         )
 
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -10194,26 +10277,16 @@ async def admin_git_credentials_add(request: Request):
                 {"success": False, "error": "Missing required fields"}, status_code=400
             )
 
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-        # cast: load_config() is Optional[ServerConfig] but is always non-None when
-        # the server is running; a raise here would be swallowed by except Exception.
-        from code_indexer.server.config.server_config import ServerConfig as _SC
+        # Config load and manager construction are synchronous I/O.
+        manager = await asyncio.to_thread(_build_git_credential_manager)
 
-        storage_mode = cast(
-            _SC, config_service.config_manager.load_config()
-        ).storage_mode
-        manager = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
-        )
-
-        result = await manager.configure_credential(
-            username=session.username,
-            forge_type=forge_type,
-            forge_host=forge_host,
-            token=token,
+        result = await manager.configure_credential_audited(
+            session.username,
+            forge_type,
+            forge_host,
+            token,
             name=name,
+            actor=session.username,
         )
         return JSONResponse(result)
 
@@ -10252,7 +10325,9 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager.delete_credential(session.username, credential_id)
+        manager.delete_credential_audited(
+            session.username, credential_id, actor=session.username
+        )
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
 
@@ -10520,8 +10595,6 @@ async def user_git_credentials_add(request: Request):
             {"success": False, "error": "Session expired"}, status_code=401
         )
 
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -10536,26 +10609,16 @@ async def user_git_credentials_add(request: Request):
                 {"success": False, "error": "Missing required fields"}, status_code=400
             )
 
-        config_service = get_config_service()
-        db_path = str(
-            config_service.config_manager.server_dir / "data" / "cidx_server.db"
-        )
-        server_dir = config_service.config_manager.server_dir
-        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
-        # flag .storage_mode access — config is always present when server is running.
-        storage_mode = cast(
-            Any, config_service.config_manager.load_config()
-        ).storage_mode
-        manager = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
-        )
+        # Config load and manager construction are synchronous I/O.
+        manager = await asyncio.to_thread(_build_git_credential_manager)
 
-        result = await manager.configure_credential(
-            username=session.username,
-            forge_type=forge_type,
-            forge_host=forge_host,
-            token=token,
+        result = await manager.configure_credential_audited(
+            session.username,
+            forge_type,
+            forge_host,
+            token,
             name=name,
+            actor=session.username,
         )
         return JSONResponse(result)
 
@@ -10598,7 +10661,9 @@ def user_git_credentials_delete(request: Request, credential_id: str):
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager.delete_credential(session.username, credential_id)
+        manager.delete_credential_audited(
+            session.username, credential_id, actor=session.username
+        )
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
 
@@ -10792,11 +10857,12 @@ def create_ssh_key(
         )
 
         manager = _get_ssh_key_manager()
-        manager.create_key(
-            name=key_name,
+        manager.create_key_audited(
+            key_name,
             key_type=key_type,
             email=email if email else None,
             description=description if description else None,
+            actor=session.username,
         )
 
         return _create_ssh_keys_page_response(
@@ -10853,7 +10919,7 @@ def delete_ssh_key(
         # wrote. That return value used to be discarded, so a refused deletion
         # was rendered as a success -- a silent lie about a safety-critical
         # operation.
-        if not manager.delete_key(key_name):
+        if not manager.delete_key_audited(key_name, actor=session.username):
             return _create_ssh_keys_page_response(
                 request,
                 session,
@@ -10908,7 +10974,7 @@ def assign_host_to_key(
         from ..services.ssh_key_manager import HostConflictError
 
         manager = _get_ssh_key_manager()
-        manager.assign_key_to_host(key_name, hostname)
+        manager.assign_key_to_host_audited(key_name, hostname, actor=session.username)
 
         return _create_ssh_keys_page_response(
             request,

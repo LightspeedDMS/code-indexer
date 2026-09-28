@@ -183,7 +183,7 @@ async def test_real_dispatch_passes_through_when_enforcement_disabled(
     mock_meta.hosts = ["github.com"]
     mock_meta.email = None
     mock_meta.description = None
-    mock_manager.assign_key_to_host.return_value = mock_meta
+    mock_manager.assign_key_to_host_audited.return_value = mock_meta
 
     async with _real_dispatch_context(
         enforcement_enabled=False,
@@ -213,6 +213,6 @@ async def test_real_dispatch_passes_through_when_enforcement_disabled(
         f"enforcement disabled must pass through, got: {result}"
     )
     assert parsed.get("success") is True
-    mock_manager.assign_key_to_host.assert_called_once_with(
-        key_name="deploy-key_1.v2", hostname="github.com", force=False
+    mock_manager.assign_key_to_host_audited.assert_called_once_with(
+        "deploy-key_1.v2", "github.com", force=False, actor=user.username
     )

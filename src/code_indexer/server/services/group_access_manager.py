@@ -29,8 +29,43 @@ from .constants import (
     DEFAULT_GROUP_USERS,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.audit_events import ALL_TARGETS_MARKER
+from code_indexer.server.services.audit_outcome import record_outcome
 
 logger = logging.getLogger(__name__)
+
+
+def _record_tool_access(
+    actor: str,
+    tool_name: str,
+    group_id: object,
+    allowed: bool,
+    all_groups: bool,
+    outcome: str,
+) -> None:
+    """Record one tool-to-group access change (the acting user is *actor*).
+
+    A successful change names the group it changed and the tool.  A failed
+    change verified no group (other than the fixed every-group marker), so
+    it records the placeholder target and only the ``all_groups`` flag.
+    """
+    action_type = (
+        "group_tool_access_granted" if allowed else "group_tool_access_revoked"
+    )
+    if outcome == "success":
+        target: Optional[str] = str(group_id)
+        details: Dict[str, Any] = {"tool_name": tool_name, "all_groups": all_groups}
+    else:
+        target = ALL_TARGETS_MARKER if group_id == ALL_TARGETS_MARKER else None
+        details = {"all_groups": all_groups}
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="group",
+        target_id=target,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class DefaultGroupCannotBeDeletedError(Exception):
@@ -969,7 +1004,27 @@ class GroupAccessManager:
     def set_tool_access(
         self, tool_name: str, group_id: int, allowed: bool, granted_by: str
     ) -> bool:
-        """Set a tool's explicit allow/deny state for one group."""
+        """Set a tool's explicit allow/deny state for one group.
+
+        Records one ``group_tool_access_granted`` / ``_revoked`` row with
+        *granted_by* (the acting user) as the actor.  Returns False, after
+        recording a failure row, when the backend reports the change was not
+        applied.
+        """
+        try:
+            applied = self._set_tool_access(tool_name, group_id, allowed, granted_by)
+        except Exception:
+            _record_tool_access(
+                granted_by, tool_name, group_id, allowed, False, "failure"
+            )
+            raise
+        outcome = "success" if applied else "failure"
+        _record_tool_access(granted_by, tool_name, group_id, allowed, False, outcome)
+        return bool(applied)
+
+    def _set_tool_access(
+        self, tool_name: str, group_id: int, allowed: bool, granted_by: str
+    ) -> bool:
         if self._backend is not None:
             return self._backend.set_tool_access(  # type: ignore[no-any-return]
                 tool_name, group_id, allowed, granted_by
@@ -1057,7 +1112,27 @@ class GroupAccessManager:
     def set_tool_access_all_groups(
         self, tool_name: str, allowed: bool, granted_by: str
     ) -> List[int]:
-        """Atomically set one tool's state for every group existing at call time."""
+        """Atomically set one tool's state for every group existing at call time.
+
+        Records one ``group_tool_access_granted`` / ``_revoked`` row per
+        affected group (``all_groups`` true), with *granted_by* as the actor.
+        """
+        try:
+            affected = self._set_tool_access_all_groups(tool_name, allowed, granted_by)
+        except Exception:
+            _record_tool_access(
+                granted_by, tool_name, ALL_TARGETS_MARKER, allowed, True, "failure"
+            )
+            raise
+        for group_id in affected:
+            _record_tool_access(
+                granted_by, tool_name, group_id, allowed, True, "success"
+            )
+        return affected
+
+    def _set_tool_access_all_groups(
+        self, tool_name: str, allowed: bool, granted_by: str
+    ) -> List[int]:
         if self._backend is not None:
             return self._backend.set_tool_access_all_groups(  # type: ignore[no-any-return]
                 tool_name, allowed, granted_by
