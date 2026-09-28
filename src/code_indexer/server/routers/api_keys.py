@@ -252,6 +252,24 @@ def get_config_service() -> ConfigService:
     return _get_config_service()
 
 
+def _persist_provider_key(
+    provider: str, field_name: str, value: str, *, actor: str, action_type: str
+) -> None:
+    """Set one provider key field as ONE audited configuration change.
+
+    The row names the provider only; the key value never reaches it.  The
+    startup/cluster key sync never goes through here, so a restart writes
+    no provider-key row.
+    """
+
+    def _set_key(candidate) -> None:
+        setattr(candidate.claude_integration_config, field_name, value)
+
+    get_config_service().apply_audited_change(
+        _set_key, actor=actor, target_id=provider, action_type=action_type
+    )
+
+
 # Helper functions for key clearing
 def _clear_from_claude_config(key_to_clear: str) -> Optional[str]:
     """Clear apiKey from ~/.claude.json if it matches. Returns location name if cleared."""
@@ -345,11 +363,13 @@ def save_anthropic_key(
         raise HTTPException(status_code=500, detail=result.error)
 
     # Persist to server config
-    config_service = get_config_service()
-    config = config_service.get_config()
-    assert config.claude_integration_config is not None
-    config.claude_integration_config.anthropic_api_key = request.api_key
-    config_service.save_config(config)
+    _persist_provider_key(
+        "anthropic",
+        "anthropic_api_key",
+        request.api_key,
+        actor=_current_user.username,
+        action_type="provider_api_key_set",
+    )
 
     # Trigger immediate catch-up processing (Story #23, AC3)
     # This replaces the old flag-based deferred reconciliation (Story #20)
@@ -394,11 +414,13 @@ def save_voyageai_key(
         raise HTTPException(status_code=500, detail=result.error)
 
     # Persist to server config
-    config_service = get_config_service()
-    config = config_service.get_config()
-    assert config.claude_integration_config is not None
-    config.claude_integration_config.voyageai_api_key = request.api_key
-    config_service.save_config(config)
+    _persist_provider_key(
+        "voyageai",
+        "voyageai_api_key",
+        request.api_key,
+        actor=_current_user.username,
+        action_type="provider_api_key_set",
+    )
 
     return SaveApiKeyResponse(
         success=True,
@@ -589,11 +611,13 @@ def save_cohere_key(
         raise HTTPException(status_code=500, detail=result.error)
 
     # Persist to server config
-    config_service = get_config_service()
-    config = config_service.get_config()
-    assert config.claude_integration_config is not None
-    config.claude_integration_config.cohere_api_key = request.api_key
-    config_service.save_config(config)
+    _persist_provider_key(
+        "cohere",
+        "cohere_api_key",
+        request.api_key,
+        actor=_current_user.username,
+        action_type="provider_api_key_set",
+    )
 
     return SaveApiKeyResponse(
         success=True,
@@ -687,8 +711,13 @@ def clear_cohere_key(
     cleared = ["server config"]
 
     # Clear from config
-    config.claude_integration_config.cohere_api_key = ""
-    config_service.save_config(config)
+    _persist_provider_key(
+        "cohere",
+        "cohere_api_key",
+        "",
+        actor=_current_user.username,
+        action_type="provider_api_key_cleared",
+    )
 
     # Clear from environment only if it matches
     if os.environ.get("CO_API_KEY") == key_to_clear:
@@ -727,8 +756,13 @@ def clear_anthropic_key(
     cleared = ["server config"]
 
     # Clear from config
-    config.claude_integration_config.anthropic_api_key = ""
-    config_service.save_config(config)
+    _persist_provider_key(
+        "anthropic",
+        "anthropic_api_key",
+        "",
+        actor=_current_user.username,
+        action_type="provider_api_key_cleared",
+    )
 
     # Clear from environment only if it matches
     if os.environ.get("ANTHROPIC_API_KEY") == key_to_clear:
@@ -773,8 +807,13 @@ def clear_voyageai_key(
     cleared = ["server config"]
 
     # Clear from config
-    config.claude_integration_config.voyageai_api_key = ""
-    config_service.save_config(config)
+    _persist_provider_key(
+        "voyageai",
+        "voyageai_api_key",
+        "",
+        actor=_current_user.username,
+        action_type="provider_api_key_cleared",
+    )
 
     # Clear from environment only if it matches
     if os.environ.get("VOYAGE_API_KEY") == key_to_clear:

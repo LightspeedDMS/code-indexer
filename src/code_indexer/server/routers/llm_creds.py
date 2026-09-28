@@ -183,22 +183,25 @@ def save_config(
                 error="llm_creds_provider_api_key is required for subscription mode",
             )
 
-    # Load and update config
+    # Load and update config: one audited change on a candidate copy (the
+    # provider API key is recorded by key name only).
     config_svc = get_config_service()
-    config = config_svc.get_config()
-    prev_mode = config.claude_integration_config.claude_auth_mode
+    prev_mode = config_svc.get_config().claude_integration_config.claude_auth_mode
 
-    config.claude_integration_config.claude_auth_mode = mode
-    config.claude_integration_config.llm_creds_provider_url = (
-        request.llm_creds_provider_url
+    def _set_llm_creds(candidate) -> None:
+        integration = candidate.claude_integration_config
+        integration.claude_auth_mode = mode
+        integration.llm_creds_provider_url = request.llm_creds_provider_url
+        integration.llm_creds_provider_api_key = request.llm_creds_provider_api_key
+        integration.llm_creds_provider_consumer_id = (
+            request.llm_creds_provider_consumer_id
+        )
+
+    config_svc.apply_audited_change(
+        _set_llm_creds,
+        actor=_current_user.username,
+        target_id="claude_integration",
     )
-    config.claude_integration_config.llm_creds_provider_api_key = (
-        request.llm_creds_provider_api_key
-    )
-    config.claude_integration_config.llm_creds_provider_consumer_id = (
-        request.llm_creds_provider_consumer_id
-    )
-    config_svc.save_config(config)
 
     # Lifecycle transitions
     existing_service = getattr(http_request.app.state, "llm_lifecycle_service", None)

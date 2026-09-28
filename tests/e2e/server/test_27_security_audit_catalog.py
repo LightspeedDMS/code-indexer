@@ -17,11 +17,15 @@ REST/MCP front door only -- no CLI, no direct DB access.
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
 from fastapi.testclient import TestClient
 
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 _PASSWORD = "E2e-Audit-Pass-9431!"
@@ -150,4 +154,104 @@ def test_account_and_credential_rows_name_the_caller(
             assert secret not in every_entry
     finally:
         test_client.delete(f"/api/admin/users/{member}", headers=auth_headers)
+        test_client.delete(f"/api/admin/users/{second_admin}", headers=auth_headers)
+
+
+_SEED_REPO = (
+    Path(
+        os.environ.get(
+            "E2E_SEED_CACHE_DIR", str(Path.home() / ".tmp" / "cidx-e2e-seed-repos")
+        )
+    )
+    / "markupsafe"
+)
+_JOB_TIMEOUT = float(os.environ.get("E2E_GOLDEN_JOB_TIMEOUT", "120"))
+
+
+def test_golden_repo_and_config_rows_name_the_caller(
+    test_client: TestClient,
+    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
+) -> None:
+    """A second admin (not ``admin``) adds and removes a golden repo and
+    changes the refresh interval; every row names that admin."""
+    if not _SEED_REPO.exists():
+        pytest.skip(f"Seed repo not found at {_SEED_REPO!s}")
+    suffix = uuid.uuid4().hex[:8]
+    second_admin = f"e2e-audit-golden-admin-{suffix}"
+    alias = f"e2e-audit-golden-{suffix}"
+    created_admin = test_client.post(
+        "/api/admin/users",
+        json={"username": second_admin, "password": _PASSWORD, "role": "admin"},
+        headers=auth_headers,
+    )
+    assert created_admin.status_code == 201, created_admin.text[:300]
+    admin2 = _login(test_client, second_admin, _PASSWORD)
+    original = test_client.get("/global/config", headers=auth_headers)
+    assert original.status_code == 200, original.text[:300]
+    original_interval = original.json()["refresh_interval"]
+
+    try:
+        # --- Golden repo add (REST) ---
+        added = test_client.post(
+            "/api/admin/golden-repos",
+            json={"repo_url": str(_SEED_REPO), "alias": alias},
+            headers=admin2,
+        )
+        assert added.status_code == 202, added.text[:300]
+        wait_for_terminal_job(
+            test_client,
+            added.json()["job_id"],
+            admin_token_provider,
+            timeout=_JOB_TIMEOUT,
+            poll_interval=0.5,
+            label="golden add",
+        )
+        row = _one_row(
+            test_client, auth_headers, "golden_repo_added", second_admin, alias
+        )
+        assert (row["outcome"], row["source"]) == ("success", "rest")
+
+        # --- Golden repo removal (REST): the caller, never "admin" ---
+        removed = test_client.delete(f"/api/admin/golden-repos/{alias}", headers=admin2)
+        assert removed.status_code == 204, removed.text[:300]
+        row = _one_row(
+            test_client, auth_headers, "golden_repo_removed", second_admin, alias
+        )
+        assert (row["outcome"], row["source"]) == ("success", "rest")
+        seeded_admin_rows = _entries(
+            test_client, auth_headers, "golden_repo_removed", "admin"
+        )
+        assert all(e["target_id"] != alias for e in seeded_admin_rows)
+
+        # --- Configuration change (REST) ---
+        new_interval = original_interval + 60
+        changed = test_client.put(
+            "/global/config", json={"refresh_interval": new_interval}, headers=admin2
+        )
+        assert changed.status_code == 200, changed.text[:300]
+        row = _one_row(
+            test_client, auth_headers, "config_changed", second_admin, "golden_repos"
+        )
+        assert (row["outcome"], row["source"]) == ("success", "rest")
+        assert str(new_interval) in json.dumps(row)
+
+        every_entry = json.dumps(
+            [
+                _entries(test_client, auth_headers, action, second_admin)
+                for action in (
+                    "golden_repo_added",
+                    "golden_repo_removed",
+                    "config_changed",
+                )
+            ]
+        )
+        assert str(_SEED_REPO) not in every_entry
+    finally:
+        test_client.put(
+            "/global/config",
+            json={"refresh_interval": original_interval},
+            headers=auth_headers,
+        )
+        test_client.delete(f"/api/admin/golden-repos/{alias}", headers=auth_headers)
         test_client.delete(f"/api/admin/users/{second_admin}", headers=auth_headers)

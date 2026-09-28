@@ -256,7 +256,7 @@ def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
         )
 
     try:
-        ops.set_config(refresh_interval)
+        ops.set_config(refresh_interval, actor=user.username)
         return _mcp_response(  # type: ignore[no-any-return]
             {"success": True, "status": "updated", "refresh_interval": refresh_interval}
         )

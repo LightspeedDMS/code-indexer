@@ -154,14 +154,16 @@ def update_git_settings(
         HTTPException: 401/403 if not authenticated/authorized/elevated (handled by dependency)
         HTTPException: 422 if email validation fails (handled by Pydantic)
     """
-    config_manager = _get_config_manager()
-    config = config_manager.load()
+    from code_indexer.server.services.config_change_audit import (
+        apply_git_settings_change,
+    )
 
-    # Update only the default_committer_email field
-    config.git_service.default_committer_email = updates.default_committer_email
-
-    # Save the updated config
-    config_manager.save(config)
+    # Update only the default_committer_email field (one audited change).
+    config = apply_git_settings_change(
+        _get_config_manager(),
+        default_committer_email=updates.default_committer_email,
+        actor=current_user.username,
+    )
 
     return GitServiceConfigResponse(
         service_committer_name=config.git_service.service_committer_name,

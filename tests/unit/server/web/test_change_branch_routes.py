@@ -128,7 +128,7 @@ class TestChangeBranchRoute:
         assert body["success"] is True
         assert body["job_id"] == "job-001"
         mock_manager.change_branch_async.assert_called_once_with(
-            "my-repo", "feature/new", "admin"
+            "my-repo", "feature/new", submitter_username="admin"
         )
 
     @pytest.mark.asyncio
@@ -274,7 +274,7 @@ class TestChangeBranchAsyncRoute:
             "Response must include job_id from change_branch_async()"
         )
         mock_manager.change_branch_async.assert_called_once_with(
-            "my-repo", "feature/new", "admin"
+            "my-repo", "feature/new", submitter_username="admin"
         )
 
     @pytest.mark.asyncio
@@ -384,7 +384,7 @@ class TestChangeBranchAsyncRoute:
             )
 
         mock_manager.change_branch_async.assert_called_once_with(
-            "my-repo", "feature/new", "alice"
+            "my-repo", "feature/new", submitter_username="alice"
         )
 
 

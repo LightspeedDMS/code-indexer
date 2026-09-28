@@ -1,5 +1,6 @@
 """Unit tests for Story #926 backup config validation endpoint."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -30,7 +31,12 @@ def _build_client(monkeypatch, config_service, ssh_key_manager, bootstrap):
             ):
                 app.dependency_overrides[dep_callable] = lambda: None
 
-    monkeypatch.setattr(routes, "_require_admin_session", lambda request: object())
+    # The session carries the acting admin's name (the audit actor).
+    monkeypatch.setattr(
+        routes,
+        "_require_admin_session",
+        lambda request: SimpleNamespace(username="example-admin"),
+    )
     monkeypatch.setattr(
         routes, "validate_login_csrf_token", lambda request, token: True
     )

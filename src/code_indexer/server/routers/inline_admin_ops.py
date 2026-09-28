@@ -50,6 +50,10 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
+from ..services.golden_repo_audited_ops import (
+    request_golden_repo_refresh,
+    submit_provider_scoped_index_job,
+)
 
 # Constants used by route handlers
 GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
@@ -361,8 +365,10 @@ def register_admin_ops_routes(
                     detail="RefreshScheduler not available",
                 )
             # Resolution from bare alias to global format happens inside RefreshScheduler
-            job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-                alias, submitter_username=current_user.username
+            job_id = request_golden_repo_refresh(
+                lifecycle_manager.refresh_scheduler,
+                alias,
+                actor=current_user.username,
             )
             return JobResponse(
                 job_id=job_id or "",
@@ -459,11 +465,13 @@ def register_admin_ops_routes(
                     for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
 
-                provider_job_id = background_job_manager.submit_job(
+                provider_job_id = submit_provider_scoped_index_job(
+                    background_job_manager,
+                    actor=current_user.username,
+                    alias=alias,
+                    index_type="semantic",
                     operation_type="provider_index_add",
                     func=_provider_index_job,
-                    submitter_username=current_user.username,
-                    repo_alias=alias,
                     repo_path=repo_path,
                     provider_name=request.providers[0],
                     clear=False,
@@ -520,11 +528,13 @@ def register_admin_ops_routes(
                     for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
 
-                provider_job_id = background_job_manager.submit_job(
+                provider_job_id = submit_provider_scoped_index_job(
+                    background_job_manager,
+                    actor=current_user.username,
+                    alias=alias,
+                    index_type="temporal",
                     operation_type="provider_temporal_index_rebuild",
                     func=_provider_temporal_index_job,
-                    submitter_username=current_user.username,
-                    repo_alias=alias,
                     repo_path=repo_path,
                     provider_name=request.providers[0],
                     clear=False,
@@ -855,8 +865,11 @@ def register_admin_ops_routes(
                     f"Job cancellation failed during repository deletion: {job_error}"
                 )
 
-            # Perform repository deletion with proper error handling
-            golden_repo_manager.remove_golden_repo(alias)
+            # Perform repository deletion with proper error handling; the job
+            # and its audit row name the authenticated caller.
+            golden_repo_manager.remove_golden_repo(
+                alias, submitter_username=current_user.username
+            )
 
             logging.info(
                 f"Successfully removed golden repository '{alias}' by user '{current_user.username}'"

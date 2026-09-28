@@ -98,7 +98,7 @@ def _register_removable_repo(manager: GoldenRepoManager, alias: str) -> Path:
 
 
 def _submit_and_get_worker(manager: GoldenRepoManager, alias: str):
-    manager.remove_golden_repo(alias)
+    manager.remove_golden_repo(alias, submitter_username="example-admin")
     return manager.background_job_manager.submit_job.call_args.kwargs["func"]
 
 

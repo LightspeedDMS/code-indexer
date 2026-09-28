@@ -265,7 +265,11 @@ class TestSaveConfig:
         data = response.json()
         assert data["success"] is True
         assert data["mode"] == "subscription"
-        # Config fields should have been set
+        # Config fields are set by ONE audited change applied to a candidate.
+        change = svc.apply_audited_change
+        change.assert_called_once()
+        assert change.call_args[1]["target_id"] == "claude_integration"
+        change.call_args[0][0](mock_config)
         assert mock_config.claude_integration_config.claude_auth_mode == "subscription"
         assert (
             mock_config.claude_integration_config.llm_creds_provider_url

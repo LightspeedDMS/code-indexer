@@ -2827,7 +2827,9 @@ def set_global_refresh_interval(interval: int):
 
     ops = GlobalRepoOperations(golden_repos_dir)
     try:
-        ops.set_config(interval)
+        # Standalone CLI: the process is not a server, so no audit row is
+        # written; the fixed local actor only satisfies the required argument.
+        ops.set_config(interval, actor="cli-local")
         console.print(
             f"[green]Updated global refresh interval to {interval} seconds[/green]"
         )

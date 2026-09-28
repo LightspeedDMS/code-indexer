@@ -218,7 +218,7 @@ def update_global_config(
     ops = get_global_repo_operations()
 
     try:
-        ops.set_config(config.refresh_interval)
+        ops.set_config(config.refresh_interval, actor=user.username)
         return ConfigUpdateResponse(status="updated")
     except ValueError as e:
         # Map ValueError (validation failed) to HTTP 400

@@ -51,7 +51,7 @@ def _register_repo(manager, alias="race-repo"):
 
 
 def _worker_for(manager, alias):
-    manager.remove_golden_repo(alias)
+    manager.remove_golden_repo(alias, submitter_username="example-admin")
     return manager.background_job_manager.submit_job.call_args.kwargs["func"]
 
 
@@ -130,6 +130,7 @@ def test_failed_cleanup_is_quarantined_and_alias_can_be_readded(manager):
             repo_url=f"https://example.test/{alias}.git",
             alias=alias,
             default_branch="main",
+            submitter_username="example-admin",
         )
         add_worker = manager.background_job_manager.submit_job.call_args.kwargs["func"]
         result = add_worker()

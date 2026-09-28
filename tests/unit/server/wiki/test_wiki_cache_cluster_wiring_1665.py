@@ -214,7 +214,7 @@ class TestSite2GoldenRepoManagerLifecycleHook:
         return clone_path
 
     def _run_removal_worker(self, manager, alias: str) -> None:
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         worker = manager.background_job_manager.submit_job.call_args[1]["func"]
         worker()
 

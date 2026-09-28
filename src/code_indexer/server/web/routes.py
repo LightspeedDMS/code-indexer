@@ -11,6 +11,10 @@ from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR
 import asyncio
 import functools
 import html
+
+import anyio
+import anyio.from_thread
+import anyio.to_thread
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
@@ -51,7 +55,8 @@ from .auth import (
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
-from ..services.config_service import get_config_service
+from ..services.config_service import BootstrapFileNotWritten, get_config_service
+from ..services.golden_repo_audited_ops import request_golden_repo_refresh
 from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
     SubmissionGateOverloadedError,
@@ -3755,8 +3760,8 @@ def refresh_golden_repo(
         if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
             raise Exception("RefreshScheduler not available")
         # Resolution from bare alias to global format happens inside RefreshScheduler
-        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=session.username
+        job_id = request_golden_repo_refresh(
+            lifecycle_manager.refresh_scheduler, alias, actor=session.username
         )
         return _create_golden_repos_page_response(
             request,
@@ -3812,8 +3817,11 @@ def force_resync_golden_repo(
         if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
             raise Exception("RefreshScheduler not available")
         # force_reset=True discards divergent local state before re-indexing
-        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=session.username, force_reset=True
+        job_id = request_golden_repo_refresh(
+            lifecycle_manager.refresh_scheduler,
+            alias,
+            actor=session.username,
+            force_reset=True,
         )
         return _create_golden_repos_page_response(
             request,
@@ -4076,7 +4084,16 @@ async def change_golden_repo_branch(
             )
 
         manager = _get_golden_repo_manager()
-        result = manager.change_branch_async(alias, branch, session.username)
+        # The whole audited submission (DB reads, job submit, audit row)
+        # runs off the event loop.
+        result = await asyncio.to_thread(
+            functools.partial(
+                manager.change_branch_async,
+                alias,
+                branch,
+                submitter_username=session.username,
+            )
+        )
         job_id = result.get("job_id")
         if job_id is None:
             # Already on the target branch - no background job needed
@@ -6618,38 +6635,105 @@ def _detect_language_from_path(file_path: str) -> str:
     return ext_to_lang.get(ext, "plaintext")
 
 
-async def _reload_oidc_configuration():
-    """Reload OIDC configuration without server restart."""
+class _OidcReloadFailed(Exception):
+    """The OIDC test-reload rejected a candidate configuration."""
+
+
+def _prepare_oidc_candidate_from_worker_thread(
+    candidate, prepared: Dict[str, Any]
+) -> None:
+    """``before_publish`` for an OIDC section change.
+
+    Runs on the worker thread of the audited change: builds and initializes
+    OIDC managers for the CANDIDATE configuration WITHOUT making them live,
+    and keeps them in *prepared*.  A failure raises :class:`_OidcReloadFailed`,
+    so nothing is published.  The caller swaps them in with
+    :func:`_install_oidc_managers` only after persistence.
+    """
+    try:
+        prepared["managers"] = _prepare_oidc_managers(candidate)
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-047",
+                f"Failed to reload OIDC configuration: {e}",
+            ),
+            exc_info=True,
+        )
+        raise _OidcReloadFailed(str(e)) from e
+    logger.info(
+        "OIDC configuration validated and reloaded successfully",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
+
+def _install_oidc_managers(prepared: Dict[str, Any]) -> None:
+    """Make the managers prepared for a PUBLISHED OIDC change live.
+
+    A no-op when nothing was prepared (not an OIDC section change).
+    """
     from ..auth.oidc import routes as oidc_routes
-    from ..auth.oidc.oidc_manager import OIDCManager
-    from ..auth.oidc.state_manager import StateManager
-    from ..services.config_service import get_config_service
 
-    config_service = get_config_service()
-    config = config_service.get_config()
+    if "managers" not in prepared:
+        return
+    oidc_routes.oidc_manager, oidc_routes.state_manager = prepared["managers"]
 
-    # Only reload if OIDC is enabled
+
+def _prepare_oidc_managers(config) -> Tuple[Any, Any]:
+    """Build (oidc_manager, state_manager) for *config* WITHOUT making them live.
+
+    Runs on a worker thread (the ``before_publish`` step).  Returns
+    (None, None) when OIDC is disabled in *config* (installing that clears
+    the live managers).  Never touches the live module globals.
+    """
     oidc_config = config.oidc_provider_config
     if oidc_config is None or not oidc_config.enabled:
         logger.info(
-            "OIDC is disabled, skipping reload",
+            "OIDC is disabled, the live OIDC managers will be cleared",
             extra={"correlation_id": get_correlation_id()},
         )
-        # Clear the existing OIDC manager
-        oidc_routes.oidc_manager = None
-        oidc_routes.state_manager = None
-        return
+        return None, None
+    state_manager = _build_oidc_state_manager()
+    oidc_manager = anyio.from_thread.run(_initialized_oidc_manager, oidc_config)
+    logger.info(
+        f"OIDC managers prepared for provider: {oidc_config.provider_name} (will initialize on next login)",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return oidc_manager, state_manager
 
-    # Create new OIDC manager with updated configuration
-    # Reuse existing user_manager and jwt_manager from module level
+
+def _build_oidc_state_manager() -> Any:
+    """A StateManager wired exactly as startup wires it; call OFF the event loop.
+
+    Construction opens its SQLite store and ensures its schema.  In cluster
+    mode the shared PostgreSQL pool (critical pool first, else the general
+    pool -- the startup rule) is attached so SSO state is shared across nodes.
+    """
     from .. import app as app_module
+    from ..auth.oidc import state_manager as state_module
 
+    state_manager = state_module.StateManager()
+    registry = getattr(app_module.app.state, "backend_registry", None)
+    pool = (
+        (registry.critical_connection_pool or registry.connection_pool)
+        if registry is not None
+        else None
+    )
+    if pool is not None:
+        state_manager.set_connection_pool(pool)
+    return state_manager
+
+
+async def _initialized_oidc_manager(oidc_config) -> Any:
+    """Construct and initialize an OIDCManager for *oidc_config* (event loop)."""
+    from .. import app as app_module
+    from ..auth.oidc.oidc_manager import OIDCManager
+
+    # Reuse existing user_manager and jwt_manager from module level
     logger.info(
         f"Creating new OIDC manager with config: email_claim={oidc_config.email_claim}, username_claim={oidc_config.username_claim}",
         extra={"correlation_id": get_correlation_id()},
     )
-
-    state_manager = StateManager()
     oidc_manager = OIDCManager(
         config=oidc_config,
         user_manager=app_module.user_manager,
@@ -6670,19 +6754,7 @@ async def _reload_oidc_configuration():
             "GroupAccessManager injected into reloaded OIDCManager for SSO auto-provisioning",
             extra={"correlation_id": get_correlation_id()},
         )
-
-    # Replace the old managers with new ones
-    oidc_routes.oidc_manager = oidc_manager
-    oidc_routes.state_manager = state_manager
-
-    logger.info(
-        f"OIDC configuration reloaded for provider: {oidc_config.provider_name} (will initialize on next login)",
-        extra={"correlation_id": get_correlation_id()},
-    )
-    logger.info(
-        f"New OIDC manager config - email_claim: {oidc_manager.config.email_claim}, username_claim: {oidc_manager.config.username_claim}",
-        extra={"correlation_id": get_correlation_id()},
-    )
+    return oidc_manager
 
 
 def _get_qec_total_entries() -> int:
@@ -9273,13 +9345,9 @@ def reset_config(
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    # Reset to defaults using ConfigService
+    # Reset to defaults using ConfigService (one audited change)
     try:
-        config_service = get_config_service()
-        # Create a fresh default config and save it
-        default_config = config_service.config_manager.create_default_config()
-        config_service.save_config(default_config)
-        config_service._config = default_config  # Update cached config
+        get_config_service().reset_to_defaults_audited(actor=session.username)
 
         return _create_config_page_response(
             request,
@@ -9329,35 +9397,40 @@ async def update_langfuse_pull_config(
     config_service = get_config_service()
 
     try:
-        # Update scalar settings
-        config_service.update_setting(
-            "langfuse", "pull_enabled", form_data.get("pull_enabled", "false")
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_host",
-            form_data.get("pull_host", "https://cloud.langfuse.com"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_sync_interval_seconds",
-            form_data.get("pull_sync_interval_seconds", "300"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_trace_age_days",
-            form_data.get("pull_trace_age_days", "30"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_max_concurrent_observations",
-            form_data.get("pull_max_concurrent_observations", "5"),
-        )
-
-        # Update projects from JSON
+        # Scalar settings plus the projects JSON, as ONE audited change.
+        updates: List[Tuple[str, str, Any]] = [
+            ("langfuse", "pull_enabled", form_data.get("pull_enabled", "false")),
+            (
+                "langfuse",
+                "pull_host",
+                form_data.get("pull_host", "https://cloud.langfuse.com"),
+            ),
+            (
+                "langfuse",
+                "pull_sync_interval_seconds",
+                form_data.get("pull_sync_interval_seconds", "300"),
+            ),
+            (
+                "langfuse",
+                "pull_trace_age_days",
+                form_data.get("pull_trace_age_days", "30"),
+            ),
+            (
+                "langfuse",
+                "pull_max_concurrent_observations",
+                form_data.get("pull_max_concurrent_observations", "5"),
+            ),
+        ]
         projects_json = form_data.get("pull_projects", "[]")
         if projects_json:
-            config_service.update_setting("langfuse", "pull_projects", projects_json)
+            updates.append(("langfuse", "pull_projects", projects_json))
+        await asyncio.to_thread(
+            functools.partial(
+                config_service.update_settings_audited,
+                updates,
+                actor=session.username,
+            )
+        )
 
         return _create_config_page_response(
             request,
@@ -9436,16 +9509,24 @@ async def update_cidx_meta_backup_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-    try:
+    def _save_and_bootstrap() -> None:
         config_service = get_config_service()
-        config_service.update_setting("cidx_meta_backup", "enabled", enabled)
-        config_service.update_setting("cidx_meta_backup", "remote_url", remote_url)
-
+        config_service.update_settings_audited(
+            [
+                ("cidx_meta_backup", "enabled", enabled),
+                ("cidx_meta_backup", "remote_url", remote_url),
+            ],
+            actor=session.username,
+        )
         if remote_url:
             from ..services.cidx_meta_backup import get_cidx_meta_path
 
             repo_root = get_cidx_meta_path(config_service.config_manager.server_dir)
             CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
+
+    try:
+        # One audited change plus the bootstrap, off the event loop.
+        await asyncio.to_thread(_save_and_bootstrap)
 
         return _create_config_page_response(
             request,
@@ -9628,11 +9709,16 @@ async def update_config_section(
                 )
 
             _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
-            config_service.update_totp_elevation_atomic(
-                enabled=_enabled,
-                idle_timeout_seconds=_idle,
-                max_age_seconds=_max_age,
-                session_manager=_esm,
+            # One audited change, off the event loop.
+            await anyio.to_thread.run_sync(
+                functools.partial(
+                    config_service.update_totp_elevation_audited,
+                    enabled=_enabled,
+                    idle_timeout_seconds=_idle,
+                    max_age_seconds=_max_age,
+                    session_manager=_esm,
+                    actor=session.username,
+                )
             )
             return _create_config_page_response(
                 request,
@@ -9693,50 +9779,40 @@ async def update_config_section(
             for key, value in data.items()
         ]
 
-        # Story #1400 CRITICAL 6: the whole section is now applied as ONE
-        # atomic unit via update_settings_atomic (validate-copy-then-publish
-        # -- a rejected batch never touches the live config, no per-key
-        # partial application). OIDC is the one exception: it needs a live
-        # test-reload BEFORE anything is durably published, so it cannot use
-        # the copy-then-publish primitive (which always publishes on
-        # validation success). It keeps its pre-#1400 shape -- apply
-        # directly against the LIVE config via _apply_setting, validate,
-        # test-reload, and only THEN persist; reload-from-file on failure
-        # undoes the in-memory mutation exactly as before.
-        if section == "oidc":
-            config = config_service.get_config()
-            _previous_host = config.host
-            for category, key, value in _updates:
-                config_service._apply_setting(config, category, key, value)
-            config_service.config_manager.validate_config(
-                config, previous_host=_previous_host
+        # Story #1400 CRITICAL 6: the whole section is applied as ONE atomic,
+        # audited change (validate-copy-then-publish -- a rejected batch
+        # never touches the live config, no per-key partial application),
+        # off the event loop.  OIDC builds managers for the CANDIDATE before
+        # anything is published (a failed build publishes nothing) and they
+        # go live only once the change is published.
+        prepared_oidc: Dict[str, Any] = {}
+        before_publish = (
+            functools.partial(
+                _prepare_oidc_candidate_from_worker_thread, prepared=prepared_oidc
             )
-            try:
-                # Try to reload with new config (don't save yet)
-                await _reload_oidc_configuration()
-                logger.info(
-                    "OIDC configuration validated and reloaded successfully",
-                    extra={"correlation_id": get_correlation_id()},
+            if section == "oidc"
+            else None
+        )
+        try:
+            await anyio.to_thread.run_sync(
+                functools.partial(
+                    config_service.update_settings_audited,
+                    _updates,
+                    actor=session.username,
+                    before_publish=before_publish,
                 )
-            except Exception as e:
-                # Reload failed - reload original config from file to restore working state
-                logger.error(
-                    format_error_log(
-                        "STORE-GENERAL-047",
-                        f"Failed to reload OIDC configuration: {e}",
-                    ),
-                    exc_info=True,
-                )
-                config_service.load_config()  # Reload from file to undo in-memory changes
-                return _create_config_page_response(
-                    request,
-                    session,
-                    error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-            config_service.save_config(config)
-        else:
-            config_service.update_settings_atomic(_updates)
+            )
+        except _OidcReloadFailed as e:
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        except BootstrapFileNotWritten:
+            _install_oidc_managers(prepared_oidc)  # published all the same
+            raise
+        _install_oidc_managers(prepared_oidc)
 
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
@@ -9863,7 +9939,9 @@ def save_api_key(
         token_manager = _get_token_manager()
         # Strip whitespace from token before validation (Issue #716 Bug 2a)
         token = token.strip()
-        token_manager.save_token(platform, token, base_url=api_url)
+        token_manager.save_token_audited(
+            platform, token, base_url=api_url, actor=session.username
+        )
 
         platform_name = "GitHub" if platform == "github" else "GitLab"
         return _create_config_page_response(
@@ -9928,7 +10006,7 @@ def delete_api_key(
     # Delete token using CITokenManager - use same server_dir as config service
     try:
         token_manager = _get_token_manager()
-        token_manager.delete_token(platform)
+        token_manager.delete_token_audited(platform, actor=session.username)
 
         platform_name = "GitHub" if platform == "github" else "GitLab"
         logger.info(
@@ -12116,13 +12194,21 @@ async def save_self_monitoring_config(
     if model not in ("opus", "sonnet", "haiku"):
         model = "opus"
 
-    # Update configuration (enabled, cadence, and model only)
-    config.self_monitoring_config.enabled = enabled  # type: ignore[union-attr]
-    config.self_monitoring_config.cadence_minutes = cadence_minutes  # type: ignore[union-attr]
-    config.self_monitoring_config.model = model  # type: ignore[union-attr]
+    # Update configuration (enabled, cadence, and model only) as ONE audited
+    # change on a candidate copy, off the event loop.
+    def _set_self_monitoring(candidate) -> None:
+        candidate.self_monitoring_config.enabled = enabled
+        candidate.self_monitoring_config.cadence_minutes = cadence_minutes
+        candidate.self_monitoring_config.model = model
 
-    # Save configuration
-    config_service.save_config(config)
+    config = await asyncio.to_thread(
+        functools.partial(
+            config_service.apply_audited_change,
+            _set_self_monitoring,
+            actor=session.username,
+            target_id="self_monitoring",
+        )
+    )
 
     # Bug #128: Start/stop service based on enabled flag
     service = getattr(request.app.state, "self_monitoring_service", None)
