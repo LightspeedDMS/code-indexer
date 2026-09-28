@@ -307,6 +307,38 @@ def _read_max_commits_from_fixed_temporal_root(
         return None
 
 
+def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
+    """Build the trigram index of a golden repo base clone (refresh step 1b).
+
+    Lets /api/regex/search pre-filter candidate files instead of scanning the
+    whole (NFS-backed) working tree. Built at index time from the same
+    gitignore-aware file set. Non-fatal: on any failure regex search simply
+    falls back to a full scan.
+
+    First removes build temps left behind by a killed build (deploy restart,
+    SIGKILL) -- otherwise they accumulate and every snapshot copies them. Only
+    stale temps are removed, so a concurrent live build in the same directory
+    (e.g. a lazy build on another node, which takes no lock) is never harmed.
+    """
+    try:
+        from code_indexer.global_repos.trigram_index_manager import (
+            TrigramIndexManager,
+            remove_leftover_build_files,
+            trigram_index_dir,
+        )
+
+        tri_source_path = Path(source_path)
+        tri_dir = trigram_index_dir(tri_source_path)
+        remove_leftover_build_files(tri_dir)
+        tri_files = TrigramIndexManager(tri_dir).build(tri_source_path)
+        logger.info(f"Trigram index built for {alias_name} ({tri_files} files)")
+    except Exception as tri_exc:  # never fail indexing over the pre-filter
+        logger.warning(
+            f"Trigram index build failed for {alias_name} "
+            f"(regex search will full-scan): {tri_exc}"
+        )
+
+
 def _is_git_repo_url(repo_url: str) -> bool:
     """
     Return True if repo_url represents a remote git repository.
@@ -3639,25 +3671,8 @@ class RefreshScheduler:
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
-        # Step 1b: build the trigram index for index-assisted regex search, so
-        # /api/regex/search can pre-filter candidate files instead of scanning the
-        # whole (NFS-backed) working tree. Built here at index time from the same
-        # gitignore-aware file set. Non-fatal: on any failure regex search simply
-        # falls back to a full scan.
-        try:
-            from code_indexer.global_repos.trigram_index_manager import (
-                TrigramIndexManager,
-            )
-
-            _tri_source_path = Path(source_path)
-            _tri_dir = _tri_source_path / ".code-indexer" / "trigram_index"
-            _tri_files = TrigramIndexManager(_tri_dir).build(_tri_source_path)
-            logger.info(f"Trigram index built for {alias_name} ({_tri_files} files)")
-        except Exception as _tri_exc:  # never fail indexing over the pre-filter
-            logger.warning(
-                f"Trigram index build failed for {alias_name} "
-                f"(regex search will full-scan): {_tri_exc}"
-            )
+        # Step 1b: build the trigram index for index-assisted regex search.
+        _build_source_trigram_index(alias_name, source_path)
 
         # Execute Step 2: temporal indexing (if enabled)
         if temporal_command is not None:

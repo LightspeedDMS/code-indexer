@@ -38,8 +38,14 @@ from code_indexer.global_repos.snapshot_deletion_errors import (
 )
 from code_indexer.server.telemetry.spans import create_span
 
+from code_indexer.global_repos.trigram_index_manager import (
+    remove_leftover_build_files,
+    trigram_index_dir,
+)
+
 from .clone_backend import _RETRYABLE_DELETE_ERRNOS
 from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
+from .snapshot_paths import resolve_versioned_snapshot_root
 
 if TYPE_CHECKING:
     from .clone_backend import CloneBackend  # pragma: no cover
@@ -237,6 +243,7 @@ class VersionedSnapshotManager:
             "cidx.snapshot_manager.create_cow_snapshot",
             attributes={"alias": alias},
         ):
+            self._remove_source_trigram_build_leftovers(source_path)
             if self._clone_backend is not None:
                 return self._create_clone_backend_snapshot(
                     alias, source_path, timestamp
@@ -245,6 +252,42 @@ class VersionedSnapshotManager:
             if self._flexclone is not None:
                 return self._create_flexclone_snapshot(alias, timestamp)
             return self._create_cow_snapshot(alias, source_path, timestamp)
+
+    def _remove_source_trigram_build_leftovers(self, source_path: str) -> None:
+        """Keep leftover trigram build temps out of the snapshot being created.
+
+        Every backend copies the whole source tree (``cp --reflink=auto -a``
+        locally or in the CoW daemon, a volume clone on ONTAP) with no exclude
+        support, so the only backend-agnostic way to keep a killed build's
+        ``trigrams.*.db.building`` out of ``.versioned/`` is to remove it from
+        the base clone before the copy. Only STALE temps are removed (see
+        ``remove_leftover_build_files``), so this is safe whether or not the
+        caller holds the per-repo write lock: a temp still being written by a
+        live build (a refresh, or a lazy build on any node) is left alone.
+
+        A source that is, or lies inside, a versioned snapshot is never
+        touched: snapshot contents change only via whole-snapshot deletion.
+        A failed removal is logged and the snapshot proceeds -- the leftover
+        is garbage, and blocking every publish of this repo over it would be
+        worse than copying it as before.
+        """
+        if (
+            resolve_versioned_snapshot_root(
+                source_path, mount_point=self._backend_mount_point()
+            )
+            is not None
+        ):
+            return
+        index_dir = trigram_index_dir(Path(source_path))
+        try:
+            remove_leftover_build_files(index_dir)
+        except OSError as exc:
+            logger.warning(
+                "Could not remove leftover trigram build files from %s before "
+                "snapshotting; they will be copied into the snapshot: %s",
+                index_dir,
+                exc,
+            )
 
     def _create_clone_backend_snapshot(
         self, alias: str, source_path: str, timestamp: int
