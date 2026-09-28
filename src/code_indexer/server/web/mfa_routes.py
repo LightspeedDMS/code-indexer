@@ -211,6 +211,20 @@ def get_totp_service():  # type: ignore[no-untyped-def]
     return _totp_service
 
 
+def _verified_factor(username: str, code: str) -> Optional[str]:
+    """Check *code* as a current TOTP code, then as a recovery code.
+
+    Returns which factor it proved ("totp" or "recovery_code"), or None.
+    A matching recovery code is consumed.
+    """
+    assert _totp_service is not None
+    if _totp_service.verify_code(username, code):
+        return "totp"
+    if _totp_service.verify_recovery_code(username, code):
+        return "recovery_code"
+    return None
+
+
 def _get_session_username(request: Request) -> Optional[str]:
     """Extract username from admin session."""
     from ..web.auth import get_session_manager
@@ -409,7 +423,12 @@ def mfa_setup_page(
         if uri is None:
             return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
     else:
-        secret = _totp_service.generate_secret(target_user)
+        if is_cross_user:
+            secret = _totp_service.regenerate_secret_cross_user(
+                target_user, actor=admin_username
+            )
+        else:
+            secret = _totp_service.generate_secret(target_user)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
         uri = _totp_service.get_provisioning_uri(target_user)
@@ -477,7 +496,7 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
             403,
         )
 
-    codes = _totp_service.generate_recovery_codes(target)
+    codes = _totp_service.regenerate_recovery_codes(target, actor=admin_username)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
     logger.info("Recovery codes regenerated for %s (by %s)", target, admin_username)
@@ -546,10 +565,10 @@ def mfa_verify(
         return _render_qr_error(username, "Invalid code.", show_mode=True)
 
     # Setup mode: activate MFA
-    if _totp_service.activate_mfa(username, totp_code):
-        codes = _totp_service.generate_recovery_codes(username)
-        if codes is None:
-            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    codes = _totp_service.activate_mfa_and_issue_recovery_codes(
+        username, totp_code, actor=admin_username
+    )
+    if codes is not None:
         logger.info("MFA activated for user %s (by %s)", username, admin_username)
         return HTMLResponse(_render_recovery_codes(codes))
 
@@ -589,14 +608,12 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
             403,
         )
 
-    valid = _totp_service.verify_code(
-        username, totp_code
-    ) or _totp_service.verify_recovery_code(username, totp_code)
-    if not valid:
+    factor = _verified_factor(username, totp_code)
+    if factor is None:
         return HTMLResponse("Invalid code. MFA was NOT disabled.", status_code=400)
 
     try:
-        _totp_service.disable_mfa(username)
+        _totp_service.disable_mfa(username, actor=username, method=factor)
     except Exception as e:
         logger.error("Failed to disable MFA for %s: %s", username, e)
         return HTMLResponse("Failed to disable MFA", status_code=500)
@@ -703,10 +720,10 @@ def user_mfa_verify(
             re_setup_link="/user/mfa/setup?mode=new",
         )
 
-    if _totp_service.activate_mfa(username, totp_code):
-        codes = _totp_service.generate_recovery_codes(username)
-        if codes is None:
-            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    codes = _totp_service.activate_mfa_and_issue_recovery_codes(
+        username, totp_code, actor=username
+    )
+    if codes is not None:
         logger.info("MFA activated for user %s (self-service)", username)
         return HTMLResponse(_render_recovery_codes(codes, done_link=_USER_BACK_LINK))
 
@@ -729,7 +746,7 @@ def user_mfa_recovery_codes_page(request: Request):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    codes = _totp_service.generate_recovery_codes(username)
+    codes = _totp_service.regenerate_recovery_codes(username, actor=username)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
     logger.info("Recovery codes regenerated for %s (self-service)", username)
@@ -745,14 +762,12 @@ def user_mfa_disable(request: Request, totp_code: str = Form(...)):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    valid = _totp_service.verify_code(
-        username, totp_code
-    ) or _totp_service.verify_recovery_code(username, totp_code)
-    if not valid:
+    factor = _verified_factor(username, totp_code)
+    if factor is None:
         return HTMLResponse("Invalid code. MFA was NOT disabled.", status_code=400)
 
     try:
-        _totp_service.disable_mfa(username)
+        _totp_service.disable_mfa(username, actor=username, method=factor)
     except Exception as e:
         logger.error("Failed to disable MFA for %s: %s", username, e)
         return HTMLResponse("Failed to disable MFA", status_code=500)

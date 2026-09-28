@@ -208,7 +208,7 @@ def _activate_admin_totp(admin_username: str) -> str:
 def _disable_admin_totp(admin_username: str) -> None:
     """Disable TOTP for admin_username (cleanup in finally blocks)."""
     totp_service = _get_totp_service()
-    totp_service.disable_mfa(admin_username)
+    totp_service.disable_mfa(admin_username, actor=admin_username)
 
 
 def _set_enforcement(enabled: bool) -> bool:
@@ -282,7 +282,7 @@ class TestAC1EnforcementOnNoTotpAndWrongOtp:
         username = _admin_username()
         # Ensure MFA is disabled (clean slate)
         totp_service = _get_totp_service()
-        totp_service.disable_mfa(username)
+        totp_service.disable_mfa(username, actor=username)
 
         # Reuse the session-scoped admin_token (obtained before any TOTP enrollment)
         # so we never re-login and never hit the replay-prevention window.

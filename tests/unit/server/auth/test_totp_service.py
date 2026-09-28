@@ -160,7 +160,7 @@ class TestRecoveryCodes:
     def test_regenerate_invalidates_old_codes(self, totp_service):
         totp_service.generate_secret("alice")
         old_codes = totp_service.generate_recovery_codes("alice")
-        new_codes = totp_service.regenerate_recovery_codes("alice")
+        new_codes = totp_service.regenerate_recovery_codes("alice", actor="alice")
         assert totp_service.verify_recovery_code("alice", old_codes[0]) is False
         assert totp_service.verify_recovery_code("alice", new_codes[0]) is True
 
@@ -186,7 +186,7 @@ class TestMFALifecycle:
         totp_service.generate_recovery_codes("alice")
         totp = pyotp.TOTP(secret)
         totp_service.activate_mfa("alice", totp.now())
-        totp_service.disable_mfa("alice")
+        totp_service.disable_mfa("alice", actor="alice")
         assert totp_service.is_mfa_enabled("alice") is False
         assert totp_service.get_provisioning_uri("alice") is None
 
@@ -496,7 +496,7 @@ class TestClusterMFAOperations:
         secret = totp_service_with_pool.generate_secret("alice")
         totp = pyotp.TOTP(secret)
         totp_service_with_pool.activate_mfa("alice", totp.now())
-        totp_service_with_pool.disable_mfa("alice")
+        totp_service_with_pool.disable_mfa("alice", actor="alice")
         assert totp_service_with_pool.is_mfa_enabled("alice") is False
 
     def test_is_mfa_enabled_via_pool(self, totp_service_with_pool):
