@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 
 _UNIT_CONTENT = """\
@@ -153,6 +155,53 @@ class TestEnsureLaunchConfigRejectsOutOfRangePortWorkers:
     def test_workers_above_max_refuses_rewrite(self, tmp_path):
         result, unit_after, tee_called = _run_apply_with_launch_values(
             tmp_path, host="192.0.2.10", workers=65
+        )
+        assert not tee_called
+        assert unit_after == _UNIT_CONTENT
+        assert result is None
+
+
+class TestEnsureLaunchConfigSharesTheHostValidator:
+    """The deployer re-validation accepts exactly the set the config write
+    paths accept: trailing-dot FQDNs and "_" in labels pass, metacharacters
+    do not."""
+
+    def test_trailing_dot_fqdn_is_accepted(self, tmp_path):
+        result, unit_after, tee_called = _run_apply_with_launch_values(
+            tmp_path, host="host.example.com."
+        )
+        assert tee_called
+        assert "--host host.example.com. " in unit_after
+        assert result is not None
+
+    def test_underscore_hostname_is_accepted(self, tmp_path):
+        result, unit_after, tee_called = _run_apply_with_launch_values(
+            tmp_path, host="node_1.example.internal"
+        )
+        assert tee_called
+        assert "--host node_1.example.internal " in unit_after
+        assert result is not None
+
+    @pytest.mark.parametrize("host", ["127.0.0.1.", "10.0.0.1.", "0x7f.0.0.1", "127.1"])
+    def test_non_canonical_numeric_host_refuses_rewrite(self, tmp_path, host):
+        result, unit_after, tee_called = _run_apply_with_launch_values(
+            tmp_path, host=host
+        )
+        assert not tee_called
+        assert unit_after == _UNIT_CONTENT
+        assert result is None
+
+    def test_backtick_host_refuses_rewrite(self, tmp_path):
+        result, unit_after, tee_called = _run_apply_with_launch_values(
+            tmp_path, host="node`id`.example.internal"
+        )
+        assert not tee_called
+        assert unit_after == _UNIT_CONTENT
+        assert result is None
+
+    def test_dollar_host_refuses_rewrite(self, tmp_path):
+        result, unit_after, tee_called = _run_apply_with_launch_values(
+            tmp_path, host="node$HOME.example.internal"
         )
         assert not tee_called
         assert unit_after == _UNIT_CONTENT

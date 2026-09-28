@@ -34,3 +34,24 @@ class TestValidateConfigSectionRejectsInvalidHost:
     def test_host_with_percent_zone_id_is_rejected(self):
         result = _validate_config_section("server", {"host": "fe80::1%eth0"})
         assert result is not None
+
+
+class TestValidateConfigSectionOnlyValidatesAChangedHost:
+    def test_unchanged_persisted_host_is_not_revalidated(self):
+        result = _validate_config_section(
+            "server", {"host": " fe80::1%eth0 "}, persisted_host="fe80::1%eth0"
+        )
+        assert result is None
+
+    def test_changed_invalid_host_is_rejected(self):
+        result = _validate_config_section(
+            "server", {"host": "fe80::2%eth1"}, persisted_host="fe80::1%eth0"
+        )
+        assert result is not None
+
+    def test_legacy_hostname_forms_are_accepted(self):
+        for host in ("host.example.com.", "node_1.example.internal"):
+            result = _validate_config_section(
+                "server", {"host": host}, persisted_host="0.0.0.0"
+            )
+            assert result is None, f"expected {host!r} to be accepted, got {result!r}"

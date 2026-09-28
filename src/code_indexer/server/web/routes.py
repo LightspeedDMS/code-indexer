@@ -55,7 +55,7 @@ from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
     SubmissionGateOverloadedError,
 )
-from ..utils.host_validation import is_valid_server_host
+from ..utils.host_validation import normalize_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -6958,8 +6958,16 @@ def _get_current_config() -> dict:
     }
 
 
-def _validate_config_section(section: str, data: dict) -> Optional[str]:
-    """Validate configuration for a section, return error message if invalid."""
+def _validate_config_section(
+    section: str, data: dict, *, persisted_host: Optional[str] = None
+) -> Optional[str]:
+    """Validate configuration for a section, return error message if invalid.
+
+    persisted_host: the currently persisted server host. A submitted host
+    equal to it (after stripping) is not a host change and is not
+    re-validated, so a host persisted before host validation existed never
+    blocks a server-section save that leaves it untouched.
+    """
     if section == "server":
         # Validate host - cannot be empty
         host = data.get("host")
@@ -6967,7 +6975,9 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             host_str = str(host).strip()
             if not host_str:
                 return "Host cannot be empty"
-            if not is_valid_server_host(host_str):
+            try:
+                normalize_server_host(host_str, current_host=persisted_host)
+            except ValueError:
                 return "Host must be a valid IPv4/IPv6 address or hostname"
 
         port = data.get("port")
@@ -9473,8 +9483,15 @@ async def update_config_section(
     form_data = await request.form()
     data = {k: v for k, v in form_data.items() if k != "csrf_token"}
 
+    # The server host is stripped ONCE here, so the change guardrail, the
+    # validation and the stored value all see the same normalised string.
+    _persisted_host: Optional[str] = None
+    if section == "server" and data.get("host") is not None:
+        data["host"] = str(data["host"]).strip()
+        _persisted_host = get_config_service().get_config().host
+
     # Validate configuration
-    error = _validate_config_section(section, data)
+    error = _validate_config_section(section, data, persisted_host=_persisted_host)
     if error:
         return _create_config_page_response(
             request,
@@ -9604,9 +9621,12 @@ async def update_config_section(
         # undoes the in-memory mutation exactly as before.
         if section == "oidc":
             config = config_service.get_config()
+            _previous_host = config.host
             for category, key, value in _updates:
                 config_service._apply_setting(config, category, key, value)
-            config_service.config_manager.validate_config(config)
+            config_service.config_manager.validate_config(
+                config, previous_host=_previous_host
+            )
             try:
                 # Try to reload with new config (don't save yet)
                 await _reload_oidc_configuration()

@@ -2998,19 +2998,28 @@ class ServerConfigManager:
 
         return config
 
-    def validate_config(self, config: ServerConfig) -> None:
+    def validate_config(
+        self, config: ServerConfig, *, previous_host: Optional[str] = None
+    ) -> None:
         """
         Validate configuration settings.
 
         Args:
             config: Configuration to validate
+            previous_host: The host value currently persisted, when config is
+                an edited copy of the persisted config. The host is then only
+                validated if it CHANGED, so a host persisted before host
+                validation existed never blocks saves of unrelated settings.
+                None (default) validates the host unconditionally.
 
         Raises:
             ValueError: If any configuration value is invalid
         """
-        # Validate host (must be an IP literal or RFC 1123 hostname; this
-        # value ultimately flows into privileged system-service config).
-        validate_server_host(config.host)
+        # Validate host (must be an IP literal or hostname; this value
+        # ultimately flows into privileged system-service config). The
+        # auto-updater re-validates it before writing the service unit.
+        if previous_host is None or config.host != previous_host:
+            validate_server_host(config.host)
 
         # Validate workers range
         if not (_SERVER_WORKERS_MIN <= config.workers <= _SERVER_WORKERS_MAX):

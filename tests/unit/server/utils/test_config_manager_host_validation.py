@@ -41,6 +41,28 @@ class TestValidateConfigRejectsInvalidHost:
         _manager(tmp_path).validate_config(config)  # must not raise
 
 
+class TestValidateConfigOnlyValidatesAChangedHost:
+    """With previous_host (the persisted value), an unchanged host is not
+    re-validated; a changed one always is. Without it, host is always
+    validated."""
+
+    _LEGACY = "fe80::1%eth0"
+
+    def test_unchanged_legacy_host_is_not_revalidated(self, tmp_path):
+        config = ServerConfig(server_dir=str(tmp_path), host=self._LEGACY)
+        _manager(tmp_path).validate_config(config, previous_host=self._LEGACY)
+
+    def test_changed_invalid_host_is_rejected(self, tmp_path):
+        config = ServerConfig(server_dir=str(tmp_path), host=_MULTILINE_HOST)
+        with pytest.raises(ValueError):
+            _manager(tmp_path).validate_config(config, previous_host="0.0.0.0")
+
+    def test_legacy_host_without_previous_host_is_rejected(self, tmp_path):
+        config = ServerConfig(server_dir=str(tmp_path), host=self._LEGACY)
+        with pytest.raises(ValueError):
+            _manager(tmp_path).validate_config(config)
+
+
 class TestValidateConfigRejectsOutOfRangeWorkers:
     def test_workers_zero_is_rejected(self, tmp_path):
         config = ServerConfig(server_dir=str(tmp_path), workers=0)

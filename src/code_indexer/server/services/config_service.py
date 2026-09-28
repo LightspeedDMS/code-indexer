@@ -33,7 +33,7 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
-from ..utils.host_validation import validate_server_host
+from ..utils.host_validation import normalize_server_host
 from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
@@ -1251,7 +1251,7 @@ class ConfigService:
                     has_candidate_updates = True
 
             if has_candidate_updates:
-                self.config_manager.validate_config(candidate)
+                self.config_manager.validate_config(candidate, previous_host=live.host)
                 self.save_config(candidate)
                 self._log_applied_updates(updates)
 
@@ -1279,9 +1279,9 @@ class ConfigService:
     ) -> None:
         """Update a server setting."""
         if key == "host":
-            host_str = str(value)
-            validate_server_host(host_str)
-            config.host = host_str
+            # Strip once; the stripped value is what is validated and stored.
+            # An unchanged host is not re-validated (only a change is).
+            config.host = normalize_server_host(str(value), current_host=config.host)
         elif key == "port":
             config.port = int(value)
         elif key == "workers":
@@ -2844,6 +2844,7 @@ class ConfigService:
             ValueError: If any setting fails validation
         """
         config = self.get_config()
+        previous_host = config.host
 
         for category, category_settings in settings.items():
             for key, value in category_settings.items():
@@ -2861,7 +2862,7 @@ class ConfigService:
                     self._update_claude_cli_setting(config, key, value)
 
         # Validate and save
-        self.config_manager.validate_config(config)
+        self.config_manager.validate_config(config, previous_host=previous_host)
         self.save_config(config)
         logger.info(
             "Saved all settings", extra={"correlation_id": get_correlation_id()}
