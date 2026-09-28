@@ -246,7 +246,12 @@ def register_admin_ops_routes(
                 detail=f"Failed to deactivate repository: {str(e)}",
             )
 
-    @app.post("/api/admin/golden-repos", response_model=JobResponse, status_code=202)
+    @app.post(
+        "/api/admin/golden-repos",
+        response_model=JobResponse,
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def add_golden_repo(
         repo_data: AddGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -327,6 +332,7 @@ def register_admin_ops_routes(
         "/api/admin/golden-repos/{alias}/refresh",
         response_model=JobResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def refresh_golden_repo(
         alias: str,
@@ -387,6 +393,7 @@ def register_admin_ops_routes(
         "/api/admin/golden-repos/{alias}/indexes",
         response_model=AddIndexResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def add_golden_repo_index(
         http_request: Request,
@@ -800,7 +807,11 @@ def register_admin_ops_routes(
             logger.error("Error fetching git cleanup history: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.delete("/api/admin/golden-repos/{alias}", status_code=204)
+    @app.delete(
+        "/api/admin/golden-repos/{alias}",
+        status_code=204,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def remove_golden_repo(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),

@@ -985,8 +985,9 @@ def _admin_role_first(handler: Any) -> Any:
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Add a golden repository (admin only)."""
+    """Add a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         repo_url = params.get("url", "")
         alias = params.get("alias", "")
@@ -1046,8 +1047,9 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Remove a golden repository (admin only)."""
+    """Remove a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1070,8 +1072,9 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Refresh a golden repository (admin only)."""
+    """Refresh a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1123,6 +1126,7 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Change the active branch of a golden repository async (Story #308).
 
@@ -1175,10 +1179,11 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5).
 
-    Requires the admin role, matching REST POST
+    Requires the admin role and an elevation window, matching REST POST
     /api/admin/golden-repos/{alias}/indexes.
     """
     alias = args.get("alias", "")

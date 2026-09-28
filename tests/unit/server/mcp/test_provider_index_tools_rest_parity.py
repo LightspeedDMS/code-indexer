@@ -8,12 +8,12 @@ REST rules (``routers/provider_indexes.py`` and
 - every ``/api/admin/provider-indexes`` route is admin-only;
 - ``POST /add``, ``/recreate`` and ``/remove`` additionally require an
   elevation window; the GET routes (providers, status) do not;
-- ``POST /api/admin/golden-repos/{alias}/indexes`` is admin-only with no
-  elevation.
+- ``POST /api/admin/golden-repos/{alias}/indexes`` is admin-only and
+  requires an elevation window.
 
 MCP equivalents under test: ``manage_provider_indexes`` (every action
 admin-only; add/recreate/remove elevation-gated; list_providers/status not)
-and ``add_golden_repo_index`` (admin-only, no elevation).
+and ``add_golden_repo_index`` (admin-only, elevation-gated).
 
 Every call goes through the real MCP ``tools/call`` dispatcher
 (``handle_tools_call``). ``ElevatedSessionManager``, ``TOTPService``,
@@ -384,7 +384,16 @@ class TestAddGoldenRepoIndexMatchesRest:
         assert env.recorder.golden_index_calls == []
 
     @pytest.mark.asyncio
-    async def test_admin_needs_no_window(self, env):
+    async def test_admin_without_window_gets_elevation_required(self, env):
+        data = await env.call(
+            ADMIN, "add_golden_repo_index", {"alias": "repo-a", "index_type": "fts"}
+        )
+        assert data.get("error") == "elevation_required"
+        assert env.recorder.golden_index_calls == []
+
+    @pytest.mark.asyncio
+    async def test_admin_with_window_succeeds(self, env):
+        env.open_window(ADMIN.username)
         data = await env.call(
             ADMIN, "add_golden_repo_index", {"alias": "repo-a", "index_type": "fts"}
         )
