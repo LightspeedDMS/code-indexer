@@ -1143,7 +1143,14 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 
 
 def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5)."""
+    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5).
+
+    Requires the admin role, matching REST POST
+    /api/admin/golden-repos/{alias}/indexes.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     alias = args.get("alias", "")
     index_type = args.get("index_type", "")
 
@@ -2192,8 +2199,67 @@ def _handle_provider_index_action(
     )
 
 
-def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Manage provider-specific semantic indexes (Story #490)."""
+_ADMIN_ROLE_REQUIRED_ERROR = "Permission denied: admin role required"
+
+
+def _admin_role_required_response(user: User) -> Optional[Dict[str, Any]]:
+    """Return an MCP permission error unless ``user`` holds the admin role.
+
+    Uses the predicate of REST ``get_current_admin_user_hybrid``
+    (``manage_users`` permission). Handlers call it themselves so the role
+    holds however the call was admitted, including by a group tool grant.
+    """
+    if user.has_permission("manage_users"):
+        return None
+    return _mcp_response({"success": False, "error": _ADMIN_ROLE_REQUIRED_ERROR})
+
+
+@require_mcp_elevation()
+def _manage_provider_index_mutation(
+    params: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Run an add/recreate/remove action of manage_provider_indexes.
+
+    Elevation-gated to match the REST twins (POST .../add, .../recreate and
+    .../remove carry require_elevation()); the read actions are not.
+    """
+    from code_indexer.server.services.provider_index_service import (
+        ProviderIndexService,
+    )
+
+    action = params.get("action", "")
+    provider_name = params.get("provider", "")
+    repo_alias = params.get("repository_alias", "")
+    if not provider_name:
+        return _mcp_response({"error": "Missing required parameter: provider"})
+    if not repo_alias:
+        return _mcp_response({"error": "Missing required parameter: repository_alias"})
+
+    service = ProviderIndexService(config=get_config_service().get_config())
+    error = service.validate_provider(provider_name)
+    if error:
+        providers = service.list_providers()
+        return _mcp_response(
+            {"error": error, "available_providers": [p["name"] for p in providers]}
+        )
+
+    repo_path = _resolve_golden_repo_path(repo_alias)
+    if not repo_path:
+        return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+
+    return _handle_provider_index_action(
+        action, provider_name, repo_alias, repo_path, user, service
+    )
+
+
+def manage_provider_indexes(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """Manage provider-specific semantic indexes (Story #490); admin-only like
+    the REST provider-index routes. ``kwargs`` carries ``session_key``."""
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
@@ -2202,6 +2268,9 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         action = params.get("action", "")
         if not action:
             return _mcp_response({"error": "Missing required parameter: action"})
+
+        if action in ("add", "recreate", "remove"):
+            return _manage_provider_index_mutation(params, user, **kwargs)
 
         service = ProviderIndexService(config=get_config_service().get_config())
 
@@ -2233,39 +2302,20 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
-        provider_name = params.get("provider", "")
-        repo_alias = params.get("repository_alias", "")
-        if not provider_name:
-            return _mcp_response({"error": "Missing required parameter: provider"})
-        if not repo_alias:
-            return _mcp_response(
-                {"error": "Missing required parameter: repository_alias"}
-            )
-
-        error = service.validate_provider(provider_name)
-        if error:
-            providers = service.list_providers()
-            return _mcp_response(
-                {"error": error, "available_providers": [p["name"] for p in providers]}
-            )
-
-        repo_path = _resolve_golden_repo_path(repo_alias)
-        if not repo_path:
-            return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
-
-        if action in ("add", "recreate", "remove"):
-            return _handle_provider_index_action(
-                action, provider_name, repo_alias, repo_path, user, service
-            )
-
         return _mcp_response({"error": f"Unknown action: {action}"})
     except Exception as e:
         logger.error("manage_provider_indexes error: %s", e, exc_info=True)
         return _mcp_response({"error": str(e)})
 
 
-@require_mcp_elevation()
-def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated mutation helper above consumes it.
+manage_provider_indexes.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+def bulk_add_provider_index(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
     """Bulk add provider index to all repositories (Story #490).
 
     Elevation-gated to match the REST twin (POST .../bulk-add carries
