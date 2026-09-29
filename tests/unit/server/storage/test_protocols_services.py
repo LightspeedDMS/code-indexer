@@ -77,10 +77,12 @@ class TestGroupsBackend:
             "get_all_users_with_groups",
             "user_exists",
             "log_audit",
-            "get_audit_logs",
         }
         protocol_attrs = set(m for m in dir(GroupsBackend) if not m.startswith("_"))
         assert required.issubset(protocol_attrs)
+        # Audit rows are read only through services/audit_log_query.py; the
+        # groups backend has no audit reader of its own.
+        assert "get_audit_logs" not in protocol_attrs
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +115,18 @@ class TestAuditLogBackend:
         from code_indexer.server.storage.protocols import AuditLogBackend
 
         required = {
+            "insert_events",
             "log",
             "log_raw",
-            "query",
+            # The shared read path (services/audit_log_query.py).
+            "query_page",
+            "count_capped",
+            "aggregate",
+            "find_terminal_rows",
             "get_pr_logs",
             "get_cleanup_logs",
         }
         protocol_attrs = set(m for m in dir(AuditLogBackend) if not m.startswith("_"))
         assert required.issubset(protocol_attrs)
+        # The per-backend query() was replaced by the shared read path.
+        assert "query" not in protocol_attrs
