@@ -50,6 +50,7 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
+from ..services.activated_repo_audited_ops import deactivate_repository_for_user
 from ..services.golden_repo_audited_ops import (
     request_golden_repo_refresh,
     submit_provider_scoped_index_job,
@@ -229,10 +230,11 @@ def register_admin_ops_routes(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         try:
-            job_id = golden_repo_manager.activated_repo_manager.deactivate_repository(
-                username=username,
-                user_alias=user_alias,
-                actor_username=current_user.username,
+            job_id = deactivate_repository_for_user(
+                golden_repo_manager.activated_repo_manager,
+                username,
+                user_alias,
+                actor=current_user.username,
             )
             return JobResponse(
                 job_id=job_id,

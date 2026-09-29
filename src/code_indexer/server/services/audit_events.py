@@ -67,6 +67,8 @@ class SystemComponent(str, Enum):
     SSO_PROVISIONING = "sso-provisioning"
     MCP_SELF_REGISTRATION = "mcp-self-registration"
     GOLDEN_REPO_RECONCILER = "golden-repo-reconciler"
+    # The loopback-only maintenance switch, driven by the local auto-updater.
+    LOCALHOST_MAINTENANCE = "localhost-maintenance"
 
 
 class AuditEventInvalid(ValueError):
@@ -225,6 +227,8 @@ AUDIT_TARGET_ID_TYPE: Dict[str, FieldType] = {
     "ci_token": OPAQUE_ID,
     "tool": OPAQUE_ID,
     "auth": USERNAME,
+    # Server-wide operational state: this node, or every node of the cluster.
+    "server": _enum("node", "cluster"),
 }
 
 _D = Delivery.DURABLE
@@ -263,6 +267,7 @@ _CREDENTIAL = {"credential_id": OPAQUE_ID, "for_self": BOOL}
 _GIT_CREDENTIAL = {"platform": _FORGE_PLATFORM, "forge_host": HOSTNAME}
 _PROVIDER_INDEX = {"provider": _EMBEDDING_PROVIDER, "job_id": OPAQUE_ID}
 _TOOL_ACCESS = {"tool_name": OPAQUE_ID, "all_groups": BOOL}
+_MAINTENANCE = {"origin": _enum("loopback")}
 
 
 def _spec(
@@ -365,6 +370,25 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     "provider_api_key_cleared": _spec("config", {"provider": _API_KEY_PROVIDER}),
     "ci_token_set": _spec("ci_token", {"platform": _FORGE_PLATFORM}),
     "ci_token_deleted": _spec("ci_token", {"platform": _FORGE_PLATFORM}),
+    # --- Server operations ---
+    "maintenance_mode_entered": _spec("server", _MAINTENANCE),
+    "maintenance_mode_exited": _spec("server", _MAINTENANCE),
+    # Written before the restart is triggered (a row means "requested"); a
+    # trigger that then raises adds a failure row after the request row.
+    "server_restart_requested": _spec("server", {}),
+    # --- Activated repositories an admin manages for another user ---
+    "user_repo_activated_by_admin": _spec(
+        "user",
+        {
+            "user_alias": REPO_ALIAS,
+            "golden_repo_alias": REPO_ALIAS,
+            "job_id": OPAQUE_ID,
+        },
+        job_based=True,
+    ),
+    "user_repo_deactivated_by_admin": _spec(
+        "user", {"user_alias": REPO_ALIAS, "job_id": OPAQUE_ID}, job_based=True
+    ),
     # --- Legacy-only types (pre-existing writers; payload predates allowlist) ---
     "group_create": _spec("group", None),
     "group_update": _spec("group", None),

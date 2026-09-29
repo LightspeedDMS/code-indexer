@@ -2521,32 +2521,21 @@ def assign_user_to_group(
             request, session, active_tab="users", error_message="Invalid CSRF token"
         )
 
+    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+
     try:
         group_manager = _get_group_manager()
-        old_group = group_manager.get_user_group(user_id)
-        old_group_name = old_group.name if old_group else "None"
-
-        new_group = group_manager.get_group(group_id)
-        if not new_group:
+        try:
+            new_group = group_manager.assign_user_to_group_audited(
+                user_id, group_id, actor=session.username
+            )
+        except GroupNotFoundError:
             return _create_groups_page_response(
                 request,
                 session,
                 active_tab="users",
                 error_message=f"Group {group_id} not found",
             )
-
-        group_manager.assign_user_to_group(user_id, group_id, session.username)
-
-        group_manager.log_audit(
-            admin_id=session.username,
-            action_type="user_group_change",
-            target_type="user",
-            target_id=user_id,
-            details={
-                "old_group": old_group_name,
-                "new_group": new_group.name,
-            },
-        )
 
         return _create_groups_page_response(
             request,
@@ -2821,22 +2810,17 @@ def _revoke_repo_access_recorded(
     """Revoke *repo_name* from a group and record the revocation (synchronous).
 
     Returns ``(group, revoked)``; ``group`` is None when it does not exist.
+    The audited entry point writes the one row of the attempt.
     """
-    group = group_manager.get_group(group_id)
-    if not group:
-        return None, False
-    revoked = bool(
-        group_manager.revoke_repo_access(repo_name=repo_name, group_id=group_id)
-    )
-    if revoked:
-        group_manager.log_audit(
-            admin_id=actor,
-            action_type="repo_access_revoke",
-            target_type="repo",
-            target_id=repo_name,
-            details={"repo": repo_name, "group": group.name},
+    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+
+    try:
+        revoked = bool(
+            group_manager.revoke_repo_access_audited(repo_name, group_id, actor=actor)
         )
-    return group, revoked
+    except GroupNotFoundError:
+        return None, False
+    return group_manager.get_group(group_id), revoked
 
 
 @web_router.post(
@@ -4177,12 +4161,17 @@ def activate_golden_repo(
     )
 
     # Try to activate the repository
+    from code_indexer.server.services.activated_repo_audited_ops import (
+        activate_repository_for_user,
+    )
+
     try:
-        activated_manager = _get_activated_repo_manager()
-        job_id = activated_manager.activate_repository(
-            username=username.strip(),
-            golden_repo_alias=golden_alias.strip(),
+        job_id = activate_repository_for_user(
+            _get_activated_repo_manager(),
+            username.strip(),
+            golden_alias.strip(),
             user_alias=effective_user_alias,
+            actor=session.username,
         )
         return _create_golden_repos_page_response(
             request,
@@ -4911,12 +4900,16 @@ def deactivate_repo(
         )
 
     # Try to deactivate the repository
+    from code_indexer.server.services.activated_repo_audited_ops import (
+        deactivate_repository_for_user,
+    )
+
     try:
-        manager = _get_activated_repo_manager()
-        job_id = manager.deactivate_repository(
-            username=username,
-            user_alias=user_alias,
-            actor_username=session.username,  # AC12: attribute to admin who clicked
+        job_id = deactivate_repository_for_user(
+            _get_activated_repo_manager(),
+            username,
+            user_alias,
+            actor=session.username,  # AC12: attribute to admin who clicked
         )
         job_link = f'<a href="/admin/jobs?search={job_id}">{job_id}</a>'
         return _create_repos_page_response(
@@ -12562,10 +12555,17 @@ def restart_server(request: Request) -> JSONResponse:
     #
     # Solo: retain the existing single-node restart path (materialize + signal /
     # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+    from code_indexer.server.services.server_restart_audited import (
+        request_server_restart,
+    )
+
     config_svc = get_config_service()
     if config_svc._pool is not None:
-        # Cluster mode: bump generation, let per-poll check handle restart.signal
-        config_svc.bump_launch_restart_generation()
+        # Cluster mode: bump generation, let per-poll check handle restart.signal.
+        # The audit row is written durably BEFORE the bump.
+        request_server_restart(
+            config_svc.bump_launch_restart_generation, actor=username, scope="cluster"
+        )
         with _restart_lock:
             _restart_in_progress = False
         return JSONResponse(
@@ -12578,9 +12578,13 @@ def restart_server(request: Request) -> JSONResponse:
             },
         )
 
-    # Solo mode: materialize launch config then schedule single-node restart
-    config_svc.materialize_launch_config()
-    _schedule_delayed_restart(delay=2)
+    # Solo mode: materialize launch config then schedule single-node restart.
+    # The audit row is written durably BEFORE the restart is scheduled.
+    def _restart_this_node() -> None:
+        config_svc.materialize_launch_config()
+        _schedule_delayed_restart(delay=2)
+
+    request_server_restart(_restart_this_node, actor=username, scope="node")
 
     # Return 202 Accepted immediately
     return JSONResponse(

@@ -666,7 +666,8 @@ LEGACY_DETAILS_READ_SCHEMA: Dict[str, Dict[str, FieldType]] = {
     "user_group_assign": _MEMBERSHIP_READ,
     "user_assign": _MEMBERSHIP_READ,
     "repo_access_grant": _REPO_ACCESS_READ,
-    "repo_access_revoke": _REPO_ACCESS_READ,
+    # A bulk revoke's one summary row counts the repositories not in the group.
+    "repo_access_revoke": {**_REPO_ACCESS_READ, "not_in_group_count": INT},
     "impersonation_set": {"actor_username": USERNAME, "target_username": USERNAME},
     "impersonation_cleared": {"actor_username": USERNAME, "previous_target": USERNAME},
     "impersonation_denied": {"actor_username": USERNAME, "target_username": USERNAME},

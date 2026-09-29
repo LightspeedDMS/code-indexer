@@ -30,7 +30,7 @@ from .constants import (
 )
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.audit_events import ALL_TARGETS_MARKER
-from code_indexer.server.services.audit_outcome import record_outcome
+from code_indexer.server.services.audit_outcome import audit_target_id, record_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,10 @@ class CidxMetaCannotBeRevokedError(Exception):
     """Raised when attempting to revoke cidx-meta access from any group."""
 
     pass
+
+
+class GroupNotFoundError(ValueError):
+    """Raised by an audited operation when the group it names does not exist."""
 
 
 @dataclass
@@ -692,6 +696,66 @@ class GroupAccessManager:
 
         self._conn_manager.execute_atomic(_do_assign)
 
+    def assign_user_to_group_audited(
+        self, user_id: str, group_id: int, *, actor: str
+    ) -> Group:
+        """Move *user_id* into group *group_id*, recording ``user_group_change``.
+
+        The one entry point of every door that moves a user between groups.
+        One row per call: ``success`` once the membership is written (target:
+        the member now persisted; details: the previous and new group names),
+        or ``failure`` when the group does not exist or the write raised, after
+        which the exception propagates.  A failure names no member.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+        """
+        action = "user_group_change"
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            previous = self.get_user_group(user_id)
+            self.assign_user_to_group(user_id, group_id, actor)
+        except Exception:
+            self._record_group_outcome(actor, action, "user", None, "failure", None)
+            raise
+        details: Dict[str, Any] = {"to_group": group.name}
+        if previous is not None:
+            details["from_group"] = previous.name
+        self._record_group_outcome(actor, action, "user", user_id, "success", details)
+        return group
+
+    def _record_group_outcome(
+        self,
+        actor: str,
+        action_type: str,
+        target_type: str,
+        verified_target: Optional[str],
+        outcome: str,
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        """Record one legacy-type membership / access row; never raises.
+
+        *verified_target* is None unless the operation persisted or found it
+        (a placeholder is recorded then).  Delivery is :meth:`log_audit`'s.
+        """
+        try:
+            self.log_audit(
+                admin_id=actor,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=audit_target_id(target_type, verified_target),
+                details=details,
+                outcome=outcome,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-open by owner decision
+            logger.error(
+                "audit record not written: action_type=%s error_class=%s",
+                action_type,
+                type(exc).__name__,
+            )
+
     def remove_user_from_group(self, user_id: str, group_id: int) -> bool:
         """
         Remove a user from a specific group.
@@ -924,6 +988,88 @@ class GroupAccessManager:
             for cb in self._on_repo_change_callbacks:
                 cb()
         return result["revoked"]  # type: ignore[no-any-return]
+
+    def revoke_repo_access_audited(
+        self, repo_name: str, group_id: int, *, actor: str
+    ) -> bool:
+        """Revoke one repository from a group, recording ``repo_access_revoke``.
+
+        The one entry point of every door that revokes a single repository.
+        One row per call: ``success`` once the grant is removed (target: the
+        repository just removed; details: it and the group name), or
+        ``failure`` when the group does not exist, the repository was not in
+        its list (returns False), or revocation raised (cidx-meta included),
+        after which the exception propagates.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+            CidxMetaCannotBeRevokedError: *repo_name* is cidx-meta.
+        """
+        action = "repo_access_revoke"
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            revoked = self.revoke_repo_access(repo_name, group_id)
+        except Exception:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            raise
+        if not revoked:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            return False
+        alias = audit_target_id("repo", repo_name)
+        self._record_group_outcome(
+            actor,
+            action,
+            "repo",
+            alias,
+            "success",
+            {"repo": alias, "group": group.name},
+        )
+        return True
+
+    def revoke_repos_access_audited(
+        self, repo_names: List[str], group_id: int, *, actor: str
+    ) -> int:
+        """Revoke many repositories from a group; return how many were revoked.
+
+        The one entry point of the bulk revoke doors.  cidx-meta is skipped
+        silently.  Each revoked repository writes its own ``success`` row (as
+        the single-repository door does); the repositories that were not in
+        the group write ONE ``failure`` row between them, carrying only their
+        count, so an unbounded request never writes one row per absent name.
+        A missing group, or a revocation that raised, writes one ``failure``
+        row and the exception propagates.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+        """
+        action = "repo_access_revoke"
+        not_in_group = 0
+        revoked = 0
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            for repo_name in repo_names:
+                if repo_name == CIDX_META_REPO:
+                    continue
+                if not self.revoke_repo_access(repo_name, group_id):
+                    not_in_group += 1
+                    continue
+                revoked += 1
+                alias = audit_target_id("repo", repo_name)
+                details = {"repo": alias, "group": group.name}
+                self._record_group_outcome(
+                    actor, action, "repo", alias, "success", details
+                )
+        except Exception:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            raise
+        if not_in_group:
+            summary = {"group": group.name, "not_in_group_count": not_in_group}
+            self._record_group_outcome(actor, action, "repo", None, "failure", summary)
+        return revoked
 
     def get_group_repos(self, group_id: int) -> List[str]:
         """
@@ -1407,6 +1553,8 @@ class GroupAccessManager:
         target_type: str,
         target_id: str,
         details: Optional[Dict[str, Any]] = None,
+        *,
+        outcome: Optional[str] = None,
     ) -> None:
         """
         Record an audit log entry.
@@ -1422,6 +1570,8 @@ class GroupAccessManager:
             target_type: Type of target (user, group, repo)
             target_id: ID of the target
             details: Optional structured payload describing the action
+            outcome: Explicit outcome (None: the one the name implies).  The
+                standalone-tooling file below has no outcome column.
         """
         if details is not None and not isinstance(details, dict):
             raise TypeError(
@@ -1437,6 +1587,7 @@ class GroupAccessManager:
                 target_type=target_type,
                 target_id=target_id,
                 details=details_json,
+                outcome=outcome,
             )
             return
 
@@ -1454,6 +1605,7 @@ class GroupAccessManager:
                     target_type=target_type,
                     target_id=target_id,
                     details_json=details_json,
+                    outcome=outcome,
                 )
             )
             return

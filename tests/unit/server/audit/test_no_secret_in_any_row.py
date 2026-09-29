@@ -6,9 +6,12 @@ client secret, TOTP secrets and codes, recovery codes, elevation session
 keys, credentials embedded in a clone URL, and free-text names) are driven
 through the REAL audited entry points of every capability class -- and
 through the real REST / Web doors for the configuration secrets -- into ONE
-real SQLite audit store.  Every column of every row is then read back with
-direct SQL and scanned for every sentinel, both as stored and inside the
-decoded ``details`` JSON.
+real SQLite audit store.  Before any scan, each driver invocation's OWN row
+(action type, outcome, target, source and actor) must be present, matched
+one-to-one, so a door that went silent cannot hide behind a sibling door's
+row of the same action type.  Every column of every row is then read back
+with direct SQL and scanned for every sentinel, both as stored and inside
+the decoded ``details`` JSON.
 
 Doubles: the forge API client (network boundary) and the harness doubles of
 ``_audit_front_doors`` (background job runner, Web CSRF, elevation switch).
@@ -23,7 +26,18 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Sequence, Tuple
+from collections import Counter
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import pyotp
 import pytest
@@ -37,9 +51,27 @@ _PASSWORD = "SecureP@ssw0rd!XyZ789"
 # Columns the store generates itself; a short numeric code may collide with
 # their digits by chance, so only those columns are skipped for such codes.
 _GENERATED_COLUMNS = frozenset({"id", "timestamp", "event_uuid", "correlation_id"})
-# Action types the drivers produce only as refusals; every other expected
-# type must also have a success row, so no secret-bearing path stopped early.
-_FAILURE_ONLY = frozenset({"authentication_failure", "elevation_failed"})
+# (action_type, outcome, target_id, source, actor): a row's identity here.
+RowKey = Tuple[str, Optional[str], str, Optional[str], str]
+
+
+@dataclass(frozen=True)
+class Door:
+    """The row ONE driver invocation must leave, identified exactly.
+
+    Two invocations of the same action type differ in target, source or
+    outcome, so each is matched to its own row: a silent door can never be
+    covered by a sibling door's row of the same type.
+    """
+
+    action_type: str
+    outcome: str
+    target_id: str
+    source: str = "system"
+    actor: str = ACTING_ADMIN
+
+    def key(self) -> RowKey:
+        return (self.action_type, self.outcome, self.target_id, self.source, self.actor)
 
 
 @dataclass
@@ -47,12 +79,39 @@ class Secrets:
     """Sentinel secrets per capability class, and the rows each must yield."""
 
     values: Dict[str, List[str]] = field(default_factory=dict)
-    expected: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    doors: Dict[str, List[Door]] = field(default_factory=dict)
 
     def add(self, capability: str, *values: str) -> None:
         for value in values:
             assert value, capability  # an empty sentinel matches everything
             self.values.setdefault(capability, []).append(value)
+
+    def expect(self, capability: str, *doors: Door) -> None:
+        self.doors.setdefault(capability, []).extend(doors)
+
+
+def stored_key(row: Mapping[str, Any]) -> RowKey:
+    return (
+        row["action_type"],
+        row["outcome"],
+        row["target_id"],
+        row["source"],
+        row["admin_id"],
+    )
+
+
+def door_mismatch(
+    rows: Sequence[Mapping[str, Any]], doors: Sequence[Door]
+) -> Tuple[List[RowKey], List[RowKey]]:
+    """``(missing, unexpected)``: the multisets of expected and stored rows differ.
+
+    *missing* are invocations with no stored row of their own; *unexpected*
+    are stored rows no invocation declared (an extra door, or a door that
+    wrote twice).  Both empty means the multisets are equal.
+    """
+    expected = Counter(door.key() for door in doors)
+    stored = Counter(stored_key(row) for row in rows)
+    return list((expected - stored).elements()), list((stored - expected).elements())
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +258,17 @@ def drive_users_and_passwords(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None
         )
         == issued_token
     )
-    s.expected[capability] = (
-        "user_created",
-        "user_password_reset_by_admin",
-        "user_role_changed",
-        "user_email_changed",
-        "user_deleted",
-        "authentication_failure",
-        "authentication_success",
+    s.expect(
+        capability,
+        Door("user_created", "success", _USER),
+        Door("user_created", "failure", "(unknown)"),
+        Door("user_password_reset_by_admin", "success", _USER),
+        Door("user_password_reset_by_admin", "failure", _USER),
+        Door("user_role_changed", "success", _USER),
+        Door("user_email_changed", "success", _USER),
+        Door("user_deleted", "success", _USER),
+        Door("authentication_failure", "failure", "(unknown)", actor="(unknown)"),
+        Door("authentication_success", "success", ACTING_ADMIN),
     )
 
 
@@ -225,7 +287,12 @@ def drive_api_keys(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
     assert not users.delete_api_key_audited(
         ACTING_ADMIN, raw_key_shaped_id, actor=ACTING_ADMIN
     )
-    s.expected[capability] = ("api_key_created", "api_key_deleted")
+    s.expect(
+        capability,
+        Door("api_key_created", "success", key_id),
+        Door("api_key_deleted", "success", key_id),
+        Door("api_key_deleted", "failure", "unresolved"),
+    )
 
 
 def drive_mcp_credentials(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
@@ -245,11 +312,20 @@ def drive_mcp_credentials(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
     assert not manager.revoke_credential_audited(
         ACTING_ADMIN, secret_shaped_id, actor=ACTING_ADMIN
     )
-    s.expected[capability] = ("mcp_credential_created", "mcp_credential_revoked")
+    credential_id = credential["credential_id"]
+    s.expect(
+        capability,
+        Door("mcp_credential_created", "success", credential_id),
+        Door("mcp_credential_revoked", "success", credential_id),
+        Door("mcp_credential_revoked", "failure", "unresolved"),
+    )
 
 
 def drive_ssh_keys(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
-    from code_indexer.server.services.ssh_key_manager import SSHKeyManager
+    from code_indexer.server.services.ssh_key_manager import (
+        SSHKeyManager,
+        audit_key_id,
+    )
 
     capability = "ssh keys"
     ssh_dir = tmp_path / "ssh"
@@ -279,10 +355,13 @@ def drive_ssh_keys(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
     s.add(capability, name, email, description, *private_body)
     manager.assign_key_to_host_audited(name, "git.example.com", actor=ACTING_ADMIN)
     assert manager.delete_key_audited(name, actor=ACTING_ADMIN)
-    s.expected[capability] = (
-        "ssh_key_created",
-        "ssh_key_host_assigned",
-        "ssh_key_deleted",
+    key_id = audit_key_id(metadata.fingerprint)
+    assert key_id is not None
+    s.expect(
+        capability,
+        Door("ssh_key_created", "success", key_id),
+        Door("ssh_key_host_assigned", "success", key_id),
+        Door("ssh_key_deleted", "success", key_id),
     )
 
 
@@ -327,7 +406,13 @@ def drive_git_credentials(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
                 )
             )
     manager.delete_credential_audited(_USER, result["credential_id"], actor=_USER)
-    s.expected[capability] = ("git_credential_configured", "git_credential_deleted")
+    credential_id = result["credential_id"]
+    s.expect(
+        capability,
+        Door("git_credential_configured", "success", credential_id, actor=_USER),
+        Door("git_credential_configured", "failure", "unresolved", actor=_USER),
+        Door("git_credential_deleted", "success", credential_id, actor=_USER),
+    )
 
 
 def drive_provider_api_keys(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
@@ -342,7 +427,11 @@ def drive_provider_api_keys(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
         assert resp.status_code == 200, resp.text
         resp = env.rest("DELETE", f"/api/api-keys/{provider}")
         assert resp.status_code == 200, resp.text
-    s.expected[capability] = ("provider_api_key_set", "provider_api_key_cleared")
+        s.expect(
+            capability,
+            Door("provider_api_key_set", "success", provider, source="rest"),
+            Door("provider_api_key_cleared", "success", provider, source="rest"),
+        )
 
 
 def drive_ci_tokens(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
@@ -353,7 +442,11 @@ def drive_ci_tokens(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
         "POST", "/admin/config/api-keys/github", data={"token": token, "api_url": ""}
     )
     env.web("DELETE", "/admin/config/api-keys/github", headers={"X-CSRF-Token": "x"})
-    s.expected[capability] = ("ci_token_set", "ci_token_deleted")
+    s.expect(
+        capability,
+        Door("ci_token_set", "success", "github", source="web"),
+        Door("ci_token_deleted", "success", "github", source="web"),
+    )
 
 
 def drive_config_secrets(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
@@ -381,7 +474,12 @@ def drive_config_secrets(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
     assert resp.status_code == 200, resp.text
     live = env.config_service.get_config()
     assert live.oidc_provider_config.client_secret == client_secret
-    s.expected[capability] = ("config_changed",)
+    # Two doors write config_changed: each must leave its own row.
+    s.expect(
+        capability,
+        Door("config_changed", "success", "oidc", source="web"),
+        Door("config_changed", "success", "claude_integration", source="rest"),
+    )
 
 
 def drive_repo_url_credentials(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
@@ -394,7 +492,9 @@ def drive_repo_url_credentials(env: DoorsEnv, tmp_path: Path, s: Secrets) -> Non
         submitter_username=ACTING_ADMIN,
         skip_pre_flight_git_validation=True,
     )
-    s.expected[capability] = ("golden_repo_added",)
+    s.expect(
+        capability, Door("golden_repo_added", "success", "example-credential-repo")
+    )
 
 
 def _next_step_code(secret: str) -> str:
@@ -435,13 +535,15 @@ def drive_mfa_and_elevation(env: DoorsEnv, tmp_path: Path, s: Secrets) -> None:
     other_secret = totp.regenerate_secret_cross_user(_USER, actor=ACTING_ADMIN)
     s.add(capability, other_secret)
     totp.disable_mfa(ACTING_ADMIN, actor=ACTING_ADMIN, method="totp")
-    s.expected[capability] = (
-        "mfa_activated",
-        "mfa_recovery_codes_regenerated",
-        "elevation_failed",
-        "elevation_granted",
-        "mfa_secret_regenerated_cross_user",
-        "mfa_disabled",
+    s.expect(
+        capability,
+        Door("mfa_activated", "success", ACTING_ADMIN),
+        Door("mfa_recovery_codes_regenerated", "success", ACTING_ADMIN),
+        Door("elevation_failed", "failure", ACTING_ADMIN),
+        Door("elevation_granted", "success", ACTING_ADMIN),  # TOTP code
+        Door("elevation_granted", "success", ACTING_ADMIN),  # recovery code
+        Door("mfa_secret_regenerated_cross_user", "success", _USER),
+        Door("mfa_disabled", "success", ACTING_ADMIN),
     )
 
 
@@ -469,22 +571,44 @@ def test_no_secret_of_any_class_reaches_any_row(env: DoorsEnv, tmp_path) -> None
     for driver in _DRIVERS.values():
         driver(env, tmp_path, secrets)
     rows = all_rows(env.store.db_path)
-    recorded = {row["action_type"] for row in rows}
-    missing = {
-        capability: sorted(set(expected) - recorded)
-        for capability, expected in secrets.expected.items()
-        if set(expected) - recorded
-    }
-    assert missing == {}, "a capability class produced no row to scan"
-    succeeded = {row["action_type"] for row in rows if row["outcome"] == "success"}
-    unfinished = sorted(
-        {action for expected in secrets.expected.values() for action in expected}
-        - _FAILURE_ONLY
-        - succeeded
-    )
-    assert unfinished == [], "a secret-bearing success path did not complete"
-    assert set(secrets.values) == set(secrets.expected)
+    # Every invocation's OWN row must exist before the scan means anything.
+    assert set(secrets.values) == set(secrets.doors)
+    assert all(secrets.doors[capability] for capability in secrets.values)
+    all_doors = [door for doors in secrets.doors.values() for door in doors]
+    # Expected and stored rows are equal multisets: no door went silent, and
+    # none wrote an extra or duplicate row.
+    assert door_mismatch(rows, all_doors) == ([], [])
     assert leaks(rows, secrets.values) == []
+
+
+def test_a_silent_or_duplicated_door_is_reported() -> None:
+    """Negative control: expected and stored rows are compared as multisets."""
+
+    def row(target: str, source: str, outcome: str = "success") -> Dict[str, Any]:
+        return {
+            "action_type": "config_changed",
+            "outcome": outcome,
+            "target_id": target,
+            "source": source,
+            "admin_id": ACTING_ADMIN,
+        }
+
+    web = Door("config_changed", "success", "oidc", source="web")
+    rest = Door("config_changed", "success", "claude_integration", source="rest")
+    only_web = [row("oidc", "web")]
+    both = [row("oidc", "web"), row("claude_integration", "rest")]
+    # A silent door cannot hide behind a sibling row of the same type.
+    assert door_mismatch(only_web, [web, rest]) == ([rest.key()], [])
+    # One row never satisfies two identical expectations.
+    assert door_mismatch(only_web, [web, web]) == ([web.key()], [])
+    # A door that writes twice leaves an unexpected row.
+    assert door_mismatch([*both, row("oidc", "web")], [web, rest]) == (
+        [],
+        [web.key()],
+    )
+    failed = [row("oidc", "web", "failure")]
+    assert door_mismatch(failed, [web]) == ([web.key()], [stored_key(failed[0])])
+    assert door_mismatch(both, [web, rest]) == ([], [])
 
 
 def test_the_scan_finds_a_secret_in_any_column_or_encoding() -> None:

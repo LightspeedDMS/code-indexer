@@ -44,6 +44,8 @@ _UNAUDITED_PRIMITIVES = frozenset(
         "assign_key_to_host",
         "configure_credential",
         "delete_credential",
+        "assign_user_to_group",
+        "revoke_repo_access",
     }
 )
 _AUDITED_ENTRY_POINTS = frozenset(

@@ -31,12 +31,12 @@ from ..services.audit_log_query import (
     query_audit_log,
     row_fields,
 )
-from ..services.constants import CIDX_META_REPO
 from ..services.group_access_manager import (
     GroupAccessManager,
     Group,
     DefaultGroupCannotBeDeletedError,
     GroupHasUsersError,
+    GroupNotFoundError,
     CidxMetaCannotBeRevokedError,
 )
 from ..mcp.tools import TOOL_REGISTRY
@@ -586,19 +586,15 @@ def assign_user_to_group(
 
     Requires admin role. Replaces any existing group assignment for the user.
     """
-    # Verify group exists
-    group = group_manager.get_group(group_id)
-    if group is None:
+    try:
+        group = group_manager.assign_user_to_group_audited(
+            request.user_id, group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-
-    group_manager.assign_user_to_group(
-        user_id=request.user_id,
-        group_id=group_id,
-        assigned_by=current_user.username,
-    )
 
     return MessageResponse(
         message=f"User '{request.user_id}' assigned to group '{group.name}'"
@@ -757,29 +753,24 @@ def remove_repo_from_group(
     Requires admin role. Revokes the group's access to the repository.
     cidx-meta access cannot be revoked (returns 400).
     """
-    # Verify group exists
-    group = group_manager.get_group(group_id)
-    if group is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Group with ID {group_id} not found",
-        )
-
     try:
-        revoked = group_manager.revoke_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
+        revoked = group_manager.revoke_repo_access_audited(
+            repo_name, group_id, actor=current_user.username
         )
-
         if not revoked:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository '{repo_name}' not found in group '{group.name}' access list",
+                detail=f"Repository '{repo_name}' not found in the group's access list",
             )
 
         # Return 204 No Content on success
         return None
 
+    except GroupNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Group with ID {group_id} not found",
+        )
     except CidxMetaCannotBeRevokedError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -809,45 +800,23 @@ def bulk_remove_repos_from_group(
     Requires admin role. cidx-meta is silently skipped (cannot be removed).
     Returns count of repos actually removed.
     """
-    group = group_manager.get_group(group_id)
-    if group is None:
+    # cidx-meta is skipped silently (AC5); the audited entry point writes one
+    # row per revoked repository and one summary row for the absent ones.
+    try:
+        removed_count = group_manager.revoke_repos_access_audited(
+            request.repos, group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-
-    removed_count = 0
-    removed_repos = []
-
-    for repo_name in request.repos:
-        # Silently skip cidx-meta (AC5 requirement)
-        if repo_name == CIDX_META_REPO:
-            continue
-        try:
-            revoked = group_manager.revoke_repo_access(
-                repo_name=repo_name,
-                group_id=group_id,
-            )
-            if revoked:
-                removed_count += 1
-                removed_repos.append(repo_name)
-        except CidxMetaCannotBeRevokedError:
-            # Should not happen since we skip cidx-meta above, but be safe
-            continue
-
-    # AC7: Log repo access revoke for each removed repo
-    for repo_name in removed_repos:
-        group_manager.log_audit(
-            admin_id=current_user.username,
-            action_type="repo_access_revoke",
-            target_type="repo",
-            target_id=repo_name,
-            details={"repo": repo_name, "group": group.name},
-        )
+    group = group_manager.get_group(group_id)
+    group_name = group.name if group is not None else str(group_id)
 
     return BulkRemoveReposResponse(
         removed=removed_count,
-        message=f"Removed {removed_count} repo(s) from group '{group.name}'",
+        message=f"Removed {removed_count} repo(s) from group '{group_name}'",
     )
 
 
@@ -934,37 +903,15 @@ def move_user_to_group(
             detail=f"User '{user_id}' not found",
         )
 
-    # Check if target group exists
-    target_group = group_manager.get_group(request.group_id)
-    if target_group is None:
+    try:
+        target_group = group_manager.assign_user_to_group_audited(
+            user_id, request.group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {request.group_id} not found",
         )
-
-    # Get previous group for audit log
-    previous_group = group_manager.get_user_group(user_id)
-    previous_group_name = previous_group.name if previous_group else "none"
-
-    # Perform the move
-    group_manager.assign_user_to_group(
-        user_id=user_id,
-        group_id=request.group_id,
-        assigned_by=current_user.username,
-    )
-
-    # AC7: Log user group change
-    group_manager.log_audit(
-        admin_id=current_user.username,
-        action_type="user_group_change",
-        target_type="user",
-        target_id=user_id,
-        details={
-            "user_id": user_id,
-            "from_group": previous_group_name,
-            "to_group": target_group.name,
-        },
-    )
 
     return MessageResponse(
         message=f"User '{user_id}' moved to group '{target_group.name}'"

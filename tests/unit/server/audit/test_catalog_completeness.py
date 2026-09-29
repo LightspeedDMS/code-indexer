@@ -7,20 +7,24 @@ without this test noticing it:
   ``public``, the login tool);
 - MCP handlers carrying the ``__mcp_requires_session_key__`` marker (the
   elevation-gated tools);
-- mutating REST and Web routes (POST/PUT/PATCH/DELETE) whose dependency tree
-  holds an admin or elevation gate, or whose body checks the admin session or
-  the elevation window.  The route table is the production wiring's own,
-  built in a separate process (``_audit_route_table_probe``).
+- EVERY registered mutating REST and Web route (POST/PUT/PATCH/DELETE) of the
+  app as mounted at startup, including the routers the lifespan mounts, plus
+  the self-authenticating GET doors.  The route table is the production
+  wiring's own, built in a separate process (``_audit_route_table_probe``).
+  No gate detection decides what is inventoried, so a route guarded by a
+  helper nobody listed is still inventoried.
 
-Doors that authenticate the caller themselves (logins, MFA, elevation) carry
-no such gate, so they are listed in ``_SELF_AUTHENTICATING_*``; each must
-still exist.
+Every route is then MAPPED to catalog action types, EXEMPT with a one-line
+reason, or NON-ADMIN SELF-SERVICE with a one-line reason (the caller acting
+on their own resources, or a read-only search); an unclassified route fails.
+The known admin / elevation gate names remain only as a cross-check: a route
+behind one of them can never be filed as self-service.  The documented-gap
+tables must stay empty.
 
-Every door is then either MAPPED to catalog action types, EXEMPT with a
-one-line reason, or a documented GAP.  A mapped door must reach the emission
-of every type it is mapped to: its handler, or a same-module helper it calls
-(bounded depth), names the type's audited entry point (or, for a legacy type,
-its literal).  Every allowlisted catalog type must be claimed by some door.
+A mapped door must reach the emission of every type it is mapped to: its
+handler, or a same-module helper it calls (bounded depth), names the type's
+audited entry point (or, for a legacy type, its literal or its audited entry
+point).  Every allowlisted catalog type must be claimed by some door.
 """
 
 from __future__ import annotations
@@ -39,6 +43,13 @@ from typing import Callable, Dict, FrozenSet, Iterable, List, Mapping, Set, Tupl
 import pytest
 
 import code_indexer
+from _audit_route_classification import (
+    READ_ONLY,
+    ROUTE_EXEMPT,
+    ROUTE_SELF_SERVICE,
+    SCIP_SCRATCH_CLEANUP,
+    WORKSPACE_GIT,
+)
 from code_indexer.server.services.audit_events import AUDIT_ACTION_CATALOG
 
 _PROBE = Path(__file__).with_name("_audit_route_table_probe.py")
@@ -118,16 +129,31 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "provider_api_key_cleared": {"apply_audited_change"},
         "ci_token_set": {"save_token_audited"},
         "ci_token_deleted": {"delete_token_audited"},
+        "maintenance_mode_entered": {"enter_maintenance_mode_audited"},
+        "maintenance_mode_exited": {"exit_maintenance_mode_audited"},
+        "server_restart_requested": {"request_server_restart"},
+        "user_repo_activated_by_admin": {"activate_repository_for_user"},
+        "user_repo_deactivated_by_admin": {"deactivate_repository_for_user"},
+        # Legacy types whose rows now come from one audited entry point.
+        "user_group_change": {"assign_user_to_group_audited"},
+        "repo_access_revoke": {
+            "revoke_repo_access_audited",
+            "revoke_repos_access_audited",
+        },
     }.items()
 }
 
 
 def _evidence(action_type: str) -> FrozenSet[str]:
     """Names proving a door reaches *action_type*'s emission."""
-    if action_type in _ENTRY_POINTS:
+    spec = AUDIT_ACTION_CATALOG.get(action_type)
+    if spec is not None and spec.details_schema is not None:
         return _ENTRY_POINTS[action_type]
-    # Legacy writers name the type literally or via ``log_<type>``.
-    return frozenset({action_type, f"log_{action_type}"})
+    # Legacy writers name the type literally or via ``log_<type>``, or call
+    # the type's audited entry point.
+    return frozenset(
+        {action_type, f"log_{action_type}", *_ENTRY_POINTS.get(action_type, ())}
+    )
 
 
 _ALL_EVIDENCE: FrozenSet[str] = frozenset(
@@ -178,11 +204,8 @@ _MCP_MAPPED: Dict[str, Tuple[str, ...]] = {
 # Tools that authenticate the caller themselves (no permission gate).
 _SELF_AUTHENTICATING_MCP = frozenset({"elevate_session"})
 
-_READ_ONLY = "read-only: lists or reports state, changes nothing"
-_WORKSPACE_GIT = (
-    "git operation inside the caller's activated working copy; changes "
-    "repository content, not accounts, credentials, access or configuration"
-)
+_READ_ONLY = READ_ONLY
+_WORKSPACE_GIT = WORKSPACE_GIT
 
 _MCP_EXEMPT: Dict[str, str] = {
     "admin_embedding_stats_query": _READ_ONLY,
@@ -202,8 +225,11 @@ _MCP_EXEMPT: Dict[str, str] = {
     "git_branch_delete": _WORKSPACE_GIT,
     "git_clean": _WORKSPACE_GIT,
     "git_reset": _WORKSPACE_GIT,
-    "scip_cleanup_workspaces": "maintenance: removes temporary SCIP scratch workspaces",
-    "trigger_dependency_analysis": "starts an analysis job over indexed content",
+    "scip_cleanup_workspaces": SCIP_SCRATCH_CLEANUP,
+    "trigger_dependency_analysis": (
+        "starts a dependency-map analysis job; rewrites generated domain "
+        "documents, not access or configuration"
+    ),
 }
 
 _MCP_GAPS: Dict[str, str] = {}
@@ -221,6 +247,7 @@ _GIT_DELETE = ("git_credential_deleted",)
 _CONFIG = ("config_changed",)
 _KEY_SET = ("provider_api_key_set",)
 _KEY_CLEARED = ("provider_api_key_cleared",)
+_USER_REPO_REMOVED = ("user_repo_deactivated_by_admin",)
 
 # Doors that authenticate the caller themselves: no admin/elevation gate.
 _SELF_AUTHENTICATING_ROUTES: Dict[str, Tuple[str, ...]] = {
@@ -267,8 +294,10 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "PUT /api/v1/groups/{group_id}": ("group_update",),
     "DELETE /api/v1/groups/{group_id}": ("group_delete",),
     "PUT /api/v1/users/{user_id}/group": _USER_GROUP,
+    "POST /api/v1/groups/{group_id}/members": _USER_GROUP,
     "POST /api/v1/groups/{group_id}/repos": ("repo_access_grant",),
     "DELETE /api/v1/groups/{group_id}/repos": ("repo_access_revoke",),
+    "DELETE /api/v1/groups/{group_id}/repos/{repo_name}": ("repo_access_revoke",),
     "POST /api/v1/groups/tool-access/{group_id}/{tool_name}": (
         "group_tool_access_granted",
     ),
@@ -335,107 +364,31 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/self-monitoring": _CONFIG,
     "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
     "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),
+    # Server operations
+    "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
+    "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),
+    "POST /admin/restart": ("server_restart_requested",),
+    # Activated repositories an admin manages for another user
+    "POST /admin/golden-repos/activate": ("user_repo_activated_by_admin",),
+    "DELETE /api/admin/activated-repos/{username}/{user_alias}": _USER_REPO_REMOVED,
+    "POST /admin/repos/{username}/{user_alias}/deactivate": _USER_REPO_REMOVED,
+    # Token and OAuth flows that write their existing (legacy) rows
+    "POST /api/auth/refresh": ("token_refresh_success", "token_refresh_failure"),
+    "POST /oauth/authorize/consent": ("oauth_authorization",),
+    "POST /oauth/register": ("oauth_client_registration",),
+    "POST /oauth/revoke": ("oauth_token_revocation",),
+    "POST /oauth/token": ("oauth_token_exchange",),
 }
 
-_PROBE_ONLY = "connectivity probe with the supplied or stored key; stores nothing"
-_CATEGORY = "presentation grouping of repositories; no access or credential change"
-_ANALYSIS_JOB = "starts or controls an analysis / sync job over indexed content"
-_OPERATIONAL = "operational state (caches, health counters, job records)"
+# The written reasons live in ``_audit_route_classification``.
+_ROUTE_EXEMPT: Dict[str, str] = ROUTE_EXEMPT
 
-_ROUTE_EXEMPT: Dict[str, str] = {
-    "POST /api/admin/search-events/export": _READ_ONLY,
-    "POST /admin/query": _READ_ONLY,
-    "POST /admin/partials/query-results": _READ_ONLY,
-    "POST /api/v1/repos/{alias}/git/reset": _WORKSPACE_GIT,
-    "POST /api/v1/repos/{alias}/git/clean": _WORKSPACE_GIT,
-    "DELETE /api/v1/repos/{alias}/git/branches/{name}": _WORKSPACE_GIT,
-    **{
-        f"POST /api/api-keys/{provider}/{probe}": _PROBE_ONLY
-        for provider in ("anthropic", "voyageai", "cohere")
-        for probe in ("test", "test-configured")
-    },
-    "POST /api/llm-creds/test-connection": _PROBE_ONLY,
-    "POST /api/v1/repo-categories": _CATEGORY,
-    "PUT /api/v1/repo-categories/{category_id}": _CATEGORY,
-    "DELETE /api/v1/repo-categories/{category_id}": _CATEGORY,
-    "POST /api/v1/repo-categories/reorder": _CATEGORY,
-    "POST /api/v1/repo-categories/re-evaluate": _CATEGORY,
-    "POST /admin/repo-categories/create": _CATEGORY,
-    "POST /admin/repo-categories/{category_id}/update": _CATEGORY,
-    "POST /admin/repo-categories/{category_id}/delete": _CATEGORY,
-    "POST /admin/repo-categories/reorder": _CATEGORY,
-    "POST /admin/repo-categories/re-evaluate": _CATEGORY,
-    "POST /admin/golden-repos/{alias}/category": _CATEGORY,
-    "POST /admin/diagnostics/run-all": _ANALYSIS_JOB,
-    "POST /admin/diagnostics/run/{category}": _ANALYSIS_JOB,
-    "POST /admin/diagnostics/generate-missing-descriptions": _ANALYSIS_JOB,
-    "POST /admin/langfuse-sync/trigger": _ANALYSIS_JOB,
-    "POST /admin/self-monitoring/run-now": _ANALYSIS_JOB,
-    "POST /admin/partials/depmap-job-status/retry": _ANALYSIS_JOB,
-    "POST /admin/dependency-map/repair": _ANALYSIS_JOB,
-    "POST /admin/dependency-map/trigger": _ANALYSIS_JOB,
-    "POST /admin/dependency-map/cancel": _ANALYSIS_JOB,
-    "POST /admin/dependency-map/trigger-refinement": _ANALYSIS_JOB,
-    "POST /admin/golden-repos/{alias}/wiki-refresh": _ANALYSIS_JOB,
-    "POST /admin/golden-repos/{alias}/wiki-toggle": "per-repository wiki feature flag",
-    "POST /admin/activated-repos/{username}/{alias}/wiki-toggle": (
-        "per-repository wiki feature flag"
-    ),
-    "POST /admin/golden-repos/{alias}/temporal-options": (
-        "per-repository history-indexing parameters"
-    ),
-    "POST /api/admin/scip-cleanup-workspaces": _OPERATIONAL,
-    "DELETE /api/admin/jobs/cleanup": _OPERATIONAL,
-    "POST /admin/jobs/{job_id}/cancel": _OPERATIONAL,
-    "POST /admin/config/query-embedding-cache/clear": _OPERATIONAL,
-    "POST /admin/provider-health/clear-sinbin": _OPERATIONAL,
-    "POST /admin/provider-health/reset-state": _OPERATIONAL,
-    "POST /api/admin/diagnostics/dedup-warnings/clear-all": _OPERATIONAL,
-    "POST /api/admin/reaper/trigger": _OPERATIONAL,
-    **{
-        f"POST /admin/research/{path}": "interactive research-assistant session"
-        for path in ("send", "sessions", "sessions/{session_id}/upload")
-    },
-    "PUT /admin/research/sessions/{session_id}": "interactive research-assistant session",
-    "DELETE /admin/research/sessions/{session_id}": (
-        "interactive research-assistant session"
-    ),
-    "DELETE /admin/research/sessions/{session_id}/files/{filename}": (
-        "interactive research-assistant session"
-    ),
-    **{
-        f"POST /admin/api/discovery/{path}": "browses or hides forge repositories"
-        for path in (
-            "{platform}/start",
-            "{platform}/enrich",
-            "hide",
-            "unhide",
-            "branches",
-        )
-    },
-}
+_ROUTE_SELF_SERVICE: Dict[str, str] = ROUTE_SELF_SERVICE
 
-# Doors with security weight and NO audit row today (reported, not fixed here).
-_ROUTE_GAPS: Dict[str, str] = {
-    "POST /api/v1/groups/{group_id}/members": (
-        "moves a user into a group; the sibling doors record user_group_change"
-    ),
-    "DELETE /api/v1/groups/{group_id}/repos/{repo_name}": (
-        "revokes one repository from a group; the bulk door records repo_access_revoke"
-    ),
-    "POST /api/admin/maintenance/enter": "server-wide maintenance mode switch",
-    "POST /api/admin/maintenance/exit": "server-wide maintenance mode switch",
-    "POST /admin/restart": "admin-triggered server restart",
-    "POST /admin/golden-repos/activate": (
-        "admin gives another user an activated copy of a repository"
-    ),
-    "DELETE /api/admin/activated-repos/{username}/{user_alias}": (
-        "admin removes another user's activated repository"
-    ),
-    "POST /admin/repos/{username}/{user_alias}/deactivate": (
-        "admin removes another user's activated repository"
-    ),
-}
+# Doors with security weight and NO audit row: must stay empty.
+_ROUTE_GAPS: Dict[str, str] = {}
+
+_ROUTE_TABLES = (_ROUTE_MAPPED, _ROUTE_EXEMPT, _ROUTE_SELF_SERVICE, _ROUTE_GAPS)
 
 # ---------------------------------------------------------------------------
 # Derivation
@@ -474,10 +427,25 @@ def _is_gated_route(entry: RouteEntry) -> bool:
 
 
 def route_inventory(entries: Iterable[RouteEntry]) -> Set[str]:
-    """Gated mutating routes plus the self-authenticating doors present."""
+    """EVERY registered mutating route, plus the self-authenticating doors present.
+
+    No gate detection decides membership: a route guarded by a helper that
+    no list names is inventoried all the same.
+    """
     by_key = {str(e["key"]) for e in entries}
-    gated = {str(e["key"]) for e in entries if _is_gated_route(e)}
-    return gated | (set(_SELF_AUTHENTICATING_ROUTES) & by_key)
+    mutating = {key for key in by_key if _method(key) in _MUTATING}
+    return mutating | (set(_SELF_AUTHENTICATING_ROUTES) & by_key)
+
+
+def self_service_behind_a_gate(
+    entries: Iterable[RouteEntry], self_service: Mapping[str, str]
+) -> List[str]:
+    """Self-service classifications of routes behind a known admin gate."""
+    return sorted(
+        str(e["key"])
+        for e in entries
+        if str(e["key"]) in self_service and _is_gated_route(e)
+    )
 
 
 def mcp_inventory(
@@ -637,9 +605,33 @@ def test_every_mcp_door_is_mapped_exempt_or_a_known_gap(mcp_registries) -> None:
     assert unclassified(inventory, _MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS) == []
 
 
-def test_every_route_door_is_mapped_exempt_or_a_known_gap(route_entries) -> None:
+def test_every_mutating_route_is_mapped_exempt_or_self_service(route_entries) -> None:
     inventory = route_inventory(route_entries)
-    assert unclassified(inventory, _ROUTE_MAPPED, _ROUTE_EXEMPT, _ROUTE_GAPS) == []
+    assert unclassified(inventory, *_ROUTE_TABLES) == []
+
+
+def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
+    route_entries,
+) -> None:
+    """wire_fault_injection mounts it only when enabled; it is inventoried anyway."""
+    from code_indexer.server.fault_injection.router import router as fault_router
+
+    expected = {
+        f"{method} {getattr(route, 'path', '')}"
+        for route in fault_router.routes
+        for method in getattr(route, "methods", ())
+        if method in _MUTATING
+    }
+    assert len(expected) == 7
+    assert expected <= route_inventory(route_entries)
+
+
+def test_no_self_service_route_sits_behind_an_admin_gate(route_entries) -> None:
+    assert self_service_behind_a_gate(route_entries, _ROUTE_SELF_SERVICE) == []
+
+
+def test_no_door_is_left_as_a_known_gap() -> None:
+    assert (_ROUTE_GAPS, _MCP_GAPS) == ({}, {})
 
 
 def test_no_classification_names_a_door_outside_the_inventory(
@@ -654,20 +646,12 @@ def test_no_classification_names_a_door_outside_the_inventory(
         for table in (_MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS)
         for name in table
         if name not in mcp_doors
-    ] + [
-        key
-        for table in (_ROUTE_MAPPED, _ROUTE_EXEMPT, _ROUTE_GAPS)
-        for key in table
-        if key not in route_doors
-    ]
+    ] + [key for table in _ROUTE_TABLES for key in table if key not in route_doors]
     assert stale == []
 
 
 def test_the_classifications_are_disjoint() -> None:
-    for tables in (
-        (_MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS),
-        (_ROUTE_MAPPED, _ROUTE_EXEMPT, _ROUTE_GAPS),
-    ):
+    for tables in ((_MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS), _ROUTE_TABLES):
         seen: List[str] = [key for table in tables for key in table]
         assert len(seen) == len(set(seen))
 
@@ -683,8 +667,14 @@ def test_every_mapped_action_type_is_in_the_catalog() -> None:
     assert sorted(set(_ENTRY_POINTS) - set(AUDIT_ACTION_CATALOG)) == []
 
 
-def test_every_exemption_and_gap_has_a_reason() -> None:
-    for table in (_MCP_EXEMPT, _MCP_GAPS, _ROUTE_EXEMPT, _ROUTE_GAPS):
+def test_every_exemption_self_service_and_gap_has_a_reason() -> None:
+    for table in (
+        _MCP_EXEMPT,
+        _MCP_GAPS,
+        _ROUTE_EXEMPT,
+        _ROUTE_SELF_SERVICE,
+        _ROUTE_GAPS,
+    ):
         assert all(reason.strip() for reason in table.values())
 
 
@@ -769,13 +759,28 @@ def test_an_unmapped_gated_route_is_reported(route_entries) -> None:
         "source": "def example(request):\n    _require_admin_session(request)\n",
     }
     inventory = route_inventory([*route_entries, dummy, body_gated])
-    assert unclassified(inventory, _ROUTE_MAPPED, _ROUTE_EXEMPT, _ROUTE_GAPS) == [
+    assert unclassified(inventory, *_ROUTE_TABLES) == [
         "POST /admin/example-body-gated",
         "POST /api/admin/example-dummy",
     ]
 
 
-def test_an_ungated_or_read_route_is_not_inventoried() -> None:
+def test_a_new_route_with_an_unknown_admin_helper_is_reported(route_entries) -> None:
+    """A gate the name lists do not know still cannot hide a mutating route."""
+    unknown_helper = {
+        "key": "POST /api/admin/example-unknown-helper",
+        "dependencies": ["_example_unrecognised_admin_guard"],
+        "permissions": [],
+        "source": "def example(request):\n    _example_verify_admin(request)\n",
+    }
+    assert _is_gated_route(unknown_helper) is False  # the name lists miss it
+    inventory = route_inventory([*route_entries, unknown_helper])
+    assert unclassified(inventory, *_ROUTE_TABLES) == [
+        "POST /api/admin/example-unknown-helper"
+    ]
+
+
+def test_a_read_route_is_not_inventoried_but_any_mutating_route_is() -> None:
     entries = [
         {
             "key": "GET /api/admin/example",
@@ -789,8 +794,34 @@ def test_an_ungated_or_read_route_is_not_inventoried() -> None:
             "permissions": ["repository:write"],
             "source": "def example(): pass\n",
         },
+        {
+            "key": "PATCH /api/example/public",
+            "dependencies": [],
+            "permissions": [],
+            "source": "def example(): pass\n",
+        },
     ]
-    assert route_inventory(entries) == set()
+    assert route_inventory(entries) == {
+        "POST /api/example",
+        "PATCH /api/example/public",
+    }
+
+
+def test_a_self_service_entry_behind_an_admin_gate_is_reported() -> None:
+    gated = {
+        "key": "POST /api/example-admin-only",
+        "dependencies": ["get_current_admin_user"],
+        "permissions": [],
+        "source": "def example(): pass\n",
+    }
+    ungated = {**gated, "key": "POST /api/example-own", "dependencies": []}
+    self_service = {
+        "POST /api/example-admin-only": "reason",
+        "POST /api/example-own": "reason",
+    }
+    assert self_service_behind_a_gate([gated, ungated], self_service) == [
+        "POST /api/example-admin-only"
+    ]
 
 
 def test_a_mapped_door_without_its_emission_is_reported() -> None:

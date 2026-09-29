@@ -500,6 +500,8 @@ class AuditLogService:
         target_type: str,
         target_id: str,
         details: Optional[str] = None,
+        *,
+        outcome: Optional[str] = None,
     ) -> None:
         """
         Insert one audit log entry.
@@ -516,6 +518,8 @@ class AuditLogService:
             target_type: Category of the target ('user', 'group', 'repo', 'auth').
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
+            outcome:     Explicit outcome; None records the one the action
+                         type's name implies (see ``build_legacy_event``).
         """
         self._deliver_legacy(
             build_legacy_event(
@@ -524,6 +528,7 @@ class AuditLogService:
                 target_type=target_type,
                 target_id=target_id,
                 details_json=details,
+                outcome=outcome,
             )
         )
 

@@ -9,8 +9,13 @@ NOT persisted to disk - server restart clears maintenance state.
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.audit_outcome import (
+    AuditActor,
+    conforming_details,
+    record_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +102,58 @@ class MaintenanceState:
                 "maintenance_mode": False,
                 "message": "Maintenance mode deactivated.",
             }
+
+    def enter_maintenance_mode_audited(
+        self, *, actor: AuditActor, origin: str
+    ) -> Dict[str, Any]:
+        """:meth:`enter_maintenance_mode`, recording ``maintenance_mode_entered``."""
+        return self._switch_audited(
+            self.enter_maintenance_mode, "maintenance_mode_entered", actor, origin
+        )
+
+    def exit_maintenance_mode_audited(
+        self, *, actor: AuditActor, origin: str
+    ) -> Dict[str, Any]:
+        """:meth:`exit_maintenance_mode`, recording ``maintenance_mode_exited``."""
+        return self._switch_audited(
+            self.exit_maintenance_mode, "maintenance_mode_exited", actor, origin
+        )
+
+    @staticmethod
+    def _switch_audited(
+        switch: Callable[[], Dict[str, Any]],
+        action_type: str,
+        actor: AuditActor,
+        origin: str,
+    ) -> Dict[str, Any]:
+        """Run *switch* and record its one row (this node's state changed).
+
+        ``success`` after the switch, or ``failure`` when it raised, after
+        which the exception propagates.  *origin* names where the request
+        came from (a value of the catalog's ``origin`` enum).
+        """
+        details = conforming_details(action_type, origin=origin)
+        try:
+            result = switch()
+        except Exception:
+            record_outcome(
+                actor=actor,
+                action_type=action_type,
+                target_type="server",
+                target_id="node",
+                outcome="failure",
+                details=details,
+            )
+            raise
+        record_outcome(
+            actor=actor,
+            action_type=action_type,
+            target_type="server",
+            target_id="node",
+            outcome="success",
+            details=details,
+        )
+        return result
 
     def _get_running_jobs_count(self) -> int:
         """Get total running jobs from all trackers."""

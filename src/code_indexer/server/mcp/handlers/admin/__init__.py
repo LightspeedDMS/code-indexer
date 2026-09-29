@@ -951,33 +951,38 @@ def _validate_group_id(
     Returns:
         Tuple of (group_id, group, error_response) - error_response is None on success
     """
-    group_id_str = args.get("group_id", "")
-    if not group_id_str:
-        return (
-            None,
-            None,
-            _mcp_response(
-                {"success": False, "error": "Missing required parameter: group_id"}
-            ),
-        )
-    try:
-        group_id = int(group_id_str)
-    except ValueError:
-        return (
-            None,
-            None,
-            _mcp_response(
-                {"success": False, "error": f"Invalid group_id: {group_id_str}"}
-            ),
-        )
+    group_id, error = _parse_group_id(args)
+    if error:
+        return None, None, error
     group = group_manager.get_group(group_id)
     if not group:
-        return (
-            None,
-            None,
-            _mcp_response({"success": False, "error": f"Group not found: {group_id}"}),
-        )
+        return None, None, _group_not_found(group_id)
     return group_id, group, None
+
+
+def _parse_group_id(
+    args: Dict[str, Any],
+) -> tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """Parse group_id only; existence is left to the audited operation.
+
+    Returns:
+        Tuple of (group_id, error_response) - error_response is None on success
+    """
+    group_id_str = args.get("group_id", "")
+    if not group_id_str:
+        return None, _mcp_response(
+            {"success": False, "error": "Missing required parameter: group_id"}
+        )
+    try:
+        return int(group_id_str), None
+    except ValueError:
+        return None, _mcp_response(
+            {"success": False, "error": f"Invalid group_id: {group_id_str}"}
+        )
+
+
+def _group_not_found(group_id: Optional[int]) -> Dict[str, Any]:
+    return _mcp_response({"success": False, "error": f"Group not found: {group_id}"})  # type: ignore[no-any-return]
 
 
 def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1192,6 +1197,8 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 @require_mcp_elevation()
 def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Assign a user to a group (inner handler — Story #992)."""
+    from ....services.group_access_manager import GroupNotFoundError
+
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1199,7 +1206,7 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1209,16 +1216,12 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
                 {"success": False, "error": "Missing required parameter: user_id"}
             )
 
-        group_manager.assign_user_to_group(
-            user_id=user_id, group_id=group_id, assigned_by=user.username
-        )
-        group_manager.log_audit(
-            admin_id=user.username,
-            action_type="user_group_change",
-            target_type="user",
-            target_id=user_id,
-            details={"user_id": user_id, "group": group.name, "source": "mcp"},
-        )
+        try:
+            group_manager.assign_user_to_group_audited(
+                user_id, group_id, actor=user.username
+            )
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
@@ -1324,7 +1327,10 @@ def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
 @require_mcp_elevation()
 def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Revoke a group's access to a single repository (inner handler — Story #992)."""
-    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ....services.group_access_manager import (
+        CidxMetaCannotBeRevokedError,
+        GroupNotFoundError,
+    )
 
     try:
         group_manager = _get_group_manager()
@@ -1333,7 +1339,7 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1344,8 +1350,8 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             )
 
         try:
-            if not group_manager.revoke_repo_access(
-                repo_name=repo_name, group_id=group_id
+            if not group_manager.revoke_repo_access_audited(
+                repo_name, group_id, actor=user.username
             ):
                 return _mcp_response(  # type: ignore[no-any-return]
                     {
@@ -1353,14 +1359,9 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                         "error": f"Repository '{repo_name}' not found in group's access list",
                     }
                 )
-            group_manager.log_audit(
-                admin_id=user.username,
-                action_type="repo_access_revoke",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name, "source": "mcp"},
-            )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         except CidxMetaCannotBeRevokedError:
             return _mcp_response(  # type: ignore[no-any-return]
                 {
@@ -1383,8 +1384,7 @@ def _bulk_remove_repos(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories (inner handler — Story #992)."""
-    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
-    from ....services.constants import CIDX_META_REPO
+    from ....services.group_access_manager import GroupNotFoundError
 
     try:
         group_manager = _get_group_manager()
@@ -1393,7 +1393,7 @@ def _bulk_remove_repos(
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1403,28 +1403,14 @@ def _bulk_remove_repos(
                 {"success": False, "error": "Missing required parameter: repo_names"}
             )
 
-        removed_count = 0
-        for repo_name in repo_names:
-            if repo_name == CIDX_META_REPO:
-                continue
-            try:
-                if group_manager.revoke_repo_access(
-                    repo_name=repo_name, group_id=group_id
-                ):
-                    removed_count += 1
-                    group_manager.log_audit(
-                        admin_id=user.username,
-                        action_type="repo_access_revoke",
-                        target_type="repo",
-                        target_id=repo_name,
-                        details={
-                            "repo": repo_name,
-                            "group": group.name,
-                            "source": "mcp",
-                        },
-                    )
-            except CidxMetaCannotBeRevokedError:
-                continue
+        # cidx-meta is skipped silently; one row per revoked repository and
+        # one summary row for the absent ones (the audited entry point).
+        try:
+            removed_count = group_manager.revoke_repos_access_audited(
+                repo_names, group_id, actor=user.username
+            )
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         return _mcp_response({"success": True, "removed_count": removed_count})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
