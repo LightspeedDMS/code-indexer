@@ -49,7 +49,16 @@ _FAKE_MAX_TOKENS = 8192
 _FILE_COUNT = 12
 _INTERRUPT_AFTER_FILE_PROGRESS_CALLS = 3
 _RESUME_MARKER = "Resuming interrupted operation"
-_RECONCILE_MARKER = "Reconcile:"
+# Emitted unconditionally on entry to SmartIndexer._do_reconcile_with_database
+# (for any repository with files) and by no other path. The later
+# "Reconcile: N/M files up-to-date" line is NOT a usable marker: it appears
+# only when files remain to index, and an interrupted run may already have
+# embedded every file (thread-scheduling dependent), in which case reconcile
+# reports "All N files up-to-date" instead.
+_RECONCILE_MARKER = "Checking database collection"
+# Prefix of the per-file progress line the embedding phase emits on each
+# file completion (high_throughput_processor.py).
+_EMBEDDING_MARKER = "📊 module_"
 
 
 def _deterministic_embedding(text: str) -> List[float]:
@@ -160,13 +169,24 @@ def _make_indexer(repo: Path) -> SmartIndexer:
     )
 
 
-def _interrupted_server_run(repo: Path) -> None:
-    """A real server-context run cancelled part-way through embedding."""
+def _interrupted_server_run(
+    repo: Path, interrupt_on_last_embedding: bool = False
+) -> None:
+    """A real server-context run cancelled part-way through embedding.
+
+    By default the cancel is requested on the first embedding completion.
+    How many of the remaining queued files the thread pool has already
+    started by then (and so still finishes) depends on thread scheduling;
+    ``interrupt_on_last_embedding`` pins the extreme case in which every
+    file is already embedded when the cancel lands."""
     calls = {"file_progress": 0}
 
     def interrupting_callback(
         current: int, total: int, path: Path, info: Optional[str] = None, **_: Any
     ) -> Optional[str]:
+        if interrupt_on_last_embedding:
+            embedded = info is not None and _EMBEDDING_MARKER in info
+            return "INTERRUPT" if embedded and total and current == total else None
         if total and total > 0:
             calls["file_progress"] += 1
             if calls["file_progress"] >= _INTERRUPT_AFTER_FILE_PROGRESS_CALLS:
@@ -206,6 +226,19 @@ def _took_resume_path(infos: List[str]) -> bool:
 
 def _took_reconcile_path(infos: List[str]) -> bool:
     return any(_RECONCILE_MARKER in i for i in infos)
+
+
+def _assert_fully_indexed(repo: Path, files: List[Path]) -> None:
+    """The run finished and every repository file is in the vector store."""
+    stored = json.loads(_metadata_path(repo).read_text())
+    assert stored["status"] == "completed"
+    indexer = _make_indexer(repo)
+    store = indexer.vector_store_client
+    collection = store.resolve_collection_name(
+        indexer.config, indexer.embedding_provider
+    )
+    expected = sorted(str(f.relative_to(repo)) for f in files)
+    assert store.get_all_indexed_files(collection) == expected
 
 
 class TestInterruptedServerIndexResumes:
@@ -278,7 +311,8 @@ class TestStateWithoutValidSealIgnored:
         assert not _took_resume_path(infos), (
             f"Server indexing resumed from state without a server seal: {infos}"
         )
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
     def test_resume_file_with_invalid_seal_is_not_resumed(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -290,7 +324,8 @@ class TestStateWithoutValidSealIgnored:
         infos = _server_run_collecting_info(repo)
 
         assert not _took_resume_path(infos)
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
     def test_edited_server_sealed_state_is_not_resumed(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -305,7 +340,8 @@ class TestStateWithoutValidSealIgnored:
         infos = _server_run_collecting_info(repo)
 
         assert not _took_resume_path(infos)
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
     def test_sealed_state_copied_from_another_repo_is_not_resumed(
         self, tmp_path: Path
@@ -314,26 +350,44 @@ class TestStateWithoutValidSealIgnored:
         _build_repo(source)
         _interrupted_server_run(source)
         target = tmp_path / "target"
-        _build_repo(target)
+        target_files = _build_repo(target)
         _write_resume_file(target, json.loads(_metadata_path(source).read_text()))
 
         infos = _server_run_collecting_info(target)
 
         assert not _took_resume_path(infos)
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(target, target_files)
 
     def test_sealed_state_is_not_trusted_under_a_different_server_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = tmp_path / "repo"
-        _build_repo(repo)
+        files = _build_repo(repo)
         _interrupted_server_run(repo)
         monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "other-server"))
 
         infos = _server_run_collecting_info(repo)
 
         assert not _took_resume_path(infos)
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
+
+    def test_wrong_key_state_is_reconciled_when_every_file_was_embedded_before_the_interrupt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is left to index, yet the untrusted state is still not
+        resumed: the run reconciles, finds every file indexed, completes."""
+        repo = tmp_path / "repo"
+        files = _build_repo(repo)
+        _interrupted_server_run(repo, interrupt_on_last_embedding=True)
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "other-server"))
+
+        infos = _server_run_collecting_info(repo)
+
+        assert not _took_resume_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
 
     def test_local_cli_still_trusts_unsealed_state(self, tmp_path: Path) -> None:
         """Local CLI indexing is unchanged: its own resume file is trusted."""
@@ -383,7 +437,7 @@ class TestSealKey:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = tmp_path / "repo"
-        _build_repo(repo)
+        files = _build_repo(repo)
         _interrupted_server_run(repo)
         blocker = tmp_path / "blocked"
         blocker.write_text("file, not a directory")
@@ -392,4 +446,5 @@ class TestSealKey:
         infos = _server_run_collecting_info(repo)
 
         assert not _took_resume_path(infos)
-        assert _took_reconcile_path(infos)
+        assert _took_reconcile_path(infos), f"Progress info: {infos}"
+        _assert_fully_indexed(repo, files)
