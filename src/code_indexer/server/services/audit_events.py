@@ -705,15 +705,23 @@ def build_legacy_event(
 ) -> AuditEvent:
     """Build a row for a pre-existing writer.
 
-    The payload predates the allowlist and is stored as given; the event
-    still gets its uuid and ambient attribution.  Without an explicit
-    *outcome*, the outcome the action type's name implies is recorded
-    (``*_success`` / ``*_failure`` / ``*_denied``), otherwise NULL.
+    The payload is stored restricted to the read-side legacy allowlist
+    (``audit_log_query.restrict_legacy_details``): a field a reader may not
+    see is never stored.  The event gets its uuid and ambient attribution.
+    Without an explicit *outcome*, the outcome the action type's name
+    implies is recorded (``*_success`` / ``*_failure`` / ``*_denied``),
+    otherwise NULL.
     """
+    # Imported here: audit_log_query imports this module.
+    from code_indexer.server.services.audit_log_query import (
+        restrict_legacy_details,
+    )
+
     if outcome is None:
         outcome = implied_legacy_outcome(action_type)
     else:
         _require_outcome(outcome, str(action_type)[:_MAX_REPORTED_FIELD_NAME])
+    details_json = restrict_legacy_details(action_type, details_json)
     ctx = current_audit_request_context()
     return AuditEvent(
         event_uuid=str(uuid.uuid4()),

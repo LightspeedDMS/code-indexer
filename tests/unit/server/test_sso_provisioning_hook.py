@@ -529,9 +529,9 @@ class TestAC7_AuditLoggingForSSOProvisioning:
         user_log = next((log for log in logs if log["target_id"] == user_id), None)
         assert user_log is not None
         details = json.loads(user_log["details"])
-        assert details["group"] == "users"
-        # The provisioning source is recorded; readers see only its name.
-        assert "source" in details["omitted_fields"]
+        # Only allowlisted fields are stored by a legacy writer; the
+        # provisioning origin is the row's system actor, not a details field.
+        assert details == {"group": "users"}
 
 
 class TestGroupMapping:
@@ -676,10 +676,9 @@ class TestGroupMapping:
         user_log = next((log for log in logs if log["target_id"] == user_id), None)
         assert user_log is not None
         details = json.loads(user_log["details"])
-        assert details["group"] == "admins"
-        # The external groups it was mapped from are recorded; readers see
-        # only the field name.
-        assert "external_groups" in details["omitted_fields"]
+        # The mapped group is stored; the external group names it was mapped
+        # from are not on the legacy allowlist, so they are not stored.
+        assert details == {"group": "admins"}
 
     def test_existing_user_not_reassigned_with_group_mappings(self, group_manager):
         """Test that existing user's group is not changed even with different external groups."""

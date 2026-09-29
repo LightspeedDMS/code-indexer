@@ -74,7 +74,7 @@ def test_group_manager_log_audit_rows_are_attributed(
         action_type="group_create",
         target_type="group",
         target_id="7",
-        details={"group_name": "example"},
+        details={"name": "example"},
     )
     row = _only_row(db_path)
     assert row[1:6] == (
@@ -82,7 +82,7 @@ def test_group_manager_log_audit_rows_are_attributed(
         "group_create",
         "group",
         "7",
-        json.dumps({"group_name": "example"}),
+        json.dumps({"name": "example"}),
     )
     assert row[0].endswith("+00:00")
     assert row[6:13] == (None, "rest", "192.0.2.7", "req-legacy", "node-l", "jwt", 0)

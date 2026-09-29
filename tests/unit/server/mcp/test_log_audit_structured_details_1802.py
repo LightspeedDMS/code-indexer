@@ -131,11 +131,9 @@ class TestStructuredRoundTripThroughFrontDoor:
 
         # The whole point of the fix: details is a genuine structured
         # object with the real field values, not an empty/opaque blob.
-        # Readers see only the allowlisted fields; the others are named.
-        assert entry["details"] == {
-            "name": "structured-test",
-            "omitted_fields": ["description", "source"],
-        }
+        # A legacy writer stores only the allowlisted fields (the free-text
+        # description is never stored).
+        assert entry["details"] == {"name": "structured-test"}
 
 
 class TestLegacyFreeTextRowIsHandledWithoutCrashingOrHidingContent:
@@ -147,15 +145,22 @@ class TestLegacyFreeTextRowIsHandledWithoutCrashingOrHidingContent:
         self, admin_user, wired_app_state, audit_service
     ):
         from code_indexer.server.mcp.handlers.admin import handle_query_audit_logs
+        from tests.unit.server._audit_read_support import make_event
 
         legacy_text = "Created group 'legacy' via MCP"
-        audit_service.log_raw(
-            timestamp="2026-08-20T10:00:00+00:00",
-            admin_id="admin",
-            action_type="group_create",
-            target_type="group",
-            target_id="999",
-            details=legacy_text,
+        # A row stored before the write-time allowlist existed: inserted as
+        # stored, not through a legacy writer (which would restrict it now).
+        audit_service.insert_events(
+            [
+                make_event(
+                    ts="2026-08-20T10:00:00+00:00",
+                    actor="admin",
+                    action_type="group_create",
+                    target_type="group",
+                    target_id="999",
+                    details_json=legacy_text,
+                )
+            ]
         )
 
         result = handle_query_audit_logs.__wrapped__(

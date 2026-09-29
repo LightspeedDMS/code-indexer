@@ -35,6 +35,7 @@ from typing import (
     FrozenSet,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Set,
@@ -699,15 +700,65 @@ LEGACY_DETAILS_READ_URLS: Dict[str, FrozenSet[str]] = {
 _MAX_URL_LENGTH = 2048
 _WEB_URL_SCHEMES = frozenset({"https", "http"})
 _URL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+# The pull/merge-request paths the forge clients return (GitHub ``html_url``,
+# GitLab ``web_url``).  GitLab nests at most 20 group levels, so a path has at
+# most 20 groups + project + "-" + kind + id segments.
+_MAX_PR_PATH_LENGTH = 512
+_MAX_PR_PATH_SEGMENTS = 24
+_PR_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
+_PR_NUMBER_RE = re.compile(r"^[0-9]{1,20}$")
+_GITHUB_PULL = "pull"
+_GITLAB_MERGE_REQUESTS = "merge_requests"
+_GITLAB_SEPARATOR = "-"
+
+
+def _is_ordinary_segment(segment: str) -> bool:
+    """Letters, digits, ``-``, ``_`` and ``.`` only; never ``.``, ``..`` or
+    the bare GitLab separator ``-``."""
+    return (
+        bool(_PR_PATH_SEGMENT_RE.match(segment))
+        and segment.strip(".") != ""
+        and segment != _GITLAB_SEPARATOR
+    )
+
+
+def _is_pr_path(path: str) -> bool:
+    """True when *path* is ``/<owner>/<repo>/pull/<n>`` or
+    ``/<group>/.../<project>[/-]/merge_requests/<n>``.
+
+    Anything else -- percent-encoding, ``;`` path parameters, empty or dot
+    segments, extra trailing segments, an over-long path -- is refused.
+    """
+    if len(path) > _MAX_PR_PATH_LENGTH or not path.startswith("/"):
+        return False
+    segments = path[1:].split("/")
+    if not 4 <= len(segments) <= _MAX_PR_PATH_SEGMENTS:
+        return False
+    *project, kind, number = segments
+    if not _PR_NUMBER_RE.match(number):
+        return False
+    if kind == _GITHUB_PULL:
+        if len(project) != 2:
+            return False
+    elif kind == _GITLAB_MERGE_REQUESTS:
+        if project[-1] == _GITLAB_SEPARATOR:
+            project = project[:-1]
+        if len(project) < 2:
+            return False
+    else:
+        return False
+    return all(_is_ordinary_segment(segment) for segment in project)
 
 
 def plain_web_url(value: Any) -> Optional[str]:
-    """*value* as a plain http(s) URL -- scheme, host, port and path -- or None.
+    """*value* as a plain PR URL -- scheme, host, port and path -- or None.
 
     Userinfo (``user:token@``), the query and the fragment are dropped, so
-    a credential embedded in a stored URL is never shown.  A value that is
-    not an http(s) URL with a DNS-style host, is over-long, or contains
-    whitespace or a control character is refused.
+    a credential embedded in a stored URL is never shown, and the path must
+    be a pull or merge-request path (:func:`_is_pr_path`), so no other
+    content passes through it.  A value that is not an http(s) URL with a
+    DNS-style host, is over-long, or contains whitespace or a control
+    character is refused.
     """
     if not isinstance(value, str) or not 0 < len(value) <= _MAX_URL_LENGTH:
         return None
@@ -721,6 +772,8 @@ def plain_web_url(value: Any) -> Optional[str]:
     scheme = parts.scheme.lower()
     host = parts.hostname or ""
     if scheme not in _WEB_URL_SCHEMES or not _URL_HOST_RE.match(host):
+        return None
+    if not _is_pr_path(parts.path):
         return None
     netloc = host if port is None else f"{host}:{port}"
     return urlunsplit((scheme, netloc, parts.path, "", ""))
@@ -770,6 +823,18 @@ def project_details(action_type: str, raw: Any) -> Optional[str]:
     stored = _stored_object(raw)
     if stored is None:
         return json.dumps({OMITTED_FIELDS_KEY: [OMITTED_UNSTRUCTURED]})
+    kept, omitted = _allowlisted_fields(action_type, stored)
+    if omitted:
+        kept[OMITTED_FIELDS_KEY] = sorted(omitted)
+    return json.dumps(kept) if kept else None
+
+
+def _allowlisted_fields(
+    action_type: str, stored: Mapping[Any, Any]
+) -> Tuple[Dict[str, Any], Set[str]]:
+    """The conforming fields of *stored* (URL fields in their plain form)
+    and the names of the rest -- the ONE allowlist both the read projection
+    and the legacy write path apply."""
     schema = details_read_schema(action_type)
     url_fields = LEGACY_DETAILS_READ_URLS.get(action_type, frozenset())
     kept: Dict[str, Any] = {}
@@ -787,8 +852,30 @@ def project_details(action_type: str, raw: Any) -> Optional[str]:
             kept[key] = value
         else:
             omitted.add(_omitted_name(key))
-    if omitted:
-        kept[OMITTED_FIELDS_KEY] = sorted(omitted)
+    return kept, omitted
+
+
+def restrict_legacy_details(
+    action_type: str, details_json: Optional[str]
+) -> Optional[str]:
+    """What a legacy writer may STORE: the fields a reader may see.
+
+    For an action type in :data:`LEGACY_DETAILS_READ_SCHEMA` only the
+    conforming fields are kept (a PR URL in its :func:`plain_web_url` form);
+    every other field, and content that is not a JSON object, is not
+    stored.  Returns None when nothing is kept.  Other action types are
+    returned unchanged (their rows are shown with no field at all).  Rows
+    stored before this rule are still shown only through
+    :func:`project_details`.
+    """
+    if action_type not in LEGACY_DETAILS_READ_SCHEMA:
+        return details_json
+    if details_json is None or details_json == "":
+        return None
+    stored = _stored_object(details_json)
+    if stored is None:
+        return None
+    kept, _omitted = _allowlisted_fields(action_type, stored)
     return json.dumps(kept) if kept else None
 
 

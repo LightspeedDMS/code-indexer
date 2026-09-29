@@ -100,8 +100,9 @@ def test_entries_carry_the_attribution_columns(admin_user, wired_audit_service) 
     assert entry["action"] == entry["action_type"] == "password_change_failure"
     assert entry["target_type"] == "auth"
     assert entry["target_id"] == entry["resource"] == "alice"
-    # Only allowlisted details fields are shown; the others are named.
-    assert entry["details"] == {"username": "alice", "omitted_fields": ["reason"]}
+    # Only allowlisted details fields are stored by a legacy writer (and so
+    # shown); the non-allowlisted "reason" was never stored.
+    assert entry["details"] == {"username": "alice"}
     # Additive attribution fields.
     assert isinstance(entry["id"], int)
     assert entry["outcome"] == "failure"

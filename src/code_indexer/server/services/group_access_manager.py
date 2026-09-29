@@ -1610,8 +1610,14 @@ class GroupAccessManager:
             )
             return
 
-        # Outside a server (tests, tooling): direct write to this file.
+        # Outside a server (tests, tooling): direct write to this file, with
+        # the same write-time allowlist build_legacy_event applies.
+        from code_indexer.server.services.audit_log_query import (
+            restrict_legacy_details,
+        )
+
         now = datetime.now(timezone.utc).isoformat()
+        details_json = restrict_legacy_details(action_type, details_json)
 
         def _do_log(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()

@@ -79,11 +79,9 @@ class TestEnsureUserGroupMembershipAssignsNewUser:
         matching = [log for log in logs if log["target_id"] == "audited-user"]
         assert len(matching) == 1
         assert matching[0]["action_type"] == "user_assign"
-        # Readers see the allowlisted fields; the others are named.
-        assert json.loads(matching[0]["details"]) == {
-            "group": "users",
-            "omitted_fields": ["source"],
-        }
+        # A legacy writer stores only the allowlisted fields ("source" is
+        # not one), so that is all a reader sees.
+        assert json.loads(matching[0]["details"]) == {"group": "users"}
 
     def test_default_action_type_is_user_group_assign(self, manager, audit_store):
         users_group = manager.get_group_by_name("users")

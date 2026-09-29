@@ -462,7 +462,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details={"name": group.name, "description": group.description},
+            details={"name": group.name},
         )
         return _group_to_response(group)
     except ValueError:
@@ -551,10 +551,7 @@ def update_group(
             action_type="group_update",
             target_type="group",
             target_id=str(group_id),
-            details={
-                "name": updated_group.name,
-                "description": updated_group.description,
-            },
+            details={"name": updated_group.name},
         )
         return _group_to_response(updated_group)
     except ValueError as e:

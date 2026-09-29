@@ -113,7 +113,7 @@ class TestAuditLogServiceLog:
             action_type="user_group_change",
             target_type="user",
             target_id="user123",
-            details='{"from": "users", "to": "admins"}',
+            details='{"from_group": "users", "to_group": "admins"}',
         )
 
         conn = sqlite3.connect(str(db_path))
@@ -129,7 +129,7 @@ class TestAuditLogServiceLog:
         assert row["action_type"] == "user_group_change"
         assert row["target_type"] == "user"
         assert row["target_id"] == "user123"
-        assert row["details"] == '{"from": "users", "to": "admins"}'
+        assert row["details"] == '{"from_group": "users", "to_group": "admins"}'
         assert row["timestamp"] is not None
 
     def test_log_with_none_details(self, tmp_path):

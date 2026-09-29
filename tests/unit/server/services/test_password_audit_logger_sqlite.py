@@ -138,8 +138,10 @@ class TestPasswordChangeSuccessMapping:
         assert log["admin_id"] == "testuser"
         assert log["target_id"] == "testuser"
 
-    def test_details_contains_ip_address(self, tmp_path):
-        """log_password_change_success() stores ip_address in details JSON."""
+    def test_details_store_only_allowlisted_fields(self, tmp_path):
+        """log_password_change_success() stores only the read-side legacy
+        allowlist in details: the peer address and client string are not
+        stored there (the row's own attribution columns carry the peer)."""
         from code_indexer.server.services.audit_log_service import AuditLogService
         from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
 
@@ -154,9 +156,7 @@ class TestPasswordChangeSuccessMapping:
         logs, _ = _stored(db_path)
         details = json.loads(logs[0]["details"])
 
-        assert details["ip_address"] == "10.0.0.1"
-        assert details["user_agent"] == "Mozilla/5.0"
-        assert "timestamp" in details
+        assert details == {"username": "alice"}
 
 
 class TestAuthenticationFailureMapping:

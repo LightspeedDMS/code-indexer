@@ -597,7 +597,8 @@ class TestDetailsAllowlist:
 
 
 class TestPlainWebUrl:
-    """Stored URLs are shown as scheme + host + port + path only."""
+    """Stored PR URLs are shown as scheme + host + port + a pull or
+    merge-request path only."""
 
     @pytest.mark.parametrize(
         "stored, shown",
@@ -611,17 +612,73 @@ class TestPlainWebUrl:
                 "https://forge.example.com:8443/org/repo/pull/7",
             ),
             (
-                "http://forge.example.com/-/merge_requests/3?private_token=x#note",
-                "http://forge.example.com/-/merge_requests/3",
+                "http://forge.example.com/org/repo/-/merge_requests/3"
+                "?private_token=x#note",
+                "http://forge.example.com/org/repo/-/merge_requests/3",
             ),
             (
-                "https://example-secret@forge.example.com/a",
-                "https://forge.example.com/a",
+                "https://example-secret@forge.example.com/org/repo/pull/1",
+                "https://forge.example.com/org/repo/pull/1",
             ),
         ],
     )
     def test_userinfo_query_and_fragment_are_dropped(self, stored, shown):
         assert plain_web_url(stored) == shown
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            # GitHubPRClient: the API's html_url.
+            "https://github.com/example-org/example-repo/pull/42",
+            "https://github.com/example_org/example.repo/pull/1",
+            # GitLabPRClient: the API's web_url, nested groups included.
+            "https://gitlab.com/example-group/example-project/-/merge_requests/7",
+            "https://gitlab.com/example-group/sub.group/example_project/-/"
+            "merge_requests/7",
+            # Older GitLab form without the "/-" separator.
+            "https://gitlab.example.com/example-group/example-project/"
+            "merge_requests/12",
+        ],
+    )
+    def test_pull_and_merge_request_urls_are_kept(self, stored):
+        assert plain_web_url(stored) == stored
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            # Path parameters.
+            "https://github.com/example-org/example-repo/pull/1;jsessionid=abc",
+            "https://github.com/example-org/example-repo;x=y/pull/1",
+            # Percent-encoded content.
+            "https://github.com/example-org/example%2Frepo/pull/1",
+            "https://github.com/example-org/example-repo/pull/%31",
+            "https://gitlab.com/example-group/example%20project/-/merge_requests/1",
+            # Overlong path (a valid shape, too long to be one this server made).
+            "https://gitlab.com/" + "/".join(["g" * 40] * 18) + "/-/merge_requests/1",
+            # Too many segments.
+            "https://gitlab.com/" + "/".join(["g"] * 30) + "/-/merge_requests/1",
+            # Not a pull or merge-request path.
+            "https://forge.example.com/a",
+            "https://forge.example.com/",
+            "https://github.com/example-org/example-repo/issues/1",
+            "https://github.com/example-org/example-repo/pull/abc",
+            "https://github.com/example-org/example-repo/pull/1/files",
+            "https://github.com/example-org/example-repo/pull/1/",
+            "https://github.com/example-org/pull/1",
+            "https://github.com/a/b/c/pull/1",
+            "https://gitlab.com/example-group/-/merge_requests/1",
+            "https://gitlab.com/example-group/example-project/-/-/merge_requests/1",
+            "https://forge.example.com/-/merge_requests/3",
+            # Dot segments.
+            "https://github.com/../example-repo/pull/1",
+            "https://github.com/example-org/./pull/1",
+            "https://gitlab.com/example-group/../example-project/-/merge_requests/1",
+            # Empty segments.
+            "https://github.com//example-repo/pull/1",
+        ],
+    )
+    def test_non_pr_paths_path_parameters_and_encoding_are_refused(self, stored):
+        assert plain_web_url(stored) is None
 
     @pytest.mark.parametrize(
         "stored",

@@ -2380,7 +2380,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details={"name": group.name, "description": group.description},
+            details={"name": group.name},
         )
 
         return _create_groups_page_response(
@@ -2430,12 +2430,7 @@ def update_group(
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details={
-                    "old_name": old_group.name,
-                    "new_name": name,
-                    "old_description": old_group.description,
-                    "new_description": description,
-                },
+                details={"old_name": old_group.name, "new_name": name},
             )
             return _create_groups_page_response(
                 request, session, success_message=f"Group '{name}' updated successfully"

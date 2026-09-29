@@ -1044,11 +1044,7 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_create",
                 target_type="group",
                 target_id=str(group.id),
-                details={
-                    "name": group.name,
-                    "description": group.description,
-                    "source": "mcp",
-                },
+                details={"name": group.name, "source": "mcp"},
             )
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": True, "group_id": group.id, "name": group.name}
@@ -1129,11 +1125,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details={
-                    "name": updated_group.name,
-                    "description": updated_group.description,
-                    "source": "mcp",
-                },
+                details={"name": updated_group.name, "source": "mcp"},
             )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except ValueError as e:
