@@ -23,6 +23,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
 
 from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers._utils import (
+    _admin_role_first,
     _coerce_int,
     _mcp_response,
     _parse_json_string_array,
@@ -74,6 +75,7 @@ def _get_legacy():
 # =============================================================================
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
@@ -153,6 +155,7 @@ def _assign_new_user_to_default_group(
         )
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
@@ -250,6 +253,7 @@ def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
     return _mcp_response({"success": True, **config})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for set_global_config tool."""
@@ -607,6 +611,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # =============================================================================
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
@@ -751,6 +756,7 @@ def handle_admin_embedding_stats_query(
     )
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
@@ -985,6 +991,7 @@ def _group_not_found(group_id: Optional[int]) -> Dict[str, Any]:
     return _mcp_response({"success": False, "error": f"Group not found: {group_id}"})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all groups with member counts and repository access information."""
     try:
@@ -1019,6 +1026,7 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new custom group."""
@@ -1061,6 +1069,7 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed information about a specific group."""
     try:
@@ -1096,6 +1105,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Update a custom group's name and/or description."""
@@ -1140,6 +1150,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
@@ -1613,6 +1624,7 @@ def _query_audit_log_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Query the audit log (admin only) through the shared read function.
@@ -1741,6 +1753,7 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
 # =============================================================================
 
 
+@_admin_role_first
 def handle_trigger_dependency_analysis(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1972,6 +1985,7 @@ _VALID_MEMBER_ACTIONS = frozenset({"add", "remove"})
 _VALID_REPO_ACTIONS = frozenset({"add", "remove", "bulk_remove"})
 
 
+@_admin_role_first
 def handle_manage_group_members(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -1982,7 +1996,8 @@ def handle_manage_group_members(
       - 'add'    -> _add_member(args, user, **kwargs)
       - 'remove' -> _remove_member(args, user, **kwargs)
 
-    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The admin role is checked first (``_admin_role_first``); elevation is
+    enforced by each inner handler.
     """
     action = args.get("action", "")
     if not action:
@@ -2008,6 +2023,7 @@ def handle_manage_group_members(
 handle_manage_group_members.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
 
 
+@_admin_role_first
 def handle_manage_group_repos(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -2019,7 +2035,8 @@ def handle_manage_group_repos(
       - 'remove'      -> _remove_repo(args, user, **kwargs)
       - 'bulk_remove' -> _bulk_remove_repos(args, user, **kwargs)
 
-    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The admin role is checked first (``_admin_role_first``); elevation is
+    enforced by each inner handler.
     The 'repos' list parameter is forwarded as 'repo_names' for add/bulk_remove,
     and 'repo_name' (first element) for remove.
     """
@@ -2066,6 +2083,7 @@ handle_manage_group_repos.__mcp_requires_session_key__ = True  # type: ignore[at
 # =============================================================================
 
 
+@_admin_role_first
 def handle_get_memory_governor_stats(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:

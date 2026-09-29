@@ -10,6 +10,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
 )
 
 import difflib
+import functools
 import json
 import logging
 import pathspec
@@ -390,6 +391,40 @@ def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "content": [{"type": "text", "text": json.dumps(data, default=_json_default)}]
     }
+
+
+_ADMIN_ROLE_REQUIRED_ERROR = "Permission denied: admin role required"
+
+
+def _admin_role_required_response(user: User) -> Optional[Dict[str, Any]]:
+    """Return an MCP permission error unless ``user`` holds the admin role.
+
+    Uses the predicate of REST ``get_current_admin_user_hybrid``
+    (``manage_users`` permission). Handlers call it themselves so the role
+    holds however the call was admitted, including by a group tool grant.
+    """
+    if user.has_permission("manage_users"):
+        return None
+    return _mcp_response({"success": False, "error": _ADMIN_ROLE_REQUIRED_ERROR})
+
+
+def _admin_role_first(handler: Any) -> Any:
+    """Refuse a non-admin before *handler* (and any gate it carries) runs.
+
+    The admin role is checked in the handler layer so it holds however the
+    call was admitted, including by a group tool grant (the REST and Web
+    twins are admin-only).  ``functools.wraps`` carries the handler's
+    attributes, including the dispatcher's session-key marker.
+    """
+
+    @functools.wraps(handler)
+    def wrapper(params: Dict[str, Any], user: User, *extra: Any, **kwargs: Any):
+        role_error = _admin_role_required_response(user)
+        if role_error is not None:
+            return role_error
+        return handler(params, user, *extra, **kwargs)
+
+    return wrapper
 
 
 def _get_golden_repos_dir() -> str:

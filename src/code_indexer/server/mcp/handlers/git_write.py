@@ -31,7 +31,7 @@ from code_indexer.server.services.git_operations_service import (
 )
 
 from ..auth.elevation_decorator import require_mcp_elevation
-from ._utils import _mcp_response, app_module
+from ._utils import _admin_role_first, _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
 
@@ -557,8 +557,10 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
 def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_branch_delete tool - delete branch."""
+    """Handler for git_branch_delete tool - delete branch (admin role, like
+    the ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")
@@ -838,8 +840,10 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
 def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_reset tool - reset working tree."""
+    """Handler for git_reset tool - reset working tree (admin role, like the
+    ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")
@@ -888,8 +892,10 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _handle_write_error("git_reset", _ERR_RESET, e)
 
 
+@_admin_role_first
 def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_clean tool - remove untracked files."""
+    """Handler for git_clean tool - remove untracked files (admin role, like
+    the ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")

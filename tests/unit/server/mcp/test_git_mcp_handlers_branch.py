@@ -232,6 +232,17 @@ class TestGitBranchSwitchHandler:
 class TestGitBranchDeleteHandler:
     """Test git_branch_delete MCP handler (F6: Branch Management)."""
 
+    @pytest.fixture
+    def mock_user(self):
+        """git_branch_delete is admin-only (the REST twin requires
+        repository:admin); the handler body is exercised as an admin."""
+        return User(
+            username="testadmin",
+            role=UserRole.ADMIN,
+            password_hash="dummy_hash",
+            created_at=datetime.now(),
+        )
+
     def test_git_branch_delete_requires_confirmation(
         self, mock_user, mock_git_service, mock_repo_manager
     ):

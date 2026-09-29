@@ -6,7 +6,6 @@ modularization (Story #496).
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 from typing import Dict, Any, Optional
@@ -36,6 +35,8 @@ from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
 from ._utils import (
+    _admin_role_first,
+    _admin_role_required_response,
     _mcp_response,
     _get_golden_repos_dir,
     _list_global_repos,
@@ -958,25 +959,6 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     except Exception as e:
         logger.warning("get_branches failed: %s", e, exc_info=True)
         return _mcp_response({"success": False, "error": str(e), "branches": []})
-
-
-def _admin_role_first(handler: Any) -> Any:
-    """Refuse a non-admin before *handler* (and any gate it carries) runs.
-
-    The admin role is checked in the handler layer so it holds however the
-    call was admitted, including by a group tool grant (the REST and Web
-    twins are admin-only).  ``functools.wraps`` carries the handler's
-    attributes, including the dispatcher's session-key marker.
-    """
-
-    @functools.wraps(handler)
-    def wrapper(params: Dict[str, Any], user: User, *extra: Any, **kwargs: Any):
-        role_error = _admin_role_required_response(user)
-        if role_error is not None:
-            return role_error
-        return handler(params, user, *extra, **kwargs)
-
-    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -2255,21 +2237,6 @@ def _handle_provider_index_action(
     )
 
 
-_ADMIN_ROLE_REQUIRED_ERROR = "Permission denied: admin role required"
-
-
-def _admin_role_required_response(user: User) -> Optional[Dict[str, Any]]:
-    """Return an MCP permission error unless ``user`` holds the admin role.
-
-    Uses the predicate of REST ``get_current_admin_user_hybrid``
-    (``manage_users`` permission). Handlers call it themselves so the role
-    holds however the call was admitted, including by a group tool grant.
-    """
-    if user.has_permission("manage_users"):
-        return None
-    return _mcp_response({"success": False, "error": _ADMIN_ROLE_REQUIRED_ERROR})
-
-
 @require_mcp_elevation()
 def _manage_provider_index_mutation(
     params: Dict[str, Any], user: User
@@ -2367,10 +2334,9 @@ def bulk_add_provider_index(
     checked here even when a group tool grant admits the call. ``kwargs``
     carries ``session_key``.
     """
-    if not user.has_permission("manage_users"):
-        return _mcp_response(
-            {"success": False, "error": "Permission denied: admin role required"}
-        )
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     return _bulk_add_provider_index(params, user, **kwargs)
 
 
