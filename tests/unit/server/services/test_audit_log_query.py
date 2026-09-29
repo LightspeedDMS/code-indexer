@@ -31,6 +31,7 @@ from code_indexer.server.services.audit_log_query import (
     clamp_limit,
     decode_details,
     encode_cursor,
+    plain_web_url,
     query_audit_log,
 )
 from code_indexer.server.services.audit_log_service import AuditLogService
@@ -593,6 +594,58 @@ class TestDetailsAllowlist:
         assert decode_details(legacy_text.details) == {
             "omitted_fields": ["(unstructured)"]
         }
+
+
+class TestPlainWebUrl:
+    """Stored URLs are shown as scheme + host + port + path only."""
+
+    @pytest.mark.parametrize(
+        "stored, shown",
+        [
+            (
+                "https://forge.example.com/org/repo/pull/7",
+                "https://forge.example.com/org/repo/pull/7",
+            ),
+            (
+                "HTTPS://user:example-secret@Forge.Example.com:8443/org/repo/pull/7",
+                "https://forge.example.com:8443/org/repo/pull/7",
+            ),
+            (
+                "http://forge.example.com/-/merge_requests/3?private_token=x#note",
+                "http://forge.example.com/-/merge_requests/3",
+            ),
+            (
+                "https://example-secret@forge.example.com/a",
+                "https://forge.example.com/a",
+            ),
+        ],
+    )
+    def test_userinfo_query_and_fragment_are_dropped(self, stored, shown):
+        assert plain_web_url(stored) == shown
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            "javascript:alert(1)",
+            "ftp://forge.example.com/x",
+            "file:///etc/example",
+            "https://",
+            "https:///path-only",
+            "https://forge example.com/x",
+            "https://forge.example.com/x y",
+            "https://forge.example.com/\x00",
+            "https://[2001:db8::1]/x",
+            "https://-bad-.example.com/x",
+            "https://forge.example.com:99999/x",
+            "https://forge.example.com/" + "a" * 2100,
+            "",
+            7,
+            None,
+            ["https://forge.example.com/x"],
+        ],
+    )
+    def test_anything_else_is_refused(self, stored):
+        assert plain_web_url(stored) is None
 
 
 class TestSecurityCountIsIndexServed:

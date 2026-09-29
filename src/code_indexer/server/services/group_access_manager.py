@@ -1474,6 +1474,7 @@ class GroupAccessManager:
 
         self._conn_manager.execute_atomic(_do_log)
 
+
 def seed_users_to_groups(
     user_manager: Any, group_manager: "GroupAccessManager"
 ) -> tuple[int, int]:

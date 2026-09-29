@@ -26,11 +26,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import (
     Any,
     Dict,
+    FrozenSet,
     List,
     Literal,
     Optional,
@@ -40,6 +42,7 @@ from typing import (
     Union,
     overload,
 )
+from urllib.parse import urlsplit, urlunsplit
 
 from code_indexer.server.middleware.audit_request_context import (
     SOURCE_MCP,
@@ -685,6 +688,43 @@ LEGACY_DETAILS_READ_SCHEMA: Dict[str, Dict[str, FieldType]] = {
 }
 
 
+# Read-side URL fields: shown only as their :func:`plain_web_url` form, and
+# omitted (like any non-conforming field) when the stored value is not a
+# plain web URL.  The PR URL is the pull request a PR-creation job opened.
+PR_URL_FIELD = "pr_url"
+LEGACY_DETAILS_READ_URLS: Dict[str, FrozenSet[str]] = {
+    "pr_creation_success": frozenset({PR_URL_FIELD}),
+}
+_MAX_URL_LENGTH = 2048
+_WEB_URL_SCHEMES = frozenset({"https", "http"})
+_URL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+
+
+def plain_web_url(value: Any) -> Optional[str]:
+    """*value* as a plain http(s) URL -- scheme, host, port and path -- or None.
+
+    Userinfo (``user:token@``), the query and the fragment are dropped, so
+    a credential embedded in a stored URL is never shown.  A value that is
+    not an http(s) URL with a DNS-style host, is over-long, or contains
+    whitespace or a control character is refused.
+    """
+    if not isinstance(value, str) or not 0 < len(value) <= _MAX_URL_LENGTH:
+        return None
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        return None
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if scheme not in _WEB_URL_SCHEMES or not _URL_HOST_RE.match(host):
+        return None
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((scheme, netloc, parts.path, "", ""))
+
+
 def details_read_schema(action_type: str) -> Dict[str, FieldType]:
     """The fields of *action_type* that a reader may see."""
     spec = AUDIT_ACTION_CATALOG.get(action_type)
@@ -730,9 +770,17 @@ def project_details(action_type: str, raw: Any) -> Optional[str]:
     if stored is None:
         return json.dumps({OMITTED_FIELDS_KEY: [OMITTED_UNSTRUCTURED]})
     schema = details_read_schema(action_type)
+    url_fields = LEGACY_DETAILS_READ_URLS.get(action_type, frozenset())
     kept: Dict[str, Any] = {}
     omitted: Set[str] = set()
     for key, value in stored.items():
+        if isinstance(key, str) and key in url_fields:
+            shown = plain_web_url(value)
+            if shown is not None:
+                kept[key] = shown
+            else:
+                omitted.add(key)
+            continue
         ftype = schema.get(key) if isinstance(key, str) else None
         if ftype is not None and conforms(ftype, value):
             kept[key] = value

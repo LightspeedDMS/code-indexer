@@ -47,7 +47,10 @@ def client(store) -> Iterator[TestClient]:
         if isinstance(route, APIRoute):
             for dep in route.dependencies or []:
                 fn = getattr(dep, "dependency", None)
-                if getattr(fn, "__qualname__", "") == _ELEVATION_QUALNAME:
+                if (
+                    fn is not None
+                    and getattr(fn, "__qualname__", "") == _ELEVATION_QUALNAME
+                ):
                     app.dependency_overrides[fn] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
@@ -115,7 +118,10 @@ class TestDefaults:
     def test_default_page_is_100_rows_with_a_next_page_token(self, client, store):
         seed(
             store,
-            [make_event(ts=_ts(i // 60, i % 60), target_id=f"r{i}") for i in range(105)],
+            [
+                make_event(ts=_ts(i // 60, i % 60), target_id=f"r{i}")
+                for i in range(105)
+            ],
         )
         body = _get(client)
         assert len(body["logs"]) == 100
@@ -162,9 +168,7 @@ class TestFiltersAndRows:
         _seed(store)
         assert _targets(_get(client, **params)) == expected
 
-    def test_rows_carry_the_shared_fields_and_raw_string_details(
-        self, client, store
-    ):
+    def test_rows_carry_the_shared_fields_and_raw_string_details(self, client, store):
         from code_indexer.server.services.audit_log_query import AUDIT_ROW_FIELDS
 
         _seed(store)
@@ -176,6 +180,36 @@ class TestFiltersAndRows:
             "username": "u7",
             "omitted_fields": ["user_agent"],
         }
+
+    def test_pr_creation_details_carry_the_plain_pr_url(self, client, store):
+        """REST shows the recorded PR URL in ``details`` (as it always did),
+        reduced to a plain web URL -- the value MCP uses for ``resource``."""
+        seed(
+            store,
+            [
+                make_event(
+                    ts=_ts(9),
+                    action_type="pr_creation_success",
+                    target_type="auth",
+                    target_id="example-repo",
+                    actor="system",
+                    details_json=json.dumps(
+                        {
+                            "job_id": "job-7",
+                            "pr_url": "https://ci-bot:example-secret@forge."
+                            "example.com/example-org/example-repo/pull/7?t=x",
+                        }
+                    ),
+                )
+            ],
+        )
+        body = _get(client, action_type="pr_creation_success", tier="all")
+        (log,) = body["logs"]
+        assert json.loads(log["details"]) == {
+            "job_id": "job-7",
+            "pr_url": "https://forge.example.com/example-org/example-repo/pull/7",
+        }
+        assert "example-secret" not in json.dumps(body)
 
     def test_newer_direction_walks_back(self, client, store):
         _seed(store)
@@ -223,6 +257,16 @@ class TestRefusals:
         response = client.get("/api/v1/audit-logs", params=params)
         assert response.status_code == 400, (params, response.status_code)
         assert response.json()["detail"]
+
+    @pytest.mark.parametrize("offset", [0, 2])
+    def test_an_explicit_offset_with_a_cursor_is_refused(self, client, store, offset):
+        _seed(store)
+        cursor = _get(client, tier="all", limit=2)["next_cursor"]
+        response = client.get(
+            "/api/v1/audit-logs", params={"cursor": cursor, "offset": offset}
+        )
+        assert response.status_code == 400, response.text[:300]
+        assert response.json()["detail"] == "cursor and offset cannot be combined"
 
     def test_missing_store_is_503(self, client, store):
         client.app.state.audit_service = None  # type: ignore[attr-defined]

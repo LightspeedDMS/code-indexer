@@ -58,8 +58,11 @@ class TestProtocolCompliance:
     def test_has_log_raw_method(self, backend):
         assert callable(getattr(backend, "log_raw", None))
 
-    def test_has_query_method(self, backend):
-        assert callable(getattr(backend, "query", None))
+    def test_has_the_shared_read_methods_and_no_legacy_query(self, backend):
+        # Rows are read only through services/audit_log_query.query_audit_log.
+        for name in ("query_page", "count_capped", "aggregate", "find_terminal_rows"):
+            assert callable(getattr(backend, name, None)), name
+        assert not hasattr(backend, "query")
 
     def test_has_get_pr_logs_method(self, backend):
         assert callable(getattr(backend, "get_pr_logs", None))

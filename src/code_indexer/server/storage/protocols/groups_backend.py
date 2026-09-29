@@ -88,15 +88,3 @@ class GroupsBackend(Protocol):
         target_id: str,
         details: Optional[str] = None,
     ) -> None: ...
-
-    def get_audit_logs(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        exclude_target_type: Optional[str] = None,
-    ) -> tuple: ...

@@ -159,9 +159,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 9870/10241/10722).
         # 12.76.0 shifted them another +31 (9870/10241/10722 ->
         # 9901/10272/10753).
-        "CHANGELOG.md:9901",
-        "CHANGELOG.md:10272",
-        "CHANGELOG.md:10753",
+        # The Unreleased audit-log read entry shifted them another +20
+        # (9901/10272/10753 -> 9921/10292/10773).
+        "CHANGELOG.md:9921",
+        "CHANGELOG.md:10292",
+        "CHANGELOG.md:10773",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

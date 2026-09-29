@@ -40,7 +40,7 @@ def _ts(minute: int) -> str:
 
 # Newest first.  The two rows at minute 8 share a timestamp and straddle the
 # first page boundary of a 3-row page.
-_SEED = (
+_SEED: Tuple[Dict[str, Any], ...] = (
     dict(ts=_ts(10), actor="alice", target_type="user", target_id="u10"),
     dict(ts=_ts(9), actor="bob", target_type="group", target_id="7"),
     dict(ts=_ts(8), actor="alice", target_type="user", target_id="u8a"),
@@ -356,7 +356,7 @@ def test_every_door_exposes_the_same_row_fields(doors):
     }
 
 
-def test_a_divergent_adapter_fails_the_parity_check(doors):
+def test_a_divergent_adapter_fails_the_parity_check(doors: Doors):
     """Negative control: a door that drops the tier (reads every row) is
     caught by the same comparison the parity tests use."""
     query = QUERIES[0]
@@ -366,5 +366,9 @@ def test_a_divergent_adapter_fails_the_parity_check(doors):
 
     with pytest.raises(AssertionError, match="mcp differs from web"):
         assert_same_page(
-            {"web": doors.web(query), "mcp": divergent_mcp(query), "rest": doors.rest(query)}
+            {
+                "web": doors.web(query),
+                "mcp": divergent_mcp(query),
+                "rest": doors.rest(query),
+            }
         )

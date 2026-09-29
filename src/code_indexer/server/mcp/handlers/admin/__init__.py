@@ -33,6 +33,7 @@ from code_indexer.server.services.audit_log_query import (
     AUDIT_LOG_MAX_LIMIT,
     DEFAULT_AUDIT_LOG_LIMIT,
     DIRECTION_OLDER,
+    PR_URL_FIELD,
     TIER_ALL,
     AuditAggregate,
     AuditQueryError,
@@ -1577,17 +1578,29 @@ def _audit_flag(args: Dict[str, Any], name: str) -> bool:
 def _build_audit_log_entry(row: CanonicalAuditRow) -> Dict[str, Any]:
     """One query_audit_logs entry: the shared row fields, ``details``
     decoded, plus the older ``user`` / ``action`` / ``resource`` aliases
-    (always the row's own ``admin_id`` / ``action_type`` / ``target_id``)."""
+    (the row's own ``admin_id`` / ``action_type``; ``resource`` is the
+    recorded PR URL for PR-creation rows, else ``target_id``).
+
+    ``resource`` is read from the ALLOWLISTED details only: the shared read
+    path keeps ``pr_url`` solely as a plain web URL (no userinfo, query or
+    fragment), so this never exposes more than ``details`` does.
+    """
     entry = row_fields(row)
-    entry["details"] = decode_details(row.details)
+    details = decode_details(row.details)
+    entry["details"] = details
     entry["user"] = row.admin_id
     entry["action"] = row.action_type
-    entry["resource"] = row.target_id
+    pr_url = details.get(PR_URL_FIELD)
+    entry["resource"] = pr_url if isinstance(pr_url, str) else row.target_id
     return entry
 
 
 def _query_audit_log_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
     """Map the MCP arguments onto the shared read function (one call)."""
+    # Checked on the SUPPLIED arguments, before page 1 becomes offset 0 (and
+    # then "no offset"): an explicit page never combines with a cursor.
+    if args.get("cursor") and args.get("page") is not None:
+        raise AuditQueryError("cursor and page cannot be combined")
     limit, offset = _resolve_audit_log_pagination(args)
     filters = build_filters(
         # Both "action" and "action_type" name the action filter.

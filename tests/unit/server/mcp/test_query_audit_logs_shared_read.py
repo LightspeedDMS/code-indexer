@@ -171,6 +171,71 @@ class TestEntries:
         assert entry["user"] == entry["admin_id"]
 
 
+_PR_URL = "https://forge.example.com/example-org/example-repo/pull/7"
+
+
+def _pr_row(store, pr_url: Any) -> None:
+    """One PR-creation row as the PR audit writer records it."""
+    seed(
+        store,
+        [
+            make_event(
+                ts=_ts(9),
+                action_type="pr_creation_success",
+                target_type="auth",
+                target_id="example-repo",
+                actor="system",
+                details_json=json.dumps(
+                    {
+                        "job_id": "job-7",
+                        "repo_alias": "example-repo",
+                        "branch_name": "fix/example",
+                        "pr_url": pr_url,
+                        "commit_hash": "abc123",
+                        "files_modified": ["src/example.py"],
+                    }
+                ),
+            )
+        ],
+    )
+
+
+class TestPrCreationResource:
+    """PR-creation entries keep ``resource`` = the recorded PR URL, read
+    through the details allowlist (never around it)."""
+
+    def test_resource_is_the_recorded_pr_url(self, admin_user, store):
+        _pr_row(store, _PR_URL)
+        (entry,) = _ok(admin_user, action_type="pr_creation_success")["entries"]
+        assert entry["resource"] == _PR_URL
+        assert entry["details"]["pr_url"] == _PR_URL
+        assert entry["target_id"] == "example-repo"
+        assert "files_modified" in entry["details"]["omitted_fields"]
+
+    def test_userinfo_query_and_fragment_are_stripped(self, admin_user, store):
+        _pr_row(
+            store,
+            "https://ci-bot:example-secret@forge.example.com/example-org/"
+            "example-repo/pull/7?private_token=example-secret#top",
+        )
+        payload = _ok(admin_user, action_type="pr_creation_success")
+        (entry,) = payload["entries"]
+        assert entry["resource"] == _PR_URL
+        assert entry["details"]["pr_url"] == _PR_URL
+        assert "example-secret" not in json.dumps(payload)
+
+    @pytest.mark.parametrize(
+        "stored",
+        ["javascript:alert(1)", "not a url", "ftp://forge.example.com/x", 7, None],
+    )
+    def test_a_value_that_is_not_a_web_url_is_omitted(self, admin_user, store, stored):
+        _pr_row(store, stored)
+        (entry,) = _ok(admin_user, action_type="pr_creation_success")["entries"]
+        assert "pr_url" not in entry["details"]
+        assert "pr_url" in entry["details"]["omitted_fields"]
+        assert entry["resource"] == entry["target_id"] == "example-repo"
+
+
 class TestAggregate:
     def test_aggregate_groups_authentication_activity(self, admin_user, store):
         _seed(store)
@@ -227,6 +292,14 @@ class TestToolDoc:
 
 
 class TestRefusals:
+    @pytest.mark.parametrize("page", [1, 2])
+    def test_an_explicit_page_with_a_cursor_is_refused(self, admin_user, store, page):
+        _seed(store)
+        cursor = _ok(admin_user, limit=2)["next_cursor"]
+        payload = _call(admin_user, cursor=cursor, page=page)
+        assert payload["success"] is False
+        assert payload["error"] == "cursor and page cannot be combined"
+
     @pytest.mark.parametrize(
         "args",
         [

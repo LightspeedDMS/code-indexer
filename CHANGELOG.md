@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Audit Logs admin page (`/admin/audit-logs`, admin only, elevation required for data): a Security view (7-day default window) and an authentication-activity aggregate (24-hour default) with drill-down, filters for actor, action, target, outcome, source, IP address, correlation id and a UTC range, Newer/Older cursor paging, and a bounded CSV/JSON export of the filtered rows.
+- MCP `query_audit_logs` accepts `target_type`, `target_id`, `outcome`, `source`, `ip_address`, `correlation_id`, `tier` (default `all`), `cursor`, `direction`, `aggregate` and `all_time`, and returns `total_capped`, `next_cursor`, `prev_cursor` and `has_more`. Entries carry `pairing_state`, `submitted_only` and `actor_is_authenticated`.
+- REST `GET /api/v1/audit-logs` accepts the same filters plus `tier`, `cursor`, `direction`, `aggregate` and `all_time`, and returns the same additive fields.
+
+### Changed
+
+- The Audit Logs page, MCP `query_audit_logs` and REST `GET /api/v1/audit-logs` read through one shared query, so the same filters return the same rows, order, counts and paging tokens on every door. Invalid arguments (including a malformed cursor) return HTTP 400 on REST and `success: false` on MCP.
+- REST `GET /api/v1/audit-logs` without `tier` or `target_type` now returns the Security tier: every non-authentication row plus password changes, rate-limit trips, security incidents and impersonation. Routine logins and token refreshes are available with `tier=auth_activity`. Previously every authentication row was left out.
+- REST `GET /api/v1/audit-logs` without `limit` now returns 100 rows and a `next_cursor` token instead of every row; a `limit` above 1000 is clamped to 1000. Callers that need everything follow `next_cursor` until it is null. `offset` still works and cannot be combined with `cursor`.
+- Audit-log `total` is exact up to 10,000; above that it reads 10,000 and `total_capped` is true.
+- Audit-log `details` on every door show only the fields allowed for that action type. The names of other stored fields are listed under `omitted_fields`, and stored content that is not a JSON object is reported as `omitted_fields: ["(unstructured)"]` instead of being echoed.
+
+### Removed
+
+- The Audit Logs tab of the Group Management page and its `/admin/partials/groups-audit-logs` partial; audit reading lives on the Audit Logs page. `active_tab=audit` opens the Groups tab.
+
 ## [12.76.0] - 2026-09-27
 
 ### Security

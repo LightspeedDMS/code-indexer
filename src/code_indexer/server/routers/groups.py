@@ -997,7 +997,7 @@ def get_audit_logs(
     date_to: Optional[str] = None,
     tier: Optional[str] = None,
     limit: Optional[int] = None,
-    offset: int = 0,
+    offset: Optional[int] = None,
     cursor: Optional[str] = None,
     direction: str = DIRECTION_OLDER,
     aggregate: bool = False,
@@ -1034,6 +1034,10 @@ def get_audit_logs(
     if tier is None:
         tier = TIER_ALL if target_type else TIER_SECURITY
     try:
+        # Checked on the SUPPLIED value, before offset 0 becomes "no offset":
+        # an explicit offset never combines with a cursor.
+        if cursor and offset is not None:
+            raise AuditQueryError("cursor and offset cannot be combined")
         filters = build_filters(
             action_type=action_type,
             actor=admin_id,

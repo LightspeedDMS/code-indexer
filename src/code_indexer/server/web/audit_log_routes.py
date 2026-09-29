@@ -60,7 +60,8 @@ from code_indexer.server.services.audit_log_query import (
     row_fields,
 )
 
-from .routes import _create_login_redirect, _require_admin_session, templates
+from . import routes as _web_routes
+from .routes import _create_login_redirect, templates
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +322,9 @@ def audit_logs_page(request: Request) -> Response:
     partials.  Query parameters (a bookmarked or no-script form submission)
     are passed to the first partial load unchanged.
     """
-    session = _require_admin_session(request)
+    # Looked up on every call (never bound at import): the admin gate is
+    # whatever web.routes currently provides.
+    session = _web_routes._require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
     passthrough = {
@@ -369,7 +372,9 @@ def audit_logs_page(request: Request) -> Response:
 )
 def audit_logs_rows_partial(request: Request) -> Response:
     """Raw rows for the current filters, one keyset page (Newer / Older)."""
-    session = _require_admin_session(request)
+    # Looked up on every call (never bound at import): the admin gate is
+    # whatever web.routes currently provides.
+    session = _web_routes._require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     params = dict(request.query_params)
@@ -437,7 +442,9 @@ def _rows_context(
 )
 def audit_logs_aggregate_partial(request: Request) -> Response:
     """Authentication activity grouped by (action, outcome) over a window."""
-    session = _require_admin_session(request)
+    # Looked up on every call (never bound at import): the admin gate is
+    # whatever web.routes currently provides.
+    session = _web_routes._require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     params = {**dict(request.query_params), "view": TIER_AUTH_ACTIVITY}
@@ -580,7 +587,9 @@ def audit_logs_export(request: Request) -> Response:
     keyset page at a time and streamed, so a large table is never loaded
     into memory.  Filters are validated before anything is streamed.
     """
-    session = _require_admin_session(request)
+    # Looked up on every call (never bound at import): the admin gate is
+    # whatever web.routes currently provides.
+    session = _web_routes._require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     params = dict(request.query_params)

@@ -641,7 +641,8 @@ class GroupsPostgresBackend:
                 return cur.fetchone() is not None
 
     # ------------------------------------------------------------------
-    # Audit logging (part of GroupsBackend protocol)
+    # Audit logging (part of GroupsBackend protocol).  Write only: rows are
+    # read through services/audit_log_query.query_audit_log.
     # ------------------------------------------------------------------
 
     def log_audit(
@@ -658,63 +659,3 @@ class GroupsPostgresBackend:
         AuditLogPostgresBackend(self._pool).log(
             admin_id, action_type, target_type, target_id, details
         )
-
-    def get_audit_logs(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        exclude_target_type: Optional[str] = None,
-    ) -> tuple:
-        """Query audit log entries with filters. Returns (list, total_count)."""
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        if action_type:
-            conditions.append("action_type = %s")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = %s")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = %s")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= %s")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= %s")
-            params.append(f"{date_to}T23:59:59")
-        if exclude_target_type:
-            conditions.append("target_type != %s")
-            params.append(exclude_target_type)
-
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-        with self._conn() as conn:
-            with conn.cursor(row_factory=_dict_row_factory()) as cur:
-                cur.execute(f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params)
-                cnt_row = cur.fetchone()
-                total = cnt_row["cnt"] if cnt_row else 0
-
-                query = (
-                    f"SELECT id, timestamp, admin_id, action_type, "
-                    f"target_type, target_id, details "
-                    f"FROM audit_logs {where} ORDER BY timestamp DESC"
-                )
-                page_params = list(params)
-                if limit is not None:
-                    query += " LIMIT %s OFFSET %s"
-                    page_params.extend([limit, offset])
-                elif offset > 0:
-                    query += " OFFSET %s"
-                    page_params.append(offset)
-
-                cur.execute(query, page_params)
-                logs = [dict(r) for r in cur.fetchall()]
-
-        return logs, total

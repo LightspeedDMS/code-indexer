@@ -164,9 +164,9 @@ class PasswordChangeAuditLogger:
 
         Note: ALL PasswordChangeAuditLogger events use target_type="auth", including
         PR creation and git cleanup events. This is intentional — these events are
-        distinguished by action_type, not target_type. The Groups UI uses
-        exclude_target_type="auth" to filter out all PasswordChangeAuditLogger events
-        from the group management view.
+        distinguished by action_type, not target_type. The audit-log read tiers
+        (services/audit_log_query.py) use action_type to decide which of these
+        rows are security events and which are routine authentication activity.
         """
         if self._audit_service is None:
             return

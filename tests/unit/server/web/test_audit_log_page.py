@@ -315,6 +315,18 @@ class TestShellAndAccess:
         assert response.status_code == 303
         assert response.headers["location"].startswith("/login?redirect_to=")
 
+    def test_the_session_gate_is_resolved_at_call_time(self, page_env):
+        """The page asks ``web.routes`` for the admin session on every
+        request, so it never keeps a reference bound at import time (a
+        reference captured while another test patched the gate would
+        otherwise outlive that patch)."""
+        with patch(
+            "code_indexer.server.web.routes._require_admin_session",
+            return_value=None,
+        ):
+            response = page_env["client"].get("/admin/audit-logs")
+        assert response.status_code == 303
+
     def test_shell_passes_query_parameters_to_the_first_load(self, page_env):
         page = page_env["client"].get(
             "/admin/audit-logs",
