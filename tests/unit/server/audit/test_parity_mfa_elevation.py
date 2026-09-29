@@ -827,6 +827,14 @@ class TestStepUpEdgeCases:
         assert store.rows(*_ELEVATION_TYPES) == []
 
 
+# Each credentialed MCP request re-creates the credential's elevation window
+# through the same code path, with no counter or threshold on it: the first
+# request opens the window and every later one refreshes an existing window.
+# Three requests cover both cases (each request costs a real credential
+# verification, so a larger count only adds wall time).
+_CREDENTIALED_REQUEST_COUNT = 3
+
+
 def test_credentialed_mcp_requests_record_no_elevation_rows(doors, store):
     import base64
 
@@ -836,7 +844,7 @@ def test_credentialed_mcp_requests_record_no_elevation_rows(doors, store):
     ).decode()
     headers = {"Authorization": f"Basic {basic}"}
 
-    for _ in range(50):
+    for _ in range(_CREDENTIALED_REQUEST_COUNT):
         resp = doors.client.post(
             "/mcp",
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},

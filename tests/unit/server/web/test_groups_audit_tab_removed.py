@@ -5,11 +5,16 @@ Audit reading lives on the Audit Logs page (``/admin/audit-logs``), MCP
 shared read function.  One real app per module: a fresh server data
 directory, the real lifespan and a real Web login.
 
-The Groups page resolves its ``GroupAccessManager`` from the module-level
-``code_indexer.server.app.app`` (the object uvicorn serves in production),
-not from ``request.app``.  A ``create_app()`` instance is a different object,
-so the fixture points the module app's ``group_manager`` at the manager the
-real lifespan built, and restores it afterwards.
+The Groups page resolves its ``GroupAccessManager`` and
+``GoldenRepoManager`` from the module-level ``code_indexer.server.app.app``
+(the object uvicorn serves in production), not from ``request.app``.  A
+``create_app()`` instance is a different object, so the fixture points the
+module app's ``group_manager`` and ``golden_repo_manager`` at the managers
+the real lifespan built, and restores them afterwards.  The module app is
+resolved BEFORE the fixture's own ``create_app()`` under the patched data
+directory: resolving it lazily afterwards would run a second
+``create_app()`` against the same data directory and wait on the primary
+instance lock the first app already holds.
 """
 
 from __future__ import annotations
@@ -25,31 +30,41 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 
+_MODULE_STATE_MANAGERS = ("group_manager", "golden_repo_manager")
+
+
 @pytest.fixture(scope="module")
 def page_app(tmp_path_factory) -> Iterator[Any]:
+    import code_indexer.server.app as app_module
+
+    # Resolve the module app first, under the session's own data directory.
+    module_state = app_module.app.state
     data_dir = tmp_path_factory.mktemp("groups_tab_server")
     env = {
         "CIDX_SERVER_DATA_DIR": str(data_dir),
         "CIDX_DATA_DIR": str(data_dir / "cidx"),
     }
     with patch.dict("os.environ", env):
-        import code_indexer.server.app as app_module
         from code_indexer.server.services.config_service import reset_config_service
 
         reset_config_service()
         app = app_module.create_app()
         with TestClient(app, follow_redirects=False) as client:
-            module_state = app_module.app.state
             sentinel = object()
-            previous = getattr(module_state, "group_manager", sentinel)
-            module_state.group_manager = app.state.group_manager
+            previous = {
+                name: getattr(module_state, name, sentinel)
+                for name in _MODULE_STATE_MANAGERS
+            }
+            for name in _MODULE_STATE_MANAGERS:
+                setattr(module_state, name, getattr(app.state, name))
             try:
                 yield app, client
             finally:
-                if previous is sentinel:
-                    del module_state.group_manager
-                else:
-                    module_state.group_manager = previous
+                for name, value in previous.items():
+                    if value is sentinel:
+                        delattr(module_state, name)
+                    else:
+                        setattr(module_state, name, value)
         reset_config_service()
 
 
