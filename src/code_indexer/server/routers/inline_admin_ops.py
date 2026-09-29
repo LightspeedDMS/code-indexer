@@ -223,6 +223,7 @@ def register_admin_ops_routes(
         "/api/admin/activated-repos/{username}/{user_alias}",
         response_model=JobResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def admin_deactivate_activated_repo(
         username: str,
