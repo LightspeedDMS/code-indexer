@@ -63,6 +63,10 @@ class _StubUserManager:
             created_at=datetime.now(timezone.utc),
         )
 
+    def create_user_audited(self, username, password, role, *, actor):
+        """The audited entry point the MCP create_user door calls."""
+        return self.create_user(username, password, role)
+
 
 @pytest.fixture
 def acting_admin():

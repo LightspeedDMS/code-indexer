@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -33,7 +34,7 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
-from ..utils.host_validation import validate_server_host
+from ..utils.host_validation import normalize_server_host
 from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
@@ -43,6 +44,28 @@ from ..auto_update.deployment_executor import (
 from .db_outage_throttle import DbOutageThrottle
 
 logger = logging.getLogger(__name__)
+
+
+class BootstrapFileNotWritten(RuntimeError):
+    """The runtime configuration was committed; config.json was not rewritten.
+
+    The change IS published (the DB row and the live config hold it); only
+    the bootstrap file write failed.  The original error is ``__cause__``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "runtime configuration saved, but the bootstrap config file was not written"
+        )
+
+
+@dataclass
+class _ChangeAttempt:
+    """Pre-image and candidate of one configuration change (for its audit row)."""
+
+    before: Optional[ServerConfig] = None
+    after: Optional[ServerConfig] = None
+    published: bool = False
 
 
 @dataclass
@@ -1075,13 +1098,11 @@ class ConfigService:
         to a CANDIDATE copy of the config, never the live object directly.
         Every branch below is unchanged from the pre-#1400 dispatch.
 
+        Every category, "indexing" included, is applied to `config` only;
+        publishing is the caller's job (_change_config).
+
         Returns:
-            True if `config` was mutated and should participate in the
-            standard validate-then-publish flow. False for the "indexing"
-            category, a pre-existing special case that persists itself
-            internally (_update_indexing_setting) against the live config
-            and must not be re-validated/re-published by the generic
-            atomic flow.
+            True (kept for call-site compatibility).
 
         Raises:
             ValueError: If category or key is invalid, or value fails
@@ -1166,10 +1187,7 @@ class ConfigService:
             self._update_xray_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
-            self._update_indexing_setting(key, value)
-            # _update_indexing_setting saves config internally, so the
-            # caller must skip the normal validate-then-publish flow.
-            return False
+            self._update_indexing_setting(config, key, value)
         # Story #323 - Wiki metadata fields configuration
         elif category == "wiki":
             self._update_wiki_setting(config, key, value)
@@ -1211,17 +1229,67 @@ class ConfigService:
         return True
 
     def _log_applied_updates(self, updates: Sequence[Tuple[str, str, Any]]) -> None:
-        """Log every non-"indexing" update after a successful atomic publish."""
-        for category, key, value in updates:
+        """Log every non-"indexing" update after a successful atomic publish.
+
+        Names only: a value may be a secret (client secret, provider key,
+        project key), so it never reaches the operational log.
+        """
+        for category, key, _value in updates:
             if category == "indexing":
                 continue
             logger.info(
-                "Updated setting %s.%s to %s",
+                "Updated setting %s.%s",
                 category,
                 key,
-                value,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _change_config(
+        self,
+        mutate: Callable[[ServerConfig], Optional[ServerConfig]],
+        before_publish: Optional[Callable[[ServerConfig], None]],
+        attempt: "_ChangeAttempt",
+    ) -> None:
+        """The ONE publish path for a configuration change.
+
+        Under the update lock: deep-copy the live config into a CANDIDATE,
+        let *mutate* change it (or return a replacement), validate the
+        candidate, run *before_publish* against the candidate, then publish
+        it.  Anything raising before the publish leaves the live config
+        untouched; a failed publish restores the previous live config.  Once
+        the runtime row is committed the change is published, even if the
+        bootstrap file write then fails (:class:`BootstrapFileNotWritten`).
+        *attempt* receives the pre-image and the candidate (for auditing).
+        """
+        with self._config_update_lock:
+            live = self.get_config()
+            candidate = copy.deepcopy(live)
+            attempt.before, attempt.after = live, candidate
+            replacement = mutate(candidate)
+            if replacement is not None:
+                candidate = replacement
+                attempt.after = candidate
+            self.config_manager.validate_config(candidate, previous_host=live.host)
+            if before_publish is not None:
+                before_publish(candidate)
+            try:
+                self.save_config(candidate)
+            except BootstrapFileNotWritten:
+                attempt.published = True
+                raise
+            except Exception:
+                self._config = live
+                raise
+            attempt.published = True
+
+    def _updates_mutator(
+        self, updates: Sequence[Tuple[str, str, Any]]
+    ) -> Callable[[ServerConfig], None]:
+        def _mutate(candidate: ServerConfig) -> None:
+            for category, key, value in updates:
+                self._apply_setting(candidate, category, key, value)
+
+        return _mutate
 
     def update_settings_atomic(
         self, updates: Sequence[Tuple[str, str, Any]]
@@ -1231,31 +1299,98 @@ class ConfigService:
 
         Story #1400 CRITICAL 6: validate a deep-copied CANDIDATE and publish
         atomically only on full success, so a rejected update can never
-        leave the shared live config mutated in place. The "indexing"
-        category is a pre-existing special case that self-persists against
-        the live config, independent of this batch's atomicity.
+        leave the shared live config mutated in place.  Unaudited: front
+        doors use :meth:`update_settings_audited`.
 
         Raises:
             ValueError: invalid category/key, or the candidate fails
                 config_manager.validate_config.
         """
-        with self._config_update_lock:
-            live = self.get_config()
-            candidate = copy.deepcopy(live)
-            has_candidate_updates = False
-            for category, key, value in updates:
-                if category == "indexing":
-                    self._apply_setting(live, category, key, value)
-                    continue
-                if self._apply_setting(candidate, category, key, value):
-                    has_candidate_updates = True
+        if updates:
+            self._change_config(self._updates_mutator(updates), None, _ChangeAttempt())
+            self._log_applied_updates(updates)
+        return self.get_config()
 
-            if has_candidate_updates:
-                self.config_manager.validate_config(candidate)
-                self.save_config(candidate)
-                self._log_applied_updates(updates)
+    def apply_audited_change(
+        self,
+        mutate: Callable[[ServerConfig], Optional[ServerConfig]],
+        *,
+        actor: str,
+        target_id: str,
+        action_type: str = "config_changed",
+        change_kind: str = "update",
+        before_publish: Optional[Callable[[ServerConfig], None]] = None,
+    ) -> ServerConfig:
+        """Apply one configuration change for *actor* and record ONE row.
 
-            return self.get_config()
+        The single audited entry point every human configuration write goes
+        through (see :meth:`_change_config` for the publish semantics).
+        ``success`` names the changed keys (values only for allowlisted
+        non-secret scalars); a change that raises records ``failure`` with
+        the attempted key names, publishes nothing, and re-raises.  For the
+        provider-key action types *target_id* is the provider.
+        """
+        from code_indexer.server.services.config_change_audit import (
+            CHANGE_KINDS,
+            CONFIG_ACTIONS,
+            record_config_outcome,
+        )
+
+        if action_type not in CONFIG_ACTIONS or change_kind not in CHANGE_KINDS:
+            raise ValueError("unsupported audited configuration change")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("an audited configuration change requires an actor")
+        attempt = _ChangeAttempt()
+        try:
+            # Re-raises BootstrapFileNotWritten after marking the change
+            # published, so the caller still sees the file-write error.
+            self._change_config(mutate, before_publish, attempt)
+        finally:
+            # Success exactly when published: a normal save, or a committed
+            # runtime row whose bootstrap file write then failed.
+            record_config_outcome(
+                actor=actor,
+                action_type=action_type,
+                target_id=target_id,
+                change_kind=change_kind,
+                before=attempt.before,
+                after=attempt.after,
+                outcome="success" if attempt.published else "failure",
+                provider=target_id,
+            )
+        return self.get_config()
+
+    def update_settings_audited(
+        self,
+        updates: Sequence[Tuple[str, str, Any]],
+        *,
+        actor: str,
+        before_publish: Optional[Callable[[ServerConfig], None]] = None,
+    ) -> ServerConfig:
+        """:meth:`update_settings_atomic` for a front door, recording one row.
+
+        The row's target is the updated category, or ``*`` when the batch
+        spans several.
+        """
+        categories = {category for category, _key, _value in updates}
+        target = categories.pop() if len(categories) == 1 else "*"
+        result = self.apply_audited_change(
+            self._updates_mutator(updates),
+            actor=actor,
+            target_id=target,
+            before_publish=before_publish,
+        )
+        self._log_applied_updates(updates)
+        return result
+
+    def reset_to_defaults_audited(self, *, actor: str) -> ServerConfig:
+        """Replace the configuration with the defaults; record one row."""
+        return self.apply_audited_change(
+            lambda _candidate: self.config_manager.create_default_config(),
+            actor=actor,
+            target_id="*",
+            change_kind="reset_to_defaults",
+        )
 
     def update_setting(
         self, category: str, key: str, value: Any, skip_validation: bool = False
@@ -1279,9 +1414,9 @@ class ConfigService:
     ) -> None:
         """Update a server setting."""
         if key == "host":
-            host_str = str(value)
-            validate_server_host(host_str)
-            config.host = host_str
+            # Strip once; the stripped value is what is validated and stored.
+            # An unchanged host is not re-validated (only a change is).
+            config.host = normalize_server_host(str(value), current_host=config.host)
         elif key == "port":
             config.port = int(value)
         elif key == "workers":
@@ -1856,24 +1991,47 @@ class ConfigService:
         config.elevation_max_age_seconds = max_age
         return original
 
-    def _rollback_totp_elevation(
+    def _totp_elevation_mutator(
+        self, enabled: bool, idle_timeout_seconds: int, max_age_seconds: int
+    ) -> Callable[[ServerConfig], None]:
+        """Validate the final tuple (Fix #1) and stage it on the candidate."""
+
+        def _mutate(candidate: ServerConfig) -> None:
+            self._validate_totp_elevation_tuple(
+                enabled, idle_timeout_seconds, max_age_seconds
+            )
+            self._apply_totp_elevation_to_config(
+                candidate, enabled, idle_timeout_seconds, max_age_seconds
+            )
+
+        return _mutate
+
+    def update_totp_elevation_audited(
         self,
-        config: "ServerConfig",
-        original: tuple,
-        exc: Exception,
+        enabled: bool,
+        idle_timeout_seconds: int,
+        max_age_seconds: int,
+        session_manager: Optional["ElevationManagerProtocol"] = None,
+        *,
+        actor: str,
     ) -> None:
-        """Restore original totp_elevation values and log the failure."""
-        config.elevation_enforcement_enabled = original[0]
-        config.elevation_idle_timeout_seconds = original[1]
-        config.elevation_max_age_seconds = original[2]
-        logger.error(
-            "totp_elevation atomic save failed; rolled back to "
-            "enabled=%s idle=%ds max_age=%ds. Error: %s",
-            original[0],
-            original[1],
-            original[2],
-            exc,
-            extra={"correlation_id": get_correlation_id()},
+        """:meth:`update_totp_elevation_atomic` for a front door (one row)."""
+        try:
+            self.apply_audited_change(
+                self._totp_elevation_mutator(
+                    enabled, idle_timeout_seconds, max_age_seconds
+                ),
+                actor=actor,
+                target_id="totp_elevation",
+            )
+        except BootstrapFileNotWritten:
+            # Published: the live session manager must follow the new values.
+            self._after_totp_elevation_publish(
+                enabled, idle_timeout_seconds, max_age_seconds, session_manager
+            )
+            raise
+        self._after_totp_elevation_publish(
+            enabled, idle_timeout_seconds, max_age_seconds, session_manager
         )
 
     def update_totp_elevation_atomic(
@@ -1886,22 +2044,37 @@ class ConfigService:
         """Atomically validate, save, and hot-reload totp_elevation (Bug #943).
 
         Fix #1: validates the final tuple so idle > old_max_age is not rejected.
-        Fix #3: rolls back all 3 in-memory fields on save failure.
+        Fix #3: the change is staged on a candidate copy, so a failed save
+        leaves the live config untouched.
         Fix #2: calls session_manager.update_timeouts() only when provided.
         Logs INFO on success so operators can confirm hot-reload occurred.
         """
-        self._validate_totp_elevation_tuple(
-            enabled, idle_timeout_seconds, max_age_seconds
-        )
-        config = self.get_config()
-        original = self._apply_totp_elevation_to_config(
-            config, enabled, idle_timeout_seconds, max_age_seconds
-        )
         try:
-            self.save_config(config)
-        except Exception as exc:
-            self._rollback_totp_elevation(config, original, exc)
-            raise  # MESSI Rule 13 — propagate, never swallow
+            self._change_config(
+                self._totp_elevation_mutator(
+                    enabled, idle_timeout_seconds, max_age_seconds
+                ),
+                None,
+                _ChangeAttempt(),
+            )
+        except BootstrapFileNotWritten:
+            # Published: the live session manager must follow the new values.
+            self._after_totp_elevation_publish(
+                enabled, idle_timeout_seconds, max_age_seconds, session_manager
+            )
+            raise
+        self._after_totp_elevation_publish(
+            enabled, idle_timeout_seconds, max_age_seconds, session_manager
+        )
+
+    def _after_totp_elevation_publish(
+        self,
+        enabled: bool,
+        idle_timeout_seconds: int,
+        max_age_seconds: int,
+        session_manager: Optional["ElevationManagerProtocol"],
+    ) -> None:
+        """Hot-reload the live session manager and log the new values."""
         if session_manager is not None:
             session_manager.update_timeouts(idle_timeout_seconds, max_age_seconds)
         logger.info(
@@ -2844,6 +3017,7 @@ class ConfigService:
             ValueError: If any setting fails validation
         """
         config = self.get_config()
+        previous_host = config.host
 
         for category, category_settings in settings.items():
             for key, value in category_settings.items():
@@ -2861,7 +3035,7 @@ class ConfigService:
                     self._update_claude_cli_setting(config, key, value)
 
         # Validate and save
-        self.config_manager.validate_config(config)
+        self.config_manager.validate_config(config, previous_host=previous_host)
         self.save_config(config)
         logger.info(
             "Saved all settings", extra={"correlation_id": get_correlation_id()}
@@ -2871,16 +3045,20 @@ class ConfigService:
         """Get the path to the configuration file."""
         return str(self.config_manager.config_file_path)
 
-    def _update_indexing_setting(self, key: str, value: Any) -> None:
+    def _update_indexing_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
         """
-        Update an indexing setting (Story #223 - AC4).
+        Update an indexing setting on *config* (Story #223 - AC4).
 
         Handles both list and comma-separated string input for indexable_extensions.
-        Normalizes extensions to ensure leading dot and lowercase.
-        Saves config to disk immediately.
+        Normalizes extensions to ensure leading dot and lowercase.  Like every
+        other category, the change is applied to *config* only; the caller
+        (_change_config) validates and publishes it.
 
         Args:
-            key: Setting key (only 'indexable_extensions' is supported)
+            config: The candidate configuration to update
+            key: Setting key
             value: New value (list or comma-separated string)
 
         Raises:
@@ -2899,7 +3077,6 @@ class ConfigService:
                     f"Invalid value for {field_name}: must be a valid integer"
                 )
 
-        config = self.get_config()
         indexing = config.indexing_config
         if indexing is None:
             from ..utils.config_manager import IndexingConfig
@@ -2910,7 +3087,6 @@ class ConfigService:
         # Story #1158 - AC1: Embedding API parallelism (required, clamped [1, 32])
         if key in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
             setattr(indexing, key, _clamp_parallel(value, key))
-            self.save_config(config)
             logger.info(
                 "Updated indexing.%s to %d",
                 key,
@@ -2925,7 +3101,6 @@ class ConfigService:
                 indexing.temporal_parallel_requests = None
             else:
                 indexing.temporal_parallel_requests = _clamp_parallel(value, key)
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_parallel_requests to %s",
                 indexing.temporal_parallel_requests,
@@ -2954,7 +3129,6 @@ class ConfigService:
 
             validate_embedder_slug_uniqueness(embedders)
             indexing.temporal_embedders = embedders
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_embedders to %s",
                 indexing.temporal_embedders,
@@ -2972,7 +3146,6 @@ class ConfigService:
                     f"temporal_embedders {indexing.temporal_embedders!r}"
                 )
             indexing.temporal_active_embedder = active
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_active_embedder to %s",
                 indexing.temporal_active_embedder,
@@ -2992,7 +3165,6 @@ class ConfigService:
                     "temporal_aggregation_chunk_chars must be a positive integer"
                 )
             indexing.temporal_aggregation_chunk_chars = chars
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_aggregation_chunk_chars to %d",
                 indexing.temporal_aggregation_chunk_chars,
@@ -3003,7 +3175,6 @@ class ConfigService:
         # Story #1412: golden/server temporal all-branches gate (default OFF).
         if key == "temporal_all_branches_enabled":
             indexing.temporal_all_branches_enabled = _parse_bool(value)
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
@@ -3031,7 +3202,6 @@ class ConfigService:
                 normalized.append(ext)
 
         indexing.indexable_extensions = normalized
-        self.save_config(config)
         logger.info(
             "Updated indexing.indexable_extensions with %d extensions",
             len(normalized),
@@ -3928,16 +4098,24 @@ class ConfigService:
         # stale cached value from before this save.
         self._config = config
 
+        if self._pool is None and self._sqlite_db_path is None:
+            self.config_manager.save_config(config)
+            return
         if self._pool is not None:
             self._save_runtime_to_pg(config)
-            file_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(file_dict)
-        elif self._sqlite_db_path is not None:
-            self._save_runtime_to_sqlite(runtime_dict)
-            file_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(file_dict)
         else:
-            self.config_manager.save_config(config)
+            self._save_runtime_to_sqlite(runtime_dict)
+        # The runtime row is committed: the change is published from here on.
+        try:
+            self.config_manager.save_config_dict(self._extract_bootstrap_dict(config))
+        except Exception as exc:
+            logger.error(
+                "Runtime configuration committed but the bootstrap config file "
+                "was not written (%s)",
+                type(exc).__name__,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            raise BootstrapFileNotWritten() from exc
 
 
 # Global service instance

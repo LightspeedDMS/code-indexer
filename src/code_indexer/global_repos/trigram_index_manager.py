@@ -17,9 +17,11 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Set, Tuple
 
@@ -163,6 +165,9 @@ def _run_with_thread_watchdog(
 _PRINTABLE_RUN = re.compile(rb"[\t\n\r\x20-\x7e]{3,}")
 
 _DB_NAME = "trigrams.db"
+# Build temp files are named ``trigrams.<random>.db.building`` (see build()).
+_TEMP_PREFIX = "trigrams."
+_TEMP_SUFFIX = ".db.building"
 # Bump whenever the on-disk index schema changes (a new table/column, different
 # posting semantics, ...). An index whose stamped version differs is treated as
 # absent by exists(), so a stale/old-format index (e.g. a golden-repo refresh
@@ -178,6 +183,72 @@ _INSERT_BATCH = 5000
 # reclaimed during a large build instead of accumulating against the container
 # memory limit.
 _COMMIT_EVERY_FILES = 2000
+# A build temp untouched for this long is a leftover of a dead build. A live
+# build modifies its temp throughout: every _COMMIT_EVERY_FILES commit plus
+# page-cache spills while loading, then index/table writes. The longest silent
+# stretch is the external sort inside CREATE INDEX idx_postings_tc, which
+# writes only SQLite's own temp files: measured at 11.9 s for a 0.26 GB and
+# 36.6 s for a 1.05 GB loaded postings table (~35 s/GB, local disk). For the
+# largest known index (~32 GB of postings, ~19 min of silent sort) six hours is
+# a ~19x margin. The costs are asymmetric, so the margin is not larger:
+# wrongly removing a live build's temp only fails that build (the published
+# index is untouched and the next refresh rebuilds it), while keeping a dead
+# build's temp (up to tens of GB per killed build) until the threshold passes
+# lets repeated deploy restarts refill the disk before cleanup can run.
+_STALE_BUILD_FILE_AGE_SECONDS = 6 * 60 * 60
+
+
+def trigram_index_dir(repo_path: Path) -> Path:
+    """Return the trigram index directory of the repository at ``repo_path``."""
+    return Path(repo_path) / ".code-indexer" / "trigram_index"
+
+
+def remove_leftover_build_files(
+    index_dir: Path, min_age_seconds: float = _STALE_BUILD_FILE_AGE_SECONDS
+) -> int:
+    """Remove STALE build temp files (``trigrams.*.db.building``) in ``index_dir``.
+
+    A build killed before it could publish or clean up (deploy restart,
+    SIGKILL) leaves its temp behind; a large repository's temp can be tens of
+    GB, and a versioned snapshot of the directory would copy and pin it.
+
+    Liveness is decided lock-free, by staleness: a live build keeps modifying
+    its temp (see ``_STALE_BUILD_FILE_AGE_SECONDS``), so only a temp whose
+    mtime is at least ``min_age_seconds`` old can be a leftover. That makes
+    this safe for any caller on any node, whether or not it holds a lock and
+    whichever process -- refresh or lazy build, local or remote -- owns a
+    concurrent build in the same directory.
+
+    Returns the number of files removed; a missing directory removes nothing.
+    Any other ``OSError`` propagates to the caller.
+    """
+    try:
+        entries = list(os.scandir(index_dir))
+    except FileNotFoundError:
+        return 0
+    now = time.time()
+    removed = 0
+    for entry in entries:  # bounded: one pass over a finite directory listing
+        name = entry.name
+        if not (name.startswith(_TEMP_PREFIX) and name.endswith(_TEMP_SUFFIX)):
+            continue
+        try:
+            st = entry.stat(follow_symlinks=False)  # lstat: never follow a link
+            if not stat.S_ISREG(st.st_mode):
+                continue  # only regular files are build temps
+            if now - st.st_mtime < min_age_seconds:
+                continue  # recently written: may belong to a live build
+            os.unlink(entry.path)
+        except FileNotFoundError:
+            continue  # already removed by another cleanup
+        removed += 1
+    if removed:
+        logger.info(
+            "TrigramIndexManager: removed %d leftover build file(s) from %s",
+            removed,
+            index_dir,
+        )
+    return removed
 
 
 class TrigramIndexManager:
@@ -333,7 +404,7 @@ class TrigramIndexManager:
         # matches. With a unique temp per build, os.replace still atomically
         # publishes the last writer and neither build damages the other's file.
         fd, tmp_name = tempfile.mkstemp(
-            dir=str(self._dir), prefix="trigrams.", suffix=".db.building"
+            dir=str(self._dir), prefix=_TEMP_PREFIX, suffix=_TEMP_SUFFIX
         )
         os.close(fd)
         tmp_path = Path(tmp_name)

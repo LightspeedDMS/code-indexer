@@ -31,13 +31,14 @@ that metric-recording works once a private singleton is already in place.
 
 from __future__ import annotations
 
-import json
-import os
-
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
-from tests.e2e.server.conftest import AdminTokenProvider, preserve_root_logging_handlers
+from tests.e2e.server.conftest import (
+    AdminTokenProvider,
+    isolated_server_data_dir,
+    preserve_root_logging_handlers,
+)
 from tests.e2e.server.mcp_helpers import call_mcp_tool
 from tests.unit.server.telemetry.otel_test_support import (
     active_application_metrics_singleton,
@@ -107,14 +108,10 @@ class TestLifespanRealStartupWiring:
         telemetry_config.enabled=true directly into config.json at the
         isolated data dir before create_app() runs (the DB-backed
         bootstrap-equivalent value), not via CIDX_TELEMETRY_ENABLED."""
-        previous_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        isolated_data_dir = tmp_path / "isolated-data-dir"
-        os.environ["CIDX_SERVER_DATA_DIR"] = str(isolated_data_dir)
-        try:
-            isolated_data_dir.mkdir(parents=True, exist_ok=True)
-            (isolated_data_dir / "config.json").write_text(
-                json.dumps({"telemetry_config": {"enabled": True}})
-            )
+        with isolated_server_data_dir(
+            tmp_path / "isolated-data-dir",
+            config={"telemetry_config": {"enabled": True}},
+        ):
             with active_application_metrics_singleton() as (app_metrics, _areader):
                 with active_job_metrics_singleton() as (job_metrics, _jreader):
                     fresh_app = create_app()
@@ -131,8 +128,3 @@ class TestLifespanRealStartupWiring:
                                 "singleton it resolves from actual startup config"
                             )
                             assert fresh_app.state.job_metrics.is_active is True
-        finally:
-            if previous_data_dir is None:
-                os.environ.pop("CIDX_SERVER_DATA_DIR", None)
-            else:
-                os.environ["CIDX_SERVER_DATA_DIR"] = previous_data_dir

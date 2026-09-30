@@ -178,7 +178,7 @@ def _setup_admin_elevation(
     finally:
         elevated_session_manager.revoke(session_key)
         _restore_elevation_enforcement(prior_enforcement)
-        get_totp_service().disable_mfa(admin_username)
+        get_totp_service().disable_mfa(admin_username, actor=admin_username)
 
 
 logger = logging.getLogger(__name__)

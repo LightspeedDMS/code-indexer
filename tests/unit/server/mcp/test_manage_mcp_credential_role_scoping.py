@@ -106,14 +106,14 @@ def mock_cred_manager() -> MagicMock:
     real or file-backed, is ever touched by this module."""
     mgr = MagicMock()
     mgr.get_credentials.return_value = []
-    mgr.generate_credential.return_value = {
+    mgr.generate_credential_audited.return_value = {
         "credential_id": "cred-should-never-exist",
         "client_id": "mcp_should_never_exist",
         "client_secret": "mcp_sec_should_never_exist",
         "name": "",
         "created_at": "2024-01-01T00:00:00Z",
     }
-    mgr.revoke_credential.return_value = True
+    mgr.revoke_credential_audited.return_value = True
     return mgr
 
 
@@ -238,7 +238,7 @@ _DENIAL_CASES = [
         False,
         "manage_mcp_credential",
         {"action": "create", "target_user": _ADMIN_USERNAME},
-        "generate_credential",
+        "generate_credential_audited",
         id="create-admin-target-enforcement-off",
     ),
     pytest.param(
@@ -246,7 +246,7 @@ _DENIAL_CASES = [
         False,
         "manage_mcp_credential",
         {"action": "create", "target_user": "some-other-user"},
-        "generate_credential",
+        "generate_credential_audited",
         id="create-other-target-enforcement-off",
     ),
     pytest.param(
@@ -258,7 +258,7 @@ _DENIAL_CASES = [
             "target_user": _ADMIN_USERNAME,
             "credential_id": "cred-1",
         },
-        "revoke_credential",
+        "revoke_credential_audited",
         id="delete-admin-target-enforcement-off",
     ),
     pytest.param(
@@ -282,7 +282,7 @@ _DENIAL_CASES = [
         True,
         "manage_mcp_credential",
         {"action": "create", "target_user": _ADMIN_USERNAME},
-        "generate_credential",
+        "generate_credential_audited",
         id="create-admin-target-own-window",
     ),
     pytest.param(
@@ -294,7 +294,7 @@ _DENIAL_CASES = [
             "target_user": "some-other-user",
             "credential_id": "cred-1",
         },
-        "revoke_credential",
+        "revoke_credential_audited",
         id="delete-other-target-own-window",
     ),
     pytest.param(
@@ -373,8 +373,8 @@ class TestSelfServiceUnaffected:
             )
         content = _parse_mcp_response(result)
         assert content["success"] is True
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            normal_user.username, name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            normal_user.username, "", actor=normal_user.username
         )
 
     async def test_normal_user_deletes_own_credential_with_elevation(
@@ -392,8 +392,8 @@ class TestSelfServiceUnaffected:
             )
         content = _parse_mcp_response(result)
         assert content["success"] is True
-        mock_cred_manager.revoke_credential.assert_called_once_with(
-            normal_user.username, "cred-own-1"
+        mock_cred_manager.revoke_credential_audited.assert_called_once_with(
+            normal_user.username, "cred-own-1", actor=normal_user.username
         )
 
 
@@ -419,7 +419,7 @@ class TestAdminBehaviourUnchanged:
         content = _parse_mcp_response(result)
         assert content.get("success") is not True
         assert content["error"] == "elevation_required"
-        mock_cred_manager.generate_credential.assert_not_called()
+        mock_cred_manager.generate_credential_audited.assert_not_called()
 
     async def test_admin_create_for_target_with_window_succeeds(
         self, admin_user, elevation_manager, totp_enabled, mock_cred_manager
@@ -436,8 +436,8 @@ class TestAdminBehaviourUnchanged:
             )
         content = _parse_mcp_response(result)
         assert content["success"] is True
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            "some-other-user", name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            "some-other-user", "", actor=admin_user.username
         )
 
     async def test_admin_list_all_with_window_succeeds(
@@ -488,8 +488,8 @@ class TestMutationProof:
                 )
         content = _parse_mcp_response(result)
         assert content["success"] is True
-        mock_cred_manager.generate_credential.assert_called_once_with(
-            _ADMIN_USERNAME, name=""
+        mock_cred_manager.generate_credential_audited.assert_called_once_with(
+            _ADMIN_USERNAME, "", actor=normal_user.username
         )
 
     async def test_without_the_role_check_normal_user_lists_all_credentials(

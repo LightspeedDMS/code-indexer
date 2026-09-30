@@ -35,6 +35,8 @@ from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
 from ._utils import (
+    _admin_role_first,
+    _admin_role_required_response,
     _mcp_response,
     _get_golden_repos_dir,
     _list_global_repos,
@@ -964,8 +966,10 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Add a golden repository (admin only)."""
+    """Add a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         repo_url = params.get("url", "")
         alias = params.get("alias", "")
@@ -1024,8 +1028,10 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Remove a golden repository (admin only)."""
+    """Remove a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1047,8 +1053,10 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Refresh a golden repository (admin only)."""
+    """Refresh a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1080,8 +1088,12 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "job_id": None,
                 }
             )
-        job_id = refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=user.username
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            request_golden_repo_refresh,
+        )
+
+        job_id = request_golden_repo_refresh(
+            refresh_scheduler, alias, actor=user.username
         )
         return _mcp_response(
             {
@@ -1095,8 +1107,14 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Change the active branch of a golden repository async (Story #308)."""
+    """Change the active branch of a golden repository async (Story #308).
+
+    Admin-only, like the Web twin: checked here even when a group tool grant
+    admits the call.
+    """
     alias = params.get("alias", "")
     branch = params.get("branch", "")
 
@@ -1110,7 +1128,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 
     try:
         result = _utils.app_module.golden_repo_manager.change_branch_async(
-            alias, branch, user.username
+            alias, branch, submitter_username=user.username
         )
         job_id = result.get("job_id")
         if job_id is None:
@@ -1142,8 +1160,14 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5)."""
+    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5).
+
+    Requires the admin role and an elevation window, matching REST POST
+    /api/admin/golden-repos/{alias}/indexes.
+    """
     alias = args.get("alias", "")
     index_type = args.get("index_type", "")
 
@@ -2125,61 +2149,82 @@ def _provider_index_job(
     }
 
 
+def _provider_request_error_response(
+    error: Any, action: str, provider_name: str, repo_alias: str, service: Any
+) -> Dict[str, Any]:
+    """This door's response for a refused provider-index request."""
+    from code_indexer.server.services import golden_repo_audited_ops as ops
+
+    kind = error.kind
+    if kind == ops.INVALID_PROVIDER:
+        providers = service.list_providers()
+        return _mcp_response(
+            {
+                "error": error.detail,
+                "available_providers": [p["name"] for p in providers],
+            }
+        )
+    if kind == ops.REPO_NOT_FOUND:
+        return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+    if kind == ops.JOB_MANAGER_UNAVAILABLE:
+        return _mcp_response({"error": "Background job manager not available"})
+    if kind == ops.CONFIG_WRITE_FAILED:
+        return _mcp_response(
+            {
+                "error": f"Failed to write provider '{provider_name}' to config at {error.detail}"
+            }
+        )
+    requirement = (
+        "Remove requires a writable path."
+        if action == "remove"
+        else "Write operations require a writable path."
+    )
+    return _mcp_response(
+        {"error": f"Cannot resolve base clone for '{repo_alias}'. {requirement}"}
+    )
+
+
 def _handle_provider_index_action(
     action: str,
     provider_name: str,
     repo_alias: str,
-    repo_path: str,
     user: User,
     service,
 ) -> Dict[str, Any]:
-    """Handle add/recreate/remove actions for manage_provider_indexes."""
-    if action == "remove":
-        base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
-        if not base_clone_path:
+    """Handle add/recreate/remove actions for manage_provider_indexes.
+
+    The change itself (and its audit row) is the shared provider-index
+    entry point also used by the REST routes.
+    """
+    from code_indexer.server.services import golden_repo_audited_ops as ops
+
+    try:
+        if action == "remove":
+            result = ops.remove_provider_index_audited(
+                service=service,
+                provider=provider_name,
+                alias=repo_alias,
+                actor=user.username,
+            )
             return _mcp_response(
                 {
-                    "error": f"Cannot resolve base clone for '{repo_alias}'. Remove requires a writable path."
+                    "success": result["removed"],
+                    "message": result["message"],
+                    "collection_name": result["collection_name"],
                 }
             )
-        _remove_provider_from_config(base_clone_path, provider_name)
-        result = service.remove_provider_index(base_clone_path, provider_name)
-        return _mcp_response(
-            {
-                "success": result["removed"],
-                "message": result["message"],
-                "collection_name": result["collection_name"],
-            }
+        job_id = ops.submit_provider_index_job(
+            job_manager=_utils.app_module.background_job_manager,
+            service=service,
+            action=action,
+            provider=provider_name,
+            alias=repo_alias,
+            actor=user.username,
         )
-
-    # add or recreate
-    clear = action == "recreate"
-    if _utils.app_module.background_job_manager is None:
-        return _mcp_response({"error": "Background job manager not available"})
-
-    base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
-    if not base_clone_path:
-        return _mcp_response(
-            {
-                "error": f"Cannot resolve base clone for '{repo_alias}'. Write operations require a writable path."
-            }
+    except ops.ProviderIndexRequestError as error:
+        return _provider_request_error_response(
+            error, action, provider_name, repo_alias, service
         )
-    if not _append_provider_to_config(base_clone_path, provider_name):
-        return _mcp_response(
-            {
-                "error": f"Failed to write provider '{provider_name}' to config at {base_clone_path}"
-            }
-        )
-
-    job_id = _utils.app_module.background_job_manager.submit_job(
-        operation_type=f"provider_index_{action}",
-        func=_provider_index_job,
-        submitter_username=user.username,
-        repo_alias=repo_alias,
-        repo_path=repo_path,
-        provider_name=provider_name,
-        clear=clear,
-    )
     return _mcp_response(
         {
             "success": True,
@@ -2192,8 +2237,41 @@ def _handle_provider_index_action(
     )
 
 
-def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Manage provider-specific semantic indexes (Story #490)."""
+@require_mcp_elevation()
+def _manage_provider_index_mutation(
+    params: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Run an add/recreate/remove action of manage_provider_indexes.
+
+    Elevation-gated to match the REST twins (POST .../add, .../recreate and
+    .../remove carry require_elevation()); the read actions are not.
+    """
+    from code_indexer.server.services.provider_index_service import (
+        ProviderIndexService,
+    )
+
+    action = params.get("action", "")
+    provider_name = params.get("provider", "")
+    repo_alias = params.get("repository_alias", "")
+    if not provider_name:
+        return _mcp_response({"error": "Missing required parameter: provider"})
+    if not repo_alias:
+        return _mcp_response({"error": "Missing required parameter: repository_alias"})
+
+    service = ProviderIndexService(config=get_config_service().get_config())
+    return _handle_provider_index_action(
+        action, provider_name, repo_alias, user, service
+    )
+
+
+def manage_provider_indexes(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """Manage provider-specific semantic indexes (Story #490); admin-only like
+    the REST provider-index routes. ``kwargs`` carries ``session_key``."""
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
@@ -2202,6 +2280,9 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         action = params.get("action", "")
         if not action:
             return _mcp_response({"error": "Missing required parameter: action"})
+
+        if action in ("add", "recreate", "remove"):
+            return _manage_provider_index_mutation(params, user, **kwargs)
 
         service = ProviderIndexService(config=get_config_service().get_config())
 
@@ -2233,144 +2314,71 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
-        provider_name = params.get("provider", "")
-        repo_alias = params.get("repository_alias", "")
-        if not provider_name:
-            return _mcp_response({"error": "Missing required parameter: provider"})
-        if not repo_alias:
-            return _mcp_response(
-                {"error": "Missing required parameter: repository_alias"}
-            )
-
-        error = service.validate_provider(provider_name)
-        if error:
-            providers = service.list_providers()
-            return _mcp_response(
-                {"error": error, "available_providers": [p["name"] for p in providers]}
-            )
-
-        repo_path = _resolve_golden_repo_path(repo_alias)
-        if not repo_path:
-            return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
-
-        if action in ("add", "recreate", "remove"):
-            return _handle_provider_index_action(
-                action, provider_name, repo_alias, repo_path, user, service
-            )
-
         return _mcp_response({"error": f"Unknown action: {action}"})
     except Exception as e:
         logger.error("manage_provider_indexes error: %s", e, exc_info=True)
         return _mcp_response({"error": str(e)})
 
 
-@require_mcp_elevation()
-def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated mutation helper above consumes it.
+manage_provider_indexes.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+def bulk_add_provider_index(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
     """Bulk add provider index to all repositories (Story #490).
+
+    Admin-only like the REST twin (POST .../bulk-add). The admin role is
+    checked here even when a group tool grant admits the call. ``kwargs``
+    carries ``session_key``.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
+    return _bulk_add_provider_index(params, user, **kwargs)
+
+
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated body below consumes it.
+bulk_add_provider_index.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+@require_mcp_elevation()
+def _bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Elevation-gated body of bulk_add_provider_index.
 
     Elevation-gated to match the REST twin (POST .../bulk-add carries
     require_elevation()).
     """
     try:
-        from code_indexer.server.auth.user_manager import UserRole
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
         )
+
+        from code_indexer.server.services import golden_repo_audited_ops as ops
 
         provider_name = params.get("provider", "")
         if not provider_name:
             return _mcp_response({"error": "Missing required parameter: provider"})
 
         service = ProviderIndexService(config=get_config_service().get_config())
-        error = service.validate_provider(provider_name)
-        if error:
-            providers = service.list_providers()
-            return _mcp_response(
-                {"error": error, "available_providers": [p["name"] for p in providers]}
+        # Admin-only (checked by the public handler), so every golden
+        # repository is in scope, as with the REST twin.  The shared entry
+        # point records one row for the whole request.
+        try:
+            job_ids, skipped = ops.bulk_add_provider_index_audited(
+                job_manager=_utils.app_module.background_job_manager,
+                service=service,
+                provider=provider_name,
+                filter_str=params.get("filter"),
+                actor=user.username,
             )
-
-        global_repos = _list_global_repos()
-
-        # Repo access must be consistent across every capability a role can
-        # reach -- a fleet-enumerating/fleet-mutating tool gets no carve-out.
-        # Filter to the repos this caller can access BEFORE any category
-        # filtering, status lookup, config mutation, or job submission.
-        # Mirrors the existing pattern in handle_list_global_repos /
-        # _append_global_repos_to_status (same file): matched on repo_name
-        # (the group-access grant key), admin ROLE bypasses unconditionally
-        # (independent of group membership, same rationale as those sibling
-        # handlers).
-        if user.role != UserRole.ADMIN:
-            access_filtering_service = _get_access_filtering_service()
-            if access_filtering_service is None:
-                # Fail closed (mirrors protocol.py's own AttributeError
-                # fail-closed rule, Story #331 AC9): an unavailable access
-                # service must never be treated as "nothing to filter".
-                return _mcp_response(
-                    {
-                        "error": (
-                            "Access denied: access control service unavailable, "
-                            "cannot verify access for tool "
-                            "'bulk_add_provider_index'"
-                        )
-                    }
-                )
-            repo_names = [r.get("repo_name", "") for r in global_repos]
-            accessible_names = access_filtering_service.filter_repo_listing(
-                repo_names, user.username
+        except ops.ProviderIndexRequestError as request_error:
+            return _provider_request_error_response(
+                request_error, "add", provider_name, "", service
             )
-            global_repos = [
-                r for r in global_repos if r.get("repo_name", "") in accessible_names
-            ]
-
-        filter_pattern = params.get("filter")
-        job_ids = []
-        skipped = []
-
-        if _utils.app_module.background_job_manager is None:
-            return _mcp_response({"error": "Background job manager not available"})
-
-        for repo in global_repos:
-            alias = repo.get("alias_name", "")
-            if filter_pattern:
-                category = repo.get("category", "")
-                if filter_pattern.startswith("category:"):
-                    filter_cat = filter_pattern.split(":", 1)[1]
-                    if filter_cat.lower() not in category.lower():
-                        continue
-
-            repo_path = _resolve_golden_repo_path(alias)
-            if not repo_path:
-                continue
-            status = service.get_provider_index_status(repo_path, alias)
-            if status.get(provider_name, {}).get("exists"):
-                skipped.append(alias)
-                continue
-
-            base_clone_path = _resolve_golden_repo_base_clone(alias)
-            if not base_clone_path or not _append_provider_to_config(
-                base_clone_path, provider_name
-            ):
-                logger.warning("bulk_add_provider_index: skipping %s", alias)
-                skipped.append(alias)
-                continue
-
-            job_id = _utils.app_module.background_job_manager.submit_job(
-                operation_type="provider_index_add",
-                func=_provider_index_job,
-                submitter_username=user.username,
-                repo_alias=alias,
-                repo_path=repo_path,
-                provider_name=provider_name,
-                clear=False,
-                # Pod-pull: reconstruction params for _provider_index_job.
-                metadata={
-                    "repo_path": repo_path,
-                    "provider_name": provider_name,
-                    "clear": False,
-                },
-            )
-            job_ids.append({"alias": alias, "job_id": job_id})
 
         return _mcp_response(
             {
@@ -2389,7 +2397,13 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
 
 
 def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get provider health metrics (Story #491)."""
+    """Get provider health metrics (Story #491).
+
+    Admin-only, matching the REST provider-health routes.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 

@@ -137,14 +137,14 @@ def _self_service_client(app, user):
 
 def _fake_mcp_credential_manager():
     instance = MagicMock()
-    instance.generate_credential.return_value = {
+    instance.generate_credential_audited.return_value = {
         "client_id": "mcp_client_self_abc",
         "client_secret": "mcp_secret_self_xyz",
         "credential_id": "cred-self-123",
         "name": "self-service-cred",
         "created_at": "2025-01-01T00:00:00Z",
     }
-    instance.revoke_credential.return_value = True
+    instance.revoke_credential_audited.return_value = True
     return instance
 
 

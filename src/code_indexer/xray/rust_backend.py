@@ -633,6 +633,7 @@ class RustNativeBackend:
         self,
         xray_cache_backend: Optional[XrayCacheBackend] = None,
         identity_cache: Optional[SharedIdentityCache] = None,
+        confine_to_repo_root: bool = True,
     ) -> None:
         """Initialise backend with default xray-cli path and optional cluster cache.
 
@@ -647,7 +648,12 @@ class RustNativeBackend:
                 once per cell. None (default) creates a private cache sized
                 to _IDENTITY_CACHE_MAX_ENTRIES -- unchanged single-repo
                 xray_search behaviour.
+            confine_to_repo_root: True (default, server context) reads a
+                finding's line content only when the file resolves inside
+                the repository root; False (local ``cidx xray``) reads it
+                wherever a symlink points.
         """
+        self._confine_to_repo_root = confine_to_repo_root
         self._xray_cli_path: Path = _XRAY_CLI_DEFAULT
         self._xray_cache: Optional[XrayCacheBackend] = xray_cache_backend
         # Side-channel populated by run_batch() — debug_log() messages from xray-cli JSON.
@@ -863,8 +869,9 @@ class RustNativeBackend:
         abs_paths = [str(base / spec.get("file_path", "")) for spec in file_specs]
         # Resolved ONCE for the whole batch -- threaded through to the
         # line_content-enrichment read as a defense-in-depth containment
-        # check, alongside candidate-collection filtering upstream.
-        resolved_root = base.resolve()
+        # check, alongside candidate-collection filtering upstream. None
+        # (no check) only for the local CLI, which follows symlinks.
+        resolved_root = base.resolve() if self._confine_to_repo_root else None
 
         # Bug #1784 review MAJOR-2: track ONE operation deadline across this
         # whole call so every internal identity-helper invocation (pre-fill

@@ -10,6 +10,8 @@ the encrypted blob to the PostgreSQL backend so the sync service can distribute
 the key to all cluster nodes.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -30,8 +32,57 @@ from .ssh_input_validation import (
     is_valid_key_name,
     validate_hostname,
 )
+from .audit_outcome import conforming_details, record_outcome
 
 logger = logging.getLogger(__name__)
+
+
+_SHA256_FINGERPRINT_PREFIX = "SHA256:"
+_SHA256_DIGEST_BYTES = 32
+
+
+def audit_key_id(fingerprint: Optional[str]) -> Optional[str]:
+    """The identifier an SSH key is audited under, derived by the server.
+
+    Audit rows never carry a key's user-chosen name.  They carry the key's
+    SHA-256 fingerprint digest (from ``ssh-keygen -l`` output, as persisted
+    when the key was created), hex-encoded as ``sha256:<hex>`` so it fits the
+    opaque-id type.  Returns None when no such fingerprint is available.
+    """
+    if not fingerprint:
+        return None
+    for token in fingerprint.split():
+        if not token.startswith(_SHA256_FINGERPRINT_PREFIX):
+            continue
+        encoded = token[len(_SHA256_FINGERPRINT_PREFIX) :]
+        try:
+            digest = base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4), validate=True
+            )
+        except (binascii.Error, ValueError):
+            return None
+        if len(digest) != _SHA256_DIGEST_BYTES:
+            return None
+        return "sha256:" + digest.hex()
+    return None
+
+
+def _record_ssh(
+    actor: str,
+    action_type: str,
+    key_id: Optional[str],
+    outcome: str,
+    details: dict,
+) -> None:
+    """Record one SSH key row; *key_id* comes from :func:`audit_key_id`."""
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="ssh_key",
+        target_id=key_id,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class KeyNotFoundError(Exception):
@@ -406,6 +457,95 @@ class SSHKeyManager:
                 self._update_ssh_config()
 
                 return metadata
+
+    # ------------------------------------------------------------------
+    # Audited entry points.  Every front door (REST, MCP, Web, CLI) calls
+    # these.  The key name is the key's identifier; the description, email
+    # and key material are never recorded.  In the standalone CLI (no
+    # server process) recording is a no-op by design.
+    # ------------------------------------------------------------------
+
+    def create_key_audited(
+        self,
+        name: str,
+        key_type: str = "ed25519",
+        email: Optional[str] = None,
+        description: Optional[str] = None,
+        *,
+        actor: str,
+    ) -> KeyMetadata:
+        """:meth:`create_key`, recording ``ssh_key_created``."""
+        try:
+            metadata = self.create_key(
+                name, key_type=key_type, email=email, description=description
+            )
+        except Exception:
+            _record_ssh(actor, "ssh_key_created", None, "failure", {})
+            raise
+        details = conforming_details("ssh_key_created", key_type=key_type)
+        _record_ssh(
+            actor,
+            "ssh_key_created",
+            audit_key_id(metadata.fingerprint),
+            "success",
+            details,
+        )
+        return metadata
+
+    def assign_key_to_host_audited(
+        self, key_name: str, hostname: str, force: bool = False, *, actor: str
+    ) -> KeyMetadata:
+        """:meth:`assign_key_to_host`, recording ``ssh_key_host_assigned``."""
+        key_id: Optional[str] = None
+        try:
+            key_id = audit_key_id(self._persisted_fingerprint(key_name))
+            metadata = self.assign_key_to_host(key_name, hostname, force=force)
+        except Exception:
+            _record_ssh(actor, "ssh_key_host_assigned", key_id, "failure", {})
+            raise
+        details = conforming_details("ssh_key_host_assigned", host=hostname)
+        _record_ssh(
+            actor,
+            "ssh_key_host_assigned",
+            audit_key_id(metadata.fingerprint),
+            "success",
+            details,
+        )
+        return metadata
+
+    def delete_key_audited(self, key_name: str, *, actor: str) -> bool:
+        """:meth:`delete_key`, recording ``ssh_key_deleted``.
+
+        The row names the key by its fingerprint as looked up before the
+        deletion; a key with no persisted record is the placeholder.
+        """
+        key_id: Optional[str] = None
+        try:
+            key_id = audit_key_id(self._persisted_fingerprint(key_name))
+            deleted = self.delete_key(key_name)
+        except Exception:
+            _record_ssh(actor, "ssh_key_deleted", key_id, "failure", {})
+            raise
+        if not deleted:
+            _record_ssh(actor, "ssh_key_deleted", None, "failure", {})
+            return False
+        _record_ssh(actor, "ssh_key_deleted", key_id, "success", {})
+        return True
+
+    def _persisted_fingerprint(self, key_name: str) -> Optional[str]:
+        """The fingerprint this server persisted for *key_name*, or None."""
+        if not is_valid_key_name(key_name):
+            return None
+        if self._use_sqlite and self._sqlite_backend is not None:
+            data = self._sqlite_backend.get_key(key_name)
+            if data:
+                return str(data["fingerprint"])
+        else:
+            metadata = self._load_metadata(key_name)
+            if metadata is not None:
+                return metadata.fingerprint
+        cluster = self._cluster_managed_key_metadata(key_name)
+        return cluster.fingerprint if cluster is not None else None
 
     def _raise_on_user_section_conflict(self, hostname: str, force: bool) -> None:
         """Refuse to shadow a hand-written ``~/.ssh/config`` Host entry.

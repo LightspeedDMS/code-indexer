@@ -138,7 +138,7 @@ class TestGlobalDeactivationNotGatedOnCleanupBug1523:
         alias = "wedged-repo"
         clone_path = register_globally_active_repo(manager, alias)
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         background_worker = captured_worker(manager)
 
         # GENUINE cleanup failure: strip write permission from the clone
@@ -214,7 +214,7 @@ class TestGlobalDeactivationNotGatedOnCleanupBug1523:
             observed["alias_exists"] = aliases.alias_exists(f"{alias}-global")
             return real_rmtree(path, *args, **kwargs)
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         background_worker = captured_worker(manager)
 
         with patch.object(shutil, "rmtree", side_effect=recording_rmtree):
@@ -235,7 +235,7 @@ class TestSuccessfulRemovalTeardownBug1523:
         alias = "clean-repo"
         clone_path = register_globally_active_repo(manager, alias)
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         result = captured_worker(manager)()
 
         assert result["success"] is True

@@ -5,6 +5,13 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.middleware.audit_request_context import (
+    AUTH_METHOD_JWT,
+    AUTH_METHOD_MCP_CREDENTIAL,
+    AUTH_METHOD_OAUTH_TOKEN,
+    AUTH_METHOD_WEB_SESSION,
+    note_auth_method,
+)
 from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -249,6 +256,8 @@ def get_current_user(
             # Validate cookie JWT using same logic as Bearer
             user = _validate_jwt_and_get_user(token)
             _check_non_sso_api_restriction(user)
+            # The session JWT cookie is set by the Web UI login.
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         # No auth method available
         raise HTTPException(
@@ -293,11 +302,13 @@ def get_current_user(
                         headers={"WWW-Authenticate": _build_www_authenticate_header()},
                     )
                 _check_non_sso_api_restriction(user)
+                note_auth_method(AUTH_METHOD_OAUTH_TOKEN)
                 return user
 
     # Fallback to JWT validation
     user = _validate_jwt_and_get_user(token)
     _check_non_sso_api_restriction(user)
+    note_auth_method(AUTH_METHOD_JWT)
     return user
 
 
@@ -542,6 +553,7 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             )
 
     # Success - verify_credential() already updated last_used_at (AC5)
+    note_auth_method(AUTH_METHOD_MCP_CREDENTIAL)
     return authenticated_user
 
 
@@ -605,6 +617,7 @@ def get_current_user_web_or_api(
                     # created it -- stash the authenticated username so any
                     # downstream elevation lookup binds to this identity.
                     request.state.elevation_username = user.username
+                    note_auth_method(AUTH_METHOD_WEB_SESSION)
                     return user
         except Exception as e:
             # Web session validation failed - fall through to JWT/Bearer auth
@@ -879,6 +892,7 @@ def _hybrid_auth_impl(
             # stash the authenticated username alongside the session key so
             # every downstream elevation lookup binds to this identity.
             request.state.elevation_username = user.username
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
@@ -1205,6 +1219,57 @@ def require_elevation(required_scope: str = "full"):
         return user
 
     return _check
+
+
+def _bearer_jwt_jti(
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[str]:
+    """Return the jti of a Bearer JWT, or None for any other credential."""
+    if credentials is None or jwt_manager is None:
+        return None
+    try:
+        payload = jwt_manager.validate_token(credentials.credentials)
+    except (InvalidTokenError, TokenExpiredError):
+        return None
+    jti = payload.get("jti")
+    return str(jti) if jti else None
+
+
+def require_self_elevation(
+    request: Request,
+    current_user: User = Depends(get_current_user_web_or_api),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> User:
+    """TOTP-elevation gate for SELF-service credential mutations (any role).
+
+    Applies to actions on the caller's OWN account that every authenticated
+    user may perform (e.g. creating or deleting their own MCP credential or
+    personal API key, managing their own git-forge credential). It mirrors
+    require_elevation()'s kill-switch / TOTP-setup / session-window logic,
+    but resolves the caller via get_current_user_web_or_api (ANY
+    authenticated user) instead of the admin-only resolver, so it never
+    grants or requires a role. The MCP twins use @require_mcp_elevation(),
+    which has the same role-agnostic semantics.
+
+    The elevation window must be owned by the caller: the window lookup is
+    bound to `current_user.username`. The window key is the web-session
+    cookie for Web UI callers; for a Bearer JWT caller it is the token's jti,
+    the same key /auth/elevate stores that caller's window under.
+
+    With enforcement off (or no elevation manager wired) the request
+    proceeds unchanged.
+    """
+    if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
+        return current_user
+    _check_totp_setup(current_user)
+    if getattr(request.state, "user_jti", None) is None:
+        jti = _bearer_jwt_jti(credentials)
+        if jti is not None:
+            request.state.user_jti = jti
+    _check_session_window(
+        request, "full", elevated_session_manager, current_user.username
+    )
+    return current_user
 
 
 def require_localhost(request: Request) -> None:

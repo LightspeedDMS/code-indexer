@@ -55,6 +55,10 @@ class _StubUserManager:
             created_at=datetime.now(timezone.utc),
         )
 
+    def create_user_audited(self, username, password, role, *, actor):
+        """The audited entry point the admin create-user doors call."""
+        return self.create_user(username, password, role)
+
 
 @pytest.fixture
 def client(group_manager, monkeypatch):

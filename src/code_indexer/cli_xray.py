@@ -188,7 +188,9 @@ def xray_search(
     # ------------------------------------------------------------------
     from code_indexer.xray.search_engine import XRaySearchEngine
 
-    engine = XRaySearchEngine()
+    # Local CLI: the user's own checkout -- follow symlinks wherever they
+    # point (server-side callers keep the confined default).
+    engine = XRaySearchEngine(confine_to_repo_root=False)
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem
@@ -459,7 +461,9 @@ def xray_explore(
     # ------------------------------------------------------------------
     from code_indexer.xray.search_engine import XRaySearchEngine
 
-    engine = XRaySearchEngine()
+    # Local CLI: the user's own checkout -- follow symlinks wherever they
+    # point (server-side callers keep the confined default).
+    engine = XRaySearchEngine(confine_to_repo_root=False)
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem

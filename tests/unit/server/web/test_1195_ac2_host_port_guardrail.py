@@ -168,15 +168,17 @@ class TestAC2SourceGuards:
         # old window.
         fn_body = src[fn_start : fn_start + 12000]
         # Find positions of relevant calls
+        # The batch is now applied through the audited entry point
+        # (update_settings_audited), which shares the atomic publish path.
         get_pos = fn_body.find("get_config()")
-        update_pos = fn_body.find("update_settings_atomic(")
+        update_pos = fn_body.find("update_settings_audited")
         assert get_pos != -1, "get_config() not found in update_config_section"
         assert update_pos != -1, (
-            "update_settings_atomic() not found in update_config_section"
+            "update_settings_audited not found in update_config_section"
         )
         assert get_pos < update_pos, (
             "AC2 Opus nit: get_config() (pre-change snapshot) must come BEFORE "
-            "update_settings_atomic() so we compare against the ORIGINAL "
+            "update_settings_audited so we compare against the ORIGINAL "
             "persisted value"
         )
 

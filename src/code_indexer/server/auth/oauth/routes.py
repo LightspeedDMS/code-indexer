@@ -59,15 +59,54 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import base64
+import functools
+
+import anyio
 
 from .oauth_manager import OAuthManager, OAuthError, PKCEVerificationError
-from ..user_manager import UserManager
+from ..user_manager import User, UserManager
 from ..mcp_credential_manager import MCPCredentialManager
 from ..audit_logger import password_audit_logger
+from ..login_outcome import complete_login, reject_login
 from ..oauth_rate_limiter import oauth_token_rate_limiter, oauth_register_rate_limiter
 
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
+
+# First factor recorded for the OAuth login doors.  An MFA challenge does not
+# carry how its first factor was proven; the password authorize door is the
+# one that issues it (an SSO login's challenge records the same value).
+_PASSWORD_LOGIN_METHOD = "password"
+
+
+def _authenticate_or_reject(
+    user_manager: UserManager, username: str, password: str
+) -> Optional[User]:
+    """Check the password; record the refused attempt when it fails.
+
+    The typed name is recorded only when it names an existing account.
+    """
+    user = user_manager.authenticate_user(username, password)
+    if user is None:
+        reject_login(
+            username,
+            account_exists=user_manager.get_user(username) is not None,
+            method=_PASSWORD_LOGIN_METHOD,
+            stage="credentials",
+            reason="bad_credentials",
+        )
+    return user
+
+
+def _reject_challenge(username: Optional[str], *, account_exists: bool) -> None:
+    """Record a login refused because its MFA challenge is unusable."""
+    reject_login(
+        username,
+        account_exists=account_exists,
+        method=_PASSWORD_LOGIN_METHOD,
+        stage="challenge",
+        reason="challenge_invalid_or_expired",
+    )
 
 
 # Get the backend-aware OAuth manager from app.state (set during startup in app_wiring.py)
@@ -436,8 +475,11 @@ async def authorize_endpoint(
     # Note: state is intentionally NOT validated as required here.
     # Per OAuth 2.1 with PKCE, state is optional (Bug #624).
 
-    # Authenticate user
-    user = user_manager.authenticate_user(username, password)
+    # Authenticate user (password hashing and the refusal's audit row run off
+    # the event loop).
+    user = await anyio.to_thread.run_sync(
+        functools.partial(_authenticate_or_reject, user_manager, username, password)
+    )
 
     if not user:
         raise HTTPException(
@@ -465,13 +507,23 @@ async def authorize_endpoint(
         return render_oauth_mfa_challenge_page(challenge_token)
 
     try:
-        # Generate authorization code
-        code = manager.generate_authorization_code(
-            client_id=client_id,
-            user_id=user.username,
-            code_challenge=code_challenge,
-            redirect_uri=redirect_uri,
-            state=state,
+        # Generate authorization code and record the login (off the loop)
+        code = await anyio.to_thread.run_sync(
+            functools.partial(
+                complete_login,
+                user.username,
+                method=_PASSWORD_LOGIN_METHOD,
+                mfa="not_applicable" if totp_svc is None else "not_enrolled",
+                flow="oauth_code",
+                issue=functools.partial(
+                    manager.generate_authorization_code,
+                    client_id=client_id,
+                    user_id=user.username,
+                    code_challenge=code_challenge,
+                    redirect_uri=redirect_uri,
+                    state=state,
+                ),
+            )
         )
 
         # Audit log
@@ -529,6 +581,8 @@ def oauth_mfa_verify(
     # Consume-first: atomically remove token before verifying
     challenge = mfa_challenge_manager.consume(challenge_token)
     if challenge is None:
+        # No challenge means no known account for this attempt.
+        _reject_challenge(None, account_exists=False)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
@@ -537,6 +591,7 @@ def oauth_mfa_verify(
     # Validate client IP matches
     client_ip = http_request.client.host if http_request.client else "unknown"
     if challenge.client_ip != client_ip:
+        _reject_challenge(challenge.username, account_exists=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
@@ -545,6 +600,7 @@ def oauth_mfa_verify(
     # Verify that this is an OAuth challenge (has OAuth context).
     # Note: oauth_state is NOT checked here — state is optional per OAuth 2.1 PKCE (Bug #624).
     if not challenge.oauth_client_id:
+        _reject_challenge(challenge.username, account_exists=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid challenge type for OAuth flow.",
@@ -552,7 +608,9 @@ def oauth_mfa_verify(
 
     # Verify TOTP or recovery code
     verified = False
+    mfa = "totp"
     if recovery_code:
+        mfa = "recovery_code"
         verified = totp_svc.verify_recovery_code(
             challenge.username, recovery_code, ip_address=client_ip
         )
@@ -560,6 +618,13 @@ def oauth_mfa_verify(
         verified = totp_svc.verify_code(challenge.username, totp_code)
 
     if not verified:
+        reject_login(
+            challenge.username,
+            account_exists=True,  # issued only after a successful first factor
+            method=_PASSWORD_LOGIN_METHOD,
+            stage="mfa_code",
+            reason="mfa_code_invalid",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid verification code. Please re-authenticate.",
@@ -567,12 +632,18 @@ def oauth_mfa_verify(
 
     # Generate OAuth authorization code using stored context
     try:
-        code = manager.generate_authorization_code(
-            client_id=challenge.oauth_client_id,
-            user_id=challenge.username,
-            code_challenge=challenge.oauth_code_challenge,
-            redirect_uri=challenge.oauth_redirect_uri,
-            state=challenge.oauth_state,
+        code = complete_login(
+            challenge.username,
+            method=_PASSWORD_LOGIN_METHOD,
+            mfa=mfa,
+            flow="oauth_code",
+            issue=lambda: manager.generate_authorization_code(
+                client_id=challenge.oauth_client_id,
+                user_id=challenge.username,
+                code_challenge=challenge.oauth_code_challenge,
+                redirect_uri=challenge.oauth_redirect_uri,
+                state=challenge.oauth_state,
+            ),
         )
 
         # Audit log

@@ -14,7 +14,9 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
 import logging
+from typing import Any, Dict
 
+import anyio
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -34,47 +36,6 @@ from ..auth import dependencies
 from ..middleware.correlation import get_correlation_id
 
 logger = logging.getLogger(__name__)
-
-
-def _require_self_elevation(
-    request: Request,
-    current_user: dependencies.User = Depends(dependencies.get_current_user_web_or_api),
-) -> dependencies.User:
-    """TOTP-elevation gate for SELF-service MCP-credential mutations
-    (create/delete of the caller's OWN credential).
-
-    Mirrors `dependencies.require_elevation()`'s kill-switch / TOTP-setup /
-    session-window logic exactly, but resolves the caller via
-    `get_current_user_web_or_api` (ANY authenticated user) instead of
-    `get_current_admin_user_hybrid` (admin-only). Self-service MCP-credential
-    management is available to every authenticated user, not just admins
-    -- see `web/routes.py::user_mcp_credentials_page`'s own docstring: "any
-    authenticated user can manage their own MCP credentials." Reusing
-    `require_elevation()` verbatim would hard-require admin role via its
-    `Depends(get_current_admin_user_hybrid)` and break self-service for every
-    NORMAL_USER account. The MCP twins (`_create_self`/`_delete_self`,
-    `@require_mcp_elevation()`) have the same role-agnostic semantics: they
-    gate on the CALLER's own TOTP/elevation state, never their role.
-
-    `_check_totp_setup` is role-agnostic already (it operates on the
-    resolved `User`); `_check_session_window` is passed `current_user.username`
-    explicitly (never left to the `request.state.elevation_username` fallback)
-    so the window lookup is always bound to the identity this dependency
-    itself resolved, matching `require_elevation()`'s own call pattern.
-    """
-    if (
-        not dependencies._is_elevation_enforcement_enabled()
-        or dependencies.elevated_session_manager is None
-    ):
-        return current_user
-    dependencies._check_totp_setup(current_user)
-    dependencies._check_session_window(
-        request,
-        "full",
-        dependencies.elevated_session_manager,
-        current_user.username,
-    )
-    return current_user
 
 
 def register_mcp_credential_routes(
@@ -104,7 +65,7 @@ def register_mcp_credential_routes(
         "/api/mcp-credentials",
         response_model=CreateMCPCredentialResponse,
         status_code=201,
-        dependencies=[Depends(_require_self_elevation)],
+        dependencies=[Depends(dependencies.require_self_elevation)],
     )
     def create_mcp_credential(
         current_user: dependencies.User = Depends(
@@ -128,9 +89,8 @@ def register_mcp_credential_routes(
             mcp_manager = MCPCredentialManager(user_manager=user_manager)
             name = request.name if request else None
 
-            result = mcp_manager.generate_credential(
-                user_id=current_user.username,
-                name=name,
+            result = mcp_manager.generate_credential_audited(
+                current_user.username, name, actor=current_user.username
             )
 
             return CreateMCPCredentialResponse(
@@ -165,7 +125,7 @@ def register_mcp_credential_routes(
     @app.delete(
         "/api/mcp-credentials/{credential_id}",
         status_code=200,
-        dependencies=[Depends(_require_self_elevation)],
+        dependencies=[Depends(dependencies.require_self_elevation)],
     )
     def delete_mcp_credential(
         credential_id: str,
@@ -188,7 +148,9 @@ def register_mcp_credential_routes(
         from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        deleted = mcp_manager.revoke_credential(current_user.username, credential_id)
+        deleted = mcp_manager.revoke_credential_audited(
+            current_user.username, credential_id, actor=current_user.username
+        )
         if not deleted:
             raise HTTPException(status_code=404, detail="MCP credential not found")
         return {"message": "MCP credential deleted successfully"}
@@ -262,17 +224,28 @@ def register_mcp_credential_routes(
         Raises:
             HTTPException 404: If user not found
         """
-        from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
-
-        target_user = user_manager.get_user(username)
-        if not target_user:
-            raise HTTPException(status_code=404, detail="User not found")
+        from code_indexer.server.auth.mcp_credential_manager import (
+            MCPCredentialManager,
+            MCPCredentialOwnerNotFound,
+        )
 
         body = await request.json()
         name = body.get("name")
-
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        credential = mcp_manager.generate_credential(target_user.username, name)
+
+        def _mint() -> Dict[str, Any]:
+            # The audited mint (account lookup, credential write, durable
+            # audit row -- a failure row for an unknown account) is
+            # synchronous I/O: this runs off the event loop.
+            minted: Dict[str, Any] = mcp_manager.generate_credential_audited(
+                username, name, actor=current_user.username
+            )
+            return minted
+
+        try:
+            credential = await anyio.to_thread.run_sync(_mint)
+        except MCPCredentialOwnerNotFound:
+            raise HTTPException(status_code=404, detail="User not found")
 
         # Audit logging
         logger.info(
@@ -318,13 +291,15 @@ def register_mcp_credential_routes(
         """
         from code_indexer.server.auth.mcp_credential_manager import MCPCredentialManager
 
-        target_user = user_manager.get_user(username)
-        if not target_user:
-            raise HTTPException(status_code=404, detail="User not found")
-
+        # Every attempt goes through the audited revocation, so an unknown
+        # account or credential still records its failure row.
         mcp_manager = MCPCredentialManager(user_manager=user_manager)
-        success = mcp_manager.revoke_credential(target_user.username, credential_id)
+        success = mcp_manager.revoke_credential_audited(
+            username, credential_id, actor=current_user.username
+        )
         if not success:
+            if user_manager.get_user(username) is None:
+                raise HTTPException(status_code=404, detail="User not found")
             raise HTTPException(status_code=404, detail="Credential not found")
 
         # Audit logging

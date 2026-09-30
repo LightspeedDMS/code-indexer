@@ -28,8 +28,17 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.config import Config
 from code_indexer.services.smart_indexer import SmartIndexer
+
+
+@pytest.fixture(autouse=True)
+def _isolated_server_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server-context runs create the resume-seal key in the server data
+    directory; keep it inside the test's own temp dir."""
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "server-data"))
 
 
 def _create_git_repo(path: Path) -> None:

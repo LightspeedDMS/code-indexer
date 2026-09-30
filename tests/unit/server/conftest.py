@@ -292,6 +292,34 @@ def _reset_correlation_id_contextvar() -> Generator[None, None, None]:
         _correlation_id_var.set(None)
 
 
+@pytest.fixture(autouse=True)
+def _restore_audit_capture_binding() -> Generator[None, None, None]:
+    """Start every test from clean audit capture process wiring.
+
+    Building the FastAPI app marks the process as a server and a lifespan
+    binds its audit service; both are process-wide.  A test module that
+    imports the module-level app at collection time marks the process
+    before any test runs, so without this every later test would see a
+    marked, unbound server and an audit capture there would be a counted
+    drop.  Each test starts unmarked and unbound (a test that builds the
+    app marks it again itself); the prior wiring is restored afterwards.
+    """
+    from code_indexer.server.services import audit_capture, audit_events
+
+    binding = audit_capture._binding
+    with binding.lock:
+        saved = (binding.server_process, binding.service)
+        binding.server_process, binding.service = False, None
+    saved_node_id = audit_events.process_node_id()
+    audit_events.set_process_node_id(None)
+    try:
+        yield
+    finally:
+        with binding.lock:
+            binding.server_process, binding.service = saved
+        audit_events.set_process_node_id(saved_node_id)
+
+
 def _safe_shutdown(manager: Any) -> None:
     """Best-effort `.shutdown()` for one BackgroundJobManager instance.
 

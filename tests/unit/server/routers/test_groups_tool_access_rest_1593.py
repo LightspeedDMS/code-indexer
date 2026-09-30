@@ -65,10 +65,10 @@ def test_grant_writes_and_audits_tool_mutation() -> None:
     )
 
     assert result["allowed"] is True
+    # The manager records the change's one audit row (acting user = "admin");
+    # the route writes no second, door-level row.
     manager.set_tool_access.assert_called_once_with("git_push", 1, True, "admin")
-    manager.log_audit.assert_called_once()
-    assert manager.log_audit.call_args.kwargs["target_type"] == "tool"
-    assert manager.log_audit.call_args.kwargs["action_type"] == "tool_access_grant"
+    manager.log_audit.assert_not_called()
 
 
 def test_revoke_writes_false_and_audits_tool_mutation() -> None:
@@ -84,7 +84,7 @@ def test_revoke_writes_false_and_audits_tool_mutation() -> None:
 
     assert result["allowed"] is False
     manager.set_tool_access.assert_called_once_with("git_push", 1, False, "admin")
-    assert manager.log_audit.call_args.kwargs["action_type"] == "tool_access_revoke"
+    manager.log_audit.assert_not_called()
 
 
 def test_bulk_disable_is_one_fanout_and_audit_per_group() -> None:
@@ -101,11 +101,8 @@ def test_bulk_disable_is_one_fanout_and_audit_per_group() -> None:
     manager.set_tool_access_all_groups.assert_called_once_with(
         "git_push", False, "admin"
     )
-    assert manager.log_audit.call_count == 2
-    assert all(
-        call.kwargs["action_type"] == "tool_access_bulk_disable"
-        for call in manager.log_audit.call_args_list
-    )
+    # One row per affected group is recorded by the manager, not the route.
+    manager.log_audit.assert_not_called()
 
 
 def test_audit_failure_does_not_block_authoritative_mutation() -> None:

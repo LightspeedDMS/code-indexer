@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, TYPE_CHECKING
 
 from .password_manager import PasswordManager
+from ..services.audit_outcome import conforming_details, record_outcome
 
 if TYPE_CHECKING:
     from .user_manager import User, UserManager
@@ -76,6 +77,33 @@ class ApiKeyManager:
             )
 
         return raw_key, key_id
+
+    def generate_key_audited(
+        self, username: str, name: Optional[str] = None, *, actor: str
+    ) -> Tuple[str, str]:
+        """:meth:`generate_key`, recording ``api_key_created``.
+
+        Every front door calls this.  Only the key id is recorded -- never
+        the raw key or its free-text name.
+        """
+        try:
+            raw_key, key_id = self.generate_key(username, name=name)
+        except Exception:
+            self._record_created(actor, None, "failure")
+            raise
+        self._record_created(actor, key_id, "success")
+        return raw_key, key_id
+
+    @staticmethod
+    def _record_created(actor: str, key_id: Optional[str], outcome: str) -> None:
+        record_outcome(
+            actor=actor,
+            action_type="api_key_created",
+            target_type="api_key",
+            target_id=key_id,
+            outcome=outcome,
+            details=conforming_details("api_key_created", key_id=key_id),
+        )
 
     def validate_key(self, raw_key: str, stored_hash: str) -> bool:
         """

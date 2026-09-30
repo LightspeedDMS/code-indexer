@@ -10,7 +10,11 @@ cohere.api_endpoint) and daemon-mode delegation (daemon.enabled). This
 module is the single seam that resets exactly those fields to fixed,
 server-managed values on an already-loaded Config -- leaving every other
 provider setting (model, timeout, retries, parallelism, ...) exactly as the
-repository or the server's own config-seeding overlay set it.
+repository or the server's own config-seeding overlay set it. It also marks
+the Config as server context (``Config.confine_to_codebase_root``), so file
+discovery and read-time checks keep every indexed file inside the
+repository root; local CLI indexing, which never passes through this seam,
+follows symlinks outside the root.
 
 Wired at the "cidx index" CLI entrypoint (cli.py) behind the hidden
 --server-managed-provider-settings flag, which every server spawn site
@@ -38,3 +42,5 @@ def enforce_server_managed_provider_settings(config: Config) -> None:
     config.cohere.api_endpoint = CohereConfig().api_endpoint
     if config.daemon is not None:
         config.daemon.enabled = False
+    # Server context: indexed and read files stay inside the repository root.
+    config.confine_to_codebase_root()

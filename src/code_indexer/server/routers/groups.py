@@ -13,18 +13,30 @@ Story #705: Default Group Bootstrap and User Assignment Infrastructure
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user
 from ..auth.user_manager import User
-from ..services.constants import CIDX_META_REPO
+from ..services.audit_log_query import (
+    DIRECTION_OLDER,
+    TIER_ALL,
+    TIER_SECURITY,
+    AuditAggregate,
+    AuditQueryError,
+    aggregate_fields,
+    build_filters,
+    page_fields,
+    query_audit_log,
+    row_fields,
+)
 from ..services.group_access_manager import (
     GroupAccessManager,
     Group,
     DefaultGroupCannotBeDeletedError,
     GroupHasUsersError,
+    GroupNotFoundError,
     CidxMetaCannotBeRevokedError,
 )
 from ..mcp.tools import TOOL_REGISTRY
@@ -148,33 +160,12 @@ class BulkRemoveReposResponse(BaseModel):
     message: str
 
 
-def _audit_tool_mutation(
-    group_manager: GroupAccessManager,
-    admin_id: str,
-    action_type: str,
-    tool_name: str,
-    group: Optional[Group],
-) -> None:
-    """Record tool mutation audit without blocking the authoritative write."""
-    try:
-        group_manager.log_audit(
-            admin_id=admin_id,
-            action_type=action_type,
-            target_type="tool",
-            target_id=tool_name,
-            details={
-                "tool": tool_name,
-                "group": group.name if group is not None else None,
-                "group_id": group.id if group is not None else None,
-            },
-        )
-    except Exception:
-        logger.exception(
-            "Tool access mutation succeeded but audit write failed: "
-            "action=%s tool=%s group=%s",
-            action_type,
-            tool_name,
-            group.id if group is not None else None,
+def _require_tool_access_applied(applied: bool) -> None:
+    """Refuse to report success for a tool-access change that was not applied."""
+    if not applied:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Tool access change was not applied",
         )
 
 
@@ -203,7 +194,12 @@ class CreateGroupRequest(BaseModel):
 
 
 class AuditLogResponse(BaseModel):
-    """Response model for a single audit log entry."""
+    """Response model for a single audit log entry.
+
+    ``details`` is a JSON string holding only the allowlisted fields of the
+    stored value (see ``services/audit_log_query.project_details``).  The
+    fields after ``details`` are additive and optional.
+    """
 
     id: int
     timestamp: str
@@ -212,13 +208,52 @@ class AuditLogResponse(BaseModel):
     target_type: str
     target_id: str
     details: Optional[str] = None
+    outcome: Optional[str] = None
+    source: Optional[str] = None
+    ip_address: Optional[str] = None
+    correlation_id: Optional[str] = None
+    node_id: Optional[str] = None
+    auth_method: Optional[str] = None
+    actor_is_system: Optional[bool] = None
+    event_uuid: Optional[str] = None
+    actor_is_authenticated: Optional[bool] = None
+    pairing_state: Optional[str] = None
+    submitted_only: Optional[bool] = None
+
+
+class AuditAggregateGroupResponse(BaseModel):
+    """One (action_type, outcome) group of an authentication-activity aggregate."""
+
+    action_type: str
+    outcome: Optional[str] = None
+    count: int
+    first_seen: str
+    last_seen: str
+    distinct_actors: int
+    distinct_ips: int
 
 
 class AuditLogsListResponse(BaseModel):
-    """Response model for paginated audit logs list."""
+    """Response model for one page of audit logs (or an aggregate).
+
+    ``total`` is exact up to the count cap; ``total_capped`` is true above
+    it.  ``next_cursor`` continues towards older rows; ``prev_cursor`` with
+    ``direction=newer`` towards newer rows.  With ``aggregate=true`` the
+    ``logs`` list is empty, ``groups`` holds the aggregate and ``total`` is
+    the number of events in those groups.
+    """
 
     logs: List[AuditLogResponse]
     total: int
+    total_capped: Optional[bool] = None
+    next_cursor: Optional[str] = None
+    prev_cursor: Optional[str] = None
+    has_more: Optional[bool] = None
+    groups: Optional[List[AuditAggregateGroupResponse]] = None
+    window_from: Optional[str] = None
+    window_to: Optional[str] = None
+    all_time: Optional[bool] = None
+    truncated: Optional[bool] = None
 
 
 class UpdateGroupRequest(BaseModel):
@@ -313,18 +348,10 @@ def bulk_disable_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Tool '{tool_name}' not found",
         )
+    # The manager records one audit row per affected group.
     affected_group_ids = group_manager.set_tool_access_all_groups(
         tool_name, False, current_user.username
     )
-    groups_by_id = {group.id: group for group in group_manager.get_all_groups()}
-    for group_id in affected_group_ids:
-        _audit_tool_mutation(
-            group_manager,
-            current_user.username,
-            "tool_access_bulk_disable",
-            tool_name,
-            groups_by_id.get(group_id),
-        )
     return {"tool_name": tool_name, "affected_group_ids": affected_group_ids}
 
 
@@ -351,9 +378,9 @@ def grant_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-    group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
-    _audit_tool_mutation(
-        group_manager, current_user.username, "tool_access_grant", tool_name, group
+    # The manager records the change's audit row.
+    _require_tool_access_applied(
+        group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
     )
     return {"tool_name": tool_name, "group_id": group_id, "allowed": True}
 
@@ -381,9 +408,9 @@ def revoke_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-    group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
-    _audit_tool_mutation(
-        group_manager, current_user.username, "tool_access_revoke", tool_name, group
+    # The manager records the change's audit row.
+    _require_tool_access_applied(
+        group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
     )
     return {"tool_name": tool_name, "group_id": group_id, "allowed": False}
 
@@ -435,7 +462,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details={"name": group.name, "description": group.description},
+            details={"name": group.name},
         )
         return _group_to_response(group)
     except ValueError:
@@ -524,10 +551,7 @@ def update_group(
             action_type="group_update",
             target_type="group",
             target_id=str(group_id),
-            details={
-                "name": updated_group.name,
-                "description": updated_group.description,
-            },
+            details={"name": updated_group.name},
         )
         return _group_to_response(updated_group)
     except ValueError as e:
@@ -559,19 +583,15 @@ def assign_user_to_group(
 
     Requires admin role. Replaces any existing group assignment for the user.
     """
-    # Verify group exists
-    group = group_manager.get_group(group_id)
-    if group is None:
+    try:
+        group = group_manager.assign_user_to_group_audited(
+            request.user_id, group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-
-    group_manager.assign_user_to_group(
-        user_id=request.user_id,
-        group_id=group_id,
-        assigned_by=current_user.username,
-    )
 
     return MessageResponse(
         message=f"User '{request.user_id}' assigned to group '{group.name}'"
@@ -730,29 +750,24 @@ def remove_repo_from_group(
     Requires admin role. Revokes the group's access to the repository.
     cidx-meta access cannot be revoked (returns 400).
     """
-    # Verify group exists
-    group = group_manager.get_group(group_id)
-    if group is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Group with ID {group_id} not found",
-        )
-
     try:
-        revoked = group_manager.revoke_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
+        revoked = group_manager.revoke_repo_access_audited(
+            repo_name, group_id, actor=current_user.username
         )
-
         if not revoked:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Repository '{repo_name}' not found in group '{group.name}' access list",
+                detail=f"Repository '{repo_name}' not found in the group's access list",
             )
 
         # Return 204 No Content on success
         return None
 
+    except GroupNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Group with ID {group_id} not found",
+        )
     except CidxMetaCannotBeRevokedError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -782,45 +797,23 @@ def bulk_remove_repos_from_group(
     Requires admin role. cidx-meta is silently skipped (cannot be removed).
     Returns count of repos actually removed.
     """
-    group = group_manager.get_group(group_id)
-    if group is None:
+    # cidx-meta is skipped silently (AC5); the audited entry point writes one
+    # row per revoked repository and one summary row for the absent ones.
+    try:
+        removed_count = group_manager.revoke_repos_access_audited(
+            request.repos, group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
-
-    removed_count = 0
-    removed_repos = []
-
-    for repo_name in request.repos:
-        # Silently skip cidx-meta (AC5 requirement)
-        if repo_name == CIDX_META_REPO:
-            continue
-        try:
-            revoked = group_manager.revoke_repo_access(
-                repo_name=repo_name,
-                group_id=group_id,
-            )
-            if revoked:
-                removed_count += 1
-                removed_repos.append(repo_name)
-        except CidxMetaCannotBeRevokedError:
-            # Should not happen since we skip cidx-meta above, but be safe
-            continue
-
-    # AC7: Log repo access revoke for each removed repo
-    for repo_name in removed_repos:
-        group_manager.log_audit(
-            admin_id=current_user.username,
-            action_type="repo_access_revoke",
-            target_type="repo",
-            target_id=repo_name,
-            details={"repo": repo_name, "group": group.name},
-        )
+    group = group_manager.get_group(group_id)
+    group_name = group.name if group is not None else str(group_id)
 
     return BulkRemoveReposResponse(
         removed=removed_count,
-        message=f"Removed {removed_count} repo(s) from group '{group.name}'",
+        message=f"Removed {removed_count} repo(s) from group '{group_name}'",
     )
 
 
@@ -907,37 +900,15 @@ def move_user_to_group(
             detail=f"User '{user_id}' not found",
         )
 
-    # Check if target group exists
-    target_group = group_manager.get_group(request.group_id)
-    if target_group is None:
+    try:
+        target_group = group_manager.assign_user_to_group_audited(
+            user_id, request.group_id, actor=current_user.username
+        )
+    except GroupNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {request.group_id} not found",
         )
-
-    # Get previous group for audit log
-    previous_group = group_manager.get_user_group(user_id)
-    previous_group_name = previous_group.name if previous_group else "none"
-
-    # Perform the move
-    group_manager.assign_user_to_group(
-        user_id=user_id,
-        group_id=request.group_id,
-        assigned_by=current_user.username,
-    )
-
-    # AC7: Log user group change
-    group_manager.log_audit(
-        admin_id=current_user.username,
-        action_type="user_group_change",
-        target_type="user",
-        target_id=user_id,
-        details={
-            "user_id": user_id,
-            "from_group": previous_group_name,
-            "to_group": target_group.name,
-        },
-    )
 
     return MessageResponse(
         message=f"User '{user_id}' moved to group '{target_group.name}'"
@@ -957,44 +928,90 @@ audit_router = APIRouter(prefix="/api/v1/audit-logs", tags=["audit"])
     dependencies=[Depends(dependencies.require_elevation())],
 )
 def get_audit_logs(
+    request: Request,
     action_type: Optional[str] = None,
     target_type: Optional[str] = None,
     admin_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    outcome: Optional[str] = None,
+    source: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    correlation_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    tier: Optional[str] = None,
     limit: Optional[int] = None,
-    offset: int = 0,
+    offset: Optional[int] = None,
+    cursor: Optional[str] = None,
+    direction: str = DIRECTION_OLDER,
+    aggregate: bool = False,
+    all_time: bool = False,
     current_user: User = Depends(get_current_admin_user),
-    group_manager: GroupAccessManager = Depends(get_group_manager),
 ) -> AuditLogsListResponse:
     """
-    Get audit log entries with optional filters.
+    Get audit log entries, newest first (admin only, elevation required).
 
-    Story #710: AC8 - Get Audit Logs
-    Requires admin role. Returns paginated list sorted by timestamp descending.
+    A thin adapter over ``services/audit_log_query.query_audit_log``, the
+    same function MCP ``query_audit_logs`` and the Web Audit Logs page read
+    through.
 
-    Filters:
-    - action_type: Filter by action type (user_group_change, repo_access_grant, etc.)
-    - target_type: Filter by target type (user, group, repo)
-    - admin_id: Filter by admin who performed the action
-    - date_from: Filter logs from this date (YYYY-MM-DD)
-    - date_to: Filter logs up to this date (YYYY-MM-DD)
+    - Filters: action_type, target_type, admin_id, target_id, outcome,
+      source, ip_address, correlation_id, date_from / date_to (UTC,
+      YYYY-MM-DD or ISO-8601).
+    - tier: security (default), auth_activity or all.  With a target_type
+      and no tier, every row of that target type is read.
+    - Paging: limit (default 100, at most 1000) plus the next_cursor /
+      prev_cursor tokens (direction=newer with prev_cursor); offset stays as
+      a compatibility adapter and cannot be combined with a cursor.
+    - aggregate=true (tier auth_activity) groups authentication activity;
+      all_time lifts its default 24 h window.
+
+    A bad argument is refused with HTTP 400.
     """
-    # If no target_type specified, exclude auth events from groups audit
-    effective_exclude = None if target_type else "auth"
-
-    logs, total = group_manager.get_audit_logs(
-        action_type=action_type,
-        target_type=target_type,
-        admin_id=admin_id,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
-        offset=offset,
-        exclude_target_type=effective_exclude,
-    )
-
+    store = getattr(request.app.state, "audit_service", None)
+    if store is None:
+        logger.error("GET /api/v1/audit-logs: audit store is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audit log store unavailable",
+        )
+    if tier is None:
+        tier = TIER_ALL if target_type else TIER_SECURITY
+    try:
+        # Checked on the SUPPLIED value, before offset 0 becomes "no offset":
+        # an explicit offset never combines with a cursor.
+        if cursor and offset is not None:
+            raise AuditQueryError("cursor and offset cannot be combined")
+        filters = build_filters(
+            action_type=action_type,
+            actor=admin_id,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            source=source,
+            ip_address=ip_address,
+            correlation_id=correlation_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        result = query_audit_log(
+            store,
+            filters,
+            tier=tier,
+            cursor=cursor or None,
+            direction=direction,
+            limit=limit,
+            legacy_offset=offset or None,
+            aggregate=aggregate,
+            all_time=all_time,
+        )
+    except AuditQueryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+    if isinstance(result, AuditAggregate):
+        return AuditLogsListResponse(logs=[], **aggregate_fields(result))
     return AuditLogsListResponse(
-        logs=[AuditLogResponse(**log) for log in logs],
-        total=total,
+        logs=[AuditLogResponse(**row_fields(row)) for row in result.rows],
+        **page_fields(result),
     )

@@ -22,6 +22,8 @@ import qrcode
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from code_indexer.server.services import audit_capture
+
 try:
     from psycopg.rows import dict_row, tuple_row
 except ImportError:  # psycopg3 not installed (standalone mode)
@@ -44,6 +46,28 @@ _TOTP_ISSUER = "CIDX"
 # wait instead of raising 'database is locked' after Python's own 5.0s
 # sqlite3.connect() default.
 _SQLITE_LOCK_TIMEOUT_SECONDS = 30.0
+
+# Audit target type of every MFA lifecycle row: the account whose factor
+# changed.
+_MFA_AUDIT_TARGET_TYPE = "user"
+
+
+def _record_mfa_event(
+    actor: str, action_type: str, username: str, outcome: str, **details: Any
+) -> None:
+    """Record one MFA lifecycle audit row (never raises; fail-open).
+
+    *details* are allowlisted per action type; no code or secret is ever
+    passed here.
+    """
+    audit_capture.capture(
+        actor=actor,
+        action_type=action_type,
+        target_type=_MFA_AUDIT_TARGET_TYPE,
+        target_id=username,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class TOTPService:
@@ -265,6 +289,30 @@ class TOTPService:
                 conn.close()
 
         return str(secret)
+
+    def regenerate_secret_cross_user(self, username: str, *, actor: str) -> str:
+        """Replace ANOTHER user's TOTP secret on an admin's behalf (audited).
+
+        Records exactly one ``mfa_secret_regenerated_cross_user`` row
+        attributed to *actor*.  A user replacing their own secret uses
+        :meth:`generate_secret`.
+
+        Raises:
+            ValueError: *actor* is *username* (not a cross-user reset).
+        """
+        if actor == username:
+            raise ValueError("cross-user secret reset requires a different actor")
+        try:
+            secret = self.generate_secret(username)
+        except Exception:
+            _record_mfa_event(
+                actor, "mfa_secret_regenerated_cross_user", username, "failure"
+            )
+            raise
+        _record_mfa_event(
+            actor, "mfa_secret_regenerated_cross_user", username, "success"
+        )
+        return secret
 
     def _get_secret(self, username: str) -> Optional[str]:
         """Retrieve and decrypt the TOTP secret for a user."""
@@ -530,12 +578,28 @@ class TOTPService:
             finally:
                 conn.close()
 
-    def regenerate_recovery_codes(self, username: str) -> List[str]:
-        """Delete all existing recovery codes and generate new set.
+    def regenerate_recovery_codes(self, username: str, *, actor: str) -> List[str]:
+        """Replace *username*'s recovery codes with a new set (audited).
 
+        The regeneration entry point every door calls: exactly one
+        ``mfa_recovery_codes_regenerated`` row, attributed to *actor*.
         Does NOT change the TOTP seed.
         """
-        return self.generate_recovery_codes(username)
+        try:
+            codes = self.generate_recovery_codes(username)
+        except Exception:
+            _record_mfa_event(
+                actor, "mfa_recovery_codes_regenerated", username, "failure"
+            )
+            raise
+        _record_mfa_event(
+            actor,
+            "mfa_recovery_codes_regenerated",
+            username,
+            "success",
+            count=len(codes),
+        )
+        return codes
 
     # ------------------------------------------------------------------
     # Elevation-specific TOTP verification (Story #923 AC9)
@@ -682,8 +746,64 @@ class TOTPService:
         logger.info("MFA activated for user %s", username)
         return True
 
-    def disable_mfa(self, username: str) -> None:
-        """Disable MFA and remove all MFA data for a user."""
+    def activate_mfa_and_issue_recovery_codes(
+        self, username: str, verification_code: str, *, actor: str
+    ) -> Optional[List[str]]:
+        """Activate MFA for *username* and issue its first recovery codes.
+
+        The audited activation entry point every door calls: exactly one
+        ``mfa_activated`` row per activation, attributed to *actor*.  An
+        invalid verification code changes nothing, records nothing and
+        returns None.  The recovery codes issued here are part of the
+        activation, so no regeneration row is ever recorded for them.
+
+        A failure records ``outcome=failure`` and re-raises.  The row's
+        details tell the two failure states apart: none when activation
+        itself failed (nothing changed), ``recovery_codes_issued=False`` when
+        MFA was activated but its recovery codes could not be issued (MFA is
+        left enabled without recovery codes).
+
+        Returns:
+            The plaintext recovery codes, or None when the code is invalid.
+        """
+        try:
+            if not self.activate_mfa(username, verification_code):
+                return None
+        except Exception:
+            _record_mfa_event(actor, "mfa_activated", username, "failure")
+            raise
+        try:
+            codes = self.generate_recovery_codes(username)
+        except Exception:
+            _record_mfa_event(
+                actor, "mfa_activated", username, "failure", recovery_codes_issued=False
+            )
+            raise
+        _record_mfa_event(
+            actor, "mfa_activated", username, "success", recovery_codes_issued=True
+        )
+        return codes
+
+    def disable_mfa(
+        self, username: str, *, actor: str, method: Optional[str] = None
+    ) -> None:
+        """Disable MFA and remove all MFA data for a user (audited).
+
+        Records exactly one ``mfa_disabled`` row attributed to *actor*.
+        *method* names the factor that proved the request ("totp" or
+        "recovery_code"), never its value.
+        """
+        details = {"method": method} if method is not None else {}
+        try:
+            self._delete_mfa_data(username)
+        except Exception:
+            _record_mfa_event(actor, "mfa_disabled", username, "failure", **details)
+            raise
+        _record_mfa_event(actor, "mfa_disabled", username, "success", **details)
+        logger.info("MFA disabled for user %s", username)
+
+    def _delete_mfa_data(self, username: str) -> None:
+        """Remove the user's TOTP secret and recovery codes."""
         if self._pool is not None:
             with self._pool.connection() as conn:
                 conn.execute("DELETE FROM user_mfa WHERE user_id = %s", (username,))
@@ -701,8 +821,6 @@ class TOTPService:
                 conn.commit()
             finally:
                 conn.close()
-
-        logger.info("MFA disabled for user %s", username)
 
     def is_mfa_enabled(self, username: str) -> bool:
         """Check if MFA is enabled for a user."""

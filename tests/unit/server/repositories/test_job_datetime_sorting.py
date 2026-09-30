@@ -14,7 +14,37 @@ from pathlib import Path
 
 from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
+    JobStatus,
 )
+
+_TERMINAL_STATUSES = {
+    JobStatus.COMPLETED.value,
+    JobStatus.COMPLETED_PARTIAL.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+    JobStatus.INTERRUPTED.value,
+}
+_WAIT_TIMEOUT_SECONDS = 10.0
+_POLL_INTERVAL_SECONDS = 0.02
+
+
+def _wait_for_terminal(
+    manager: BackgroundJobManager, job_ids: list[str], username: str
+) -> None:
+    """Poll until every job in job_ids reaches a terminal status, or fail."""
+    deadline = time.monotonic() + _WAIT_TIMEOUT_SECONDS
+    last_statuses: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        for job_id in job_ids:
+            status = manager.get_job_status(job_id, username)
+            last_statuses[job_id] = status["status"] if status else None
+        if all(s in _TERMINAL_STATUSES for s in last_statuses.values()):
+            return
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    raise AssertionError(
+        f"Jobs did not reach a terminal status within {_WAIT_TIMEOUT_SECONDS}s: "
+        f"{last_statuses}"
+    )
 
 
 class TestJobDatetimeSorting:
@@ -57,7 +87,7 @@ class TestJobDatetimeSorting:
             time.sleep(0.05)  # Small delay to ensure different completion times
 
         # Wait for all jobs to complete
-        time.sleep(0.3)
+        _wait_for_terminal(self.manager, job_ids, "testuser")
 
         # This should NOT raise ValueError when sorting by completed_at
         # Previously this would crash with:
@@ -92,10 +122,12 @@ class TestJobDatetimeSorting:
             return {"status": "success"}
 
         # Submit a job
-        self.manager.submit_job("test_op", success_task, submitter_username="testuser")
+        job_id = self.manager.submit_job(
+            "test_op", success_task, submitter_username="testuser"
+        )
 
         # Wait for completion
-        time.sleep(0.2)
+        _wait_for_terminal(self.manager, [job_id], "testuser")
 
         # This should work without error
         recent_jobs = self.manager.get_recent_jobs_with_filter(time_filter="24h")
@@ -110,8 +142,10 @@ class TestJobDatetimeSorting:
             return {"status": "success"}
 
         # Submit a job
-        self.manager.submit_job("test_op", success_task, submitter_username="testuser")
-        time.sleep(0.2)
+        job_id = self.manager.submit_job(
+            "test_op", success_task, submitter_username="testuser"
+        )
+        _wait_for_terminal(self.manager, [job_id], "testuser")
 
         # Test different time filters - none should crash
         for time_filter in ["24h", "7d", "30d"]:
@@ -134,13 +168,15 @@ class TestJobDatetimeSorting:
             return {"status": "success"}
 
         # Submit jobs
+        job_ids = []
         for i in range(2):
-            self.manager.submit_job(
-                f"test_op_{i}", success_task, submitter_username="testuser"
+            job_ids.append(
+                self.manager.submit_job(
+                    f"test_op_{i}", success_task, submitter_username="testuser"
+                )
             )
-            time.sleep(0.05)
 
-        time.sleep(0.3)
+        _wait_for_terminal(self.manager, job_ids, "testuser")
 
         recent_jobs = self.manager.get_recent_jobs_with_filter(time_filter="24h")
 

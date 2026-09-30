@@ -1,9 +1,9 @@
 ---
 name: manage_provider_indexes
 category: repos
-required_permission: repository:write
-tl_dr: Manage provider-specific semantic indexes (add, recreate, remove, status, list_providers).
-slim_description: "Manage provider-specific semantic indexes: list, check status, add, recreate, or remove collections."
+required_permission: manage_golden_repos
+tl_dr: '[ADMIN ONLY] Manage provider-specific semantic indexes (add, recreate, remove, status, list_providers).'
+slim_description: "[ADMIN ONLY] Manage provider-specific semantic indexes: list, check status, add, recreate, or remove collections. add/recreate/remove require MCP elevation (TOTP step-up) when enforcement is on."
 inputSchema:
   type: object
   properties:
@@ -26,7 +26,7 @@ inputSchema:
     - action
   additionalProperties: false
 ---
-Manage provider-specific semantic indexes for golden repositories.
+[ADMIN ONLY] Manage provider-specific semantic indexes for golden repositories. Matches the REST provider-index routes: every action requires the admin role, and add/recreate/remove also require an active elevation window when elevation enforcement is on (call `elevate_session` first). list_providers and status need no elevation.
 
 Supports five actions:
 - **list_providers**: Returns configured embedding providers with valid API keys
@@ -40,3 +40,7 @@ Examples:
 - Check status: `manage_provider_indexes(action="status", repository_alias="my-repo-global")`
 - Add index: `manage_provider_indexes(action="add", provider="cohere", repository_alias="my-repo-global")`
 - Remove index: `manage_provider_indexes(action="remove", provider="cohere", repository_alias="my-repo-global")`
+
+ERRORS (add/recreate/remove only):
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)

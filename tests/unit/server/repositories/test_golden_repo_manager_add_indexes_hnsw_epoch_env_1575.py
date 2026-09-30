@@ -108,7 +108,11 @@ def _run_add_indexes_and_capture(manager, index_types, server_config, captured_f
     ):
         mock_get_cfg_svc.return_value.get_config.return_value = server_config
 
-        manager.add_indexes_to_golden_repo(alias="test-repo", index_types=index_types)
+        manager.add_indexes_to_golden_repo(
+            alias="test-repo",
+            index_types=index_types,
+            submitter_username="example-admin",
+        )
         _run_captured_worker(manager)
 
     return {c["phase_name"]: c["env"] for c in calls}

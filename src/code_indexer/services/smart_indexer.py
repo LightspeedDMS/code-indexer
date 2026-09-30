@@ -22,6 +22,7 @@ from ..config import Config, VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
 from ..services.embedding_provider import EmbeddingProvider
 from ..indexing.processor import ProcessingStats
 from .progressive_metadata import ProgressiveMetadata
+from .resume_state_seal import load_or_create_resume_seal_key
 from .git_topology_service import GitTopologyService
 
 # Removed: SmartBranchIndexer (abandoned code)
@@ -358,13 +359,16 @@ class SmartIndexer(HighThroughputProcessor):
             vector_thread_count: Number of threads for vector calculation
             detect_deletions: Detect and handle files deleted from filesystem but still in database
             enable_fts: Build full-text search index alongside semantic index
-            trust_resume_state: When False, never
-                take the interrupted-operation resume branch, regardless
-                of what the resume metadata claims -- server-spawned
-                indexing passes False since that file lives in a
-                tenant/committer-writable tree. Deliberately not
-                force_full/--clear (avoids a full re-embed). Default True
-                preserves existing behavior.
+            trust_resume_state: When False (server-spawned indexing), the
+                repository-stored resume metadata is trusted ONLY when it
+                carries a valid server-held seal, i.e. it was written by a
+                previous server-context run (see resume_state_seal.py);
+                every save of this run is sealed so an interruption can be
+                resumed. State without a valid server seal never drives
+                the resume branch, and its stored file lists are discarded;
+                an interrupted operation then completes via a reconcile.
+                Deliberately not force_full/--clear (avoids a full
+                re-embed). Default True preserves the local CLI behavior.
 
         Returns:
             ProcessingStats with operation results
@@ -394,6 +398,13 @@ class SmartIndexer(HighThroughputProcessor):
         create_new_fts: bool = False
 
         try:
+            # Server context: trust stored resume state only when the server
+            # itself sealed it, and seal every save of this run. Done before
+            # anything else touches the metadata.
+            resume_state_trusted = trust_resume_state or (
+                self._enable_server_resume_seal()
+            )
+
             # Get current git status
             git_status = self.get_git_status()
             provider_name = self.embedding_provider.get_provider_name()
@@ -663,7 +674,7 @@ class SmartIndexer(HighThroughputProcessor):
             # Check for interrupted operations first - highest priority (unless forcing full)
             if (
                 not force_full
-                and trust_resume_state
+                and resume_state_trusted
                 and self.progressive_metadata.can_resume_interrupted_operation()
             ):
                 # NOTE: The "Resuming interrupted operation" progress message is
@@ -682,7 +693,7 @@ class SmartIndexer(HighThroughputProcessor):
                     fts_manager,
                 )
 
-            # trust_resume_state=False after a genuinely
+            # Untrusted (unsealed) resume state after a genuinely
             # interrupted operation must not stall forever (mtime scan
             # compares against an already-advanced last_index_timestamp).
             # Fall back to a fresh disk-vs-database reconcile instead.
@@ -703,11 +714,15 @@ class SmartIndexer(HighThroughputProcessor):
             # `can_resume_interrupted_operation() or` here would be
             # redundant.
             if (
-                not trust_resume_state
+                not resume_state_trusted
                 and not force_full
                 and self.progressive_metadata.metadata.get("status")
                 in ("in_progress", "failed")
             ):
+                logger.info(
+                    "Stored resume state is not server-sealed; completing the "
+                    "interrupted operation with a reconcile instead of resuming."
+                )
                 return self._do_reconcile_with_database(
                     batch_size,
                     progress_callback,
@@ -828,7 +843,7 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
-                trust_resume_state=trust_resume_state,
+                trust_resume_state=resume_state_trusted,
             )
 
         except KeyboardInterrupt:
@@ -1678,6 +1693,9 @@ class SmartIndexer(HighThroughputProcessor):
                 _self_heal_collection_name, files_to_index
             )
         )
+        # Files the previous run could not index are retried even when
+        # nothing changed since, so they never stay missing from the index.
+        retried_failures, files_to_index = self._merge_recorded_failures(files_to_index)
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK: Detect corrupted state before marking as completed
@@ -1902,6 +1920,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
+            self._record_failures_of_run(stats, retried_failures, [])
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:
@@ -2063,11 +2082,11 @@ class SmartIndexer(HighThroughputProcessor):
         files_to_index = []
         modified_files = 0
         missing_files = 0
-        # Count files whose analysis THROWS, so
-        # the "nothing to index" early return below can distinguish
-        # "genuinely up-to-date" from "every candidate file's analysis
-        # failed" -- the latter must never be reported as completed.
-        analysis_failures = 0
+        # Files whose analysis THROWS were never verified. The run is still
+        # marked completed (leaving it open would make every following
+        # server-context run reconcile again), but these files are recorded
+        # as failed so the partial result is never silent.
+        analysis_failed_paths: List[str] = []
 
         for file_path in all_files_to_index:
             try:
@@ -2116,7 +2135,7 @@ class SmartIndexer(HighThroughputProcessor):
             except Exception as e:
                 # File might have issues, log and skip
                 logger.warning(f"Failed to analyze file {file_path} for reconcile: {e}")
-                analysis_failures += 1
+                analysis_failed_paths.append(str(file_path))
                 continue
 
         # Codex #1505 review, Finding 2: a degraded reconcile run (batched
@@ -2268,24 +2287,29 @@ class SmartIndexer(HighThroughputProcessor):
                     Path(""),
                     info=f"✅ All {len(all_files_to_index)} files up-to-date - no reconciliation needed",
                 )
-            if analysis_failures > 0:
-                # Nothing was queued, but not
-                # because every file was genuinely verified up-to-date --
-                # every candidate's analysis THREW instead. Marking this
-                # completed would be a false completion (Bug #1218-class
-                # silent partial index): those files were never actually
-                # checked. Leave status as-is so a subsequent run retries.
+            if analysis_failed_paths:
+                # Nothing was queued, but not because every file was
+                # verified up-to-date -- some candidates' analysis THREW.
+                # Complete with those files recorded as failed and reported
+                # in the returned stats (never a silent completion); the
+                # next run retries them. Pending self-heal entries are kept,
+                # since those files were never actually checked.
                 logger.warning(
                     "Reconcile found nothing to index, but %d file(s) "
-                    "failed analysis and were skipped -- NOT marking the "
-                    "operation completed, since those files were never "
-                    "actually verified.",
-                    analysis_failures,
+                    "failed analysis and were skipped; marking the operation "
+                    "completed with them recorded as failed files.",
+                    len(analysis_failed_paths),
                 )
-                return ProcessingStats()
+                self.progressive_metadata.set_failed_file_paths(
+                    analysis_failed_paths, failed_count=len(analysis_failed_paths)
+                )
+                self.progressive_metadata.complete_indexing()
+                return self._analysis_failure_stats(analysis_failed_paths)
             # Same as the "no files on disk" early
             # return above -- finding nothing to reconcile must still mark
-            # the operation completed.
+            # the operation completed. Every file was verified, so no
+            # recorded failure remains.
+            self.progressive_metadata.set_failed_file_paths([], failed_count=0)
             self.progressive_metadata.complete_indexing()
             # Nothing to reprocess -- but any pending self-heal entries
             # were, by construction (reconcile's own full disk/DB
@@ -2478,10 +2502,9 @@ class SmartIndexer(HighThroughputProcessor):
             )
 
             # Convert BranchIndexingResult to ProcessingStats
-            stats = ProcessingStats()
+            stats = self._analysis_failure_stats(analysis_failed_paths)
             stats.files_processed = branch_result.files_processed
             stats.chunks_created = branch_result.content_points_created
-            stats.failed_files = 0
             stats.start_time = time.time() - branch_result.processing_time
             stats.end_time = time.time()
             stats.cancelled = branch_result.cancelled
@@ -2533,6 +2556,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
+            self._record_failures_of_run(stats, [], analysis_failed_paths)
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:
@@ -2621,6 +2645,97 @@ class SmartIndexer(HighThroughputProcessor):
         # return unchanged so downstream .exists()/.relative_to can surface it.
         return first_match if first_match is not None else candidate
 
+    def _enable_server_resume_seal(self) -> bool:
+        """Server-context runs: seal this run's resume-state saves with the
+        server-held key, and report whether the stored state was sealed by
+        a previous server-context run. False whenever the key is unavailable,
+        so unsealed state is never trusted. Untrusted state also loses its
+        stored file lists (work list, completed and failed files), so none of
+        them is acted on or carried into this run's sealed saves."""
+        key = load_or_create_resume_seal_key()
+        if key is not None:
+            self.progressive_metadata.enable_resume_seal(key)
+        trusted = key is not None and self.progressive_metadata.loaded_state_is_sealed()
+        if not trusted:
+            self.progressive_metadata.discard_file_tracking()
+        return trusted
+
+    def _merge_recorded_failures(
+        self, files: List[Path]
+    ) -> Tuple[List[Path], List[Path]]:
+        """Merge the files the previous run recorded as failed into ``files``.
+
+        Each recorded path must still exist and pass the same containment
+        and eligibility checks as a resumed path; any other recorded path
+        drops out of the stored list. Returns ``(retried, merged_files)``.
+        """
+        recorded = [
+            str(p)
+            for p in self.progressive_metadata.metadata.get("failed_file_paths", [])
+        ]
+        if not recorded:
+            return [], files
+        codebase = Path(self.config.codebase_dir)
+        resolved_codebase = codebase.resolve()
+        retried: List[Path] = []
+        for stored in recorded:
+            candidate = self._reanchor_resume_path(stored, codebase)
+            if candidate.exists() and self._resume_candidate_is_safe(
+                candidate, resolved_codebase
+            ):
+                retried.append(candidate)
+        if len(retried) != len(recorded):
+            self.progressive_metadata.set_failed_file_paths([str(p) for p in retried])
+        covered = {str(f) for f in files}
+        merged = list(files) + [p for p in retried if str(p) not in covered]
+        if retried:
+            logger.info(
+                "Retrying %d file(s) that the previous indexing run could not index.",
+                len(retried),
+            )
+        return retried, merged
+
+    def _relative_to_codebase(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.config.codebase_dir))
+        except ValueError:
+            return str(path)
+
+    def _analysis_failure_stats(self, failed_paths: List[str]) -> ProcessingStats:
+        """Stats reporting the files whose reconcile analysis failed, so the
+        caller (and the CLI exit code) sees them."""
+        return ProcessingStats(
+            failed_files=len(failed_paths),
+            failed_paths=frozenset(
+                self._relative_to_codebase(Path(p)) for p in failed_paths
+            ),
+        )
+
+    def _record_failures_of_run(
+        self,
+        stats: ProcessingStats,
+        retried: List[Path],
+        extra_failed: List[str],
+    ) -> None:
+        """Replace the recorded failure list with every attributable failure
+        of this run: ``extra_failed`` plus every path in
+        ``stats.failed_paths`` (first-time candidates and retries alike).
+        When some failure has no attributed path, every retried file also
+        stays recorded."""
+        codebase = Path(self.config.codebase_dir)
+        failed = list(extra_failed) + [
+            str(codebase / rel) for rel in sorted(stats.failed_paths)
+        ]
+        if stats.failed_files > len(stats.failed_paths):
+            failed += [str(p) for p in retried]
+        self.progressive_metadata.set_failed_file_paths(failed)
+        if failed:
+            logger.warning(
+                "%d file(s) could not be indexed in this run; they are recorded "
+                "and retried on the next run.",
+                len(failed),
+            )
+
     def _resume_candidate_is_safe(
         self, candidate: Path, resolved_codebase: Path
     ) -> bool:
@@ -2663,13 +2778,22 @@ class SmartIndexer(HighThroughputProcessor):
         # independent resolve() call here.
         resolved_candidate = resolve_if_within_root(candidate, resolved_codebase)
         if resolved_candidate is None:
-            return False
+            # Local CLI context only: a fresh walk includes an in-tree
+            # symlink whose target lies outside the root (judged by its link
+            # name below), but never descends into a symlinked directory.
+            # Server context never follows a symlink out of the root.
+            if self.config.confined_to_codebase_root or not (
+                candidate.is_symlink()
+                and resolve_if_within_root(candidate.parent, resolved_codebase)
+                is not None
+            ):
+                return False
+        else:
+            relative_path = resolved_candidate.relative_to(resolved_codebase)
 
-        relative_path = resolved_candidate.relative_to(resolved_codebase)
-
-        eligibility_candidate = Path(self.config.codebase_dir) / relative_path
-        if not self.file_finder.is_eligible(eligibility_candidate):
-            return False
+            eligibility_candidate = Path(self.config.codebase_dir) / relative_path
+            if not self.file_finder.is_eligible(eligibility_candidate):
+                return False
 
         try:
             link_relative_path = candidate.relative_to(Path(self.config.codebase_dir))
@@ -2773,8 +2897,13 @@ class SmartIndexer(HighThroughputProcessor):
                 _self_heal_collection_name, existing_files
             )
         )
+        retried_failures, existing_files = self._merge_recorded_failures(existing_files)
 
-        if not remaining_file_strings and not pending_self_heal_before:
+        if (
+            not remaining_file_strings
+            and not pending_self_heal_before
+            and not retried_failures
+        ):
             # No files left to process, and nothing durably pending either.
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
@@ -2894,6 +3023,7 @@ class SmartIndexer(HighThroughputProcessor):
         if not stats.cancelled:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="Finalizing resume session...")
+            self._record_failures_of_run(stats, retried_failures, [])
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:

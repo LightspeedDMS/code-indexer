@@ -2827,7 +2827,9 @@ def set_global_refresh_interval(interval: int):
 
     ops = GlobalRepoOperations(golden_repos_dir)
     try:
-        ops.set_config(interval)
+        # Standalone CLI: the process is not a server, so no audit row is
+        # written; the fixed local actor only satisfies the required argument.
+        ops.set_config(interval, actor="cli-local")
         console.print(
             f"[green]Updated global refresh interval to {interval} seconds[/green]"
         )
@@ -3194,13 +3196,13 @@ def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
     is_flag=True,
     default=False,
     hidden=True,
-    help="Internal: do not trust a stored interrupted-operation resume "
-    "state (.code-indexer/metadata-<provider>.json) -- fall through to a "
-    "normal incremental/full walk instead of resuming from it. Used by "
+    help="Internal: trust a stored interrupted-operation resume state "
+    "(.code-indexer/metadata-<provider>.json) only when it carries a valid "
+    "server-held seal, i.e. a previous server-spawned run wrote it; this "
+    "run's resume state is sealed the same way. Unsealed state is ignored "
+    "and an interrupted operation is completed with a reconcile. Used by "
     "the server for repos whose working tree a tenant/committer can "
-    "write to, since that resume state cannot be trusted as provenance "
-    "for what the server indexes on their behalf. "
-    "Does NOT force a full reindex (unlike --clear).",
+    "write to. Does NOT force a full reindex (unlike --clear).",
 )
 @click.option(
     "--server-managed-provider-settings",
@@ -3334,6 +3336,10 @@ def index(
         rather than once after an early call whose result a later reload
         would silently discard. Every other provider setting is left
         exactly as loaded.
+
+        Either server flag also marks the config as server context, so
+        indexed files stay inside the repository root; a plain local run
+        follows symlinks wherever they point.
         """
         loaded_config = cast(Config, config_manager.load())
         if server_managed_provider_settings:
@@ -3342,6 +3348,8 @@ def index(
             )
 
             enforce_server_managed_provider_settings(loaded_config)
+        if ignore_resume_state:
+            loaded_config.confine_to_codebase_root()
         return loaded_config
 
     # Story #1418: install the embedding-stats writer BEFORE any
@@ -12683,6 +12691,11 @@ def server_auto_update_status(ctx):
 
 
 # SSH Key Management commands
+# Actor passed to the audited SSH key operations from the standalone CLI.  The
+# CLI is never a server process, so these operations record no audit row.
+_CLI_LOCAL_ACTOR = "cli-local"
+
+
 @cli.group("ssh-key")
 @click.pass_context
 def ssh_key_group(ctx):
@@ -12730,11 +12743,13 @@ def ssh_key_create(ctx, name: str, key_type: str, email: str, description: str):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.create_key(
-            name=name,
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.create_key_audited(
+            name,
             key_type=key_type,
             email=email,
             description=description,
+            actor=_CLI_LOCAL_ACTOR,
         )
 
         console.print(f"[green]SSH key '{name}' created successfully[/green]")
@@ -12815,7 +12830,8 @@ def ssh_key_delete(ctx, name: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        manager.delete_key(name)
+        # Standalone CLI: no server process, so no audit row is written.
+        manager.delete_key_audited(name, actor=_CLI_LOCAL_ACTOR)
 
         console.print(f"[green]SSH key '{name}' deleted successfully[/green]")
 
@@ -12870,7 +12886,10 @@ def ssh_key_assign(ctx, name: str, host: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.assign_key_to_host(name, host, force=force)
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.assign_key_to_host_audited(
+            name, host, force=force, actor=_CLI_LOCAL_ACTOR
+        )
 
         console.print(f"[green]Key '{name}' assigned to '{host}'[/green]")
         console.print()

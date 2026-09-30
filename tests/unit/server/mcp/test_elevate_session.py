@@ -23,6 +23,7 @@ Duplication reduction:
 """
 
 import contextlib
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -131,7 +132,11 @@ def _call_elevate(
     from code_indexer.server.mcp.handlers.admin import elevate_session as _elevate
 
     with _patch_env(manager, totp_svc, rate_limiter, enforcement):
-        return _elevate.elevate_session(args, user, session_key)
+        response = _elevate.elevate_session(args, user, session_key)
+    # The handler returns an MCP content envelope; the payload is its JSON text.
+    content = response["content"]
+    assert content[0]["type"] == "text"
+    return json.loads(content[0]["text"])
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +313,59 @@ def test_rate_limited_returns_rate_limited(
         rate_limiter_locked,
     )
     assert result.get("error") == "rate_limited"
+
+
+# ---------------------------------------------------------------------------
+# A request without a session key is refused before any code is verified
+# ---------------------------------------------------------------------------
+
+
+def test_missing_session_key_does_not_consume_code(
+    admin_user, manager, totp_svc, rate_limiter_unlocked
+):
+    result = _call_elevate(
+        {"totp_code": _VALID_TOTP},
+        admin_user,
+        "",
+        manager,
+        totp_svc,
+        rate_limiter_unlocked,
+    )
+    assert result.get("error") == "missing_session_key"
+    totp_svc.verify_enabled_code.assert_not_called()
+    rate_limiter_unlocked.check_and_record_failure.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# A window that cannot be read back after create is reported, not assumed
+# ---------------------------------------------------------------------------
+
+
+class _UnreadableWindowManager(ElevatedSessionManager):
+    """Real manager whose read-back after create finds no window."""
+
+    def get_status(self, session_key):  # type: ignore[no-untyped-def]
+        return None
+
+
+def test_window_missing_after_create_returns_structured_error(
+    admin_user, tmp_path, totp_svc, rate_limiter_unlocked
+):
+    unreadable = _UnreadableWindowManager(
+        idle_timeout_seconds=_IDLE,
+        max_age_seconds=_MAX_AGE,
+        db_path=str(tmp_path / "unreadable.db"),
+    )
+    result = _call_elevate(
+        {"totp_code": _VALID_TOTP},
+        admin_user,
+        _SESSION_KEY,
+        unreadable,
+        totp_svc,
+        rate_limiter_unlocked,
+    )
+    assert result == {
+        "error": "elevation_create_failed",
+        "message": "Elevation window not retrievable after create.",
+    }
+    rate_limiter_unlocked.record_success.assert_not_called()

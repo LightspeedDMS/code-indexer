@@ -7,7 +7,7 @@ Provides REST endpoints for checking HNSW index health with caching support.
 import functools
 import logging
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -28,6 +28,7 @@ from code_indexer.server.services.repository_health_aggregator import (
 from code_indexer.server.services.repo_access_guard import (
     AccessFilteringServiceUnavailableError,
     RepoAccessDeniedError,
+    normalize_repo_alias,
     require_repo_access,
 )
 
@@ -272,14 +273,71 @@ def _get_access_filtering_service() -> Optional[Any]:
     return getattr(app_module.app.state, "access_filtering_service", None)
 
 
-def _resolve_repo_access_target(repo_alias: str, username: str) -> Optional[str]:
-    """Resolve the golden repo alias that must be authorised for repo_alias,
-    in EXACTLY the same priority order check_repository_health_async() and
-    get_repository_indexes() use to pick which repository's data to return
-    (via _resolve_repository_path() and its inlined twin):
+def _resolve_activated_repo_access_targets(
+    username: str, user_alias: str
+) -> Optional[List[str]]:
+    """Return the golden repo aliases that authorise the caller's OWN
+    activated repo user_alias, or None when nothing authorises it.
+
+    - A single-repo activation is authorised through its backing
+      golden_repo_alias.
+    - A composite activation (is_composite, created via
+      manage_composite_repository) records its components in
+      golden_repo_aliases; it is authorised through ALL of them. A
+      composite with no (or malformed) recorded components, or with any
+      component that no longer exists as a golden repo, is never
+      authorised.
+
+    Only the caller's own activations are looked up (keyed by username),
+    so another user's repo can never resolve here.
+    """
+    try:
+        metadata = _get_activated_repo_manager().get_repository(
+            username, user_alias, touch=False
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to resolve access targets for activated repo '%s' (user '%s'): %s",
+            user_alias,
+            username,
+            exc,
+        )
+        return None
+    if not metadata:
+        return None
+    if metadata.get("is_composite", False):
+        components = metadata.get("golden_repo_aliases")
+        if not (
+            isinstance(components, list)
+            and components
+            and all(isinstance(c, str) and c for c in components)
+        ):
+            return None
+        # A component golden repo removed after the composite was created
+        # never authorises it, even if a grant for its alias remains.
+        golden_repo_manager = _get_golden_repo_manager()
+        if not all(
+            golden_repo_manager.get_golden_repo(normalize_repo_alias(c))
+            for c in components
+        ):
+            return None
+        return list(components)
+    golden_alias = metadata.get("golden_repo_alias")
+    if isinstance(golden_alias, str) and golden_alias:
+        return [golden_alias]
+    return None
+
+
+def _resolve_repo_access_target(repo_alias: str, username: str) -> Optional[List[str]]:
+    """Resolve the golden repo alias(es) that must be authorised for
+    repo_alias, in EXACTLY the same priority order
+    check_repository_health_async() and get_repository_indexes() use to pick
+    which repository's data to return (via _resolve_repository_path() and
+    its inlined twin):
       1. repo_alias as a golden repo (exact match)
       2. the -global-stripped repo_alias as a golden repo
-      3. the caller's OWN activated repo's backing golden alias
+      3. the caller's OWN activated repo: its backing golden alias, or --
+         for a composite -- every component golden alias
 
     Returns None when neither strategy resolves anything for this caller.
 
@@ -293,18 +351,18 @@ def _resolve_repo_access_target(repo_alias: str, username: str) -> Optional[str]
     """
     golden_repo_manager = _get_golden_repo_manager()
     if golden_repo_manager.get_golden_repo(repo_alias):
-        return repo_alias
+        return [repo_alias]
     if repo_alias.endswith("-global"):
         base_alias = repo_alias[:-7]
         if golden_repo_manager.get_golden_repo(base_alias):
-            return base_alias
-    return _resolve_golden_repo_alias_for_activated_repo(username, repo_alias)
+            return [base_alias]
+    return _resolve_activated_repo_access_targets(username, repo_alias)
 
 
 def _repo_access_allowed(
     access_filtering_service: Optional[Any], repo_alias: str, username: str
 ) -> bool:
-    """Return True if username is authorised for the SAME target
+    """Return True if username is authorised for EVERY target
     _resolve_repo_access_target() resolves repo_alias to.
 
     Admin users bypass the check entirely -- checked BEFORE resolution, so
@@ -325,12 +383,12 @@ def _repo_access_allowed(
     if access_filtering_service.is_admin_user(username):  # type: ignore[attr-defined]
         return True
 
-    target = _resolve_repo_access_target(repo_alias, username)
-    if target is None:
+    targets = _resolve_repo_access_target(repo_alias, username)
+    if not targets:
         return False
 
     try:
-        require_repo_access(access_filtering_service, username, target)
+        require_repo_access(access_filtering_service, username, targets)
         return True
     except RepoAccessDeniedError:
         return False

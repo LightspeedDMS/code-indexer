@@ -576,7 +576,9 @@ def _run_sweep(
             alias,
         )
         try:
-            golden_repo_manager.remove_golden_repo(
+            # Audited as the reconciler system component; the job itself
+            # keeps submitter_username.
+            golden_repo_manager.remove_orphaned_golden_repo(
                 alias, submitter_username=submitter_username
             )
             result.orphans_removed.append(alias)

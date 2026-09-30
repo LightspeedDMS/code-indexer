@@ -257,7 +257,7 @@ class TestUpdateGlobalConfigElevation:
 
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "updated"
-        mock_ops.set_config.assert_called_once_with(120)
+        mock_ops.set_config.assert_called_once_with(120, actor=_ADMIN_USERNAME)
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,12 @@ class ResourceManagedGoldenRepoOperations:
         self.golden_repo_manager = golden_repo_manager
 
     async def add_golden_repo_with_resource_management(
-        self, repo_url: str, alias: str, default_branch: str = "main"
+        self,
+        repo_url: str,
+        alias: str,
+        default_branch: str = "main",
+        *,
+        submitter_username: str,
     ) -> Dict[str, Any]:
         """
         Add golden repository with comprehensive resource management.
@@ -100,8 +105,13 @@ class ResourceManagedGoldenRepoOperations:
 
                 # Execute the actual golden repo addition
                 # This would call the existing GoldenRepoManager method
+                # The caller is the acting user (job submitter and audit
+                # actor); there is no default.
                 result = self.golden_repo_manager.add_golden_repo(
-                    repo_url=repo_url, alias=alias, default_branch=default_branch
+                    repo_url=repo_url,
+                    alias=alias,
+                    default_branch=default_branch,
+                    submitter_username=submitter_username,
                 )
 
                 # Log successful completion

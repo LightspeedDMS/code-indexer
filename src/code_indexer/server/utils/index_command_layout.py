@@ -22,9 +22,12 @@ per-command special-casing.
 
 Resume state (``.code-indexer/metadata-<provider>.json``)
 lives in a tenant/committer-writable tree, so server-spawned indexing must
-never trust it. ``--ignore-resume-state`` discards that trust without
-forcing a full re-embed (unlike ``--clear``), stamped in this same helper
-so every wrapped call site inherits it automatically.
+never trust repository-authored resume state. ``--ignore-resume-state``
+makes the child trust only resume state carrying a server-held seal
+(written by a previous server-spawned run, see
+``services/resume_state_seal.py``) without forcing a full re-embed (unlike
+``--clear``), stamped in this same helper so every wrapped call site
+inherits it automatically.
 
 A repository's ``.code-indexer/config.json`` is likewise tenant/committer
 writable, so server-spawned indexing must never let it choose where the

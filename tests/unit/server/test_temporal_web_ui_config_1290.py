@@ -47,33 +47,33 @@ class TestTemporalIndexingConfigDefaults:
 
 class TestUpdateTemporalIndexingSetting:
     def test_temporal_embedders_accepts_comma_separated_string(self, svc) -> None:
-        svc._update_indexing_setting("temporal_embedders", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_embedders", "voyage-context-4")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_embedders == ["voyage-context-4"]
 
     def test_temporal_embedders_rejects_empty(self, svc) -> None:
         with pytest.raises(ValueError):
-            svc._update_indexing_setting("temporal_embedders", "")
+            svc.update_setting("indexing", "temporal_embedders", "")
 
     def test_temporal_active_embedder_must_be_member_of_embedders(self, svc) -> None:
-        svc._update_indexing_setting("temporal_embedders", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_embedders", "voyage-context-4")
         with pytest.raises(ValueError):
-            svc._update_indexing_setting("temporal_active_embedder", "bogus-model")
+            svc.update_setting("indexing", "temporal_active_embedder", "bogus-model")
 
     def test_temporal_active_embedder_accepted_when_member(self, svc) -> None:
-        svc._update_indexing_setting("temporal_embedders", "voyage-context-4")
-        svc._update_indexing_setting("temporal_active_embedder", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_embedders", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_active_embedder", "voyage-context-4")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_active_embedder == "voyage-context-4"
 
     def test_temporal_aggregation_chunk_chars_stored(self, svc) -> None:
-        svc._update_indexing_setting("temporal_aggregation_chunk_chars", "8192")
+        svc.update_setting("indexing", "temporal_aggregation_chunk_chars", "8192")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_aggregation_chunk_chars == 8192
 
     def test_temporal_aggregation_chunk_chars_rejects_non_positive(self, svc) -> None:
         with pytest.raises(ValueError):
-            svc._update_indexing_setting("temporal_aggregation_chunk_chars", "0")
+            svc.update_setting("indexing", "temporal_aggregation_chunk_chars", "0")
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +168,9 @@ class TestConfigSeedingTemporalPropagation:
         config_file = cc_dir / "config.json"
         config_file.write_text(json.dumps({"voyage_ai": {}, "cohere": {}}))
 
-        svc._update_indexing_setting("temporal_embedders", "voyage-context-4")
-        svc._update_indexing_setting("temporal_active_embedder", "voyage-context-4")
-        svc._update_indexing_setting("temporal_aggregation_chunk_chars", "2048")
+        svc.update_setting("indexing", "temporal_embedders", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_active_embedder", "voyage-context-4")
+        svc.update_setting("indexing", "temporal_aggregation_chunk_chars", "2048")
 
         with patch(
             "code_indexer.server.services.config_service.get_config_service",

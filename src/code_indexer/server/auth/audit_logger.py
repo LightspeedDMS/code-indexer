@@ -50,6 +50,9 @@ class PasswordChangeAuditLogger:
                             file handler is created (Story #399).
         """
         self._audit_service = audit_service
+        self.log_file_path: Optional[str] = None
+        # The flat-file path to return to when the service is unset.
+        self._unbound_log_file_path: Optional[str] = log_file_path
 
         if audit_service is not None:
             # SQLite path: no file handler needed; use a disabled logger as a no-op placeholder
@@ -60,9 +63,13 @@ class PasswordChangeAuditLogger:
             self.log_file_path = None
             return
 
-        # Legacy flat-file path
+        self._configure_flat_file(log_file_path)
+
+    def _configure_flat_file(self, log_file_path: Optional[str]) -> None:
+        """Legacy flat-file mode: the path used when no service is set."""
+        path: str
         if log_file_path:
-            self.log_file_path = log_file_path
+            path = log_file_path
         else:
             # Default audit log location. Bug #1778: honor
             # CIDX_SERVER_DATA_DIR so an isolated/test server instance
@@ -81,20 +88,23 @@ class PasswordChangeAuditLogger:
             # with missing intermediate directories, unlike Path.home()
             # which always exists.
             server_dir.mkdir(parents=True, exist_ok=True)
-            self.log_file_path = str(server_dir / "password_audit.log")
+            path = str(server_dir / "password_audit.log")
+        self.log_file_path = path
 
         # Configure audit logger with unique name based on file path
         # This prevents multiple instances from interfering with each other
-        logger_name = f"password_audit_{hash(self.log_file_path)}"
+        logger_name = f"password_audit_{hash(path)}"
         self.audit_logger = logging.getLogger(logger_name)
         self.audit_logger.setLevel(logging.INFO)
 
-        # Remove any existing handlers to avoid duplicates
+        # Replace any existing handlers (the logger is shared per path):
+        # close each one so no file descriptor is leaked.
         for handler in self.audit_logger.handlers[:]:
+            handler.close()
             self.audit_logger.removeHandler(handler)
 
         # Create file handler for audit log
-        file_handler = logging.FileHandler(self.log_file_path)
+        file_handler = logging.FileHandler(path)
         file_handler.setLevel(logging.INFO)
 
         # Create formatter for structured logging
@@ -107,15 +117,24 @@ class PasswordChangeAuditLogger:
         self.audit_logger.addHandler(file_handler)
         self.audit_logger.propagate = False  # Don't propagate to root logger
 
-    def set_audit_service(self, audit_service: "AuditLogService") -> None:
+    def set_audit_service(self, audit_service: Optional["AuditLogService"]) -> None:
         """Switch from flat-file to SQLite mode (Story #399).
 
         Closes and removes the file handler to avoid resource leaks.
+        ``None`` (server shutdown) returns to the flat-file mode, at the
+        exact path the logger used before a service was set, so no
+        module-level logger keeps a stopped service; flat-file entries are
+        migrated at the next boot.
         """
+        if audit_service is not None and self.log_file_path is not None:
+            self._unbound_log_file_path = self.log_file_path
         self._audit_service = audit_service
         for handler in self.audit_logger.handlers[:]:
             handler.close()
             self.audit_logger.removeHandler(handler)
+        if audit_service is None:
+            self._configure_flat_file(self._unbound_log_file_path)
+            return
         _null_logger = logging.getLogger(f"password_audit_null_{id(self)}")
         _null_logger.addHandler(logging.NullHandler())
         _null_logger.propagate = False
@@ -145,9 +164,9 @@ class PasswordChangeAuditLogger:
 
         Note: ALL PasswordChangeAuditLogger events use target_type="auth", including
         PR creation and git cleanup events. This is intentional — these events are
-        distinguished by action_type, not target_type. The Groups UI uses
-        exclude_target_type="auth" to filter out all PasswordChangeAuditLogger events
-        from the group management view.
+        distinguished by action_type, not target_type. The audit-log read tiers
+        (services/audit_log_query.py) use action_type to decide which of these
+        rows are security events and which are routine authentication activity.
         """
         if self._audit_service is None:
             return

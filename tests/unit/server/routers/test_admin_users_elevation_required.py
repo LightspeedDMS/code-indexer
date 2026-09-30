@@ -190,7 +190,7 @@ def test_create_user_with_elevation_returns_201(client_with_elevation):
     client, _ = client_with_elevation
     handler = _find_route_handler("/api/admin/users", "POST")
     mock_um = Mock()
-    mock_um.create_user.return_value = User(
+    mock_um.create_user_audited.return_value = User(
         username="newuser",
         password_hash="hashed",
         role=UserRole.NORMAL_USER,

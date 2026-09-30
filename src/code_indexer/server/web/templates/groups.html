@@ -47,15 +47,6 @@
         </li>
         <li>
             <a href="#"
-               id="tab-audit"
-               class="tab-link {% if active_tab == 'audit' %}active{% endif %}"
-               onclick="switchTab('audit'); return false;"
-               aria-current="{% if active_tab == 'audit' %}page{% endif %}">
-                Audit Logs
-            </a>
-        </li>
-        <li>
-            <a href="#"
                id="tab-repos"
                class="tab-link {% if active_tab == 'repos' %}active{% endif %}"
                onclick="switchTab('repos'); return false;"
@@ -153,62 +144,6 @@
     <!-- Users List Section -->
     <section id="groups-users-section">
         {% include "partials/groups_users_list.html" %}
-    </section>
-</section>
-
-<!-- Audit Logs Tab Content -->
-<section id="content-audit" class="tab-content {% if active_tab != 'audit' %}hidden{% endif %}">
-    <div class="tab-header">
-        <h2>Audit Logs</h2>
-        <div class="tab-actions">
-            <button
-                class="outline"
-                hx-get="/admin/partials/groups-audit-logs"
-                hx-target="#audit-logs-section"
-                hx-swap="innerHTML"
-                hx-indicator="#audit-refresh-indicator"
-            >
-                Refresh
-            </button>
-            <span id="audit-refresh-indicator" class="htmx-indicator">Loading...</span>
-        </div>
-    </div>
-
-    <!-- Audit Filter Form -->
-    <section class="filter-section">
-        <form id="audit-filter-form" onsubmit="filterAuditLogs(); return false;">
-            <div class="filter-row">
-                <div class="filter-field">
-                    <label for="audit_date_from">From Date</label>
-                    <input type="date" id="audit_date_from" name="date_from">
-                </div>
-                <div class="filter-field">
-                    <label for="audit_date_to">To Date</label>
-                    <input type="date" id="audit_date_to" name="date_to">
-                </div>
-                <div class="filter-field">
-                    <label for="audit_action_type">Action Type</label>
-                    <select id="audit_action_type" name="action_type">
-                        <option value="">All Actions</option>
-                        <option value="user_group_change">User Group Change</option>
-                        <option value="repo_access_grant">Repo Access Grant</option>
-                        <option value="repo_access_revoke">Repo Access Revoke</option>
-                        <option value="group_create">Group Create</option>
-                        <option value="group_update">Group Update</option>
-                        <option value="group_delete">Group Delete</option>
-                    </select>
-                </div>
-                <div class="filter-actions">
-                    <button type="submit" class="primary small">Apply Filter</button>
-                    <button type="button" class="secondary small" onclick="clearAuditFilters()">Clear</button>
-                </div>
-            </div>
-        </form>
-    </section>
-
-    <!-- Audit Logs Section -->
-    <section id="audit-logs-section">
-        {% include "partials/groups_audit_logs.html" %}
     </section>
 </section>
 
@@ -310,44 +245,6 @@
     align-items: center;
 }
 
-.filter-section {
-    background: var(--pico-card-background-color);
-    padding: 1rem;
-    border-radius: 0.25rem;
-    margin-bottom: 1rem;
-}
-
-.filter-row {
-    display: flex;
-    gap: 1rem;
-    align-items: flex-end;
-    flex-wrap: wrap;
-}
-
-.filter-field {
-    flex: 1;
-    min-width: 150px;
-}
-
-.filter-field label {
-    display: block;
-    margin-bottom: 0.25rem;
-    font-size: 0.875rem;
-}
-
-.filter-field input,
-.filter-field select {
-    width: 100%;
-    padding: 0.5rem;
-    margin-bottom: 0;
-}
-
-.filter-actions {
-    display: flex;
-    gap: 0.5rem;
-    padding-bottom: 0.25rem;
-}
-
 .form-section {
     margin-bottom: 1rem;
 }
@@ -436,32 +333,6 @@ function confirmDeleteGroup(groupId, groupName) {
     if (confirm('Are you sure you want to delete group "' + groupName + '"? This action cannot be undone.')) {
         document.getElementById('delete-form-' + groupId).submit();
     }
-}
-
-function filterAuditLogs() {
-    var dateFrom = document.getElementById('audit_date_from').value;
-    var dateTo = document.getElementById('audit_date_to').value;
-    var actionType = document.getElementById('audit_action_type').value;
-
-    var params = new URLSearchParams();
-    if (dateFrom) params.append('date_from', dateFrom);
-    if (dateTo) params.append('date_to', dateTo);
-    if (actionType) params.append('action_type', actionType);
-
-    var url = '/admin/partials/groups-audit-logs';
-    if (params.toString()) {
-        url += '?' + params.toString();
-    }
-
-    htmx.ajax('GET', url, {target: '#audit-logs-section', swap: 'innerHTML'});
-}
-
-function clearAuditFilters() {
-    document.getElementById('audit_date_from').value = '';
-    document.getElementById('audit_date_to').value = '';
-    document.getElementById('audit_action_type').value = '';
-
-    htmx.ajax('GET', '/admin/partials/groups-audit-logs', {target: '#audit-logs-section', swap: 'innerHTML'});
 }
 
 // Story #199: In-place toggle for group-repo access grid

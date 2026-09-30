@@ -217,7 +217,7 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
 
         # RefreshScheduler must be called with bare alias and submitter_username
         mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
-            "my-repo", submitter_username="admin"
+            "my-repo", submitter_username="admin", force_reset=False
         )
 
         # GoldenRepoManager.refresh_golden_repo must NOT be called

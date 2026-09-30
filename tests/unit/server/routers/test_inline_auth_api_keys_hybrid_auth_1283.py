@@ -221,7 +221,21 @@ class TestCreateApiKeySessionAuth:
 class TestCreateApiKeyBearerAuthRegression:
     """Regression: Bearer-token POST /api/keys must still work after the swap."""
 
-    def test_post_api_keys_with_bearer_token_returns_201(self):
+    def test_post_api_keys_with_bearer_token_returns_201(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from code_indexer.server.web import auth as web_auth
+
+        # The hybrid dependency consults the web session manager before the
+        # Bearer header; install a real one so this test does not depend on
+        # another test having initialized the process-wide instance.
+        monkeypatch.setattr(
+            web_auth,
+            "_session_manager",
+            web_auth.SessionManager(
+                "example-session-secret", SimpleNamespace(host="127.0.0.1")
+            ),
+        )
         app, user_manager_mock, _ = _make_app()
         user_manager_mock.get_api_keys.return_value = []
 
@@ -301,7 +315,7 @@ class TestDeleteApiKeySessionAuth:
 
     def test_delete_api_key_with_session_cookie_returns_200(self):
         app, user_manager_mock, _ = _make_app()
-        user_manager_mock.delete_api_key.return_value = True
+        user_manager_mock.delete_api_key_audited.return_value = True
         user = _make_user("erin", UserRole.ADMIN)
         client, patcher = _session_client(app, user_manager_mock, user)
         try:
@@ -310,4 +324,6 @@ class TestDeleteApiKeySessionAuth:
             patcher.stop()
 
         assert resp.status_code == 200, resp.text
-        user_manager_mock.delete_api_key.assert_called_once_with("erin", "kid-1")
+        user_manager_mock.delete_api_key_audited.assert_called_once_with(
+            "erin", "kid-1", actor="erin"
+        )

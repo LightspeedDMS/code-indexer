@@ -248,7 +248,7 @@ class TestRepositoryDeletionTDD:
         # Mock a cleanup method to track if it was called
         cleanup_tracker = {"cleanup_called": False}
 
-        def mock_remove_with_cleanup_tracking(alias):
+        def mock_remove_with_cleanup_tracking(alias, *, submitter_username):
             try:
                 # Simulate some work
                 if alias == "exception-repo":
@@ -295,7 +295,7 @@ class TestRepositoryDeletionTDD:
         mock_transaction.rollback = mock_transaction_rollback
 
         # Simulate transaction failure
-        def mock_remove_with_transaction(alias):
+        def mock_remove_with_transaction(alias, *, submitter_username):
             # Should use transaction properly
             mock_transaction.begin()
             try:

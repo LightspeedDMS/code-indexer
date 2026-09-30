@@ -144,25 +144,41 @@ def test_get_reflects_real_state(admin_client, group_manager, users_group):
 
 
 def test_bulk_disable_affects_all_groups_and_writes_one_audit_entry_each(
-    admin_client, group_manager
+    admin_client, group_manager, temp_db_path
 ):
-    all_groups = group_manager.get_all_groups()
-    for group in all_groups:
-        group_manager.set_tool_access(_NON_AUTH_TOOL, group.id, True, "admin")
+    from code_indexer.server.services import audit_capture
+    from code_indexer.server.services.audit_log_service import AuditLogService
 
-    response = admin_client.post(
-        f"/api/v1/groups/tool-access/{_NON_AUTH_TOOL}/bulk-disable"
-    )
+    # A real audit store on the same database, bound as the server binds it.
+    audit_service = AuditLogService(temp_db_path)
+    audit_service.start()
+    audit_capture.mark_server_process()
+    audit_capture.bind_audit_service(audit_service, node_id=None)
+    try:
+        all_groups = group_manager.get_all_groups()
+        for group in all_groups:
+            group_manager.set_tool_access(_NON_AUTH_TOOL, group.id, True, "admin")
 
-    assert response.status_code == 200, response.text
-    assert set(response.json()["affected_group_ids"]) == {g.id for g in all_groups}
-    for group in all_groups:
-        assert group_manager.is_tool_allowed(_NON_AUTH_TOOL, group.id) is False
+        response = admin_client.post(
+            f"/api/v1/groups/tool-access/{_NON_AUTH_TOOL}/bulk-disable"
+        )
 
-    logs, total = group_manager.get_audit_logs(
-        action_type="tool_access_bulk_disable", target_type="tool"
-    )
-    assert total == len(all_groups)
+        assert response.status_code == 200, response.text
+        assert set(response.json()["affected_group_ids"]) == {g.id for g in all_groups}
+        for group in all_groups:
+            assert group_manager.is_tool_allowed(_NON_AUTH_TOOL, group.id) is False
+
+        from tests.unit.server._audit_read_support import audit_logs
+
+        logs, total = audit_logs(
+            audit_service, action_type="group_tool_access_revoked", target_type="group"
+        )
+        assert total == len(all_groups)
+        assert {log["target_id"] for log in logs} == {str(g.id) for g in all_groups}
+    finally:
+        audit_capture.clear_audit_service()
+        audit_capture.reset_server_process_mark()
+        audit_service.stop()
 
 
 def test_authenticate_cannot_be_mutated_through_real_endpoint(

@@ -1,5 +1,8 @@
-"""``FileFinder`` candidates must resolve to a location inside the
-codebase root.
+"""Server-context ``FileFinder`` candidates must resolve to a location
+inside the codebase root.
+
+Containment applies to server context (``Config.confine_to_codebase_root``);
+local CLI context is covered by test_symlink_containment_context.py.
 
 ``FileFinder.find_files()``'s directory walk, size check, and text
 sniffing all operate on a symlink's TARGET (following it), so a
@@ -25,6 +28,7 @@ from code_indexer.utils.path_confinement import (
 
 def _make_finder(codebase_dir: Path) -> FileFinder:
     config = Config(codebase_dir=codebase_dir)
+    config.confine_to_codebase_root()
     return FileFinder(config)
 
 

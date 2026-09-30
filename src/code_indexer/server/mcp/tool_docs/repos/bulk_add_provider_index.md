@@ -1,9 +1,9 @@
 ---
 name: bulk_add_provider_index
 category: repos
-required_permission: repository:write
-tl_dr: Add a provider's semantic index to the golden repositories you can access that lack it.
-slim_description: "Add a provider's semantic index to the golden repositories the caller can access that currently lack it, with an optional category filter pattern. Requires MCP elevation (TOTP step-up) when enforcement is on."
+required_permission: manage_golden_repos
+tl_dr: '[ADMIN ONLY] Add a provider''s semantic index to every golden repository that lacks it.'
+slim_description: "[ADMIN ONLY] Add a provider's semantic index to the golden repositories that currently lack it, with an optional category filter pattern. Requires MCP elevation (TOTP step-up) when enforcement is on."
 inputSchema:
   type: object
   properties:
@@ -17,11 +17,9 @@ inputSchema:
     - provider
   additionalProperties: false
 ---
-Bulk add a provider's semantic index to the golden repositories the caller can access that lack it. Admins see and target every golden repository; non-admin callers only see and target the repositories their group grants them access to.
+[ADMIN ONLY] Bulk add a provider's semantic index to the golden repositories that lack it. Matches the REST twin (POST .../bulk-add): the admin role is required, and so is an active elevation window when elevation enforcement is turned on.
 
-Requires MCP elevation (TOTP step-up) when elevation enforcement is turned on, matching the REST twin (POST .../bulk-add).
-
-Creates background jobs for each accessible repository missing the specified provider's index. Returns list of job IDs for progress tracking.
+Creates background jobs for each repository missing the specified provider's index. Returns list of job IDs for progress tracking.
 
 Optionally filter repositories by category pattern.
 
@@ -32,5 +30,5 @@ ERRORS:
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
 Examples:
-- Add to all accessible repos: `bulk_add_provider_index(provider="cohere")`
-- Add to accessible backend repos: `bulk_add_provider_index(provider="cohere", filter="category:backend")`
+- Add to all repos: `bulk_add_provider_index(provider="cohere")`
+- Add to backend repos: `bulk_add_provider_index(provider="cohere", filter="category:backend")`

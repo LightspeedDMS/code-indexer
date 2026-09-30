@@ -18,7 +18,7 @@ between the two elevation gates in this file:
 - `POST /api/mcp-credentials` (create) and
   `DELETE /api/mcp-credentials/{credential_id}` (delete) -- mutating,
   self-service -- carry an elevation dependency, but it is the SELF-SERVICE
-  gate (`inline_mcp_creds._require_self_elevation`, which resolves the
+  gate (`dependencies.require_self_elevation`, which resolves the
   caller via `get_current_user_web_or_api` and works for ANY authenticated
   user), never this file's admin-only `require_elevation.<locals>._check`
   (which hard-requires `get_current_admin_user_hybrid` and would incorrectly
@@ -54,7 +54,7 @@ _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 # The self-service elevation gate is a plain module-level function (not a
 # factory-produced closure like the admin one above), so its __qualname__
 # is just its own name.
-_SELF_SERVICE_ELEVATION_QUALNAME = "_require_self_elevation"
+_SELF_SERVICE_ELEVATION_QUALNAME = "require_self_elevation"
 _ENFORCEMENT_PATH = (
     "code_indexer.server.auth.dependencies._is_elevation_enforcement_enabled"
 )
@@ -222,7 +222,7 @@ def test_self_service_mutating_routes_require_self_service_elevation(
     assert route is not None, f"{method} {path} route not found"
     assert _route_has_self_service_elevation_dep(route), (
         f"{method} {path}: expected the self-service elevation "
-        "gate (_require_self_elevation)"
+        "gate (require_self_elevation)"
     )
     assert not _route_has_elevation_dep(route), (
         f"{method} {path}: must NOT carry the admin-only require_elevation() "
@@ -308,7 +308,7 @@ class TestAdminMcpCredentialElevationRefusal:
             "/api/admin/users/{username}/mcp-credentials", "POST"
         )
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.generate_credential.return_value = {
+        mock_mcp_manager_instance.generate_credential_audited.return_value = {
             "credential_id": "cred-123",
             "client_id": "mcp_client_abc",
             "client_secret": "mcp_secret_xyz",
@@ -349,7 +349,7 @@ class TestAdminMcpCredentialElevationRefusal:
             "/api/admin/users/{username}/mcp-credentials/{credential_id}", "DELETE"
         )
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.revoke_credential.return_value = True
+        mock_mcp_manager_instance.revoke_credential_audited.return_value = True
 
         for client in _admin_client(app, admin_user):
             with (
@@ -431,7 +431,9 @@ class TestAdminMcpCredentialElevationSuccess:
             "created_at": "2025-01-01T00:00:00Z",
         }
         mock_mcp_manager_instance = MagicMock()
-        mock_mcp_manager_instance.generate_credential.return_value = fake_credential
+        mock_mcp_manager_instance.generate_credential_audited.return_value = (
+            fake_credential
+        )
 
         for client in _admin_client(app, admin_user):
             with (

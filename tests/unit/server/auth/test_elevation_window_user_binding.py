@@ -259,7 +259,7 @@ def test_rest_route_accepts_window_opened_by_the_same_authenticated_user(
     app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: user_a
     handler = _find_route_handler("/api/admin/users", "POST")
     mock_um = Mock()
-    mock_um.create_user.return_value = User(
+    mock_um.create_user_audited.return_value = User(
         username="newuser",
         password_hash="hashed",
         role=UserRole.NORMAL_USER,
@@ -478,7 +478,7 @@ def test_real_auth_chain_api_key_users_own_window_still_succeeds(
     manager.create(_SESSION_KEY, _USER_B, _IP)
     handler = _find_route_handler("/api/admin/users", "POST")
     mock_um = Mock()
-    mock_um.create_user.return_value = User(
+    mock_um.create_user_audited.return_value = User(
         username="newuser",
         password_hash="hashed",
         role=UserRole.NORMAL_USER,
@@ -526,7 +526,7 @@ def test_real_auth_chain_cross_user_denial_depends_on_user_bound_lookup(
 
     handler = _find_route_handler("/api/admin/users", "POST")
     mock_um = Mock()
-    mock_um.create_user.return_value = User(
+    mock_um.create_user_audited.return_value = User(
         username="irrelevant",
         password_hash="hashed",
         role=UserRole.NORMAL_USER,

@@ -85,6 +85,7 @@ from ..web import (
 )
 from ..web.repo_category_routes import repo_category_web_router
 from ..web.dependency_map_routes import dependency_map_router
+from ..web.audit_log_routes import audit_log_web_router
 
 # Import helper functions from app_helpers (extracted to break circular import with app.py)
 
@@ -308,6 +309,9 @@ def register_inline_routes(
 
     # Include dependency map router with /admin prefix (Story #212)
     app.include_router(dependency_map_router, prefix="/admin", tags=["admin"])
+
+    # Include the Audit Logs page router with /admin prefix
+    app.include_router(audit_log_web_router, prefix="/admin", tags=["admin"])
 
     # Include wiki router (Stories #280-#283)
     from ..wiki.routes import wiki_router

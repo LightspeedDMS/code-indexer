@@ -22,7 +22,7 @@ inputSchema:
   required: [forge_type, forge_host, token]
 ---
 
-TL;DR: Configure a git forge PAT. Validates the token against the forge API, discovers your identity (name, email, username), and stores the token encrypted.
+TL;DR: Configure a git forge PAT. Requires MCP elevation (TOTP step-up). Validates the token against the forge API, discovers your identity (name, email, username), and stores the token encrypted.
 
 USE CASES:
 - Set up GitHub/GitLab PAT for push operations
@@ -42,5 +42,9 @@ RETURNS:
 - git_user_email: Your email from the forge
 
 SECURITY: Token is validated against the forge API before storage. Stored with AES-256-CBC encryption.
+
+ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
 EXAMPLE: {"forge_type": "github", "forge_host": "github.com", "token": "ghp_xxx", "name": "My GitHub"} Returns: {"success": true, "credential_id": "uuid", "forge_username": "octocat"}

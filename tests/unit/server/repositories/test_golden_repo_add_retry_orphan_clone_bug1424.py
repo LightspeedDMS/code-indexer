@@ -119,6 +119,7 @@ class TestExecuteAddRetryDoesNotWedgeOnOrphanClone:
             manager.execute_add_golden_repo_work(
                 repo_url=bogus_source,
                 alias="repoE",
+                submitter_username="example-admin",
             )
 
         # The orphan leftover MUST be gone -- proving cleanup ran before clone.

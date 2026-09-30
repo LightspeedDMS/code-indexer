@@ -17,7 +17,22 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
+
+from code_indexer.server.services.audit_events import (
+    AUDIT_ROW_COLUMNS,
+    AuditEvent,
+    build_legacy_event,
+    event_row_values,
+)
+from code_indexer.server.services.audit_log_query import (
+    POSTGRES_DIALECT,
+    AuditFilters,
+    build_aggregate_sql,
+    build_count_sql,
+    build_page_sql,
+    build_terminal_rows_sql,
+)
 
 from .pg_utils import sanitize_row
 
@@ -34,8 +49,47 @@ _PR_ACTION_TYPES = (
 # Cleanup action_type value
 _CLEANUP_ACTION_TYPE = "git_cleanup"
 
-# Columns selected in every read query
-_SELECT_COLS = "id, timestamp, admin_id, action_type, target_type, target_id, details"
+# Columns selected in every read query: the original seven plus the
+# attribution columns (same names as the SQLite store).
+_SELECT_COLS = (
+    "id, timestamp, admin_id, action_type, target_type, target_id, details, "
+    "outcome, source, ip_address, correlation_id, node_id, auth_method, "
+    "actor_is_system, event_uuid"
+)
+
+_INSERT_EVENT_SQL = (
+    f"INSERT INTO audit_logs ({', '.join(AUDIT_ROW_COLUMNS)}) "
+    f"VALUES ({', '.join('%s' for _ in AUDIT_ROW_COLUMNS)})"
+)
+
+
+def _insert_event_rows(conn: Any, events: Sequence[AuditEvent]) -> None:
+    """The ONLY statement the capture path uses to insert audit rows.
+
+    Runs inside the caller's transaction.  A later capture step (for
+    example a delivery-queue insert) can join the same transaction next to
+    this call.
+    """
+    with conn.cursor() as cur:
+        cur.executemany(
+            _INSERT_EVENT_SQL, [event_row_values(event) for event in events]
+        )
+
+
+def _utc_row(row: dict) -> dict:
+    """Row with every TIMESTAMPTZ value as an ISO-8601 UTC string.
+
+    The session time zone must not leak into what readers see (or into a
+    keyset cursor): the same instant always renders the same way.
+    """
+    return {
+        key: (
+            value.astimezone(timezone.utc).isoformat()
+            if isinstance(value, datetime)
+            else value
+        )
+        for key, value in row.items()
+    }
 
 
 def _dict_row_factory() -> Any:
@@ -75,6 +129,17 @@ class AuditLogPostgresBackend:
     # Write
     # ------------------------------------------------------------------
 
+    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+        """Insert *events* in ONE transaction (not one commit per row).
+
+        Raises on failure; the whole batch is rolled back.
+        """
+        if not events:
+            return
+        with self._conn() as conn:
+            with conn.transaction():
+                _insert_event_rows(conn, events)
+
     def log(
         self,
         admin_id: str,
@@ -93,16 +158,17 @@ class AuditLogPostgresBackend:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        now = datetime.now(timezone.utc).isoformat()
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (now, admin_id, action_type, target_type, target_id, details),
+        self.insert_events(
+            [
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details,
                 )
-            conn.commit()
+            ]
+        )
 
     def log_raw(
         self,
@@ -124,96 +190,72 @@ class AuditLogPostgresBackend:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (timestamp, admin_id, action_type, target_type, target_id, details),
+        self.insert_events(
+            [
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details,
+                    occurred_at=timestamp,
                 )
-            conn.commit()
+            ]
+        )
 
     # ------------------------------------------------------------------
-    # Read
+    # Shared read path (services/audit_log_query.py renders the SQL); the
+    # ONE way rows are read for the Web page, MCP and REST.
     # ------------------------------------------------------------------
 
-    def query(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        exclude_target_type: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-    ) -> Tuple[List[dict], int]:
-        """
-        Query audit log entries with optional filters.
-
-        Args:
-            action_type:          Filter by exact action_type.
-            target_type:          Filter by exact target_type.
-            admin_id:             Filter by exact admin_id.
-            date_from:            ISO date string YYYY-MM-DD (inclusive lower bound).
-            date_to:              ISO date string YYYY-MM-DD (inclusive upper bound).
-            exclude_target_type:  Exclude rows where target_type equals this value.
-            limit:                Max rows returned (None = unlimited).
-            offset:               Rows to skip (for pagination).
-
-        Returns:
-            (list_of_dicts, total_matching_count)
-        """
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        if action_type:
-            conditions.append("action_type = %s")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = %s")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = %s")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= %s")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= %s")
-            params.append(f"{date_to}T23:59:59")
-        if exclude_target_type:
-            conditions.append("target_type != %s")
-            params.append(exclude_target_type)
-
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
+    def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> List[dict]:
         with self._conn() as conn:
             with conn.cursor(row_factory=_dict_row_factory()) as cur:
-                cur.execute(
-                    f"SELECT COUNT(*) AS cnt FROM audit_logs {where}",
-                    params,
-                )
-                count_row = cur.fetchone()
-                total: int = count_row["cnt"] if count_row else 0
+                cur.execute(sql, list(params))
+                return [_utc_row(row) for row in cur.fetchall()]
 
-                query_sql = (
-                    f"SELECT {_SELECT_COLS} FROM audit_logs {where} "
-                    "ORDER BY timestamp DESC"
-                )
-                count_params = list(params)
-                if limit is not None:
-                    query_sql += " LIMIT %s OFFSET %s"
-                    count_params = count_params + [limit, offset]
-                elif offset > 0:
-                    query_sql += " OFFSET %s"
-                    count_params = count_params + [offset]
+    def query_page(
+        self,
+        filters: AuditFilters,
+        tier: str,
+        *,
+        seek: Optional[Tuple[str, int]],
+        direction: str,
+        limit: int,
+        offset: int = 0,
+    ) -> List[dict]:
+        """One keyset page of rows (see ``audit_log_query.build_page_sql``)."""
+        sql, params = build_page_sql(
+            filters,
+            tier,
+            POSTGRES_DIALECT,
+            seek=seek,
+            direction=direction,
+            limit=limit,
+            offset=offset,
+        )
+        return self._fetch_dicts(sql, params)
 
-                cur.execute(query_sql, count_params)
-                rows = cur.fetchall()
+    def count_capped(self, filters: AuditFilters, tier: str, *, cap: int) -> int:
+        """Matching row count, reading at most ``cap + 1`` rows."""
+        sql, params = build_count_sql(filters, tier, POSTGRES_DIALECT, cap=cap)
+        return int(self._fetch_dicts(sql, params)[0]["cnt"])
 
-        return [sanitize_row(row) for row in rows], total
+    def aggregate(
+        self, filters: AuditFilters, tier: str, *, max_groups: int
+    ) -> List[dict]:
+        """``GROUP BY (action_type, outcome)`` of the matching rows, in SQL."""
+        sql, params = build_aggregate_sql(
+            filters, tier, POSTGRES_DIALECT, max_groups=max_groups
+        )
+        return self._fetch_dicts(sql, params)
+
+    def find_terminal_rows(self, correlation_ids: Sequence[str]) -> List[dict]:
+        """Terminal rows sharing one of *correlation_ids* (pairing lookup)."""
+        if not correlation_ids:
+            return []
+        sql, params = build_terminal_rows_sql(correlation_ids, POSTGRES_DIALECT)
+        return self._fetch_dicts(sql, params)
 
     def get_pr_logs(
         self,

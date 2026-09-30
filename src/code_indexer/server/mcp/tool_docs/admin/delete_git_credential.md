@@ -13,7 +13,7 @@ inputSchema:
   required: [credential_id]
 ---
 
-TL;DR: Delete a previously configured git forge credential. You can only delete your own credentials.
+TL;DR: Delete a previously configured git forge credential. Requires MCP elevation (TOTP step-up). You can only delete your own credentials.
 
 USE CASES:
 - Remove a credential when the PAT has been revoked
@@ -26,5 +26,9 @@ RETURNS:
 - success: true if deleted
 
 SECURITY: Ownership is enforced - you cannot delete another user's credentials.
+
+ERRORS:
+- elevation_required: TOTP step-up needed
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
 EXAMPLE: {"credential_id": "uuid"} Returns: {"success": true, "message": "Credential uuid deleted"}
