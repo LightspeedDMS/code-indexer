@@ -38,6 +38,7 @@ from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
 from ..services.deactivation_query_drain import track_activated_repo_query
+from ..services.repo_access_guard import narrow_global_repos_to_accessible
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -791,10 +792,15 @@ class SemanticQueryManager:
 
         # ALSO get global repos from BackendRegistry (cluster-aware, database-backed)
         global_repos_list = []
+        access_filtering_service: Optional[Any] = None
         try:
             from code_indexer.server import app as app_module
 
-            backend_registry = getattr(app_module.app.state, "backend_registry", None)
+            app_state = app_module.app.state
+            access_filtering_service = getattr(
+                app_state, "access_filtering_service", None
+            )
+            backend_registry = getattr(app_state, "backend_registry", None)
             if backend_registry:
                 global_repos = list(backend_registry.global_repos.list_repos().values())
 
@@ -816,6 +822,21 @@ class SemanticQueryManager:
                 ),
                 extra=get_log_extra("QUERY-MIGRATE-003"),
             )
+
+        # Query searches only repositories the caller can access: narrow the
+        # global repos BEFORE the alias match and the search, so rows, the
+        # repositories_searched count, degraded_repos, error texts and the
+        # result limit only ever involve accessible repositories. Admins keep
+        # every global repo. The caller's activated repos are not narrowed
+        # here. Without access_filtering_service a query that would include
+        # any global repo is refused (AccessFilteringServiceUnavailableError,
+        # every caller); one scoped to the caller's own activation proceeds.
+        global_repos_list = narrow_global_repos_to_accessible(
+            access_filtering_service,
+            username,
+            global_repos_list,
+            repository_alias=repository_alias,
+        )
 
         # Merge user repos and global repos
         all_repos = user_repos + global_repos_list

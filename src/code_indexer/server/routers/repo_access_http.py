@@ -50,10 +50,17 @@ def enforce_repo_access(
             detail={"error_code": "access_denied", "detail": str(e)},
         )
     except AccessFilteringServiceUnavailableError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error_code": "access_control_unavailable", "detail": str(e)},
-        )
+        raise access_control_unavailable_error(e)
+
+
+def access_control_unavailable_error(
+    exc: AccessFilteringServiceUnavailableError,
+) -> HTTPException:
+    """The REST refusal for an unavailable access service (fails closed)."""
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={"error_code": "access_control_unavailable", "detail": str(exc)},
+    )
 
 
 def accessible_repo_names(
