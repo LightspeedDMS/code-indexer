@@ -60,6 +60,7 @@
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - work autonomously; every defect = file + fix + iterate until clean
 - [feedback_bug_report_means_report_not_fix.md](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
+- [feedback_issue_routing_public_vs_security.md](feedback_issue_routing_public_vs_security.md) - security issues -> private security repo; regular bugs -> PUBLIC repo issues (issue_manager defaults to the private origin)
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - always commit on development, never master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - bump version + tag BEFORE promoting to staging
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - run ruff/mypy before staging; the hook is a safety net
@@ -76,12 +77,15 @@
 - [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop, no pre-flight questions
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - ask before ANY change to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - targeted requests must not trigger unrelated rewrites
+- [feedback_validation_runs_stay_on_scope.md](feedback_validation_runs_stay_on_scope.md) - staging validation proves the shipped fix only; side anomalies = one-line notes, never investigations
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer; green tests never substitute for a review gate
-- [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - opus for code-reviewer only; tdd/implementation stays on Sonnet
+- [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - all agents on Opus 5.5 (model: "opus"); reviews go to Codex (supersedes Sonnet rule)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - dual review (Claude + independent Codex) for every review gate
 - [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - tdd-paired-engineer for gnarly bugs; cost accepted for blind-spot coverage
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - after 2-3 Codex REJECTs on one fix, dispatch Opus to judge materiality
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - when codex flags over-engineering, SIMPLIFY
+- [feedback_index_failures_are_transient.md](feedback_index_failures_are_transient.md) - index file failures = transient embedder calls; retry, no caps or loop guards
+- [feedback_codex_exhausted_fallback_to_claude.md](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [feedback_find_is_bfs_use_mmin.md](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
 - [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling
@@ -107,6 +111,7 @@
 - [project_config_default_flip_is_inert.md](project_config_default_flip_is_inert.md) - changing a dataclass default is inert on existing deployments
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - write mode is context-dependent (server=sqlite, CLI=json)
 - [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" is not what production runs
+- [project_staging_cluster_storage_owned_by_agent.md](project_staging_cluster_storage_owned_by_agent.md) - staging cluster storage is the agent's; clean it up (root cause first) without asking
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
 - [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)

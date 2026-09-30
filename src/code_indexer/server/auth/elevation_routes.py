@@ -7,12 +7,18 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from code_indexer.server.auth.dependencies import (
-    get_current_admin_user_hybrid,
+    get_current_user_hybrid,
     _is_elevation_enforcement_enabled,
+    _mfa_setup_url_for_role,
 )
 from code_indexer.server.auth.elevated_session_manager import (
     ElevatedSession,
     elevated_session_manager,
+)
+from code_indexer.server.auth.elevation_step_up import (
+    StepUpOutcome,
+    StepUpResult,
+    step_up,
 )
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
@@ -108,28 +114,33 @@ def _require_totp_service():
     return svc
 
 
-def _verify_elevation_code(
-    totp_service, username: str, body: ElevateRequest, client_ip: str
-) -> str:
-    """Verify TOTP or recovery code. Returns scope string on success, raises 401/403 on failure."""
-    if body.recovery_code:
-        if not totp_service.verify_recovery_code(
-            username, body.recovery_code, ip_address=client_ip
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": "elevation_failed",
-                    "message": "Invalid recovery code.",
-                },
-            )
-        return "totp_repair"
-    if not totp_service.verify_enabled_code(username, body.totp_code):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "elevation_failed", "message": "Invalid or expired code."},
+def _step_up_error(result: StepUpResult) -> HTTPException:
+    """This door's error for a step-up that did not grant a window."""
+    if result.outcome is StepUpOutcome.LOCKED_OUT:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "rate_limited",
+                "message": "Too many elevation attempts. Try again later.",
+            },
         )
-    return "full"
+    if result.outcome is StepUpOutcome.INVALID_CODE:
+        message = (
+            "Invalid recovery code."
+            if result.used_recovery_code
+            else "Invalid or expired code."
+        )
+        return HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "elevation_failed", "message": message},
+        )
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "error": "elevation_create_failed",
+            "message": "Elevation window not retrievable after create.",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +152,14 @@ def _verify_elevation_code(
 def elevate(
     body: ElevateRequest,
     request: Request,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """Submit a TOTP or recovery code to open an elevation window (AC3).
+
+    Elevation is available to every TOTP-enrolled user, not only admins --
+    this opens a window for the CALLER's own username; it never grants any
+    admin-only action, which stays behind require_elevation()'s own admin
+    gate on each protected route.
 
     When the kill switch is OFF, this endpoint has no meaning — the caller is
     asking to satisfy a TOTP challenge that no protected route will issue.
@@ -159,7 +175,10 @@ def elevate(
     if not totp_service.is_mfa_enabled(user.username):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "totp_setup_required", "setup_url": "/admin/mfa/setup"},
+            detail={
+                "error": "totp_setup_required",
+                "setup_url": _mfa_setup_url_for_role(user.role),
+            },
         )
 
     session_key = _resolve_session_key(request)
@@ -173,59 +192,41 @@ def elevate(
         )
 
     client_ip = request.client.host if request.client else "unknown"
-    limiter_key = f"{client_ip}:{user.username}"
-
-    is_locked, _ = login_rate_limiter.is_locked(limiter_key)
-    if is_locked:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "error": "rate_limited",
-                "message": "Too many elevation attempts. Try again later.",
-            },
-        )
-
-    try:
-        scope = _verify_elevation_code(totp_service, user.username, body, client_ip)
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            login_rate_limiter.check_and_record_failure(limiter_key)
-        raise
-
-    elevated_session_manager.create(
+    result = step_up(
+        user.username,
+        totp_code=body.totp_code,
+        recovery_code=body.recovery_code,
         session_key=session_key,
-        username=user.username,
-        elevated_from_ip=client_ip,
-        scope=scope,
+        client_ip=client_ip,
+        totp_service=totp_service,
+        sessions=elevated_session_manager,
+        limiter=login_rate_limiter,
     )
-    session = elevated_session_manager.get_status(session_key)
-    if session is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "elevation_create_failed",
-                "message": "Elevation window not retrievable after create.",
-            },
-        )
+    if result.session is None:
+        raise _step_up_error(result)
 
-    login_rate_limiter.record_success(limiter_key)
-    resp = _build_status_response(session)
+    resp = _build_status_response(result.session)
     assert resp.elevated_until is not None
     assert resp.max_until is not None
     return ElevateResponse(
         elevated=True,
         elevated_until=resp.elevated_until,
         max_until=resp.max_until,
-        scope=resp.scope or scope,
+        scope=resp.scope or result.scope,
     )
 
 
 @router.get("/elevation-status", response_model=StatusResponse)
 def elevation_status(
     request: Request,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
-    """Read-only elevation window check — does NOT touch (AC4)."""
+    """Read-only elevation window check — does NOT touch (AC4).
+
+    An elevation window is valid only for the user who created it: a window
+    resolved for this session key but owned by a different user is treated
+    exactly like "no window" -- never disclosed as this user's own status.
+    """
     if not _is_elevation_enforcement_enabled():
         return _not_elevated()
     session_key = _resolve_session_key(request)
@@ -233,5 +234,13 @@ def elevation_status(
         return _not_elevated()
     session = elevated_session_manager.get_status(session_key)
     if session is None:
+        return _not_elevated()
+    if session.username != user.username:
+        logger.warning(
+            "Elevation status lookup rejected: session key %.8s is not "
+            "owned by the authenticating user %s",
+            session_key,
+            user.username,
+        )
         return _not_elevated()
     return _build_status_response(session)

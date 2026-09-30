@@ -108,7 +108,9 @@ class TestRealAuthenticationFailureReachesAuditLogsTable:
                 user_agent="pytest-regression-1671",
             )
 
-            logs, total = audit_service.query()
+            from tests.unit.server._audit_read_support import audit_logs
+
+            logs, total = audit_logs(audit_service)
 
             assert total == 1, (
                 "Expected exactly one audit_logs row for the authentication "

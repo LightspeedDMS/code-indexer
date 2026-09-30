@@ -458,8 +458,8 @@ class TestSSOPasswordChangeAPIProtection:
             ):
                 # Mock user_manager to raise SSOPasswordChangeError
                 mock_user_manager = MagicMock()
-                mock_user_manager.change_password.side_effect = SSOPasswordChangeError(
-                    "Cannot change password for SSO users."
+                mock_user_manager.change_password_audited.side_effect = (
+                    SSOPasswordChangeError("Cannot change password for SSO users.")
                 )
 
                 with patch(

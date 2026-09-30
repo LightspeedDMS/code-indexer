@@ -15,18 +15,31 @@ import base64
 import html as html_module
 import logging
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth import dependencies as _auth_dependencies
+from code_indexer.server.auth.elevated_session_manager import (
+    elevated_session_manager,
+    log_elevation_owner_mismatch,
+)
 from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
+from code_indexer.server.auth.login_outcome import complete_login, reject_login
 
 logger = logging.getLogger(__name__)
+
+# First factor recorded for a login completed at the MFA challenge.  The
+# challenge does not carry how the first factor was proven, and the password
+# login is the door that issues it (an SSO login's challenge records the
+# same value).
+_CHALLENGE_LOGIN_METHOD = "password"
 
 _LOGIN_ROUTE = "/login"
 _ADMIN_ROUTE = "/admin/"
 _VERIFY_ROUTE = "/admin/mfa/verify"
+_ELEVATE_PAGE = "/admin/elevate"
 
 # Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
 # A session satisfies required_scope R when session_rank <= required_rank.
@@ -62,12 +75,17 @@ def _resolve_session_key(request: Request) -> Optional[str]:
 
 def _check_elevation_window(
     request: Request,
+    username: str,
     required_scope: str = "full",
 ) -> Optional[Dict[str, Any]]:
     """Return error dict if elevation check fails, or None when check passes.
 
     Story #925 AC5/AC6: enforces TOTP step-up elevation for Web UI endpoints.
-    Fails closed: no window -> returns elevation_required error dict.
+    An elevation window is valid only for the user who created it: the
+    lookup is bound to `username` (the caller's already-authenticated
+    identity) via touch_atomic_for_user(), never a bare session-key lookup.
+    Fails closed: no window, or a window owned by a different user, ->
+    returns elevation_required error dict.
     Both required_scope and session.scope are validated against _SCOPE_RANK;
     unknown values raise ValueError (programmer error, not a runtime auth failure).
     """
@@ -80,8 +98,9 @@ def _check_elevation_window(
     if not session_key:
         return {"error": "elevation_required", "message": "No active elevation window."}
 
-    session = elevated_session_manager.touch_atomic(session_key)
+    session = elevated_session_manager.touch_atomic_for_user(session_key, username)
     if session is None:
+        log_elevation_owner_mismatch(elevated_session_manager, session_key, username)
         return {"error": "elevation_required", "message": "No active elevation window."}
 
     if session.scope not in _SCOPE_RANK:
@@ -130,7 +149,7 @@ def _cross_user_setup_guard(
     Returns an HTMLResponse (403 or 400) when the guard fails, or None when
     all checks pass. Caller emits audit log only on the success path.
     """
-    elev_err = _check_elevation_window(request, required_scope="full")
+    elev_err = _check_elevation_window(request, admin_username, required_scope="full")
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",
@@ -151,6 +170,35 @@ def _cross_user_setup_guard(
     return None
 
 
+def _reenroll_factor_gate(request: Request, username: str) -> Optional[Any]:
+    """Require proof of the current factor before replacing an ACTIVE enrollment.
+
+    When elevation enforcement is on and `username` already has MFA enabled,
+    generating a new TOTP secret for that account requires an elevation
+    window owned by `username`. The elevation page opens one from a current
+    TOTP code (scope "full") or a recovery code (scope "totp_repair"), so
+    either scope is accepted.
+
+    Returns a redirect to the elevation page, which comes back to this same
+    URL afterwards, when no such window exists; returns None when the
+    request may proceed. First-time enrollment (MFA not enabled) and
+    deployments with enforcement off are not affected.
+    """
+    assert _totp_service is not None
+    if not _auth_dependencies._is_elevation_enforcement_enabled():
+        return None
+    if not _totp_service.is_mfa_enabled(username):
+        return None
+    if _check_elevation_window(request, username, required_scope="totp_repair") is None:
+        return None
+    return_to = request.url.path
+    if request.url.query:
+        return_to = f"{return_to}?{request.url.query}"
+    return RedirectResponse(
+        f"{_ELEVATE_PAGE}?next={quote(return_to, safe='')}", status_code=303
+    )
+
+
 mfa_router = APIRouter(prefix="/admin/mfa", tags=["mfa"])
 user_mfa_router = APIRouter(tags=["user-mfa"])
 _totp_service = None
@@ -168,6 +216,20 @@ def get_totp_service():  # type: ignore[no-untyped-def]
     Returns None if the service hasn't been initialized yet.
     """
     return _totp_service
+
+
+def _verified_factor(username: str, code: str) -> Optional[str]:
+    """Check *code* as a current TOTP code, then as a recovery code.
+
+    Returns which factor it proved ("totp" or "recovery_code"), or None.
+    A matching recovery code is consumed.
+    """
+    assert _totp_service is not None
+    if _totp_service.verify_code(username, code):
+        return "totp"
+    if _totp_service.verify_recovery_code(username, code):
+        return "recovery_code"
+    return None
 
 
 def _get_session_username(request: Request) -> Optional[str]:
@@ -345,7 +407,9 @@ def mfa_setup_page(
     # also required to prevent accidental overwrites.
     if is_cross_user:
         if mode == "show":
-            elev_err = _check_elevation_window(request, required_scope="full")
+            elev_err = _check_elevation_window(
+                request, admin_username, required_scope="full"
+            )
             if elev_err is not None:
                 return _error_html_page(
                     "Elevation Required",
@@ -356,13 +420,22 @@ def mfa_setup_page(
             guard_err = _cross_user_setup_guard(request, admin_username, target_user)
             if guard_err is not None:
                 return guard_err
+    elif mode != "show":
+        factor_err = _reenroll_factor_gate(request, admin_username)
+        if factor_err is not None:
+            return factor_err
 
     if mode == "show":
         uri = _totp_service.get_provisioning_uri(target_user)
         if uri is None:
             return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
     else:
-        secret = _totp_service.generate_secret(target_user)
+        if is_cross_user:
+            secret = _totp_service.regenerate_secret_cross_user(
+                target_user, actor=admin_username
+            )
+        else:
+            secret = _totp_service.generate_secret(target_user)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
         uri = _totp_service.get_provisioning_uri(target_user)
@@ -420,7 +493,9 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
     is_cross_user = target != admin_username
     required_scope = "full" if is_cross_user else "totp_repair"
 
-    elev_err = _check_elevation_window(request, required_scope=required_scope)
+    elev_err = _check_elevation_window(
+        request, admin_username, required_scope=required_scope
+    )
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",
@@ -428,7 +503,7 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
             403,
         )
 
-    codes = _totp_service.generate_recovery_codes(target)
+    codes = _totp_service.regenerate_recovery_codes(target, actor=admin_username)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
     logger.info("Recovery codes regenerated for %s (by %s)", target, admin_username)
@@ -497,10 +572,10 @@ def mfa_verify(
         return _render_qr_error(username, "Invalid code.", show_mode=True)
 
     # Setup mode: activate MFA
-    if _totp_service.activate_mfa(username, totp_code):
-        codes = _totp_service.generate_recovery_codes(username)
-        if codes is None:
-            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    codes = _totp_service.activate_mfa_and_issue_recovery_codes(
+        username, totp_code, actor=admin_username
+    )
+    if codes is not None:
         logger.info("MFA activated for user %s (by %s)", username, admin_username)
         return HTMLResponse(_render_recovery_codes(codes))
 
@@ -532,7 +607,7 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    elev_err = _check_elevation_window(request, required_scope="totp_repair")
+    elev_err = _check_elevation_window(request, username, required_scope="totp_repair")
     if elev_err is not None:
         return _error_html_page(
             "Elevation Required",
@@ -540,14 +615,12 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
             403,
         )
 
-    valid = _totp_service.verify_code(
-        username, totp_code
-    ) or _totp_service.verify_recovery_code(username, totp_code)
-    if not valid:
+    factor = _verified_factor(username, totp_code)
+    if factor is None:
         return HTMLResponse("Invalid code. MFA was NOT disabled.", status_code=400)
 
     try:
-        _totp_service.disable_mfa(username)
+        _totp_service.disable_mfa(username, actor=username, method=factor)
     except Exception as e:
         logger.error("Failed to disable MFA for %s: %s", username, e)
         return HTMLResponse("Failed to disable MFA", status_code=500)
@@ -584,6 +657,9 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
         is_show = True
     else:
         # New setup or explicit re-setup
+        factor_err = _reenroll_factor_gate(request, username)
+        if factor_err is not None:
+            return factor_err
         secret = _totp_service.generate_secret(username)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
@@ -651,10 +727,10 @@ def user_mfa_verify(
             re_setup_link="/user/mfa/setup?mode=new",
         )
 
-    if _totp_service.activate_mfa(username, totp_code):
-        codes = _totp_service.generate_recovery_codes(username)
-        if codes is None:
-            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    codes = _totp_service.activate_mfa_and_issue_recovery_codes(
+        username, totp_code, actor=username
+    )
+    if codes is not None:
         logger.info("MFA activated for user %s (self-service)", username)
         return HTMLResponse(_render_recovery_codes(codes, done_link=_USER_BACK_LINK))
 
@@ -677,7 +753,7 @@ def user_mfa_recovery_codes_page(request: Request):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    codes = _totp_service.generate_recovery_codes(username)
+    codes = _totp_service.regenerate_recovery_codes(username, actor=username)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
     logger.info("Recovery codes regenerated for %s (self-service)", username)
@@ -693,14 +769,12 @@ def user_mfa_disable(request: Request, totp_code: str = Form(...)):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    valid = _totp_service.verify_code(
-        username, totp_code
-    ) or _totp_service.verify_recovery_code(username, totp_code)
-    if not valid:
+    factor = _verified_factor(username, totp_code)
+    if factor is None:
         return HTMLResponse("Invalid code. MFA was NOT disabled.", status_code=400)
 
     try:
-        _totp_service.disable_mfa(username)
+        _totp_service.disable_mfa(username, actor=username, method=factor)
     except Exception as e:
         logger.error("Failed to disable MFA for %s: %s", username, e)
         return HTMLResponse("Failed to disable MFA", status_code=500)
@@ -887,6 +961,14 @@ def mfa_challenge_verify(
     # This prevents duplicate session creation from concurrent requests.
     challenge_data = mfa_challenge_manager.consume(challenge_token)
     if challenge_data is None:
+        # No challenge means no known account for this attempt.
+        reject_login(
+            None,
+            account_exists=False,
+            method=_CHALLENGE_LOGIN_METHOD,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Validate client IP matches the one from password verification
@@ -898,13 +980,20 @@ def mfa_challenge_verify(
             challenge_data.client_ip,
             client_ip,
         )
+        reject_login(
+            challenge_data.username,
+            account_exists=True,  # issued only after a successful first factor
+            method=_CHALLENGE_LOGIN_METHOD,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Verify TOTP or recovery code
     verified = False
     method = "totp"
     if recovery_code:
-        method = "recovery"
+        method = "recovery_code"
         verified = _totp_service.verify_recovery_code(
             challenge_data.username, recovery_code, ip_address=client_ip
         )
@@ -918,10 +1007,16 @@ def mfa_challenge_verify(
         redirect_response = RedirectResponse(
             url=challenge_data.redirect_url, status_code=303
         )
-        session_mgr.create_session(
-            redirect_response,
-            username=challenge_data.username,
-            role=challenge_data.role,
+        complete_login(
+            challenge_data.username,
+            method=_CHALLENGE_LOGIN_METHOD,
+            mfa=method,
+            flow="web_session",
+            issue=lambda: session_mgr.create_session(
+                redirect_response,
+                username=challenge_data.username,
+                role=challenge_data.role,
+            ),
         )
         logger.info(
             "MFA login verified for %s (method=%s)", challenge_data.username, method
@@ -929,6 +1024,13 @@ def mfa_challenge_verify(
         return redirect_response
 
     # Verification failed — token is consumed, user must restart login
+    reject_login(
+        challenge_data.username,
+        account_exists=True,
+        method=_CHALLENGE_LOGIN_METHOD,
+        stage="mfa_code",
+        reason="mfa_code_invalid",
+    )
     logger.warning(
         "MFA verification failed for %s (method=%s)", challenge_data.username, method
     )

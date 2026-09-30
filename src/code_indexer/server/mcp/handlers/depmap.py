@@ -106,6 +106,16 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
             }
         )
 
+    # Repo-level access for repo_name is enforced upstream by the MCP
+    # dispatcher's _check_repository_access() (mcp/protocol.py), which
+    # recognizes repo_name for THIS tool specifically -- see
+    # _REPO_NAME_PARAM_TOOLS there. Not re-checked here: the dispatcher
+    # resolves an admin's acting_users into a scoped repo set and applies
+    # it to its own check, but this handler only ever receives the plain
+    # `user` argument -- a second, independent check at this layer could
+    # not see that scoping and would have to fall back to the caller's
+    # full access, so the single check point stays at the dispatcher.
+
     # Resolve dep_map_path fresh — NEVER cached
     dep_map_path: Path = (
         _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
@@ -253,6 +263,10 @@ def depmap_get_repo_domains_handler(
                 "anomalies": [],
             }
         )
+
+    # Repo-level access for repo_name is enforced upstream by the MCP
+    # dispatcher (mcp/protocol.py::_check_repository_access) before this
+    # handler is ever invoked.
 
     parser, err = _resolve_parser("depmap_get_repo_domains")
     if err is not None:

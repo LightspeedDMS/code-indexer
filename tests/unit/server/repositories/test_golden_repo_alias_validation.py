@@ -68,6 +68,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="foo/../bar",  # Path traversal attempt
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
     def test_rejects_alias_with_forward_slash(self, golden_repo_manager):
@@ -94,6 +95,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="foo/bar",  # Path separator attempt
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
     def test_rejects_alias_with_backslash(self, golden_repo_manager):
@@ -120,6 +122,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="foo\\bar",  # Windows path separator attempt
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
     def test_rejects_complex_path_traversal(self, golden_repo_manager):
@@ -145,6 +148,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="../../etc/passwd",  # Complex path traversal
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
     def test_validation_happens_before_filesystem_operations(self, golden_repo_manager):
@@ -180,6 +184,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="../escape",
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
             # Verify background job was NEVER submitted
@@ -206,6 +211,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="foo/bar",
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
             # Verify _validate_git_repository was NEVER called
@@ -231,6 +237,7 @@ class TestGoldenRepoAliasValidationSecurity:
                     repo_url="https://github.com/test/repo.git",
                     alias="../dangerous",
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
                 pytest.fail("Expected ValueError was not raised")
             except ValueError as e:
@@ -267,6 +274,7 @@ class TestGoldenRepoAliasValidationSecurity:
                         repo_url="https://github.com/test/repo.git",
                         alias=alias,
                         default_branch="main",
+                        submitter_username="example-admin",
                     )
                     pytest.fail(
                         f"Expected ValueError was not raised for alias '{alias}'"
@@ -330,6 +338,7 @@ class TestGoldenRepoAliasValidationRegression:
                     repo_url="https://github.com/test/repo.git",
                     alias=alias,
                     default_branch="main",
+                    submitter_username="example-admin",
                 )
 
                 # Verify job_id was returned (mock returns "test-job-id-12345")

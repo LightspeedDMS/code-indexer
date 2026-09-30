@@ -21,7 +21,11 @@ class _VectorStore:
         return {"points_count": 0}
 
     def clear_collection(self, collection_name):
-        return None
+        # Bug #1979 P1 (round 5): _do_full_index now raises on a falsy
+        # clear_collection() return for the text collection. This fake
+        # store simulates a SUCCESSFUL clear (this test is about the
+        # no-files-path metadata lifecycle, not clear-failure handling).
+        return True
 
     def collection_exists(self, collection_name):
         return True

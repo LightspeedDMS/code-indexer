@@ -28,6 +28,21 @@ from .token_encryption import (
 
 logger = logging.getLogger(__name__)
 
+
+def _record_ci_token(actor: str, action_type: str, platform: str, outcome: str) -> None:
+    """Record one CI token row: the platform only, never the token."""
+    from .audit_outcome import conforming_details, record_outcome
+
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="ci_token",
+        target_id=platform,
+        outcome=outcome,
+        details=conforming_details(action_type, platform=platform),
+    )
+
+
 # ---------------------------------------------------------------------------
 # De-spam memo for APP-GENERAL-061 (Bug #1222)
 #
@@ -370,21 +385,20 @@ class CITokenManager:
                 base_url=token_data.get("base_url"),
             )
 
-    def delete_token(self, platform: str) -> None:
+    def delete_token(self, platform: str) -> bool:
         """
         Delete a platform token.
 
         Args:
             platform: Platform name (github or gitlab)
+
+        Returns:
+            True when a stored token was removed, False when none existed.
         """
+        deleted = False
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
-            deleted = self._sqlite_backend.delete_token(platform)
-            if deleted:
-                logger.info(
-                    f"Deleted token for platform: {platform}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            deleted = bool(self._sqlite_backend.delete_token(platform))
         else:
             # JSON file storage (backward compatible)
             tokens = self._load_tokens()
@@ -392,10 +406,49 @@ class CITokenManager:
             if platform in tokens:
                 del tokens[platform]
                 self._save_tokens(tokens)
-                logger.info(
-                    f"Deleted token for platform: {platform}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                deleted = True
+        if deleted:
+            logger.info(
+                f"Deleted token for platform: {platform}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        return deleted
+
+    # ------------------------------------------------------------------
+    # Audited entry points (the Web configuration door calls these).  The
+    # row names the platform only; the token never reaches it.
+    # ------------------------------------------------------------------
+
+    def save_token_audited(
+        self,
+        platform: str,
+        token: str,
+        base_url: Optional[str] = None,
+        *,
+        actor: str,
+    ) -> None:
+        """:meth:`save_token`, recording ``ci_token_set``."""
+        try:
+            self.save_token(platform, token, base_url=base_url)
+        except Exception:
+            _record_ci_token(actor, "ci_token_set", platform, "failure")
+            raise
+        _record_ci_token(actor, "ci_token_set", platform, "success")
+
+    def delete_token_audited(self, platform: str, *, actor: str) -> bool:
+        """:meth:`delete_token`, recording ``ci_token_deleted``.
+
+        Deleting a platform with no stored token is recorded as a failure.
+        """
+        try:
+            deleted = self.delete_token(platform)
+        except Exception:
+            _record_ci_token(actor, "ci_token_deleted", platform, "failure")
+            raise
+        _record_ci_token(
+            actor, "ci_token_deleted", platform, "success" if deleted else "failure"
+        )
+        return deleted
 
     def list_tokens(self) -> Dict[str, TokenStatus]:
         """

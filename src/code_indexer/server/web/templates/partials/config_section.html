@@ -151,8 +151,8 @@
 <script>
 function submitServerConfig() {
     var form = document.getElementById('edit-form-server');
-    var originalHost = '{{ config.server.host }}';
-    var originalPort = '{{ config.server.port }}';
+    var originalHost = {{ config.server.host | tojson }};
+    var originalPort = {{ config.server.port | tojson }};
     var newHost = document.getElementById('server-host').value;
     var newPort = document.getElementById('server-port').value;
     var hostChanged = newHost !== originalHost;

@@ -190,6 +190,19 @@ class AutoWatchManager:
 
                 config = config_manager.get_config()
 
+                # AutoWatchManager only ever runs in server context (every
+                # MCP file write triggers this via files.py), so the
+                # embedding-provider endpoint and daemon-mode fields are
+                # reset to server-managed values before this config is
+                # handed to DaemonWatchManager -- whose own watch handler
+                # constructs the embedding client used on every subsequent
+                # file-change-triggered incremental reindex.
+                from ..utils.server_managed_provider_settings import (
+                    enforce_server_managed_provider_settings,
+                )
+
+                enforce_server_managed_provider_settings(config)
+
                 # Defense-in-depth: even with a real config file found
                 # up-tree, verify it actually describes repo_path exactly.
                 # This MUST be strict equality, not "equal-or-ancestor":

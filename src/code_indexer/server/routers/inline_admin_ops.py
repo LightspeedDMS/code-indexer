@@ -50,6 +50,11 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
+from ..services.activated_repo_audited_ops import deactivate_repository_for_user
+from ..services.golden_repo_audited_ops import (
+    request_golden_repo_refresh,
+    submit_provider_scoped_index_job,
+)
 
 # Constants used by route handlers
 GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
@@ -218,6 +223,7 @@ def register_admin_ops_routes(
         "/api/admin/activated-repos/{username}/{user_alias}",
         response_model=JobResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def admin_deactivate_activated_repo(
         username: str,
@@ -225,10 +231,11 @@ def register_admin_ops_routes(
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         try:
-            job_id = golden_repo_manager.activated_repo_manager.deactivate_repository(
-                username=username,
-                user_alias=user_alias,
-                actor_username=current_user.username,
+            job_id = deactivate_repository_for_user(
+                golden_repo_manager.activated_repo_manager,
+                username,
+                user_alias,
+                actor=current_user.username,
             )
             return JobResponse(
                 job_id=job_id,
@@ -242,7 +249,12 @@ def register_admin_ops_routes(
                 detail=f"Failed to deactivate repository: {str(e)}",
             )
 
-    @app.post("/api/admin/golden-repos", response_model=JobResponse, status_code=202)
+    @app.post(
+        "/api/admin/golden-repos",
+        response_model=JobResponse,
+        status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def add_golden_repo(
         repo_data: AddGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -323,6 +335,7 @@ def register_admin_ops_routes(
         "/api/admin/golden-repos/{alias}/refresh",
         response_model=JobResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def refresh_golden_repo(
         alias: str,
@@ -361,8 +374,10 @@ def register_admin_ops_routes(
                     detail="RefreshScheduler not available",
                 )
             # Resolution from bare alias to global format happens inside RefreshScheduler
-            job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-                alias, submitter_username=current_user.username
+            job_id = request_golden_repo_refresh(
+                lifecycle_manager.refresh_scheduler,
+                alias,
+                actor=current_user.username,
             )
             return JobResponse(
                 job_id=job_id or "",
@@ -381,6 +396,7 @@ def register_admin_ops_routes(
         "/api/admin/golden-repos/{alias}/indexes",
         response_model=AddIndexResponse,
         status_code=202,
+        dependencies=[Depends(dependencies.require_elevation())],
     )
     def add_golden_repo_index(
         http_request: Request,
@@ -459,11 +475,13 @@ def register_admin_ops_routes(
                     for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
 
-                provider_job_id = background_job_manager.submit_job(
+                provider_job_id = submit_provider_scoped_index_job(
+                    background_job_manager,
+                    actor=current_user.username,
+                    alias=alias,
+                    index_type="semantic",
                     operation_type="provider_index_add",
                     func=_provider_index_job,
-                    submitter_username=current_user.username,
-                    repo_alias=alias,
                     repo_path=repo_path,
                     provider_name=request.providers[0],
                     clear=False,
@@ -520,11 +538,13 @@ def register_admin_ops_routes(
                     for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
 
-                provider_job_id = background_job_manager.submit_job(
+                provider_job_id = submit_provider_scoped_index_job(
+                    background_job_manager,
+                    actor=current_user.username,
+                    alias=alias,
+                    index_type="temporal",
                     operation_type="provider_temporal_index_rebuild",
                     func=_provider_temporal_index_job,
-                    submitter_username=current_user.username,
-                    repo_alias=alias,
                     repo_path=repo_path,
                     provider_name=request.providers[0],
                     clear=False,
@@ -790,7 +810,11 @@ def register_admin_ops_routes(
             logger.error("Error fetching git cleanup history: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.delete("/api/admin/golden-repos/{alias}", status_code=204)
+    @app.delete(
+        "/api/admin/golden-repos/{alias}",
+        status_code=204,
+        dependencies=[Depends(dependencies.require_elevation())],
+    )
     def remove_golden_repo(
         alias: str,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
@@ -855,8 +879,11 @@ def register_admin_ops_routes(
                     f"Job cancellation failed during repository deletion: {job_error}"
                 )
 
-            # Perform repository deletion with proper error handling
-            golden_repo_manager.remove_golden_repo(alias)
+            # Perform repository deletion with proper error handling; the job
+            # and its audit row name the authenticated caller.
+            golden_repo_manager.remove_golden_repo(
+                alias, submitter_username=current_user.username
+            )
 
             logging.info(
                 f"Successfully removed golden repository '{alias}' by user '{current_user.username}'"

@@ -177,6 +177,7 @@ class TestAddIndexSemanticCommand:
             registered_manager.add_index_to_golden_repo(
                 alias="test-repo",
                 index_type=index_type,
+                submitter_username="example-admin",
             )
 
         return captured_cmds
@@ -263,6 +264,7 @@ class TestAddIndexFtsCommand:
             registered_manager.add_index_to_golden_repo(
                 alias="test-repo",
                 index_type=index_type,
+                submitter_username="example-admin",
             )
 
         return captured_cmds
@@ -385,6 +387,7 @@ class TestAddIndexTemporalCommand:
             registered_manager.add_index_to_golden_repo(
                 alias="test-repo",
                 index_type="temporal",
+                submitter_username="example-admin",
             )
 
         return [c for c in captured_cmds if c[:2] == ["cidx", "index"]]
@@ -681,6 +684,7 @@ class TestTemporalVectorExistenceCheck:
             registered_manager.add_index_to_golden_repo(
                 alias="test-repo",
                 index_type="temporal",
+                submitter_username="example-admin",
             )
 
         return [c for c in captured_cmds if c[:2] == ["cidx", "index"]]

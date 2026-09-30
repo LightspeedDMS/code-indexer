@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -167,7 +166,9 @@ class TestLifespanRealHandlerRemoval:
     if the removeHandler line in lifespan.py is deleted. (Verified: see docstring.)
     """
 
-    def test_sqlite_handler_removed_from_root_logger_after_lifespan_exit(self):
+    def test_sqlite_handler_removed_from_root_logger_after_lifespan_exit(
+        self, monkeypatch
+    ):
         """After entering and exiting make_lifespan(...), no SQLiteLogHandler remains.
 
         This drives the real make_lifespan async context manager via asyncio.run().
@@ -190,8 +191,9 @@ class TestLifespanRealHandlerRemoval:
         handler_installed = False
 
         with tempfile.TemporaryDirectory() as server_data_dir:
-            # Point the lifespan at our tmp dir so logs.db goes there
-            os.environ["CIDX_SERVER_DATA_DIR"] = server_data_dir
+            # Point the lifespan at our tmp dir so logs.db goes there.
+            # monkeypatch restores the previous value (or absence) at teardown.
+            monkeypatch.setenv("CIDX_SERVER_DATA_DIR", server_data_dir)
             # Write a minimal config.json so load_config() returns non-None.
             # Without this, startup_config is None and log_level access raises
             # AttributeError, which is caught and skips the handler install.
@@ -224,9 +226,6 @@ class TestLifespanRealHandlerRemoval:
                 # What we care about is the handler removal at the top of shutdown,
                 # which runs before any other step that might raise.
                 pass
-            finally:
-                # Always clean up CIDX_SERVER_DATA_DIR env var
-                os.environ.pop("CIDX_SERVER_DATA_DIR", None)
 
             # After the lifespan exits, the root logger must be clean
             from code_indexer.server.services.async_logging import (
@@ -266,7 +265,7 @@ class TestLifespanRealHandlerRemoval:
             f"the QueueHandler after stopping the listener."
         )
 
-    def test_three_lifespan_cycles_do_not_accumulate_handlers(self):
+    def test_three_lifespan_cycles_do_not_accumulate_handlers(self, monkeypatch):
         """3 startup/shutdown cycles must not grow the root logger's handler list.
 
         If removeHandler is omitted, each cycle accumulates a stale handler pointing
@@ -283,7 +282,8 @@ class TestLifespanRealHandlerRemoval:
 
         for cycle in range(3):
             with tempfile.TemporaryDirectory() as server_data_dir:
-                os.environ["CIDX_SERVER_DATA_DIR"] = server_data_dir
+                # monkeypatch restores the previous value (or absence) at teardown.
+                monkeypatch.setenv("CIDX_SERVER_DATA_DIR", server_data_dir)
                 # Write minimal config so the handler install branch is reached
                 _write_minimal_config(server_data_dir)
 
@@ -298,8 +298,6 @@ class TestLifespanRealHandlerRemoval:
                     asyncio.run(_run())
                 except Exception:
                     pass
-                finally:
-                    os.environ.pop("CIDX_SERVER_DATA_DIR", None)
 
             # After each cycle, collect any new SQLiteLogHandlers not present before
             new_handlers = [

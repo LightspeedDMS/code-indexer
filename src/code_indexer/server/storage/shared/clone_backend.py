@@ -79,6 +79,43 @@ def _validate_path_component(value: str, field: str) -> None:
         )
 
 
+class CloneDestinationExistsError(FileExistsError):
+    """Raised when create_clone_at_path refuses an already-existing
+    DIRECTORY destination.
+
+    A DEDICATED subtype (not a bare FileExistsError) so callers such as
+    ActivatedRepoManager._clone_with_copy_on_write can catch it
+    SPECIFICALLY, before their generic `except Exception` clause, and
+    skip the destructive shutil.rmtree(dest_path)/orphan-cleanup-grace-
+    loop path entirely -- dest_path here is a PRE-EXISTING directory
+    that was never touched by this clone attempt, not a partial/failed
+    clone of THIS attempt's own making, so it must never be deleted.
+    """
+
+
+def _reject_existing_directory_destination(dest_path: str, backend_name: str) -> None:
+    """Refuse to clone into an already-existing DIRECTORY destination.
+
+    ``cp --reflink=auto -a src existing_dir`` copies src INTO existing_dir
+    as a subdirectory and exits 0 instead of failing -- exactly the
+    behaviour that would let a traversed
+    activation destination "succeed" instead of erroring loudly (e.g. a
+    traversed activation landing inside the shared golden-repos tree).
+
+    Deliberately scoped to an existing DIRECTORY only: refresh_integrity_gate.py's
+    restore_chunks_db_via_reflink / restore_metadata_files_via_reflink
+    intentionally clone a healthy file ONTO an existing corrupt/stale
+    regular file (self-heal, overwrite-in-place) -- ordinary `cp -a`
+    file-to-file semantics, not a merge, and must remain allowed.
+    """
+    if os.path.isdir(dest_path):
+        raise CloneDestinationExistsError(
+            f"{backend_name}.create_clone_at_path: destination '{dest_path}' "
+            "already exists as a directory -- refusing to clone into it "
+            "(cp -a would silently merge into it instead of failing)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Protocol definition
 # ---------------------------------------------------------------------------
@@ -199,7 +236,14 @@ class LocalCloneBackend:
         partial dest_path on any exception from this method. The existing
         `timeout` deadline (Bug #1285's cow_clone_timeout) is preserved
         alongside cancel_check -- either one can end the clone.
+
+        Refuses an already-existing
+        DIRECTORY destination before running `cp` at all -- see
+        _reject_existing_directory_destination for the exact rationale. An
+        existing regular file destination remains allowed (overwrite,
+        refresh_integrity_gate.py's restore use case).
         """
+        _reject_existing_directory_destination(dest_path, "LocalCloneBackend")
         attr_flag = "-a" if preserve_attrs else "-r"
         logger.info(
             "LocalCloneBackend: creating clone at path '%s' from '%s'",
@@ -608,7 +652,14 @@ class CowDaemonBackend:
         masks the cancellation. poll_interval exists for CloneBackend
         Protocol symmetry with LocalCloneBackend; the daemon keeps its own
         exponential-backoff poll cadence regardless.
+
+        Refuses an already-existing
+        DIRECTORY destination BEFORE any daemon call, mirroring
+        LocalCloneBackend -- this codebase's own filesystem view of
+        dest_path (over the same NFS mount the daemon serves) is checked
+        client-side rather than trusting the remote daemon to enforce it.
         """
+        _reject_existing_directory_destination(dest_path, "CowDaemonBackend")
         requests = self._requests()
         # Translate CIDX-view paths to daemon-local paths so daemon validation passes and reflink works
         daemon_source = self._translate_to_daemon_path(source_path)

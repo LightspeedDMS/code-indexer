@@ -1060,6 +1060,13 @@ def _index_via_daemon(
                         style="yellow",
                     )
 
+                # Bug #1979 (P1, round 4): clear=true promises a full rebuild.
+                # A cancelled clear can leave a provider with only partial
+                # data, so it must never report success -- unlike a cancelled
+                # incremental run, which is a normal resumable partial state.
+                if cancelled and force_reindex:
+                    return 1
+
                 # Success - break out of retry loop
                 return 0
 

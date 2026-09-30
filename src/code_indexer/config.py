@@ -9,7 +9,14 @@ import yaml  # type: ignore
 from pathlib import Path
 from typing import List, Optional, Any, Literal, Tuple, Dict
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -842,6 +849,24 @@ class Config(BaseModel):
     health_error_rate_threshold: float = 0.1
     health_latency_p95_threshold_ms: float = 5000.0
     health_availability_threshold: float = 0.95
+
+    # Runtime-only server-context marker: never read from or written to
+    # config.json (a pydantic private attribute), so a repository cannot set
+    # it. When set, file discovery and read-time checks confine every indexed
+    # or read file to the resolved codebase root -- symlinks resolving
+    # outside it are skipped. Set only by the server seam
+    # (enforce_server_managed_provider_settings / confine_to_codebase_root);
+    # local CLI indexing leaves it unset and follows symlinks.
+    _confined_to_codebase_root: bool = PrivateAttr(default=False)
+
+    @property
+    def confined_to_codebase_root(self) -> bool:
+        """True when this config was loaded for server-context indexing."""
+        return self._confined_to_codebase_root
+
+    def confine_to_codebase_root(self) -> None:
+        """Mark this config as server context (see the attribute above)."""
+        self._confined_to_codebase_root = True
 
     @field_validator("codebase_dir", mode="before")
     @classmethod

@@ -15,13 +15,18 @@ import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
 import anyio.to_thread
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 
 # Module-level import so test patches against
 # code_indexer.server.routes.regex_routes.RegexSearchService work correctly.
@@ -55,6 +60,50 @@ class RegexSearchRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers — extracted for easy mocking in tests
 # ---------------------------------------------------------------------------
+
+
+def _enforce_repo_access(
+    access_filtering_service: Optional[Any],
+    username: str,
+    aliases: Union[str, List[str]],
+) -> None:
+    """Enforce repo-level access for one or more requested aliases.
+
+    /api/regex/search authorizes every requested golden repo (single or
+    omni/list form) against the caller's group grants via
+    AccessFilteringService. Delegates the actual access decision to the shared
+    require_repo_access() guard (same semantics as the MCP dispatcher's
+    _check_repository_access()) and shapes the result into this route's
+    existing HTTPException error-envelope convention.
+
+    Called UNCONDITIONALLY from the route handler (never behind an
+    "if available" branch) so the check can never be silently skipped.
+
+    Raises:
+        HTTPException 403: caller lacks access to one of the requested
+            aliases (checked in order; no silent partial results for the
+            omni/list form).
+        HTTPException 500: access_filtering_service is unavailable —
+            fails closed rather than skipping the check.
+    """
+    try:
+        require_repo_access(access_filtering_service, username, aliases)
+    except RepoAccessDeniedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "access_denied",
+                "detail": str(e),
+            },
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "access_control_unavailable",
+                "detail": str(e),
+            },
+        )
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
@@ -249,6 +298,8 @@ async def _execute_omni_search(
 )
 async def regex_search(
     body: RegexSearchRequest,
+    *,
+    request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Execute a ripgrep-powered regex search against one or more golden repos.
@@ -256,12 +307,21 @@ async def regex_search(
     Supports single-repo and omni (multi-repo) searches. Mirrors the MCP
     regex_search tool but returns results synchronously (no background job).
 
+    ``request`` is REQUIRED (keyword-only, no default) so the repo-access
+    check below can never be silently skipped -- FastAPI injects the real
+    Request for every genuine HTTP call automatically; direct (non-HTTP)
+    callers, such as whitebox unit tests, must supply one explicitly
+    (see test_regex_routes_alias_resolution_offload_1634.py /
+    test_regex_routes_trigram_hang_1590.py for the pattern).
+
     Error codes:
-        auth_required           — missing query_repos permission (403)
-        repository_not_found    — alias cannot be resolved (404)
-        pcre2_unavailable       — PCRE2 not built into ripgrep (422)
-        search_timeout          — search exceeded timeout (408)
-        search_engine_error     — ripgrep execution failure (500)
+        auth_required               — missing query_repos permission (403)
+        access_denied                — caller lacks access to a requested repo (403)
+        access_control_unavailable   — access_filtering_service missing (500)
+        repository_not_found        — alias cannot be resolved (404)
+        pcre2_unavailable            — PCRE2 not built into ripgrep (422)
+        search_timeout               — search exceeded timeout (408)
+        search_engine_error          — ripgrep execution failure (500)
     """
     from code_indexer.global_repos.regex_search import RipgrepExecutionError
 
@@ -276,6 +336,32 @@ async def regex_search(
                 "detail": "query_repos permission required",
             },
         )
+
+    # ------------------------------------------------------------------
+    # 1b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE any repo-path resolution or search execution, for both
+    #     the single-repo string form and the omni/list form. Never
+    #     skipped: access_filtering_service missing fails closed (500)
+    #     inside _enforce_repo_access, it does not bypass the check.
+    #
+    #     require_repo_access() performs synchronous DB reads
+    #     (is_admin_user()/get_accessible_repos()) which must never run
+    #     directly on the event-loop thread inside this `async def` route
+    #     (Production Scale invariant) -- offload the whole enforcement
+    #     call via anyio.to_thread.run_sync, mirroring every other
+    #     synchronous call already offloaded in this same handler.
+    # ------------------------------------------------------------------
+    access_filtering_service = getattr(
+        request.app.state, "access_filtering_service", None
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _enforce_repo_access,
+            access_filtering_service,
+            user.username,
+            body.repository_alias,
+        )
+    )
 
     # ------------------------------------------------------------------
     # 2. Load configured timeout

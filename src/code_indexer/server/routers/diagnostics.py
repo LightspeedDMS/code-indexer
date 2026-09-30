@@ -119,7 +119,7 @@ def _get_diagnostics_service() -> DiagnosticsService:
 @router.get("", response_class=HTMLResponse)
 def get_diagnostics_page(
     request: Request,
-    current_user: User = None,  # TODO: Add dependency after auth integration
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> HTMLResponse:
     """
     Render the diagnostics page.
@@ -127,6 +127,10 @@ def get_diagnostics_page(
     Story #1491 (review item 4): declared SYNC deliberately -- it calls
     get_status(), whose cold/expired-category SQLite read must not run on the
     event loop. Nothing here is awaited.
+
+    This page discloses CLI-tool/SDK/API-integration/credential
+    and infrastructure health -- admin-only, matching every sibling route on
+    this router.
 
     Returns HTML page with:
     - Five category sections
@@ -190,7 +194,6 @@ def get_diagnostics_page(
 def run_all_diagnostics(
     request: Request,
     background_tasks: BackgroundTasks,
-    current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> HTMLResponse:
     """
     Trigger diagnostic execution for all categories.
@@ -198,10 +201,16 @@ def run_all_diagnostics(
     Runs diagnostics asynchronously and returns HTML partial with polling enabled.
     The HTML partial initiates HTMX polling to /admin/diagnostics/status.
 
+    This route was already fully gated by
+    the route-level `dependencies=[Depends(dependencies.require_elevation())]`
+    above -- which itself chains `Depends(get_current_admin_user_hybrid)` --
+    so the unused `current_user: User = None` parameter was dead weight, never
+    read in the body. Removed rather than re-declared with its own Depends to
+    avoid asserting admin auth twice for the same request.
+
     Args:
         request: FastAPI request object
         background_tasks: FastAPI background tasks for async execution
-        current_user: Authenticated admin user
 
     Returns:
         HTML response with diagnostics status partial (starts polling)
@@ -245,7 +254,6 @@ def run_category_diagnostics(
     category: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> HTMLResponse:
     """
     Trigger diagnostic execution for a single category.
@@ -253,11 +261,17 @@ def run_category_diagnostics(
     Runs diagnostics asynchronously for the specified category only.
     Returns HTML partial with polling enabled to show real-time updates.
 
+    This route was already fully gated by
+    the route-level `dependencies=[Depends(dependencies.require_elevation())]`
+    above -- which itself chains `Depends(get_current_admin_user_hybrid)` --
+    so the unused `current_user: User = None` parameter was dead weight, never
+    read in the body. Removed rather than re-declared with its own Depends to
+    avoid asserting admin auth twice for the same request.
+
     Args:
         category: Category to run (e.g., "cli_tools", "sdk_prerequisites")
         request: FastAPI request object
         background_tasks: FastAPI background tasks for async execution
-        current_user: Authenticated admin user
 
     Returns:
         HTML response with diagnostics status partial (starts polling)
@@ -310,7 +324,7 @@ def run_category_diagnostics(
 @router.get("/status", response_class=HTMLResponse)
 def get_diagnostics_status(
     request: Request,
-    current_user: User = None,  # TODO: Add dependency after auth integration
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Response:
     """
     Get current diagnostics status (HTMX polling endpoint).
@@ -320,6 +334,9 @@ def get_diagnostics_status(
     endpoint is polled every ~2s per open admin page -- running that on the
     event loop is exactly the defect class this story removes. A plain def
     route is dispatched to FastAPI's threadpool. Nothing here is awaited.
+
+    This is the HTMX-polled twin of the page above and returns
+    the same admin-only diagnostic state -- gated identically.
 
     Returns HTML partial with current status for all categories.
     Includes HX-Stop-Polling header when diagnostics are complete

@@ -133,6 +133,8 @@ class AuthErrorHandler:
         internal_message: Optional[str] = None,
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
+        *,
+        record_audit: bool = True,
     ) -> Dict[str, Any]:
         """
         Create standardized error response with timing attack prevention.
@@ -143,6 +145,8 @@ class AuthErrorHandler:
             internal_message: Detailed message for audit logging
             ip_address: Client IP address for audit logging
             user_agent: Client user agent for audit logging
+            record_audit: False when the caller records the attempt's one
+                outcome row itself (login doors using login_outcome)
 
         Returns:
             Standardized error response dictionary
@@ -150,7 +154,9 @@ class AuthErrorHandler:
 
         def create_response() -> Dict[str, Any]:
             # Log detailed information internally
-            if hasattr(self.audit_logger, "log_authentication_failure"):
+            if record_audit and hasattr(
+                self.audit_logger, "log_authentication_failure"
+            ):
                 additional_context = {}
                 if ip_address:
                     additional_context["ip_address"] = ip_address

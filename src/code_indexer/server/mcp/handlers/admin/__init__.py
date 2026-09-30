@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies as dependencies
+from code_indexer.server.auth.login_outcome import complete_login, reject_login
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
@@ -22,13 +23,29 @@ from code_indexer.server.telemetry.correlation_bridge import (
 
 from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers._utils import (
+    _admin_role_first,
     _coerce_int,
     _mcp_response,
     _parse_json_string_array,
     _get_golden_repos_dir,
 )
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
-from code_indexer.server.storage.json_column import parse_json_column
+from code_indexer.server.services.audit_log_query import (
+    AUDIT_LOG_MAX_LIMIT,
+    DEFAULT_AUDIT_LOG_LIMIT,
+    DIRECTION_OLDER,
+    PR_URL_FIELD,
+    TIER_ALL,
+    AuditAggregate,
+    AuditQueryError,
+    CanonicalAuditRow,
+    aggregate_fields,
+    build_filters,
+    decode_details,
+    page_fields,
+    query_audit_log,
+    row_fields,
+)
 from . import elevate_session as _elevate_session_module
 from .mcp_credentials import (
     handle_list_mcp_credentials,
@@ -38,18 +55,12 @@ from .mcp_credentials import (
 logger = logging.getLogger(__name__)
 
 # Named constants for admin operations
-DEFAULT_AUDIT_LOG_LIMIT = 100
 JOB_ID_LENGTH = 8
 
-# Issue #1646: handle_query_audit_logs pushes `page` straight into
-# AuditLogService.query()'s `offset` parameter. This clamps `page` to a sane
-# maximum so a pathological caller-supplied value can't produce an
-# unbounded OFFSET.
+# Issue #1646: handle_query_audit_logs maps `page` onto the shared read
+# function's compatibility offset. This clamps `page` to a sane maximum so a
+# pathological caller-supplied value can't produce an unbounded OFFSET.
 _AUDIT_LOG_MAX_PAGE = 10_000
-
-# Matches the tool's own documented `limit` maximum (query_audit_logs.md)
-# so a caller-supplied `limit` can't force an unbounded SQL fetch.
-_AUDIT_LOG_MAX_LIMIT = 1000
 
 
 def _get_legacy():
@@ -64,6 +75,7 @@ def _get_legacy():
 # =============================================================================
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
@@ -143,6 +155,7 @@ def _assign_new_user_to_default_group(
         )
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
@@ -151,8 +164,8 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         password = params["password"]
         role = UserRole(params["role"])
 
-        new_user = _utils.app_module.user_manager.create_user(
-            username=username, password=password, role=role
+        new_user = _utils.app_module.user_manager.create_user_audited(
+            username, password, role, actor=user.username
         )
 
         _assign_new_user_to_default_group(username, role, user.username)
@@ -240,6 +253,7 @@ def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
     return _mcp_response({"success": True, **config})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for set_global_config tool."""
@@ -255,7 +269,7 @@ def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
         )
 
     try:
-        ops.set_config(refresh_interval)
+        ops.set_config(refresh_interval, actor=user.username)
         return _mcp_response(  # type: ignore[no-any-return]
             {"success": True, "status": "updated", "refresh_interval": refresh_interval}
         )
@@ -303,18 +317,33 @@ def handle_authenticate(
     # Validate API key
     user = user_manager.validate_user_api_key(username, api_key)
     if not user:
+        # The attempt's one outcome row; the typed name is recorded only
+        # when it names an existing account.
+        reject_login(
+            username,
+            account_exists=user_manager.get_user(username) is not None,
+            method="api_key",
+            stage="credentials",
+            reason="bad_credentials",
+        )
         return _mcp_response({"success": False, "error": "Invalid credentials"})  # type: ignore[no-any-return]
 
     # Successful authentication should refund the consumed token
     rate_limiter.refund(username)
 
-    # Create JWT token
-    token = jwt_manager.create_token(
-        {
-            "username": user.username,
-            "role": user.role.value,
-            "created_at": user.created_at.isoformat(),
-        }
+    # Create JWT token (the login's one success row is recorded with it)
+    token = complete_login(
+        user.username,
+        method="api_key",
+        mfa="not_applicable",
+        flow="mcp_jwt",
+        issue=lambda: jwt_manager.create_token(
+            {
+                "username": user.username,
+                "role": user.role.value,
+                "created_at": user.created_at.isoformat(),
+            }
+        ),
     )
 
     # Set JWT as HttpOnly cookie
@@ -582,6 +611,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # =============================================================================
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
@@ -726,6 +756,7 @@ def handle_admin_embedding_stats_query(
     )
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
@@ -926,35 +957,41 @@ def _validate_group_id(
     Returns:
         Tuple of (group_id, group, error_response) - error_response is None on success
     """
-    group_id_str = args.get("group_id", "")
-    if not group_id_str:
-        return (
-            None,
-            None,
-            _mcp_response(
-                {"success": False, "error": "Missing required parameter: group_id"}
-            ),
-        )
-    try:
-        group_id = int(group_id_str)
-    except ValueError:
-        return (
-            None,
-            None,
-            _mcp_response(
-                {"success": False, "error": f"Invalid group_id: {group_id_str}"}
-            ),
-        )
+    group_id, error = _parse_group_id(args)
+    if error:
+        return None, None, error
     group = group_manager.get_group(group_id)
     if not group:
-        return (
-            None,
-            None,
-            _mcp_response({"success": False, "error": f"Group not found: {group_id}"}),
-        )
+        return None, None, _group_not_found(group_id)
     return group_id, group, None
 
 
+def _parse_group_id(
+    args: Dict[str, Any],
+) -> tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """Parse group_id only; existence is left to the audited operation.
+
+    Returns:
+        Tuple of (group_id, error_response) - error_response is None on success
+    """
+    group_id_str = args.get("group_id", "")
+    if not group_id_str:
+        return None, _mcp_response(
+            {"success": False, "error": "Missing required parameter: group_id"}
+        )
+    try:
+        return int(group_id_str), None
+    except ValueError:
+        return None, _mcp_response(
+            {"success": False, "error": f"Invalid group_id: {group_id_str}"}
+        )
+
+
+def _group_not_found(group_id: Optional[int]) -> Dict[str, Any]:
+    return _mcp_response({"success": False, "error": f"Group not found: {group_id}"})  # type: ignore[no-any-return]
+
+
+@_admin_role_first
 def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all groups with member counts and repository access information."""
     try:
@@ -989,6 +1026,7 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new custom group."""
@@ -1014,11 +1052,7 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_create",
                 target_type="group",
                 target_id=str(group.id),
-                details={
-                    "name": group.name,
-                    "description": group.description,
-                    "source": "mcp",
-                },
+                details={"name": group.name, "source": "mcp"},
             )
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": True, "group_id": group.id, "name": group.name}
@@ -1035,6 +1069,7 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get detailed information about a specific group."""
     try:
@@ -1070,6 +1105,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Update a custom group's name and/or description."""
@@ -1099,11 +1135,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details={
-                    "name": updated_group.name,
-                    "description": updated_group.description,
-                    "source": "mcp",
-                },
+                details={"name": updated_group.name, "source": "mcp"},
             )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except ValueError as e:
@@ -1118,6 +1150,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
@@ -1167,6 +1200,8 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 @require_mcp_elevation()
 def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Assign a user to a group (inner handler — Story #992)."""
+    from ....services.group_access_manager import GroupNotFoundError
+
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1174,7 +1209,7 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1184,16 +1219,12 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
                 {"success": False, "error": "Missing required parameter: user_id"}
             )
 
-        group_manager.assign_user_to_group(
-            user_id=user_id, group_id=group_id, assigned_by=user.username
-        )
-        group_manager.log_audit(
-            admin_id=user.username,
-            action_type="user_group_change",
-            target_type="user",
-            target_id=user_id,
-            details={"user_id": user_id, "group": group.name, "source": "mcp"},
-        )
+        try:
+            group_manager.assign_user_to_group_audited(
+                user_id, group_id, actor=user.username
+            )
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
@@ -1299,7 +1330,10 @@ def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
 @require_mcp_elevation()
 def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
     """Revoke a group's access to a single repository (inner handler — Story #992)."""
-    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ....services.group_access_manager import (
+        CidxMetaCannotBeRevokedError,
+        GroupNotFoundError,
+    )
 
     try:
         group_manager = _get_group_manager()
@@ -1308,7 +1342,7 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1319,8 +1353,8 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             )
 
         try:
-            if not group_manager.revoke_repo_access(
-                repo_name=repo_name, group_id=group_id
+            if not group_manager.revoke_repo_access_audited(
+                repo_name, group_id, actor=user.username
             ):
                 return _mcp_response(  # type: ignore[no-any-return]
                     {
@@ -1328,14 +1362,9 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                         "error": f"Repository '{repo_name}' not found in group's access list",
                     }
                 )
-            group_manager.log_audit(
-                admin_id=user.username,
-                action_type="repo_access_revoke",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name, "source": "mcp"},
-            )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         except CidxMetaCannotBeRevokedError:
             return _mcp_response(  # type: ignore[no-any-return]
                 {
@@ -1358,8 +1387,7 @@ def _bulk_remove_repos(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories (inner handler — Story #992)."""
-    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
-    from ....services.constants import CIDX_META_REPO
+    from ....services.group_access_manager import GroupNotFoundError
 
     try:
         group_manager = _get_group_manager()
@@ -1368,7 +1396,7 @@ def _bulk_remove_repos(
                 {"success": False, "error": "Group manager not configured"}
             )
 
-        group_id, group, error = _validate_group_id(args, group_manager)
+        group_id, error = _parse_group_id(args)
         if error:
             return error
 
@@ -1378,28 +1406,14 @@ def _bulk_remove_repos(
                 {"success": False, "error": "Missing required parameter: repo_names"}
             )
 
-        removed_count = 0
-        for repo_name in repo_names:
-            if repo_name == CIDX_META_REPO:
-                continue
-            try:
-                if group_manager.revoke_repo_access(
-                    repo_name=repo_name, group_id=group_id
-                ):
-                    removed_count += 1
-                    group_manager.log_audit(
-                        admin_id=user.username,
-                        action_type="repo_access_revoke",
-                        target_type="repo",
-                        target_id=repo_name,
-                        details={
-                            "repo": repo_name,
-                            "group": group.name,
-                            "source": "mcp",
-                        },
-                    )
-            except CidxMetaCannotBeRevokedError:
-                continue
+        # cidx-meta is skipped silently; one row per revoked repository and
+        # one summary row for the absent ones (the audited entry point).
+        try:
+            removed_count = group_manager.revoke_repos_access_audited(
+                repo_names, group_id, actor=user.username
+            )
+        except GroupNotFoundError:
+            return _group_not_found(group_id)
         return _mcp_response({"success": True, "removed_count": removed_count})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
@@ -1453,7 +1467,9 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         description = args.get("description", "")
         api_key_manager = ApiKeyManager(user_manager=_utils.app_module.user_manager)
-        api_key, key_id = api_key_manager.generate_key(user.username, name=description)
+        api_key, key_id = api_key_manager.generate_key_audited(
+            user.username, name=description, actor=user.username
+        )
         return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
@@ -1485,7 +1501,9 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        result = _utils.app_module.user_manager.delete_api_key(user.username, key_id)
+        result = _utils.app_module.user_manager.delete_api_key_audited(
+            user.username, key_id, actor=user.username
+        )
         return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
@@ -1510,13 +1528,13 @@ def _resolve_audit_log_pagination(args: Dict[str, Any]) -> tuple:
     the same first-`limit` slice regardless of `page`. Both `limit` and
     `page` are clamped against named maxima to protect against a
     pathological caller-supplied value producing an unbounded SQL fetch or
-    OFFSET.
+    OFFSET (the shared read function clamps the offset once more).
     """
     limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
     if limit <= 0:
         limit = DEFAULT_AUDIT_LOG_LIMIT
-    elif limit > _AUDIT_LOG_MAX_LIMIT:
-        limit = _AUDIT_LOG_MAX_LIMIT
+    elif limit > AUDIT_LOG_MAX_LIMIT:
+        limit = AUDIT_LOG_MAX_LIMIT
     page = _coerce_int(args.get("page"), 1)
     if page < 1:
         page = 1
@@ -1536,77 +1554,85 @@ def _get_audit_service() -> Any:
     return audit_svc
 
 
-def _decode_audit_log_details(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Decode an audit_logs row's `details` column.
+def _audit_flag(args: Dict[str, Any], name: str) -> bool:
+    """A JSON boolean argument (absent means False); anything else is refused."""
+    value = args.get(name)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise AuditQueryError(f"{name} must be a boolean")
+    return value
 
-    Bug #1802: every writer (GroupAccessManager.log_audit, and direct
-    AuditLogService.log() callers such as PasswordChangeAuditLogger) now
-    stores a JSON object. Rows written before that fix may still hold
-    legacy free text -- those are surfaced as {"raw": <original text>}
-    instead of being silently treated as empty, so recorded content is
-    never discarded, only left unstructured.
+
+def _build_audit_log_entry(row: CanonicalAuditRow) -> Dict[str, Any]:
+    """One query_audit_logs entry: the shared row fields, ``details``
+    decoded, plus the older ``user`` / ``action`` / ``resource`` aliases
+    (the row's own ``admin_id`` / ``action_type``; ``resource`` is the
+    recorded PR URL for PR-creation rows, else ``target_id``).
+
+    ``resource`` is read from the ALLOWLISTED details only: the shared read
+    path keeps ``pr_url`` solely as a plain web URL (no userinfo, query or
+    fragment), so this never exposes more than ``details`` does.
     """
-    details_raw = row.get("details")
-    if details_raw is None:
-        return {}
-    decoded = parse_json_column(details_raw, dict, "audit_logs.details")
-    if decoded is not None:
-        return decoded
-    return {"raw": details_raw} if isinstance(details_raw, str) else {}
+    entry = row_fields(row)
+    details = decode_details(row.details)
+    entry["details"] = details
+    entry["user"] = row.admin_id
+    entry["action"] = row.action_type
+    pr_url = details.get(PR_URL_FIELD)
+    entry["resource"] = pr_url if isinstance(pr_url, str) else row.target_id
+    return entry
 
 
-def _build_audit_log_entry(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Build one query_audit_logs response entry from an audit_logs row.
-
-    PR creation (pr_creation_success/failure/disabled) and git cleanup
-    events carry a repo_alias/pr_url/repo_path inside their JSON `details`
-    blob (see PasswordChangeAuditLogger._log_to_service) -- when present,
-    `resource` surfaces that context. `user`/`action` always mirror the
-    row's own `admin_id`/`action_type` columns, the SAME columns
-    AuditLogService.query() filters on, so an entry can never disagree with
-    the SQL-level filter that selected it.
-
-    Issue #1647: this replaces a second, overlapping fetch via
-    get_pr_logs()/get_cleanup_logs() that used to re-select these SAME rows
-    (they live in the one audit_logs table, target_type="auth" like every
-    other event) and merge them on top of the general query, duplicating
-    every pr_creation_*/git_cleanup entry. There is now only one query.
-    """
-    from code_indexer.server.services.audit_log_service import (
-        PR_ACTION_TYPES,
-        CLEANUP_ACTION_TYPE,
+def _query_audit_log_from_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the MCP arguments onto the shared read function (one call)."""
+    # Checked on the SUPPLIED arguments, before page 1 becomes offset 0 (and
+    # then "no offset"): an explicit page never combines with a cursor.
+    if args.get("cursor") and args.get("page") is not None:
+        raise AuditQueryError("cursor and page cannot be combined")
+    limit, offset = _resolve_audit_log_pagination(args)
+    filters = build_filters(
+        # Both "action" and "action_type" name the action filter.
+        action_type=args.get("action") or args.get("action_type"),
+        actor=args.get("user"),
+        target_type=args.get("target_type"),
+        target_id=args.get("target_id"),
+        outcome=args.get("outcome"),
+        source=args.get("source"),
+        ip_address=args.get("ip_address"),
+        correlation_id=args.get("correlation_id"),
+        date_from=args.get("from_date"),
+        date_to=args.get("to_date"),
     )
-
-    details_obj = _decode_audit_log_details(row)
-    action = row.get("action_type", "")
-    admin_id = row.get("admin_id", "")
-    target_id = row.get("target_id", "")
-    resource = target_id
-    if action in PR_ACTION_TYPES and details_obj.get("pr_url") is not None:
-        resource = details_obj["pr_url"]
-    elif action == CLEANUP_ACTION_TYPE and details_obj.get("repo_path") is not None:
-        resource = details_obj["repo_path"]
-
+    result = query_audit_log(
+        _get_audit_service(),
+        filters,
+        tier=args.get("tier") or TIER_ALL,
+        cursor=args.get("cursor") or None,
+        direction=args.get("direction") or DIRECTION_OLDER,
+        limit=limit,
+        legacy_offset=offset or None,
+        aggregate=_audit_flag(args, "aggregate"),
+        all_time=_audit_flag(args, "all_time"),
+    )
+    if isinstance(result, AuditAggregate):
+        return {"success": True, "entries": [], **aggregate_fields(result)}
     return {
-        "timestamp": row.get("timestamp", ""),
-        "user": admin_id,
-        "action": action,
-        "action_type": action,
-        "target_type": row.get("target_type", ""),
-        "target_id": target_id,
-        "admin_id": admin_id,
-        "resource": resource,
-        "details": details_obj,
+        "success": True,
+        "entries": [_build_audit_log_entry(row) for row in result.rows],
+        **page_fields(result),
     }
 
 
+@_admin_role_first
 @require_mcp_elevation()
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Query security audit logs with optional filtering (admin only).
+    """Query the audit log (admin only) through the shared read function.
 
-    Issues #1646/#1647: one AuditLogService.query() call is the sole source
-    for both `entries` and `total` -- see _resolve_audit_log_pagination and
-    _build_audit_log_entry for the fix details.
+    A thin adapter over ``services/audit_log_query.query_audit_log``, the
+    same function the REST route and the Web Audit Logs page read through:
+    one call returns both the entries and the capped ``total``.  A bad
+    argument (filter, tier, cursor, mode) returns ``success: false``.
     """
     try:
         if user.role != UserRole.ADMIN:
@@ -1616,25 +1642,9 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "error": "Permission denied. Admin role required to query audit logs.",
                 }
             )
-
-        # Support both "action" and "action_type" as filter parameter names
-        action_filter = args.get("action") or args.get("action_type")
-        limit, offset = _resolve_audit_log_pagination(args)
-        audit_svc = _get_audit_service()
-
-        audit_rows, total = audit_svc.query(
-            action_type=action_filter if action_filter else None,
-            admin_id=args.get("user"),
-            date_from=args.get("from_date"),
-            date_to=args.get("to_date"),
-            limit=limit,
-            offset=offset,
-        )
-        entries = [_build_audit_log_entry(row) for row in audit_rows]
-
-        return _mcp_response(  # type: ignore[no-any-return]
-            {"success": True, "entries": entries, "total": total}
-        )
+        return _mcp_response(_query_audit_log_from_args(args))  # type: ignore[no-any-return]
+    except AuditQueryError as e:
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
     except RuntimeError as e:
         logger.critical("AuditLogService configuration error: %s", e)
         return _mcp_response(  # type: ignore[no-any-return]
@@ -1743,6 +1753,7 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
 # =============================================================================
 
 
+@_admin_role_first
 def handle_trigger_dependency_analysis(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1974,6 +1985,7 @@ _VALID_MEMBER_ACTIONS = frozenset({"add", "remove"})
 _VALID_REPO_ACTIONS = frozenset({"add", "remove", "bulk_remove"})
 
 
+@_admin_role_first
 def handle_manage_group_members(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -1984,7 +1996,8 @@ def handle_manage_group_members(
       - 'add'    -> _add_member(args, user, **kwargs)
       - 'remove' -> _remove_member(args, user, **kwargs)
 
-    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The admin role is checked first (``_admin_role_first``); elevation is
+    enforced by each inner handler.
     """
     action = args.get("action", "")
     if not action:
@@ -2010,6 +2023,7 @@ def handle_manage_group_members(
 handle_manage_group_members.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
 
 
+@_admin_role_first
 def handle_manage_group_repos(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -2021,7 +2035,8 @@ def handle_manage_group_repos(
       - 'remove'      -> _remove_repo(args, user, **kwargs)
       - 'bulk_remove' -> _bulk_remove_repos(args, user, **kwargs)
 
-    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The admin role is checked first (``_admin_role_first``); elevation is
+    enforced by each inner handler.
     The 'repos' list parameter is forwarded as 'repo_names' for add/bulk_remove,
     and 'repo_name' (first element) for remove.
     """
@@ -2068,6 +2083,7 @@ handle_manage_group_repos.__mcp_requires_session_key__ = True  # type: ignore[at
 # =============================================================================
 
 
+@_admin_role_first
 def handle_get_memory_governor_stats(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:

@@ -20,12 +20,18 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.server.services.branch_service import BranchService
+from code_indexer.server.services.git_argv_safety import (
+    GitArgumentValidationError,
+    validate_branch_name,
+    validate_remote_syntax,
+)
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
 
-from ._utils import _mcp_response, app_module
+from ..auth.elevation_decorator import require_mcp_elevation
+from ._utils import _admin_role_first, _mcp_response, app_module
 
 logger = logging.getLogger(__name__)
 
@@ -472,8 +478,13 @@ def list_git_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@require_mcp_elevation()
 def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for delete_git_credential - remove a git forge credential."""
+    """Handler for delete_git_credential - remove a git forge credential.
+
+    Requires the caller's own elevation window when enforcement is on,
+    matching the REST twin DELETE /user/git-credentials/{credential_id}.
+    """
     credential_id = args.get("credential_id")
     if not credential_id:
         return _mcp_response(
@@ -481,7 +492,9 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     try:
         manager = _get_credential_manager()
-        manager.delete_credential(user.username, credential_id)
+        manager.delete_credential_audited(
+            user.username, credential_id, actor=user.username
+        )
         return _mcp_response(
             {"success": True, "message": f"Credential {credential_id} deleted"}
         )
@@ -495,8 +508,13 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@require_mcp_elevation()
 def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for configure_git_credential - store a git forge PAT with identity discovery."""
+    """Handler for configure_git_credential - store a git forge PAT with identity discovery.
+
+    Requires the caller's own elevation window when enforcement is on,
+    matching the REST twin POST /user/git-credentials.
+    """
     forge_type = args.get("forge_type")
     forge_host = args.get("forge_host")
     token = args.get("token")
@@ -517,13 +535,15 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         manager = _get_credential_manager()
         loop = asyncio.new_event_loop()
         try:
+            # The audited method records its row off this private loop.
             result = loop.run_until_complete(
-                manager.configure_credential(
-                    username=user.username,
-                    forge_type=forge_type,
-                    forge_host=forge_host,
-                    token=token,
+                manager.configure_credential_audited(
+                    user.username,
+                    forge_type,
+                    forge_host,
+                    token,
                     name=name,
+                    actor=user.username,
                 )
             )
         finally:
@@ -537,8 +557,10 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
 def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_branch_delete tool - delete branch."""
+    """Handler for git_branch_delete tool - delete branch (admin role, like
+    the ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")
@@ -575,6 +597,8 @@ def git_branch_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # cache TTL.
         BranchService.invalidate(repo_path)
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_branch_delete", e)
     except GitCommandError as e:
@@ -816,8 +840,10 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
 def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_reset tool - reset working tree."""
+    """Handler for git_reset tool - reset working tree (admin role, like the
+    ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")
@@ -858,14 +884,18 @@ def git_reset(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_reset")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_reset_hard", e)
     except Exception as e:
         return _handle_write_error("git_reset", _ERR_RESET, e)
 
 
+@_admin_role_first
 def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_clean tool - remove untracked files."""
+    """Handler for git_clean tool - remove untracked files (admin role, like
+    the ``repository:admin`` REST twin, however the call was admitted)."""
     import code_indexer.server.mcp.handlers._legacy as _legacy
 
     repository_alias = args.get("repository_alias")
@@ -894,6 +924,8 @@ def git_clean(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return confirm
         _invalidate_wiki_cache(repository_alias, "git_clean")
         return _mcp_response(result)
+    except GitArgumentValidationError as e:
+        return _mcp_response({"success": False, "error": str(e)})
     except ValueError as e:
         return _new_confirmation_token("git_clean", e)
     except Exception as e:
@@ -926,6 +958,22 @@ def git_push(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {"success": False, "error": "Failed to resolve repository path"}
             )
+
+        # _get_pat_credential_for_remote() below builds its own "git remote
+        # get-url <remote>" argv, a separate call site from
+        # GitOperationsService.git_push_with_pat's own validation. Apply both
+        # hazard checks to `remote` here too (a leading '-' other than
+        # exactly '-', and a control character), before that call and
+        # before the migration trigger, so no such value from the MCP front
+        # door ever reaches any git subprocess -- using the subprocess-free
+        # validate_remote_syntax() rather than the full
+        # validate_remote_name() membership check, since repo_path here has
+        # not yet been proven to be a real, initialized git repository. The
+        # membership check still runs, unconditionally, inside
+        # git_push_with_pat below before any of its own subprocesses. See
+        # git_argv_safety module docstring for the invariant.
+        validate_remote_syntax(remote)
+        branch = validate_branch_name(branch)
 
         # Trigger migration before push if needed (Bug #639)
         git_operations_service._trigger_migration_if_needed(

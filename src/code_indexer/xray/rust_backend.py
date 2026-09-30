@@ -31,6 +31,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
+from code_indexer.utils.path_confinement import is_resolved_within_root
+
 logger = logging.getLogger(__name__)
 
 # Sanitize server-internal paths out of error messages so they are never
@@ -631,6 +633,7 @@ class RustNativeBackend:
         self,
         xray_cache_backend: Optional[XrayCacheBackend] = None,
         identity_cache: Optional[SharedIdentityCache] = None,
+        confine_to_repo_root: bool = True,
     ) -> None:
         """Initialise backend with default xray-cli path and optional cluster cache.
 
@@ -645,7 +648,12 @@ class RustNativeBackend:
                 once per cell. None (default) creates a private cache sized
                 to _IDENTITY_CACHE_MAX_ENTRIES -- unchanged single-repo
                 xray_search behaviour.
+            confine_to_repo_root: True (default, server context) reads a
+                finding's line content only when the file resolves inside
+                the repository root; False (local ``cidx xray``) reads it
+                wherever a symlink points.
         """
+        self._confine_to_repo_root = confine_to_repo_root
         self._xray_cli_path: Path = _XRAY_CLI_DEFAULT
         self._xray_cache: Optional[XrayCacheBackend] = xray_cache_backend
         # Side-channel populated by run_batch() — debug_log() messages from xray-cli JSON.
@@ -859,6 +867,11 @@ class RustNativeBackend:
 
         base = Path(repo_path) if repo_path else Path.cwd()
         abs_paths = [str(base / spec.get("file_path", "")) for spec in file_specs]
+        # Resolved ONCE for the whole batch -- threaded through to the
+        # line_content-enrichment read as a defense-in-depth containment
+        # check, alongside candidate-collection filtering upstream. None
+        # (no check) only for the local CLI, which follows symlinks.
+        resolved_root = base.resolve() if self._confine_to_repo_root else None
 
         # Bug #1784 review MAJOR-2: track ONE operation deadline across this
         # whole call so every internal identity-helper invocation (pre-fill
@@ -922,7 +935,9 @@ class RustNativeBackend:
         # Capture debug_log() messages as a side-channel before returning.
         # XRaySearchEngine.run() reads _last_debug_messages to surface in debug_output[].
         self._last_debug_messages = output.get("debug_messages", [])
-        return self._build_results(file_specs, abs_paths, output.get("findings", []))
+        return self._build_results(
+            file_specs, abs_paths, output.get("findings", []), resolved_root
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -1344,6 +1359,7 @@ class RustNativeBackend:
         file_specs: List[Dict[str, Any]],
         abs_paths: List[str],
         findings: List[Dict[str, Any]],
+        resolved_root: Optional[Path] = None,
     ) -> _BatchResult:
         """Group findings by file and build result tuples per spec."""
         findings_by_abs: Dict[str, List[Dict[str, Any]]] = {}
@@ -1359,7 +1375,9 @@ class RustNativeBackend:
             if not spec_findings:
                 results.append(([], [], None))
                 continue
-            matches = _build_matches(spec, spec_findings, abs_path=abs_path)
+            matches = _build_matches(
+                spec, spec_findings, abs_path=abs_path, resolved_root=resolved_root
+            )
             results.append((matches, [], None))
 
         return results
@@ -1910,12 +1928,23 @@ def _build_matches(
     spec: Dict[str, Any],
     spec_findings: List[Dict[str, Any]],
     abs_path: str = "",
+    resolved_root: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """Convert xray-cli findings to match dicts for one file spec."""
+    """Convert xray-cli findings to match dicts for one file spec.
+
+    ``resolved_root``, when given, must be an already-resolved directory
+    (resolved ONCE by the caller for the whole batch, not per file).
+    ``abs_path`` is read for ``line_content`` enrichment only when it
+    resolves inside that root -- defense in depth alongside the
+    candidate-collection filtering upstream, for the last point before a
+    finding's content leaves this function.
+    """
     lang = spec.get("lang", "")
     rel_path = spec.get("file_path", "")
     source_lines: List[str] = []
-    if abs_path:
+    if abs_path and (
+        resolved_root is None or is_resolved_within_root(Path(abs_path), resolved_root)
+    ):
         try:
             source = Path(abs_path).read_bytes().decode("utf-8", errors="replace")
             source_lines = source.splitlines()

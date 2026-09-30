@@ -1,27 +1,36 @@
 ---
 name: feedback-default-agents-to-sonnet5
-description: "Development/TDD/implementation subagents run on Sonnet 5 (no model override); Opus is fine specifically for code-review agents"
+description: "Agent model policy: implementation, TDD and general agents run on Opus 5.5; code reviews go to Codex (supersedes the earlier Sonnet-for-implementation rule)"
 metadata:
   type: feedback
   originSessionId: ca34043c-b05f-4314-8219-619a25ec9f26
-  modified: 2026-08-17T14:36:22.877Z
+  modified: 2026-09-27T13:00:00.000Z
 ---
 
-During the code-indexer bug-fixing mission (2026-08-17), I had been passing `model: "opus"`
-explicitly for Claude-side review agents (`code-reviewer`). The user asked "why are you
-running agents with Opus?" then said "I thought my agents should be on Sonnet 5." I
-clarified I only override for review agents, never for `tdd-engineer`/implementation
-dispatches (those already inherit the session model with no override). The user confirmed
-the precise rule in three words: "reviews" / "opus ok" / "development, tdd, on sonnet."
+CURRENT RULE (owner, 2026-09-27): run every implementation, TDD and general-purpose subagent on
+Opus 5.5 (pass `model: "opus"`), and send code reviews to Codex (`codex-code-reviewer`) instead
+of the Claude `code-reviewer`. The orchestrating session itself also runs on Opus 5.5.
 
-**Why:** cost/architecture preference, scoped by ROLE not by stakes — review benefits from
-opus's stronger adversarial reasoning (proven repeatedly this session: it caught a
-catastrophic-undercount bug and a swap-vs-merge data-loss bug that mattered), but
-implementation work should stay on Sonnet 5 regardless of how high-stakes the mechanism is.
+**Why:** the owner changed the model strategy; Opus for the work, Codex as the independent
+second model for review.
 
-**How to apply:** `model: "opus"` is approved for `code-reviewer`/`codex-code-reviewer`-type
-dispatches (adversarial review, verification, judging findings). Never pass `model: "opus"`
-for `tdd-engineer` or any other implementation/development dispatch — leave `model` unset
-so it inherits the session's Sonnet 5. This is the STANDING rule for this user, not scoped
-to one mechanism or session. See [[feedback_use_code_reviewer]] for the earlier, narrower
-version of this same preference (written when Codex credits were low).
+**How to apply:**
+- Dispatch `tdd-engineer`, `general-purpose` and similar agents with `model: "opus"`.
+- Use `codex-code-reviewer` for review gates. Verify Codex actually ran, because wrappers can
+  silently fall back (see [[feedback_verify_codex_actually_ran]]).
+- Re-run any test numbers Codex quotes, since its interpreter lacks the project deps (see
+  [[feedback_codex_interpreter_lacks_project_deps]]).
+- Opus 5.5 subagents tend to write their `INTENT:` declaration only inside thinking blocks, so the
+  intent validator blocks every Write/Edit with "NO visible text". Proof: grouping the transcript
+  records by message id showed only thinking blocks plus the tool_use. The owner then updated the
+  intent-validation guidance to suit Opus 5.5 (2026-09-27), so briefs need NO special INTENT
+  instruction. Only if blocks reappear, add a short "state the INTENT: line in your reply text"
+  note. Never phrase it as "move your reasoning into visible text": that wording coincided with an
+  API safeguard refusal (`reasoning_extraction`) that terminated a subagent.
+- After the owner changes hook configuration, restart the running agents (stop, then relaunch with
+  a takeover brief) so they run under the new setup.
+- A running agent keeps its model when resumed. To switch models, stop it and relaunch it with a
+  brief that says the tree already contains its partial edits.
+
+SUPERSEDED (2026-08-17): "development/TDD on Sonnet 5, Opus only for review agents." See
+[[feedback_use_code_reviewer]] for the history of the reviewer preference.

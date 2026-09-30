@@ -14,6 +14,7 @@ module directly.
 """
 
 from pathlib import Path
+from typing import Optional
 
 # Linux NAME_MAX is 255 bytes. resolve_confined_path rejects any single
 # path component longer than this BEFORE it ever reaches a stat/lstat
@@ -111,6 +112,68 @@ def resolve_confined_path(repo_root: Path, relative_path: str) -> Path:
     except ValueError:
         raise PermissionError("Access denied")
     return candidate
+
+
+def resolve_if_within_root(candidate: Path, resolved_root: Path) -> Optional[Path]:
+    """Resolve ``candidate`` (following symlinks, collapsing ``..``
+    segments) and return the resolved path if it lies inside
+    ``resolved_root``, else ``None``.
+
+    The core implementation of the shared containment primitive used by
+    every indexing discovery and file-read path -- a fresh directory
+    walk, git-diff-based incremental discovery, watch-mode handlers, the
+    disk-vs-database reconcile pass, the interrupted-operation resume
+    path, and the point where a file's content is actually opened for
+    chunking. ``is_resolved_within_root``
+    is a thin boolean wrapper around this function -- callers that also
+    need the resolved value itself (e.g. to derive a relative path) call
+    this one directly instead of resolving the same candidate a second
+    time.
+
+    ``resolved_root`` MUST already be resolved (``Path.resolve()``) by
+    the caller -- this function resolves it ONCE per run, not once per
+    candidate, so callers checking many candidates against the same root
+    (a full directory walk, a batch of git-diff entries) should resolve
+    the root a single time and pass the same value for every candidate.
+
+    Fails closed (returns ``None``, never raises) on any resolution
+    error, including a symlink loop (``RuntimeError`` on CPython) or a
+    permission error walking the link chain (``OSError``), and on a
+    resolved location that is not a descendant of ``resolved_root``.
+
+    Args:
+        candidate: The path to check (need not exist; need not be
+            pre-resolved).
+        resolved_root: The already-resolved root directory candidates
+            must lie inside.
+
+    Returns:
+        The resolved candidate path if it lies inside resolved_root,
+        else None.
+    """
+    try:
+        resolved_candidate = candidate.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError:
+        return None
+
+    return resolved_candidate
+
+
+def is_resolved_within_root(candidate: Path, resolved_root: Path) -> bool:
+    """Return True if ``candidate`` resolves (following symlinks,
+    collapsing ``..`` segments) to a location inside ``resolved_root``.
+
+    Thin boolean wrapper around ``resolve_if_within_root`` -- see that
+    function's docstring for the full contract (fail-closed behavior,
+    the ``resolved_root`` pre-resolution requirement, and the list of
+    callers).
+    """
+    return resolve_if_within_root(candidate, resolved_root) is not None
 
 
 def reject_if_within_git_directory(

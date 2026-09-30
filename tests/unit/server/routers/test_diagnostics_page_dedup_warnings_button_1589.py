@@ -16,6 +16,7 @@ test_diagnostics_router.py's exact fixture pattern.
 """
 
 import re
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -23,10 +24,29 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.diagnostics import router
 
 _ELEVATION_QUALNAME = "require_elevation.<locals>._check"
 _CLEAR_ALL_PATH = "/api/admin/diagnostics/dedup-warnings/clear-all"
+
+
+def _fake_admin_user() -> User:
+    """Stand-in admin user for the get_current_admin_user_hybrid override.
+
+    GET /admin/diagnostics now requires admin auth, so this
+    suite (which pre-dates that fix and exercises behavior unrelated to
+    auth) overrides the dependency the same way test_diagnostics_router.py
+    does.
+    """
+    return User(
+        username="test-diagnostics-dedup-admin",
+        password_hash="hashed",
+        role=UserRole.ADMIN,
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+
 
 # `if (!window.confirm(<anything>)) { return...; }` -- the exact
 # cancel-returns-early idiom this codebase's restartServer() already
@@ -60,6 +80,7 @@ def client():
     app = FastAPI()
     app.include_router(router)
     _bypass_elevation(app, router)
+    app.dependency_overrides[get_current_admin_user_hybrid] = _fake_admin_user
     return TestClient(app)
 
 

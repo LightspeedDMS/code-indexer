@@ -19,6 +19,10 @@ from code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
     SemanticQueryError,
 )
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
+from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 
 # ---------------------------------------------------------------------------
@@ -85,11 +89,28 @@ def _make_backend_registry_mock(alias=GLOBAL_REPO_ALIAS, url=GLOBAL_REPO_URL):
 
 
 @pytest.fixture
-def mock_backend_registry():
+def granted_access_service(tmp_path):
+    """Real AccessFilteringService: 'testuser' is a NON-admin whose group is
+    granted the repos these tests query, so every test exercises the
+    non-admin repository narrowing in query_user_repositories (a MagicMock
+    service would report every caller as admin and skip it)."""
+    gam = GroupAccessManager(tmp_path / "groups.db")
+    group = gam.create_group("restricted", "test group")
+    gam.assign_user_to_group("testuser", group.id, assigned_by="test")
+    for repo_name in (GLOBAL_REPO_ALIAS[: -len("-global")], "test-repo"):
+        gam.grant_repo_access(repo_name, group.id, granted_by="test")
+    service = AccessFilteringService(gam)
+    assert not service.is_admin_user("testuser")
+    return service
+
+
+@pytest.fixture
+def mock_backend_registry(granted_access_service):
     """Patch app.state.backend_registry to return a mock with one global repo."""
     registry = _make_backend_registry_mock()
     mock_app = MagicMock()
     mock_app.state.backend_registry = registry
+    mock_app.state.access_filtering_service = granted_access_service
     with patch("code_indexer.server.app.app", mock_app):
         yield registry
 
@@ -246,7 +267,7 @@ class TestGlobalRepos404Bug:
 class TestGlobalReposFlow:
     """Flow tests for global repos with mocked backend_registry."""
 
-    def test_complete_global_repo_query_flow(self, temp_dirs):
+    def test_complete_global_repo_query_flow(self, temp_dirs, granted_access_service):
         """
         Full flow: backend_registry has a global repo, query by alias succeeds.
         """
@@ -266,6 +287,7 @@ class TestGlobalReposFlow:
         )
         mock_app = MagicMock()
         mock_app.state.backend_registry = registry
+        mock_app.state.access_filtering_service = granted_access_service
 
         with patch("code_indexer.server.app.app", mock_app):
             with patch.object(manager, "_perform_search", return_value=[]):

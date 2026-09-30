@@ -401,6 +401,13 @@ class DaemonWatchManager:
             vector_store_client = backend.get_vector_store_client()
 
             # Initialize SmartIndexer
+            # Bug #1979 (round 5 -- SUPERSEDED by the round-4 revert): bare
+            # legacy filename, matching daemon/service.py's own index path
+            # (also reverted back to the bare name). Round 4's coordinator
+            # ruling reverted the daemon-write per-provider filename
+            # entirely rather than propagate it to every reader (cidx
+            # status, foreground cidx watch, config_fixer); watch mode
+            # follows the SAME reverted convention here.
             metadata_path = code_indexer_dir / "metadata.json"
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path

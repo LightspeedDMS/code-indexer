@@ -55,6 +55,8 @@ Applies to source, tests, **test fixtures and sample data**, docstrings, comment
 - Bug reports and epics cite BEHAVIOUR and code locations in THIS repository -- never a third party's file paths, type names, or source.
 - Credentials for testing live in gitignored files (`.local-testing`, `.e2e-automation`); read them, never echo, quote, or commit them.
 - Real production/customer detail belongs in gitignored working areas (`.analysis/`, `reports/`), never in a tracked file or the tracker.
+- Security vulnerabilities are tracked out of band in the dedicated private repository `code-indexer-security`, never in this repository's issues, PRs, or docs.
+- Commit messages always use neutral, professional language. Security commits, and their code comments and tests, state the invariant enforced (e.g. "validate git remote and branch arguments"), never the flaw, exploit, payload, or impact.
 
 ### If something already leaked
 
@@ -67,6 +69,8 @@ Scrub it, then say so plainly to the user -- do not quietly edit and move on. Ed
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.
 
 ## Memory Files
+
+**MEMORIES ARE PUBLIC.** `.claude-memory/` is committed to this public open-source repository, so every memory file is world-readable. NEVER write secrets, credentials, or any sensitive information into a memory file -- not even temporarily, not even "to sanitize later".
 
 Memory notes in `.claude-memory/` are committed to version control. Before staging/committing ANY memory file, sanitize it: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IPs, network topology, cluster node ids, ports). Capture the lesson, never the environment -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
 
@@ -144,6 +148,12 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
+### Gate Timing -- Full Gates Only After Approval
+
+Full gates (`fast-`, `server-fast-`, `e2e-automation.sh`, full `./lint.sh`, directory-wide pytest) run ONCE, only after ALL code reviews are approved. In an epic, only after ALL stories are completed and approved. Running them before or between review rounds wastes the run whenever review rejects.
+
+In between, pick tests strategically: (1) tests for the specific capability being worked on, and (2) tests for capabilities you suspect the change could break (callers, shared state, sibling paths). Name the files; never run whole directories as a substitute for thinking. Put this rule in every engineer and pair brief.
+
 ### Hierarchy
 
 1. Targeted tests (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
@@ -214,7 +224,7 @@ Three CI sync constraints, all learned by breaking them:
 2. `lint` runs on **Python 3.9**, tracking `[tool.mypy] python_version`. `no_site_packages=false` means mypy PARSES third-party sources under that target -- a newer interpreter installs deps whose syntax 3.9 can't parse and the gate dies inside `site-packages`. Do NOT modernize to 3.12 without moving the mypy target. (mypy also flags `attr-defined` on a private third-party attr the CI-installed version lacks -- access such internals via `getattr(mod, "_X", fallback)`, not a bare import.)
 3. `rust` pins `dtolnay/rust-toolchain@<exact>` which must track `rust/rust-toolchain.toml`'s `channel`; rustup auto-installs it for any `cargo` invocation with cwd inside `rust/`, in CI and locally alike. Do not revert either to floating.
 
-**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing.
+**pre-commit mypy is stricter about `Any` returns than `lint.sh`** -- run `pre-commit run mypy --files <changed>` before committing. **The pre-commit hook skips `tests/`, but `lint.sh` and CI type-check them** -- also run `python3 -m mypy --explicit-package-bases --check-untyped-defs <changed test files>` (typical hits: `str` passed where `Path`/an enum is expected, `Any` returned from a typed helper).
 
 ---
 

@@ -19,8 +19,10 @@ from ...services.ssh_key_generator import (
     InvalidKeyNameError,
     KeyAlreadyExistsError,
 )
+from ...services.ssh_input_validation import InvalidHostnameError
+from ..auth.elevation_decorator import require_mcp_elevation
 
-from ._utils import _mcp_response
+from ._utils import _admin_role_first, _mcp_response
 
 if TYPE_CHECKING:
     pass
@@ -78,9 +80,13 @@ def _metadata_payload(meta: Any, include_public: bool = False) -> Dict[str, Any]
     return payload
 
 
+@require_mcp_elevation()
 def _create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Create a new SSH key pair (inner handler).
+
+    Elevation-gated to match the REST twin (POST /api/ssh-keys carries
+    require_elevation()).
 
     Args:
         args: Dict with name, key_type (optional), email (optional), description (optional)
@@ -102,11 +108,12 @@ def _create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.create_key(
-            name=name,
+        metadata = manager.create_key_audited(
+            name,
             key_type=key_type,
             email=email,
             description=description,
+            actor=user.username,
         )
         payload = _metadata_payload(metadata, include_public=True)
         payload["success"] = True
@@ -167,9 +174,13 @@ def _list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error listing SSH keys", e)
 
 
+@require_mcp_elevation()
 def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Delete an SSH key (inner handler).
+
+    Elevation-gated to match the REST twin (DELETE /api/ssh-keys/{name}
+    carries require_elevation()).
 
     Args:
         args: Dict with name
@@ -193,7 +204,7 @@ def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         # was reported as a success -- a silent lie about a safety-critical
         # operation. The failure shape matches this handler's existing
         # convention for a rejected request (see the missing-name branch above).
-        if not manager.delete_key(name):
+        if not manager.delete_key_audited(name, actor=user.username):
             return _mcp_response(
                 {
                     "success": False,
@@ -252,9 +263,14 @@ def _show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error getting public key", e)
 
 
+@require_mcp_elevation()
 def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Assign a host to an SSH key (inner handler).
+
+    Elevation-gated to match the REST twin (POST /api/ssh-keys/{name}/hosts
+    carries require_elevation()): an admin JWT with no live TOTP must not
+    reach this mutation via MCP any more than it can via REST/web.
 
     Args:
         args: Dict with name and hostname
@@ -280,10 +296,8 @@ def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.assign_key_to_host(
-            key_name=name,
-            hostname=hostname,
-            force=force,
+        metadata = manager.assign_key_to_host_audited(
+            name, hostname, force=force, actor=user.username
         )
         payload = _metadata_payload(metadata)
         payload["success"] = True
@@ -293,6 +307,8 @@ def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": f"Key not found: {name}"})
     except HostConflictError as e:
         return _mcp_response({"success": False, "error": str(e)})
+    except InvalidHostnameError as e:
+        return _mcp_response({"success": False, "error": f"Invalid hostname: {str(e)}"})
     except Exception as e:
         return _ssh_error("Error assigning host to key", e)
 
@@ -300,17 +316,28 @@ def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 _VALID_SSH_ACTIONS = frozenset({"create", "delete", "show_public", "assign_host"})
 
 
-def handle_manage_ssh_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+@_admin_role_first
+def handle_manage_ssh_key(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
     """
     Unified SSH key management dispatcher (Story #992).
 
     Dispatches to inner handlers based on the 'action' parameter:
-      - 'create'      -> _create(args, user)
-      - 'delete'      -> _delete(args, user)
-      - 'show_public' -> _show_public(args, user)
-      - 'assign_host' -> _assign_host(args, user)
+      - 'create'      -> _create(args, user)       [elevation required]
+      - 'delete'      -> _delete(args, user)       [elevation required]
+      - 'show_public' -> _show_public(args, user)  [read-only, no elevation]
+      - 'assign_host' -> _assign_host(args, user)  [elevation required]
 
-    Permission is enforced at the tool-doc level (repository:admin).
+    Admin role required in the handler (``_admin_role_first``), like every
+    REST ``/api/ssh-keys`` twin, however the call was admitted.
+    Elevation: create/delete/assign_host are decorated with
+    @require_mcp_elevation() individually
+    (Story #992 pattern -- inner handlers own the decorator, not this
+    dispatcher). **kwargs is forwarded so a caller-supplied session_key
+    reaches those decorators; this function itself declares
+    __mcp_requires_session_key__ below so protocol.py injects it when
+    dispatched as the top-level MCP tool handler.
     """
     action = args.get("action", "")
     if not action:
@@ -328,21 +355,26 @@ def handle_manage_ssh_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     if action == "create":
-        return _create(args, user)
+        return _create(args, user, **kwargs)  # type: ignore[no-any-return]
     if action == "delete":
-        return _delete(args, user)
+        return _delete(args, user, **kwargs)  # type: ignore[no-any-return]
     if action == "show_public":
         return _show_public(args, user)
     # action == "assign_host"
-    return _assign_host(args, user)
+    return _assign_host(args, user, **kwargs)  # type: ignore[no-any-return]
 
 
+handle_manage_ssh_key.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+@_admin_role_first
 def handle_list_ssh_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     List all managed and unmanaged SSH keys (Story #992).
 
     Simple rename wrapper over _list — same signature, same response shape.
-    Permission enforced at tool-doc level (repository:admin).
+    Admin role required in the handler (``_admin_role_first``), like the
+    REST ``GET /api/ssh-keys`` twin, however the call was admitted.
     """
     return _list(args, user)
 

@@ -115,11 +115,23 @@ def _load_repo_config(repo_path: str) -> Any:
     search_similar's existing "orphaned repo -> skip gracefully"
     `except ValueError` handling) instead of silently using an unrelated
     ancestor's or a defaulted config.
+
+    This function only ever runs in server context (never a developer's own
+    local CLI query), so the embedding-provider endpoint and daemon-mode
+    fields are always reset to server-managed values before the config is
+    returned -- unconditionally, regardless of which branch served it.
     """
+    from ..utils.server_managed_provider_settings import (
+        enforce_server_managed_provider_settings,
+    )
+
     registry = _get_repo_config_cache()
     if registry is not None:
-        return registry.get_config(repo_path)
-    return ConfigManager.load_verified_config(Path(repo_path))
+        config = registry.get_config(repo_path)
+    else:
+        config = ConfigManager.load_verified_config(Path(repo_path))
+    enforce_server_managed_provider_settings(config)
+    return config
 
 
 def _get_golden_repos_dir() -> str:

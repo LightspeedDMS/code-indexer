@@ -8,11 +8,28 @@ metadata:
   modified: 2026-09-24T15:45:31.446Z
 ---
 
-v12.71.0 is committed on `development`, merged to `staging`, and RUNNING on BOTH
-staging deployments (solo/SQLite and clustered/PostgreSQL, both confirmed
-`version: 12.71.0` through their own front doors; CI green on both branches).
-Production is still 12.65.0. Master untouched. No push-to-master authorization
-has been given.
+**PROMOTED. v12.72.0 IS LIVE IN PRODUCTION** (merge `92dadb1e`, 2026-09-24),
+taking production from 12.65.0 across 62 commits and 7 version bumps. Authorized
+by the operator with the full two-confirmation protocol; CI green on master.
+
+Verified through the production front door after the auto-deploy: `12.72.0`,
+`status: healthy`, 998 global repositories, a real `search_code` returning
+results in 720ms under the `parallel` query strategy. The wildcard cap guard
+also fired correctly (997 repos vs a cap of 50), so fleet-scale protections
+work at real scale.
+
+**Pre-flight checks worth repeating next promotion**: master-only NON-merge
+commits was 0 (proves no un-back-merged hotfix would be reverted -- the ~23
+master-only commits are all merge commits from prior promotions, which is the
+normal shape and NOT divergence); and the merged tree was `git diff`-identical
+to the staging tree the gates ran against.
+
+**A real trap hit during the push**: production `check_health` reported
+`active_jobs: 2` ninety seconds after reporting 0, which would have meant killing
+in-flight work. `get_job_statistics` (the JobTracker, the authoritative registry
+for restartable jobs) reported `active: 0, pending: 0` throughout, and health
+oscillated back to 0. The two counters measure different things -- trust the
+JobTracker for "is durable work at risk", not health's `system.active_jobs`.
 
 **MCP surface always-on cost, measured at the front door at 12.71.0**: cluster
 147 tools / 117,624 chars; solo 145 tools / 113,443 chars. The two-tool gap is

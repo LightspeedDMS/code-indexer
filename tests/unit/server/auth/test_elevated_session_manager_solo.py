@@ -909,6 +909,35 @@ def test_cross_instance_touch_atomic_shared_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# An elevation window is valid only for the user who created it --
+# touch_atomic_for_user() must reject a resolved session key when the
+# requested username does not own it, on both backends.
+# ---------------------------------------------------------------------------
+
+
+def test_touch_atomic_for_user_rejects_wrong_username(manager):
+    """touch_atomic_for_user() must return None when session_key exists but
+    belongs to a different username (SQLite backend)."""
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    result = manager.touch_atomic_for_user(_SESSION_KEY_A, "a-different-user")
+    assert result is None
+    # The window itself is untouched and still reachable by its real owner.
+    assert manager.touch_atomic_for_user(_SESSION_KEY_A, _USERNAME_ADMIN) is not None
+
+
+def test_cluster_touch_atomic_for_user_rejects_wrong_username(cluster_manager):
+    """touch_atomic_for_user() must return None when session_key exists but
+    belongs to a different username (PostgreSQL backend)."""
+    cluster_manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    result = cluster_manager.touch_atomic_for_user(_SESSION_KEY_A, "a-different-user")
+    assert result is None
+    assert (
+        cluster_manager.touch_atomic_for_user(_SESSION_KEY_A, _USERNAME_ADMIN)
+        is not None
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cross-instance PG visibility
 # ---------------------------------------------------------------------------
 
@@ -1070,3 +1099,69 @@ def test_fail_closed_store_error_denies_access(tmp_path, monkeypatch):
         "Fail-closed violated: get_status must return None (deny) on store error, "
         "not raise or grant access."
     )
+
+
+# ---------------------------------------------------------------------------
+# log_elevation_owner_mismatch() -- read-only, exception-safe diagnostic
+# ---------------------------------------------------------------------------
+
+
+def test_log_elevation_owner_mismatch_warns_on_mismatch(manager, caplog):
+    """Must log a WARNING when the resolved session belongs to someone else."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, _SESSION_KEY_A, "a-different-user")
+    assert any(
+        "not owned by the authenticating user" in rec.message for rec in caplog.records
+    )
+
+
+def test_log_elevation_owner_mismatch_silent_when_username_matches(manager, caplog):
+    """Must not log anything when the session belongs to the given username."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, _SESSION_KEY_A, _USERNAME_ADMIN)
+    assert caplog.records == []
+
+
+def test_log_elevation_owner_mismatch_silent_when_no_session(manager, caplog):
+    """Must not log anything when the session key does not exist at all."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, "nonexistent-key", _USERNAME_ADMIN)
+    assert caplog.records == []
+
+
+def test_log_elevation_owner_mismatch_never_raises_on_store_error(manager, tmp_path):
+    """A broken store read must not propagate an exception onto the auth path."""
+    import shutil
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    broken = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=str(tmp_path / "will_be_broken" / "elevated_sessions.db"),
+    )
+    shutil.rmtree(tmp_path / "will_be_broken")
+    # No exception must escape this call.
+    log_elevation_owner_mismatch(broken, _SESSION_KEY_A, _USERNAME_ADMIN)

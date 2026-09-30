@@ -57,6 +57,7 @@ def test_partial_orphan_cleanup_never_falls_through_to_clone(manager, monkeypatc
             repo_url="https://example.invalid/repo.git",
             alias=alias,
             default_branch="main",
+            submitter_username="example-admin",
         )
 
     assert writer_ran

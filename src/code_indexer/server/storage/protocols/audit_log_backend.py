@@ -6,12 +6,25 @@ pure typing-construct relocation, zero behaviour change.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Sequence
+
 from ._shared import List, Optional, Protocol, Tuple, runtime_checkable
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.audit_events import AuditEvent
+    from code_indexer.server.services.audit_log_query import AuditFilters
 
 
 @runtime_checkable
 class AuditLogBackend(Protocol):
     """Protocol for audit log service storage (AuditLogService interface)."""
+
+    def insert_events(self, events: "Sequence[AuditEvent]") -> None:
+        """Insert *events* in ONE transaction; raise on failure.
+
+        The single write function of the unified audit capture path.
+        """
+        ...
 
     def log(
         self,
@@ -32,17 +45,35 @@ class AuditLogBackend(Protocol):
         details: Optional[str] = None,
     ) -> None: ...
 
-    def query(
+    # Shared read path (services/audit_log_query.py renders the SQL); the
+    # ONE way rows are read for the Web page, MCP and REST.
+
+    def query_page(
         self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        exclude_target_type: Optional[str] = None,
-        limit: Optional[int] = None,
+        filters: "AuditFilters",
+        tier: str,
+        *,
+        seek: Optional[Tuple[str, int]],
+        direction: str,
+        limit: int,
         offset: int = 0,
-    ) -> Tuple[List[dict], int]: ...
+    ) -> List[dict]:
+        """One keyset page ordered by ``(timestamp, id)`` in *direction*."""
+        ...
+
+    def count_capped(self, filters: "AuditFilters", tier: str, *, cap: int) -> int:
+        """Matching row count, reading at most ``cap + 1`` rows."""
+        ...
+
+    def aggregate(
+        self, filters: "AuditFilters", tier: str, *, max_groups: int
+    ) -> List[dict]:
+        """SQL ``GROUP BY (action_type, outcome)`` of the matching rows."""
+        ...
+
+    def find_terminal_rows(self, correlation_ids: "Sequence[str]") -> List[dict]:
+        """Non-attempted rows sharing one of *correlation_ids*."""
+        ...
 
     def get_pr_logs(
         self,

@@ -1140,6 +1140,147 @@ ensure_git_safe_directory_wildcard() {
 }
 
 # ---------------------------------------------------------------------------
+# Step: CoW daemon user joins its configured service_group (daemon host only)
+#
+# cidx-server creates activated-repos/<user>/ as the service user with mode
+# 2775 and group = the service user's primary group. The CoW daemon, running
+# as its OWN OS user, must create the per-user clone inside that directory,
+# which it can only do through the group bits. The group is the daemon
+# config's `service_group` (the same group the daemon grants clone ACLs to);
+# it must EQUAL the cidx service user's primary group -- the gid every new
+# user directory carries -- otherwise joining it does not help (fail loudly). The daemon user comes from its systemd unit (User=),
+# else the running MainPID's real uid, and must be an existing, non-root,
+# conservatively named account -- never guessed (ERROR + skip otherwise). A
+# running daemon only picks up a new supplementary group on restart, so it is
+# restarted whenever its running process lacks the gid (this also repairs a
+# previous run whose restart failed). No-op on nodes that do not host the
+# daemon. Mirrors DeploymentExecutor._ensure_cow_daemon_user_in_service_group()
+# (the auto-updater's self-heal twin for already-deployed hosts).
+# ---------------------------------------------------------------------------
+
+COW_DAEMON_SERVICE_NAME="cow-storage-daemon"
+# /proc root; overridable via env var for testing only (mirrors
+# COW_DAEMON_HOST_CONFIG_PATH above).
+PROC_ROOT="${CIDX_PROC_ROOT:-/proc}"
+
+err() { echo "[install-cidx-server] ERROR $*" >&2; }
+
+# Prints the validated CoW daemon account name; returns 1 (after an ERROR
+# message) when it cannot be resolved or is unsafe.
+resolve_cow_daemon_user() {
+    local name pid uid
+    if ! name="$(systemctl show -p User --value "${COW_DAEMON_SERVICE_NAME}")"; then
+        err "systemctl show -p User failed for ${COW_DAEMON_SERVICE_NAME}"
+        return 1
+    fi
+    if [[ -z "${name}" ]]; then
+        if ! pid="$(systemctl show -p MainPID --value "${COW_DAEMON_SERVICE_NAME}")"; then
+            err "systemctl show -p MainPID failed for ${COW_DAEMON_SERVICE_NAME}"
+            return 1
+        fi
+        if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+            err "${COW_DAEMON_SERVICE_NAME} unit has no User= and the daemon is not running; cannot determine the daemon user"
+            return 1
+        fi
+        if ! uid="$(awk '$1 == "Uid:" {print $2}' "${PROC_ROOT}/${pid}/status")" || [[ -z "${uid}" ]]; then
+            err "cannot read the real uid of ${COW_DAEMON_SERVICE_NAME} (pid ${pid})"
+            return 1
+        fi
+        if ! name="$(getent passwd "${uid}" | cut -d: -f1)" || [[ -z "${name}" ]]; then
+            err "uid ${uid} of ${COW_DAEMON_SERVICE_NAME} has no passwd entry"
+            return 1
+        fi
+    fi
+    if [[ ! "${name}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        err "CoW daemon user name '${name}' is invalid"
+        return 1
+    fi
+    if ! uid="$(id -u "${name}" 2>/dev/null)"; then
+        err "CoW daemon user '${name}' does not exist"
+        return 1
+    fi
+    if [[ "${uid}" == "0" ]]; then
+        err "CoW daemon user '${name}' is root (uid 0); refusing"
+        return 1
+    fi
+    echo "${name}"
+}
+
+# True when the /proc status of <pid> lists <gid> on its Gid: or Groups: line.
+cow_daemon_process_has_gid() {
+    local status="${PROC_ROOT}/$1/status" gid="$2" line value
+    [[ -r "${status}" ]] || return 1
+    while IFS= read -r line; do
+        case "${line}" in
+            Gid:*|Groups:*)
+                for value in ${line#*:}; do
+                    if [[ "${value}" == "${gid}" ]]; then
+                        return 0
+                    fi
+                done
+                ;;
+        esac
+    done < "${status}"
+    return 1
+}
+
+ensure_cow_daemon_service_group_membership() {
+    info "--- CoW daemon service-group membership ---"
+    local config="${COW_DAEMON_HOST_CONFIG_PATH}"
+    if ! sudo test -f "${config}"; then
+        info "No co-located CoW daemon config at ${config}; skipping"
+        return 0
+    fi
+
+    local service_group
+    service_group="$(sudo python3 -c 'import json, sys; print((json.load(open(sys.argv[1])).get("service_group") or "").strip())' "${config}")" \
+        || die "Cannot read CoW daemon config ${config}"
+    [[ -n "${service_group}" ]] \
+        || die "CoW daemon config ${config} has no service_group"
+    getent group "${service_group}" >/dev/null 2>&1 \
+        || die "CoW daemon service_group '${service_group}' does not exist on this host"
+
+    # New activated-repos user dirs carry the service user's PRIMARY gid
+    # (ensure_activated_user_dir), so service_group must be exactly that group.
+    local service_user primary_group
+    service_user="$(whoami)"
+    primary_group="$(id -gn "${service_user}")"
+    if [[ "${primary_group}" != "${service_group}" ]]; then
+        die "CoW daemon service_group '${service_group}' is not the primary group of the cidx service user '${service_user}' (primary group '${primary_group}'); new activated-repos user directories would not be writable by the daemon"
+    fi
+
+    local daemon_user
+    if ! daemon_user="$(resolve_cow_daemon_user)"; then
+        err "Skipping CoW daemon service-group membership: the daemon user could not be determined safely"
+        return 0
+    fi
+
+    if [[ " $(id -nG "${daemon_user}") " == *" ${service_group} "* ]]; then
+        info "CoW daemon user ${daemon_user} is already a member of ${service_group}"
+    else
+        dry_run_or_exec sudo usermod -aG "${service_group}" "${daemon_user}" \
+            || die "Failed to add CoW daemon user ${daemon_user} to group ${service_group}"
+        info "Added CoW daemon user ${daemon_user} to ${service_group}"
+    fi
+
+    local gid pid
+    gid="$(getent group "${service_group}" | cut -d: -f3)"
+    pid="$(systemctl show -p MainPID --value "${COW_DAEMON_SERVICE_NAME}")" \
+        || die "systemctl show -p MainPID failed for ${COW_DAEMON_SERVICE_NAME}"
+    if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+        info "${COW_DAEMON_SERVICE_NAME} is not running; it picks up ${service_group} when it starts"
+        return 0
+    fi
+    if cow_daemon_process_has_gid "${pid}" "${gid}"; then
+        info "Running ${COW_DAEMON_SERVICE_NAME} already carries group ${service_group}"
+        return 0
+    fi
+    dry_run_or_exec sudo systemctl restart "${COW_DAEMON_SERVICE_NAME}" \
+        || die "Failed to restart ${COW_DAEMON_SERVICE_NAME} after the group change"
+    info "Restarted ${COW_DAEMON_SERVICE_NAME} so it picks up group ${service_group}"
+}
+
+# ---------------------------------------------------------------------------
 # Step: auto-update systemd service + timer
 #
 # Renders cidx-auto-update.service from the SAME template used by
@@ -1348,6 +1489,7 @@ main() {
     # co-located daemon-config auto-detect step).
     if [[ "${CLONE_BACKEND}" == "cow-daemon" ]]; then
         resolve_cow_daemon_storage_path
+        ensure_cow_daemon_service_group_membership
     fi
 
     write_config

@@ -4,10 +4,12 @@ Repository Health REST API Router.
 Provides REST endpoints for checking HNSW index health with caching support.
 """
 
+import functools
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
@@ -22,6 +24,12 @@ from code_indexer.server.services.repository_health_aggregator import (
 )
 from code_indexer.server.services.repository_health_aggregator import (
     _to_collection_health_result as _to_collection_health_result,  # noqa: F401
+)
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    normalize_repo_alias,
+    require_repo_access,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,8 +164,23 @@ async def get_repository_description(
         DescriptionResponse with repo_alias and markdown description body
 
     Raises:
+        HTTPException 403: caller lacks access to repo_alias
         HTTPException 404: cidx-meta file not found or golden_repos_dir not set
+        HTTPException 500: access_filtering_service unavailable
     """
+    # ------------------------------------------------------------------
+    # Repo-level access is verified UNCONDITIONALLY, before even checking
+    # golden_repos_dir, so no filesystem existence/path-traversal signal
+    # is ever computed for a caller who lacks access. Offloaded off the
+    # event-loop thread: this is `async def` and require_repo_access()
+    # performs synchronous DB reads.
+    # ------------------------------------------------------------------
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _enforce_direct_repo_access, repo_alias, current_user.username
+        )
+    )
+
     golden_repos_dir = getattr(request.app.state, "golden_repos_dir", None)
     if not golden_repos_dir:
         raise HTTPException(
@@ -232,6 +255,207 @@ def _get_background_job_manager():
             "Server must set app.state.background_job_manager during startup."
         )
     return manager
+
+
+def _get_access_filtering_service() -> Optional[Any]:
+    """Get access_filtering_service from app state.
+
+    Mirrors the module-singleton pattern of _get_golden_repo_manager() /
+    _get_activated_repo_manager() / _get_background_job_manager() above so
+    it is patchable identically in tests. Unlike those siblings, returns
+    None rather than raising when unwired: this is a repo-scoped access
+    gate, not a hard dependency -- callers MUST turn None into a 403/500
+    fail-closed response via _enforce_repo_access(), never proceed as if
+    the caller had access.
+    """
+    from code_indexer.server import app as app_module
+
+    return getattr(app_module.app.state, "access_filtering_service", None)
+
+
+def _resolve_activated_repo_access_targets(
+    username: str, user_alias: str
+) -> Optional[List[str]]:
+    """Return the golden repo aliases that authorise the caller's OWN
+    activated repo user_alias, or None when nothing authorises it.
+
+    - A single-repo activation is authorised through its backing
+      golden_repo_alias.
+    - A composite activation (is_composite, created via
+      manage_composite_repository) records its components in
+      golden_repo_aliases; it is authorised through ALL of them. A
+      composite with no (or malformed) recorded components, or with any
+      component that no longer exists as a golden repo, is never
+      authorised.
+
+    Only the caller's own activations are looked up (keyed by username),
+    so another user's repo can never resolve here.
+    """
+    try:
+        metadata = _get_activated_repo_manager().get_repository(
+            username, user_alias, touch=False
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to resolve access targets for activated repo '%s' (user '%s'): %s",
+            user_alias,
+            username,
+            exc,
+        )
+        return None
+    if not metadata:
+        return None
+    if metadata.get("is_composite", False):
+        components = metadata.get("golden_repo_aliases")
+        if not (
+            isinstance(components, list)
+            and components
+            and all(isinstance(c, str) and c for c in components)
+        ):
+            return None
+        # A component golden repo removed after the composite was created
+        # never authorises it, even if a grant for its alias remains.
+        golden_repo_manager = _get_golden_repo_manager()
+        if not all(
+            golden_repo_manager.get_golden_repo(normalize_repo_alias(c))
+            for c in components
+        ):
+            return None
+        return list(components)
+    golden_alias = metadata.get("golden_repo_alias")
+    if isinstance(golden_alias, str) and golden_alias:
+        return [golden_alias]
+    return None
+
+
+def _resolve_repo_access_target(repo_alias: str, username: str) -> Optional[List[str]]:
+    """Resolve the golden repo alias(es) that must be authorised for
+    repo_alias, in EXACTLY the same priority order
+    check_repository_health_async() and get_repository_indexes() use to pick
+    which repository's data to return (via _resolve_repository_path() and
+    its inlined twin):
+      1. repo_alias as a golden repo (exact match)
+      2. the -global-stripped repo_alias as a golden repo
+      3. the caller's OWN activated repo: its backing golden alias, or --
+         for a composite -- every component golden alias
+
+    Returns None when neither strategy resolves anything for this caller.
+
+    An activated repo's custom alias is chosen by the user at activation
+    time with no uniqueness check against existing golden repo aliases, so
+    it can collide with an unrelated golden repo's alias. Both routes
+    resolve a golden repo match BEFORE ever considering the caller's own
+    activated repos for the same alias string -- this function's priority
+    order must stay in exact lockstep with that, so authorisation is never
+    computed against a different repository than the one actually served.
+    """
+    golden_repo_manager = _get_golden_repo_manager()
+    if golden_repo_manager.get_golden_repo(repo_alias):
+        return [repo_alias]
+    if repo_alias.endswith("-global"):
+        base_alias = repo_alias[:-7]
+        if golden_repo_manager.get_golden_repo(base_alias):
+            return [base_alias]
+    return _resolve_activated_repo_access_targets(username, repo_alias)
+
+
+def _repo_access_allowed(
+    access_filtering_service: Optional[Any], repo_alias: str, username: str
+) -> bool:
+    """Return True if username is authorised for EVERY target
+    _resolve_repo_access_target() resolves repo_alias to.
+
+    Admin users bypass the check entirely -- checked BEFORE resolution, so
+    an admin querying an alias that resolves to neither a golden nor their
+    own activated repo still reaches the route's own 404, matching every
+    other admin-bypass front door in this codebase.
+
+    Raises:
+        AccessFilteringServiceUnavailableError: access_filtering_service is
+            None -- checked BEFORE resolution or the admin bypass, so
+            callers fail closed regardless of role or what repo_alias
+            would otherwise resolve to.
+    """
+    require_repo_access(
+        access_filtering_service, username, None
+    )  # raises if unavailable; else a no-op
+
+    if access_filtering_service.is_admin_user(username):  # type: ignore[attr-defined]
+        return True
+
+    targets = _resolve_repo_access_target(repo_alias, username)
+    if not targets:
+        return False
+
+    try:
+        require_repo_access(access_filtering_service, username, targets)
+        return True
+    except RepoAccessDeniedError:
+        return False
+
+
+def _enforce_repo_access(repo_alias: str, username: str) -> None:
+    """Enforce repo-level access for repo_alias against the SAME target
+    the route's own resolution strategy resolves it to (see
+    _resolve_repo_access_target) -- never against the raw alias string in
+    isolation.
+
+    Called UNCONDITIONALLY, before repository resolution or job
+    submission (aside from the golden-repo lookups
+    _resolve_repo_access_target itself performs to determine the correct
+    authorisation target), so the check can never be silently skipped.
+
+    Raises:
+        HTTPException 403: caller lacks access to the resolved target.
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    try:
+        allowed = _repo_access_allowed(
+            _get_access_filtering_service(), repo_alias, username
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "access_control_unavailable", "detail": str(e)},
+        )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "access_denied",
+                "detail": str(RepoAccessDeniedError(repo_alias, username)),
+            },
+        )
+
+
+def _enforce_direct_repo_access(repo_alias: str, username: str) -> None:
+    """Enforce DIRECT repo-level access for repo_alias, with NO
+    activated-repo fallback.
+
+    GET .../description reads golden-keyed cidx-meta content
+    (cidx-meta/{repo_alias}.md) unconditionally -- it never resolves
+    repo_alias against the caller's own activated repos, so authorising it
+    via an activated repo's backing golden alias would authorise a
+    DIFFERENT repository's description than the one actually read.
+
+    Raises:
+        HTTPException 403: caller lacks direct access to repo_alias.
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    try:
+        require_repo_access(_get_access_filtering_service(), username, repo_alias)
+    except RepoAccessDeniedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "access_denied", "detail": str(e)},
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "access_control_unavailable", "detail": str(e)},
+        )
 
 
 def _resolve_golden_repo_alias_for_activated_repo(
@@ -364,10 +588,22 @@ async def check_repository_health_async(
         HealthCheckJobResponse with job_id to poll
 
     Raises:
+        HTTPException 403: caller lacks access to repo_alias
         HTTPException 404: Repository not found
         HTTPException 409: A health check job is already running for this repo
-        HTTPException 500: Failed to start health check job
+        HTTPException 500: Failed to start health check job, or
+            access_filtering_service unavailable
     """
+    # ------------------------------------------------------------------
+    # Repo-level access is verified UNCONDITIONALLY, before repository
+    # resolution or job submission. Offloaded off the event-loop thread:
+    # this is `async def` and require_repo_access() performs synchronous
+    # DB reads.
+    # ------------------------------------------------------------------
+    await anyio.to_thread.run_sync(
+        functools.partial(_enforce_repo_access, repo_alias, current_user.username)
+    )
+
     try:
         resolved_alias, clone_path = _resolve_repository_path(repo_alias, current_user)
         index_base_path = clone_path / ".code-indexer" / "index"
@@ -452,9 +688,21 @@ async def get_repository_indexes(
         IndexesStatusResponse with boolean flags for each index type
 
     Raises:
+        HTTPException 403: caller lacks access to repo_alias
         HTTPException 404: Repository not found
-        HTTPException 500: Failed to check index status
+        HTTPException 500: Failed to check index status, or
+            access_filtering_service unavailable
     """
+    # ------------------------------------------------------------------
+    # Repo-level access is verified UNCONDITIONALLY, before repository
+    # resolution. Offloaded off the event-loop thread: this is `async def`
+    # and require_repo_access() performs synchronous
+    # DB reads.
+    # ------------------------------------------------------------------
+    await anyio.to_thread.run_sync(
+        functools.partial(_enforce_repo_access, repo_alias, current_user.username)
+    )
+
     try:
         # Multi-strategy repository resolution (same as health endpoint)
         # Strategy 1: Try as golden repo (exact match)

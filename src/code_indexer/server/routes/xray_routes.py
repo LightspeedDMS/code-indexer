@@ -12,12 +12,17 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, cast
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 logger = logging.getLogger(__name__)
@@ -59,6 +64,48 @@ class XRaySearchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers — extracted for easy mocking in tests
 # ---------------------------------------------------------------------------
+
+
+def _enforce_repo_access(
+    access_filtering_service: Optional[Any],
+    username: str,
+    aliases: Union[str, List[str]],
+) -> None:
+    """Enforce repo-level access for one or more requested aliases.
+
+    /api/xray/search authorizes every requested golden repo against the
+    caller's group grants via AccessFilteringService before any X-Ray AST
+    search. Delegates the actual access decision to the shared
+    require_repo_access() guard (same semantics as the MCP dispatcher's
+    _check_repository_access()) and shapes the result into this route's
+    existing HTTPException error-envelope convention.
+
+    Called UNCONDITIONALLY, before repository/evaluator resolution or job
+    submission, so the check can never be silently skipped.
+
+    Raises:
+        HTTPException 403: caller lacks access to the requested alias.
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    try:
+        require_repo_access(access_filtering_service, username, aliases)
+    except RepoAccessDeniedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error_code": "access_denied",
+                "detail": str(e),
+            },
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error_code": "access_control_unavailable",
+                "detail": str(e),
+            },
+        )
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
@@ -141,20 +188,25 @@ def _resolve_evaluator_code_or_raise(body: "XRaySearchRequest") -> str:
 )
 def xray_search(
     body: XRaySearchRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> XRaySearchResponse:
     """Submit an X-Ray AST search job and return its job_id.
 
     1. Permission check (query_repos).
-    2. Field validation (search_target, timeout_seconds range, max_files).
-    3. Evaluator resolution — evaluator_code or pattern_name (Bug #1812).
-    4. Repository alias resolution.
-    5. Pre-flight evaluator validation via validate_rust_evaluator.
-    6. Job submission via BackgroundJobManager.
-    7. Return HTTP 202 with {job_id}.
+    2. Repo-level access check.
+    3. Field validation (search_target, timeout_seconds range, max_files).
+    4. Evaluator resolution — evaluator_code or pattern_name (Bug #1812).
+    5. Repository alias resolution.
+    6. Pre-flight evaluator validation via validate_rust_evaluator.
+    7. Job submission via BackgroundJobManager.
+    8. Return HTTP 202 with {job_id}.
 
     Error codes:
         auth_required              — missing query_repos permission (403)
+        access_denied              — caller lacks access to a requested repo (403)
+        access_control_unavailable — access_filtering_service missing (500)
         invalid_search_target      — search_target not 'content' or 'filename' (422)
         timeout_out_of_range       — timeout_seconds outside [10, 600] (422)
         max_files_out_of_range     — max_files provided but < 1 (422)
@@ -176,6 +228,15 @@ def xray_search(
                 "detail": "query_repos permission required",
             },
         )
+
+    # ------------------------------------------------------------------
+    # 1b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE repository/evaluator resolution or job submission.
+    # ------------------------------------------------------------------
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, body.repository_alias)
 
     # ------------------------------------------------------------------
     # 2. Field validation
@@ -334,6 +395,8 @@ class XRayBatchSearchResponse(BaseModel):
 # Map synchronous MCP error codes to HTTP status codes.
 _BATCH_ERROR_HTTP_STATUS = {
     "auth_required": status.HTTP_403_FORBIDDEN,
+    "access_denied": status.HTTP_403_FORBIDDEN,
+    "access_control_unavailable": status.HTTP_500_INTERNAL_SERVER_ERROR,
     "alias_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
     "scans_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
     "too_many_repositories": status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -363,7 +426,10 @@ def xray_search_batch(
 
     Error codes follow the batch contract (distinct from the single-search
     xray_search endpoint's error codes, though both now support pattern_name
-    and evaluator_code — Bug #1812).
+    and evaluator_code — Bug #1812). Repo-level access enforcement
+    lives inside handle_xray_search_batch itself, since this
+    route calls that handler directly rather than routing through the MCP
+    dispatcher.
     """
     import json as _json
 

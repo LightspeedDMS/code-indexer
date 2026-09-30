@@ -178,10 +178,13 @@
     </div>
     <div class="pagination-controls">
         <button id="gitlab-back-btn" class="outline small" disabled
-                onclick="loadGitLabBack({{ page_size }}, '{{ search_term|default('', true)|e }}')">Previous</button>
+                data-search-term="{{ search_term|default('', true) }}"
+                onclick="loadGitLabBack({{ page_size }}, this.dataset.searchTerm)">Previous</button>
         <button id="gitlab-next-btn" class="outline small"
                 {% if not has_next_page %}disabled{% endif %}
-                onclick="loadGitLabNext('{{ next_cursor|default('', true)|e }}', {{ page_size }}, '{{ search_term|default('', true)|e }}')">Next</button>
+                data-next-cursor="{{ next_cursor|default('', true) }}"
+                data-search-term="{{ search_term|default('', true) }}"
+                onclick="loadGitLabNext(this.dataset.nextCursor, {{ page_size }}, this.dataset.searchTerm)">Next</button>
     </div>
 </div>
 

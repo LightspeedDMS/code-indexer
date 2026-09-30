@@ -691,3 +691,32 @@ class TestLoginRateLimiterClusterMode:
         # Node 1 should also see the lockout
         locked, _ = limiter_node1.is_locked("dave")
         assert locked is True
+
+    def test_lockout_transition_is_reported_once_across_nodes(self, pg_pool):
+        """Only the failure that locks the account reports the transition."""
+        node1 = LoginRateLimiter(max_attempts=3)
+        node1.set_connection_pool(pg_pool)
+        node2 = LoginRateLimiter(max_attempts=3)
+        node2.set_connection_pool(pg_pool)
+
+        assert node1.record_failure("erin").lockout_started is False
+        assert node1.record_failure("erin").lockout_started is False
+        third = node2.record_failure("erin")
+        assert (third.locked, third.lockout_started) == (True, True)
+
+        # A node that passed its lock pre-check just before node2 locked the
+        # account (the cross-node race) records a failure over the threshold
+        # but must not report a second transition.
+        racing = node1._pg_record_failure("erin")
+        assert (racing.locked, racing.lockout_started) == (True, False)
+        # A failure recorded while locked never reports it either.
+        later = node1.record_failure("erin")
+        assert (later.locked, later.lockout_started) == (True, False)
+
+
+class TestLockoutTransitionInMemory:
+    def test_in_memory_lockout_transition_is_reported_once(self):
+        limiter = LoginRateLimiter(max_attempts=2)
+        outcomes = [limiter.record_failure("frank") for _ in range(4)]
+        assert [o.lockout_started for o in outcomes] == [False, True, False, False]
+        assert [o.locked for o in outcomes] == [False, True, True, True]

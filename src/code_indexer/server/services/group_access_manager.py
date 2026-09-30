@@ -29,8 +29,43 @@ from .constants import (
     DEFAULT_GROUP_USERS,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.audit_events import ALL_TARGETS_MARKER
+from code_indexer.server.services.audit_outcome import audit_target_id, record_outcome
 
 logger = logging.getLogger(__name__)
+
+
+def _record_tool_access(
+    actor: str,
+    tool_name: str,
+    group_id: object,
+    allowed: bool,
+    all_groups: bool,
+    outcome: str,
+) -> None:
+    """Record one tool-to-group access change (the acting user is *actor*).
+
+    A successful change names the group it changed and the tool.  A failed
+    change verified no group (other than the fixed every-group marker), so
+    it records the placeholder target and only the ``all_groups`` flag.
+    """
+    action_type = (
+        "group_tool_access_granted" if allowed else "group_tool_access_revoked"
+    )
+    if outcome == "success":
+        target: Optional[str] = str(group_id)
+        details: Dict[str, Any] = {"tool_name": tool_name, "all_groups": all_groups}
+    else:
+        target = ALL_TARGETS_MARKER if group_id == ALL_TARGETS_MARKER else None
+        details = {"all_groups": all_groups}
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="group",
+        target_id=target,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class DefaultGroupCannotBeDeletedError(Exception):
@@ -49,6 +84,10 @@ class CidxMetaCannotBeRevokedError(Exception):
     """Raised when attempting to revoke cidx-meta access from any group."""
 
     pass
+
+
+class GroupNotFoundError(ValueError):
+    """Raised by an audited operation when the group it names does not exist."""
 
 
 @dataclass
@@ -145,8 +184,8 @@ class GroupAccessManager:
         """
         Inject AuditLogService for audit event delegation (Story #399).
 
-        When set, log_audit() and get_audit_logs() delegate to the service
-        instead of operating directly on the audit_logs table.
+        When set, log_audit() delegates to the service instead of writing
+        directly to the audit_logs table.
 
         Args:
             audit_service: AuditLogService instance
@@ -657,6 +696,66 @@ class GroupAccessManager:
 
         self._conn_manager.execute_atomic(_do_assign)
 
+    def assign_user_to_group_audited(
+        self, user_id: str, group_id: int, *, actor: str
+    ) -> Group:
+        """Move *user_id* into group *group_id*, recording ``user_group_change``.
+
+        The one entry point of every door that moves a user between groups.
+        One row per call: ``success`` once the membership is written (target:
+        the member now persisted; details: the previous and new group names),
+        or ``failure`` when the group does not exist or the write raised, after
+        which the exception propagates.  A failure names no member.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+        """
+        action = "user_group_change"
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            previous = self.get_user_group(user_id)
+            self.assign_user_to_group(user_id, group_id, actor)
+        except Exception:
+            self._record_group_outcome(actor, action, "user", None, "failure", None)
+            raise
+        details: Dict[str, Any] = {"to_group": group.name}
+        if previous is not None:
+            details["from_group"] = previous.name
+        self._record_group_outcome(actor, action, "user", user_id, "success", details)
+        return group
+
+    def _record_group_outcome(
+        self,
+        actor: str,
+        action_type: str,
+        target_type: str,
+        verified_target: Optional[str],
+        outcome: str,
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        """Record one legacy-type membership / access row; never raises.
+
+        *verified_target* is None unless the operation persisted or found it
+        (a placeholder is recorded then).  Delivery is :meth:`log_audit`'s.
+        """
+        try:
+            self.log_audit(
+                admin_id=actor,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=audit_target_id(target_type, verified_target),
+                details=details,
+                outcome=outcome,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-open by owner decision
+            logger.error(
+                "audit record not written: action_type=%s error_class=%s",
+                action_type,
+                type(exc).__name__,
+            )
+
     def remove_user_from_group(self, user_id: str, group_id: int) -> bool:
         """
         Remove a user from a specific group.
@@ -890,6 +989,88 @@ class GroupAccessManager:
                 cb()
         return result["revoked"]  # type: ignore[no-any-return]
 
+    def revoke_repo_access_audited(
+        self, repo_name: str, group_id: int, *, actor: str
+    ) -> bool:
+        """Revoke one repository from a group, recording ``repo_access_revoke``.
+
+        The one entry point of every door that revokes a single repository.
+        One row per call: ``success`` once the grant is removed (target: the
+        repository just removed; details: it and the group name), or
+        ``failure`` when the group does not exist, the repository was not in
+        its list (returns False), or revocation raised (cidx-meta included),
+        after which the exception propagates.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+            CidxMetaCannotBeRevokedError: *repo_name* is cidx-meta.
+        """
+        action = "repo_access_revoke"
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            revoked = self.revoke_repo_access(repo_name, group_id)
+        except Exception:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            raise
+        if not revoked:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            return False
+        alias = audit_target_id("repo", repo_name)
+        self._record_group_outcome(
+            actor,
+            action,
+            "repo",
+            alias,
+            "success",
+            {"repo": alias, "group": group.name},
+        )
+        return True
+
+    def revoke_repos_access_audited(
+        self, repo_names: List[str], group_id: int, *, actor: str
+    ) -> int:
+        """Revoke many repositories from a group; return how many were revoked.
+
+        The one entry point of the bulk revoke doors.  cidx-meta is skipped
+        silently.  Each revoked repository writes its own ``success`` row (as
+        the single-repository door does); the repositories that were not in
+        the group write ONE ``failure`` row between them, carrying only their
+        count, so an unbounded request never writes one row per absent name.
+        A missing group, or a revocation that raised, writes one ``failure``
+        row and the exception propagates.
+
+        Raises:
+            GroupNotFoundError: *group_id* names no group.
+        """
+        action = "repo_access_revoke"
+        not_in_group = 0
+        revoked = 0
+        try:
+            group = self.get_group(group_id)
+            if group is None:
+                raise GroupNotFoundError(f"Group with ID {group_id} not found")
+            for repo_name in repo_names:
+                if repo_name == CIDX_META_REPO:
+                    continue
+                if not self.revoke_repo_access(repo_name, group_id):
+                    not_in_group += 1
+                    continue
+                revoked += 1
+                alias = audit_target_id("repo", repo_name)
+                details = {"repo": alias, "group": group.name}
+                self._record_group_outcome(
+                    actor, action, "repo", alias, "success", details
+                )
+        except Exception:
+            self._record_group_outcome(actor, action, "repo", None, "failure", None)
+            raise
+        if not_in_group:
+            summary = {"group": group.name, "not_in_group_count": not_in_group}
+            self._record_group_outcome(actor, action, "repo", None, "failure", summary)
+        return revoked
+
     def get_group_repos(self, group_id: int) -> List[str]:
         """
         Get all repositories accessible by a group.
@@ -969,7 +1150,27 @@ class GroupAccessManager:
     def set_tool_access(
         self, tool_name: str, group_id: int, allowed: bool, granted_by: str
     ) -> bool:
-        """Set a tool's explicit allow/deny state for one group."""
+        """Set a tool's explicit allow/deny state for one group.
+
+        Records one ``group_tool_access_granted`` / ``_revoked`` row with
+        *granted_by* (the acting user) as the actor.  Returns False, after
+        recording a failure row, when the backend reports the change was not
+        applied.
+        """
+        try:
+            applied = self._set_tool_access(tool_name, group_id, allowed, granted_by)
+        except Exception:
+            _record_tool_access(
+                granted_by, tool_name, group_id, allowed, False, "failure"
+            )
+            raise
+        outcome = "success" if applied else "failure"
+        _record_tool_access(granted_by, tool_name, group_id, allowed, False, outcome)
+        return bool(applied)
+
+    def _set_tool_access(
+        self, tool_name: str, group_id: int, allowed: bool, granted_by: str
+    ) -> bool:
         if self._backend is not None:
             return self._backend.set_tool_access(  # type: ignore[no-any-return]
                 tool_name, group_id, allowed, granted_by
@@ -1057,7 +1258,27 @@ class GroupAccessManager:
     def set_tool_access_all_groups(
         self, tool_name: str, allowed: bool, granted_by: str
     ) -> List[int]:
-        """Atomically set one tool's state for every group existing at call time."""
+        """Atomically set one tool's state for every group existing at call time.
+
+        Records one ``group_tool_access_granted`` / ``_revoked`` row per
+        affected group (``all_groups`` true), with *granted_by* as the actor.
+        """
+        try:
+            affected = self._set_tool_access_all_groups(tool_name, allowed, granted_by)
+        except Exception:
+            _record_tool_access(
+                granted_by, tool_name, ALL_TARGETS_MARKER, allowed, True, "failure"
+            )
+            raise
+        for group_id in affected:
+            _record_tool_access(
+                granted_by, tool_name, group_id, allowed, True, "success"
+            )
+        return affected
+
+    def _set_tool_access_all_groups(
+        self, tool_name: str, allowed: bool, granted_by: str
+    ) -> List[int]:
         if self._backend is not None:
             return self._backend.set_tool_access_all_groups(  # type: ignore[no-any-return]
                 tool_name, allowed, granted_by
@@ -1332,6 +1553,8 @@ class GroupAccessManager:
         target_type: str,
         target_id: str,
         details: Optional[Dict[str, Any]] = None,
+        *,
+        outcome: Optional[str] = None,
     ) -> None:
         """
         Record an audit log entry.
@@ -1347,6 +1570,8 @@ class GroupAccessManager:
             target_type: Type of target (user, group, repo)
             target_id: ID of the target
             details: Optional structured payload describing the action
+            outcome: Explicit outcome (None: the one the name implies).  The
+                standalone-tooling file below has no outcome column.
         """
         if details is not None and not isinstance(details, dict):
             raise TypeError(
@@ -1362,10 +1587,37 @@ class GroupAccessManager:
                 target_type=target_type,
                 target_id=target_id,
                 details=details_json,
+                outcome=outcome,
             )
             return
 
+        from code_indexer.server.services import audit_capture
+        from code_indexer.server.services.audit_events import build_legacy_event
+
+        if audit_capture.is_server_process():
+            # A manager built without the lifespan audit service (for example
+            # per request) never writes to its own file inside a server: the
+            # row goes to the one bound audit store.
+            audit_capture.record(
+                build_legacy_event(
+                    actor=admin_id,
+                    action_type=action_type,
+                    target_type=target_type,
+                    target_id=target_id,
+                    details_json=details_json,
+                    outcome=outcome,
+                )
+            )
+            return
+
+        # Outside a server (tests, tooling): direct write to this file, with
+        # the same write-time allowlist build_legacy_event applies.
+        from code_indexer.server.services.audit_log_query import (
+            restrict_legacy_details,
+        )
+
         now = datetime.now(timezone.utc).isoformat()
+        details_json = restrict_legacy_details(action_type, details_json)
 
         def _do_log(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
@@ -1379,113 +1631,6 @@ class GroupAccessManager:
             )
 
         self._conn_manager.execute_atomic(_do_log)
-
-    def get_audit_logs(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        exclude_target_type: Optional[str] = None,
-    ) -> tuple[List[dict], int]:
-        """
-        Get audit log entries with optional filters.
-
-        Story #710: AC8 - Get Audit Logs
-        Story #399: Delegates to AuditLogService when injected.
-
-        Args:
-            action_type: Filter by action type
-            target_type: Filter by target type
-            admin_id: Filter by admin who performed the action
-            date_from: Filter logs from this date (ISO format YYYY-MM-DD)
-            date_to: Filter logs up to this date (ISO format YYYY-MM-DD)
-            limit: Maximum number of entries to return
-            offset: Number of entries to skip
-            exclude_target_type: Exclude entries with this target_type (AC5)
-
-        Returns:
-            Tuple of (list of log dicts, total count)
-        """
-        if self._audit_service is not None:
-            return self._audit_service.query(  # type: ignore[no-any-return]
-                action_type=action_type,
-                target_type=target_type,
-                admin_id=admin_id,
-                date_from=date_from,
-                date_to=date_to,
-                limit=limit,
-                offset=offset,
-                exclude_target_type=exclude_target_type,
-            )
-
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-
-        # Build WHERE clause
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if action_type:
-            conditions.append("action_type = ?")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = ?")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = ?")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= ?")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= ?")
-            params.append(f"{date_to}T23:59:59")
-
-        where_clause = ""
-        if conditions:
-            where_clause = "WHERE " + " AND ".join(conditions)
-
-        # Get total count
-        count_query = f"SELECT COUNT(*) as count FROM audit_logs {where_clause}"
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()["count"]
-
-        # Build main query
-        query = f"""
-            SELECT id, timestamp, admin_id, action_type, target_type,
-                   target_id, details
-            FROM audit_logs
-            {where_clause}
-            ORDER BY timestamp DESC
-        """
-
-        if limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-
-        logs = []
-        for row in rows:
-            logs.append(
-                {
-                    "id": row["id"],
-                    "timestamp": row["timestamp"],
-                    "admin_id": row["admin_id"],
-                    "action_type": row["action_type"],
-                    "target_type": row["target_type"],
-                    "target_id": row["target_id"],
-                    "details": row["details"],
-                }
-            )
-
-        return logs, total
 
 
 def seed_users_to_groups(

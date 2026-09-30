@@ -97,8 +97,13 @@ def _create_test_user(
         },
         admin_headers,
     )
+    _mcp_inner(resp, "create_user")
+
+
+def _mcp_inner(resp, tool: str) -> dict:
+    """Return the parsed inner JSON of an MCP tool result, asserting success."""
     assert resp.status_code == 200, (
-        f"create_user MCP call failed: HTTP {resp.status_code} — {resp.text[:300]}"
+        f"{tool} MCP call failed: HTTP {resp.status_code} — {resp.text[:300]}"
     )
     body = resp.json()
     result = body.get("result", {})
@@ -106,17 +111,41 @@ def _create_test_user(
     # MCP result content is a list of {"type": "text", "text": "<json>"}.
     # Parse the inner JSON text to check the tool success flag.
     assert content and isinstance(content, list), (
-        f"create_user: unexpected result.content shape: {body}"
+        f"{tool}: unexpected result.content shape: {body}"
     )
     raw = content[0].get("text", "{}")
     try:
         inner = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise AssertionError(
-            f"create_user: failed to parse inner JSON from MCP result: {raw!r}"
+            f"{tool}: failed to parse inner JSON from MCP result: {raw!r}"
         ) from exc
-    assert inner.get("success") is True, (
-        f"create_user returned success=False for {username!r}: {body}"
+    assert inner.get("success") is True, f"{tool} returned success=False: {body}"
+    return dict(inner)
+
+
+def _add_user_to_powerusers(
+    client: TestClient, admin_headers: dict, username: str
+) -> None:
+    """Place the user in the 'powerusers' group via the MCP admin tools.
+
+    Activation requires group access to the golden repository; new golden
+    repos are granted to the 'powerusers' group, while a newly created
+    power_user starts in the 'users' group.
+    """
+    groups = _mcp_inner(
+        call_mcp_tool(client, "list_groups", {}, admin_headers), "list_groups"
+    )["groups"]
+    group_ids = [g["id"] for g in groups if g["name"] == "powerusers"]
+    assert group_ids, f"list_groups: no 'powerusers' group in {groups}"
+    _mcp_inner(
+        call_mcp_tool(
+            client,
+            "manage_group_members",
+            {"action": "add", "group_id": str(group_ids[0]), "user_id": username},
+            admin_headers,
+        ),
+        "manage_group_members",
     )
 
 
@@ -244,6 +273,7 @@ class TestAuthNeverCached:
         try:
             # Step 1: create test user via admin MCP tool.
             _create_test_user(client, auth_headers, username, password)
+            _add_user_to_powerusers(client, auth_headers, username)
 
             # Step 2: login as the new user to obtain a JWT.
             user_token = _login(client, username, password)

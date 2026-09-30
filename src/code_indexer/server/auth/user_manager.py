@@ -16,6 +16,17 @@ from pydantic import BaseModel
 from .password_manager import PasswordManager
 from .password_strength_validator import PasswordStrengthValidator
 from ..utils.datetime_parser import DateTimeParser
+from ..services.audit_events import SystemComponent
+from ..services.audit_outcome import AuditActor, conforming_details, record_outcome
+from ...validation.user_validation import (
+    validate_username_path_safe,
+    UserValidationError,
+)
+
+
+def _name_of(user: Optional["User"]) -> Optional[str]:
+    """The verified username of a looked-up account, or None."""
+    return user.username if user is not None else None
 
 
 class SSOPasswordChangeError(Exception):
@@ -233,8 +244,19 @@ class UserManager:
             Created User object
 
         Raises:
-            ValueError: If user already exists or password is too weak
+            ValueError: If username is unsafe, user already exists, or
+                password is too weak
         """
+        # Centralized path-traversal-safety gate.
+        # Runs BEFORE password validation/hashing and BEFORE any backend
+        # write, so an unsafe username (e.g. '..', containing '/'/'\\')
+        # never reaches storage regardless of which caller invokes
+        # create_user (self-registration, admin REST, web UI, MCP).
+        try:
+            validate_username_path_safe(username)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
+
         # Validate password strength (applies to both backends)
         is_valid, validation_result = self.password_strength_validator.validate(
             password, username
@@ -681,6 +703,161 @@ class UserManager:
             self._save_users(users_data)
             return True
 
+    # ------------------------------------------------------------------
+    # Audited entry points.  Every front door (REST, MCP, Web) calls these;
+    # the unaudited primitives above stay for seeding and test fixtures.
+    # Each records exactly one outcome row naming the acting user (never
+    # the target) and re-raises any failure.  The target account is
+    # recorded only once an account lookup has verified it exists; on a
+    # failed or unknown lookup the row carries the fixed placeholder and no
+    # optional details.  Lookups run inside the guarded block, so a failing
+    # lookup still records the failure row.
+    # ------------------------------------------------------------------
+
+    def create_user_audited(
+        self, username: str, password: str, role: UserRole, *, actor: AuditActor
+    ) -> User:
+        """:meth:`create_user`, recording ``user_created``.
+
+        *actor* is the creating admin, or the self-registration system
+        component.  A failed creation persisted no account, so its row
+        names none.
+        """
+        provisioning = (
+            "self_registration"
+            if actor is SystemComponent.SELF_REGISTRATION
+            else "admin"
+        )
+        details = {"role": role.value, "provisioning": provisioning}
+        try:
+            user = self.create_user(username=username, password=password, role=role)
+        except Exception:
+            self._record_user_outcome(actor, "user_created", None, "failure", {})
+            raise
+        self._record_user_outcome(
+            actor, "user_created", user.username, "success", details
+        )
+        return user
+
+    def delete_user_audited(self, username: str, *, actor: str) -> bool:
+        """:meth:`delete_user`, recording ``user_deleted``."""
+        verified: Optional[User] = None
+        try:
+            verified = self.get_user(username)
+            deleted = self.delete_user(username) if verified is not None else False
+        except Exception:
+            self._record_user_outcome(actor, "user_deleted", None, "failure", {})
+            raise
+        if not deleted or verified is None:
+            self._record_user_outcome(actor, "user_deleted", None, "failure", {})
+            return False
+        self._record_user_outcome(
+            actor,
+            "user_deleted",
+            verified.username,
+            "success",
+            {"deleted_role": verified.role.value},
+        )
+        return True
+
+    def update_user_role_audited(
+        self, username: str, new_role: UserRole, *, actor: str
+    ) -> bool:
+        """:meth:`update_user_role`, recording ``user_role_changed``."""
+        action = "user_role_changed"
+        verified: Optional[User] = None
+        try:
+            verified = self.get_user(username)
+            updated = (
+                self.update_user_role(username, new_role)
+                if verified is not None
+                else False
+            )
+        except Exception:
+            self._record_user_outcome(actor, action, None, "failure", {})
+            raise
+        if not updated or verified is None:
+            self._record_user_outcome(actor, action, None, "failure", {})
+            return False
+        self._record_user_outcome(
+            actor,
+            action,
+            verified.username,
+            "success",
+            {"old_role": verified.role.value, "new_role": new_role.value},
+        )
+        return True
+
+    def change_password_audited(
+        self, username: str, new_password: str, *, actor: str
+    ) -> bool:
+        """:meth:`change_password`, recording an admin reset of another user.
+
+        A user changing their own password writes no new row here: that path
+        is already recorded by the password-change audit rows.
+        """
+        if actor == username:
+            return self.change_password(username, new_password)
+        action = "user_password_reset_by_admin"
+        verified: Optional[User] = None
+        try:
+            verified = self.get_user(username)
+            changed = self.change_password(username, new_password)
+        except Exception:
+            self._record_user_outcome(actor, action, _name_of(verified), "failure", {})
+            raise
+        if not changed or verified is None:
+            self._record_user_outcome(actor, action, None, "failure", {})
+            return changed
+        self._record_user_outcome(actor, action, verified.username, "success", {})
+        return True
+
+    def update_user_email_audited(
+        self, username: str, new_email: Optional[str], *, actor: str
+    ) -> bool:
+        """Set or clear *username*'s email, recording ``user_email_changed``.
+
+        No row is written when the email does not change.  The email value
+        itself is never recorded (personal data).
+        """
+        action = "user_email_changed"
+        verified: Optional[User] = None
+        try:
+            verified = self.get_user(username)
+            if verified is not None and (verified.email or None) == (new_email or None):
+                return True
+            updated = (
+                self.update_user(username, new_email=new_email)
+                if verified is not None
+                else False
+            )
+        except Exception:
+            self._record_user_outcome(actor, action, _name_of(verified), "failure", {})
+            raise
+        if not updated or verified is None:
+            self._record_user_outcome(actor, action, None, "failure", {})
+            return False
+        self._record_user_outcome(actor, action, verified.username, "success", {})
+        return True
+
+    @staticmethod
+    def _record_user_outcome(
+        actor: AuditActor,
+        action_type: str,
+        verified_username: Optional[str],
+        outcome: str,
+        details: Dict[str, str],
+    ) -> None:
+        """Record one user row; *verified_username* is None unless looked up."""
+        record_outcome(
+            actor=actor,
+            action_type=action_type,
+            target_type="user",
+            target_id=verified_username,
+            outcome=outcome,
+            details=details,
+        )
+
     def add_api_key(
         self,
         username: str,
@@ -845,6 +1022,37 @@ class UserManager:
                 return False  # Key not found
             self._save_users(users_data)
             return True
+
+    def delete_api_key_audited(self, username: str, key_id: str, *, actor: str) -> bool:
+        """:meth:`delete_api_key`, recording ``api_key_deleted``.
+
+        The key id is recorded only when the deletion found and removed that
+        persisted key; a failed or unknown deletion records the placeholder.
+        The key's free-text name is never recorded.
+        """
+        try:
+            deleted = self.delete_api_key(username, key_id)
+        except Exception:
+            self._record_api_key_deleted(actor, None, "failure")
+            raise
+        if not deleted:
+            self._record_api_key_deleted(actor, None, "failure")
+            return False
+        self._record_api_key_deleted(actor, key_id, "success")
+        return True
+
+    @staticmethod
+    def _record_api_key_deleted(
+        actor: str, verified_key_id: Optional[str], outcome: str
+    ) -> None:
+        record_outcome(
+            actor=actor,
+            action_type="api_key_deleted",
+            target_type="api_key",
+            target_id=verified_key_id,
+            outcome=outcome,
+            details=conforming_details("api_key_deleted", key_id=verified_key_id),
+        )
 
     def validate_user_api_key(self, username: str, raw_key: str) -> Optional[User]:
         """
@@ -1312,6 +1520,27 @@ class UserManager:
         return True
 
     def create_oidc_user(self, username, role, email, oidc_identity):
+        """Create user via JIT provisioning, recording ``user_created``.
+
+        The actor is the SSO-provisioning system component; the email and
+        identity data are never recorded.  See :meth:`_create_oidc_user`.
+        """
+        role_value = role.value if hasattr(role, "value") else str(role)
+        details = conforming_details(
+            "user_created", role=role_value, provisioning="sso"
+        )
+        actor = SystemComponent.SSO_PROVISIONING
+        try:
+            user = self._create_oidc_user(username, role, email, oidc_identity)
+        except Exception:
+            self._record_user_outcome(actor, "user_created", None, "failure", {})
+            raise
+        self._record_user_outcome(
+            actor, "user_created", user.username, "success", details
+        )
+        return user
+
+    def _create_oidc_user(self, username, role, email, oidc_identity):
         """Create user via JIT provisioning (without user-known password).
 
         Args:
@@ -1324,9 +1553,19 @@ class UserManager:
             Created User object
 
         Raises:
-            ValueError: If user already exists
+            ValueError: If username is unsafe or user already exists
         """
         import secrets
+
+        # Same centralized gate as create_user().
+        # An IdP-derived username is input this server does not control
+        # (the IdP decides its value, and a username_claim may point at a
+        # free-text field) -- JIT
+        # provisioning must not bypass path-traversal-safety validation.
+        try:
+            validate_username_path_safe(username)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
 
         # Story #702 SQLite migration: Add SQLite backend support
         if self._use_sqlite and self._sqlite_backend is not None:

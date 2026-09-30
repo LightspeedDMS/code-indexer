@@ -42,6 +42,21 @@ def _make_user(role: UserRole = UserRole.NORMAL_USER) -> User:
     )
 
 
+def _make_admin_bypass_request() -> Any:
+    """Minimal stand-in for FastAPI's injected Request.
+
+    regex_search() now requires a real Request
+    (keyword-only, no default) to enforce repo-level access. This test
+    exercises unrelated behavior (trigram-hang degradation), so the
+    stand-in's access_filtering_service admin-bypasses the check.
+    """
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    request = MagicMock()
+    request.app.state.access_filtering_service = mock_access_service
+    return request
+
+
 def _build_repo_with_index(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -94,7 +109,9 @@ class TestRegexRouteDegradesOnTrigramHang:
         ):
             start = time.monotonic()
             with pytest.raises(HTTPException) as exc_info:
-                await regex_search(body, user)
+                await regex_search(
+                    body, user=user, request=_make_admin_bypass_request()
+                )
             elapsed = time.monotonic() - start
 
         assert elapsed < BLOCK_SECONDS, (

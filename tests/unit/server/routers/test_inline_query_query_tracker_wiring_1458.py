@@ -160,6 +160,17 @@ class TestRestQueryTrackerWiringFtsMode:
 
         mock_activated_repo_manager = MagicMock()
         mock_activated_repo_manager.activated_repos_dir = str(activated_repos_dir)
+        # inline_query.py's
+        # FTS-availability check now calls get_activated_repo_path(...)
+        # instead of hand-joining activated_repos_dir/username/user_alias --
+        # mirror the REAL ActivatedRepoManager's join formula here so this
+        # MagicMock keeps resolving to the same on-disk paths these tests
+        # already set up.
+        mock_activated_repo_manager.get_activated_repo_path.side_effect = (
+            lambda username, user_alias: str(
+                activated_repos_dir / username / user_alias
+            )
+        )
         mock_activated_repo_manager.list_activated_repositories.return_value = [
             {"user_alias": "myrepo", "username": "alice", "is_global": False}
         ]
@@ -254,6 +265,17 @@ class TestRestQueryTrackerWiringFtsMode:
 
         mock_activated_repo_manager = MagicMock()
         mock_activated_repo_manager.activated_repos_dir = str(activated_repos_dir)
+        # inline_query.py's
+        # FTS-availability check now calls get_activated_repo_path(...)
+        # instead of hand-joining activated_repos_dir/username/user_alias --
+        # mirror the REAL ActivatedRepoManager's join formula here so this
+        # MagicMock keeps resolving to the same on-disk paths these tests
+        # already set up.
+        mock_activated_repo_manager.get_activated_repo_path.side_effect = (
+            lambda username, user_alias: str(
+                activated_repos_dir / username / user_alias
+            )
+        )
         mock_activated_repo_manager.list_activated_repositories.return_value = [
             {"user_alias": "repo-without-fts", "username": "alice", "is_global": False},
             {"user_alias": "repo-with-fts", "username": "alice", "is_global": False},
@@ -353,6 +375,17 @@ class TestRestQueryTrackerWiringFtsMode:
 
         mock_activated_repo_manager = MagicMock()
         mock_activated_repo_manager.activated_repos_dir = str(activated_repos_dir)
+        # inline_query.py's
+        # FTS-availability check now calls get_activated_repo_path(...)
+        # instead of hand-joining activated_repos_dir/username/user_alias --
+        # mirror the REAL ActivatedRepoManager's join formula here so this
+        # MagicMock keeps resolving to the same on-disk paths these tests
+        # already set up.
+        mock_activated_repo_manager.get_activated_repo_path.side_effect = (
+            lambda username, user_alias: str(
+                activated_repos_dir / username / user_alias
+            )
+        )
         mock_activated_repo_manager.list_activated_repositories.return_value = [
             {"user_alias": "myrepo", "username": "alice", "is_global": False}
         ]

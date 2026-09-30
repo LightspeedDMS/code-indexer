@@ -26,9 +26,13 @@ def _make_user() -> User:
 
 
 def _make_app_state(read_path: Path) -> MagicMock:
-    """Build a mock app state whose dependency_map_service.cidx_meta_read_path returns read_path."""
+    """Build a mock app state whose dependency_map_service.cidx_meta_read_path
+    returns read_path. access_filtering_service.is_admin_user() is set
+    explicitly to True rather than left as an implicit truthy attribute of
+    a bare MagicMock, so this double's behavior is stated, not incidental."""
     state = MagicMock()
     state.dependency_map_service.cidx_meta_read_path = read_path
+    state.access_filtering_service.is_admin_user.return_value = True
     return state
 
 

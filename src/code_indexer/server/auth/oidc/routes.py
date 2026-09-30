@@ -1,9 +1,13 @@
 """OIDC authentication routes for FastAPI."""
 
+import functools
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional, TypeVar, cast
+
+import anyio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from ..login_outcome import complete_login, reject_login
 from ...web.auth import get_session_manager
 from ...web.routes import _get_user_mfa_status
 
@@ -20,6 +24,46 @@ oidc_manager: Optional["OIDCManager"] = None
 
 # Global state manager instance (injected by app.py)
 state_manager: Optional["StateManager"] = None
+
+_SSO_LOGIN_METHOD = "sso"
+
+T = TypeVar("T")
+
+
+async def _reject_sso(*, stage: str, reason: str) -> None:
+    """Record one refused SSO login, off the event loop.
+
+    No account is established at any SSO refusal point, so none is named.
+    """
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            reject_login,
+            None,
+            account_exists=False,
+            method=_SSO_LOGIN_METHOD,
+            stage=stage,
+            reason=reason,
+        )
+    )
+
+
+async def _complete_sso(username: str, *, flow: str, issue: Callable[[], T]) -> T:
+    """Issue an SSO login's session or code and record it, off the event loop.
+
+    Reached only when the account has no MFA enrolled (an enrolled account
+    is sent to the MFA challenge, which records the login's outcome).
+    """
+    issued = await anyio.to_thread.run_sync(
+        functools.partial(
+            complete_login,
+            username,
+            method=_SSO_LOGIN_METHOD,
+            mfa="not_enrolled",
+            flow=flow,
+            issue=issue,
+        )
+    )
+    return cast(T, issued)
 
 
 @router.get("/callback")
@@ -39,6 +83,7 @@ async def sso_callback(code: str, state: str, request: Request):
             state_data = dependencies.oidc_state_manager.validate_state(state)
 
         if not state_data:
+            await _reject_sso(stage="challenge", reason="challenge_invalid_or_expired")
             raise HTTPException(status_code=400, detail="Invalid state")
 
     # Build callback URL using CIDX_ISSUER_URL if set (for reverse proxy scenarios)
@@ -53,6 +98,7 @@ async def sso_callback(code: str, state: str, request: Request):
     try:
         await oidc_manager.ensure_provider_initialized()
     except Exception as _exc:
+        await _reject_sso(stage="credentials", reason="server_error")
         raise HTTPException(
             status_code=503,
             detail="SSO provider is currently unavailable",
@@ -63,23 +109,37 @@ async def sso_callback(code: str, state: str, request: Request):
         "code_verifier"
     )
 
-    tokens = await oidc_manager.provider.exchange_code_for_token(  # type: ignore[union-attr]
-        code, code_verifier, callback_url
-    )
+    try:
+        tokens = await oidc_manager.provider.exchange_code_for_token(  # type: ignore[union-attr]
+            code, code_verifier, callback_url
+        )
+    except Exception:
+        await _reject_sso(stage="credentials", reason="bad_credentials")
+        raise
 
     # Parse ID token to get user info (includes groups for Entra/Keycloak)
     if "id_token" not in tokens:
+        await _reject_sso(stage="credentials", reason="server_error")
         raise HTTPException(status_code=500, detail="ID token not returned by provider")
 
-    user_info = oidc_manager.provider.get_user_info(  # type: ignore[union-attr]
-        tokens["access_token"], tokens["id_token"]
-    )
+    try:
+        user_info = oidc_manager.provider.get_user_info(  # type: ignore[union-attr]
+            tokens["access_token"], tokens["id_token"]
+        )
+    except Exception:
+        await _reject_sso(stage="credentials", reason="bad_credentials")
+        raise
 
     # Match or create user (email-based)
-    user = await oidc_manager.match_or_create_user(user_info)
+    try:
+        user = await oidc_manager.match_or_create_user(user_info)
+    except Exception:
+        await _reject_sso(stage="credentials", reason="server_error")
+        raise
 
     # Check if user was found/created (JIT provisioning disabled or email not verified)
     if user is None:
+        await _reject_sso(stage="credentials", reason="bad_credentials")
         raise HTTPException(
             status_code=403, detail="User not authorized. Please contact administrator."
         )
@@ -90,13 +150,39 @@ async def sso_callback(code: str, state: str, request: Request):
         # Use the backend-aware oauth_manager from app.state (set in app_wiring.py)
         oauth_manager = request.app.state.oauth_manager
 
-        # Generate OAuth authorization code
-        oauth_code = oauth_manager.generate_authorization_code(
-            client_id=state_data["client_id"],
-            user_id=user.username,
-            code_challenge=state_data["code_challenge"],
-            redirect_uri=state_data["redirect_uri"],
-            state=state_data["oauth_state"],
+        # MFA enforcement for SSO users (same condition and helper as the
+        # standard OIDC branch below). Reuses the OAuth MFA-challenge page
+        # and its POST /oauth/mfa/verify completion, the same mechanism the
+        # password-based OAuth authorize flow already applies.
+        if _get_user_mfa_status(user.username):
+            from ..mfa_challenge import mfa_challenge_manager
+            from ...web.mfa_routes import render_oauth_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url="/oauth/authorize",
+                oauth_client_id=state_data["client_id"],
+                oauth_redirect_uri=state_data["redirect_uri"],
+                oauth_code_challenge=state_data["code_challenge"],
+                oauth_state=state_data["oauth_state"],
+            )
+            return render_oauth_mfa_challenge_page(challenge_token)
+
+        # Generate OAuth authorization code (and record the login)
+        oauth_code = await _complete_sso(
+            user.username,
+            flow="oauth_code",
+            issue=functools.partial(
+                oauth_manager.generate_authorization_code,
+                client_id=state_data["client_id"],
+                user_id=user.username,
+                code_challenge=state_data["code_challenge"],
+                redirect_uri=state_data["redirect_uri"],
+                state=state_data["oauth_state"],
+            ),
         )
 
         # Redirect back to OAuth client (Claude Code) with authorization code
@@ -139,10 +225,15 @@ async def sso_callback(code: str, state: str, request: Request):
 
         redirect_response = RedirectResponse(url=redirect_url, status_code=302)
 
-        session_manager.create_session(
-            redirect_response,
-            username=user.username,
-            role=user.role.value,
+        await _complete_sso(
+            user.username,
+            flow="web_session",
+            issue=functools.partial(
+                session_manager.create_session,
+                redirect_response,
+                username=user.username,
+                role=user.role.value,
+            ),
         )
 
         return redirect_response

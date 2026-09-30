@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         ActivatedRepoManager,
     )
     from code_indexer.server.services.group_access_manager import GroupAccessManager
+    from code_indexer.server.services.audit_outcome import AuditActor
 
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
@@ -607,14 +608,18 @@ class GoldenRepoManager:
         description: Optional[str] = None,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
-        submitter_username: str = "admin",
+        *,
+        submitter_username: str,
         skip_pre_flight_git_validation: bool = False,
     ) -> str:
         """
         Add a golden repository.
 
         This method submits a background job and returns immediately with a job_id.
-        Use BackgroundJobManager to track progress and results.
+        Use BackgroundJobManager to track progress and results.  Records one
+        ``golden_repo_added`` row naming *submitter_username* (the
+        authenticated caller; there is no default).  The row carries the
+        clone URL's host name only, never the URL.
 
         Args:
             repo_url: Git repository URL
@@ -624,7 +629,8 @@ class GoldenRepoManager:
             description: Optional description for the repository
             enable_temporal: Enable temporal git history indexing
             temporal_options: Temporal indexing configuration options
-            submitter_username: Username of the user submitting the job (default: "admin")
+            submitter_username: The authenticated caller, recorded on the job
+                and as the audit actor.
 
         Returns:
             Job ID for tracking add operation progress
@@ -635,6 +641,55 @@ class GoldenRepoManager:
             GitOperationError: If git repository is invalid or inaccessible
             MaintenanceModeError: If server is in maintenance mode (Story #734)
         """
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            record_repo_outcome,
+            repo_host,
+        )
+
+        host = repo_host(repo_url)
+        try:
+            job_id = self._submit_add_job(
+                repo_url=repo_url,
+                alias=alias,
+                default_branch=default_branch,
+                enable_temporal=enable_temporal,
+                temporal_options=temporal_options,
+                submitter_username=submitter_username,
+                skip_pre_flight_git_validation=skip_pre_flight_git_validation,
+            )
+        except Exception:
+            record_repo_outcome(
+                submitter_username,
+                "golden_repo_added",
+                None,
+                "failure",
+                repo_host=host,
+                branch=default_branch,
+            )
+            raise
+        record_repo_outcome(
+            submitter_username,
+            "golden_repo_added",
+            alias,
+            "success",
+            job_id=job_id,
+            repo_host=host,
+            branch=default_branch,
+        )
+        return job_id
+
+    def _submit_add_job(
+        self,
+        *,
+        repo_url: str,
+        alias: str,
+        default_branch: Optional[str],
+        enable_temporal: bool,
+        temporal_options: Optional[Dict],
+        submitter_username: str,
+        skip_pre_flight_git_validation: bool,
+    ) -> str:
+        """Validate the request and submit the background add job."""
         # Check maintenance mode first (Story #734)
         from code_indexer.server.services.maintenance_service import (
             get_maintenance_state,
@@ -724,7 +779,7 @@ class GoldenRepoManager:
         default_branch: Optional[str] = None,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
-        submitter_username: str = "admin",
+        submitter_username: str,
         progress_callback: Optional[Callable[..., Any]] = None,
     ) -> Dict[str, Any]:
         """reusable clone + index + register + global-activate body for
@@ -1381,16 +1436,19 @@ class GoldenRepoManager:
 
         return True
 
-    def remove_golden_repo(self, alias: str, submitter_username: str = "admin") -> str:
+    def remove_golden_repo(self, alias: str, *, submitter_username: str) -> str:
         """
-        Remove a golden repository.
+        Remove a golden repository on behalf of a human caller.
 
         This method submits a background job and returns immediately with a job_id.
-        Use BackgroundJobManager to track progress and results.
+        Use BackgroundJobManager to track progress and results.  Records one
+        ``golden_repo_removed`` row naming *submitter_username* (the
+        authenticated caller; there is no default).
 
         Args:
             alias: Alias of the repository to remove
-            submitter_username: Username of the user submitting the job (default: "admin")
+            submitter_username: The authenticated caller, recorded on the job
+                and as the audit actor.
 
         Returns:
             Job ID for tracking removal progress
@@ -1399,6 +1457,49 @@ class GoldenRepoManager:
             GoldenRepoError: If repository not found
             MaintenanceModeError: If server is in maintenance mode (Story #734)
         """
+        return self._submit_removal(
+            alias, submitter_username=submitter_username, actor=submitter_username
+        )
+
+    def remove_orphaned_golden_repo(
+        self, alias: str, *, submitter_username: str
+    ) -> str:
+        """Remove a registry-orphan on behalf of the golden-repo reconciler.
+
+        Same as :meth:`remove_golden_repo`, but the audit row names the
+        reconciler system component; *submitter_username* is recorded on the
+        job only.
+        """
+        from code_indexer.server.services.audit_events import SystemComponent
+
+        return self._submit_removal(
+            alias,
+            submitter_username=submitter_username,
+            actor=SystemComponent.GOLDEN_REPO_RECONCILER,
+        )
+
+    def _submit_removal(
+        self, alias: str, *, submitter_username: str, actor: "AuditActor"
+    ) -> str:
+        """Submit the removal job and record its one ``golden_repo_removed`` row."""
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            record_repo_outcome,
+        )
+
+        verified_alias: Optional[str] = None
+        try:
+            verified_alias = self._verify_removable(alias)
+            job_id = self._submit_removal_job(alias, submitter_username)
+        except Exception:
+            record_repo_outcome(actor, "golden_repo_removed", verified_alias, "failure")
+            raise
+        record_repo_outcome(
+            actor, "golden_repo_removed", alias, "success", job_id=job_id
+        )
+        return job_id
+
+    def _verify_removable(self, alias: str) -> str:
+        """Refuse removal in maintenance mode or of an unknown alias."""
         # Check maintenance mode first (Story #734)
         from code_indexer.server.services.maintenance_service import (
             get_maintenance_state,
@@ -1413,6 +1514,10 @@ class GoldenRepoManager:
         # worker/node can still be removed from this worker)
         if self._resolve_golden_repo(alias) is None:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
+        return alias
+
+    def _submit_removal_job(self, alias: str, submitter_username: str) -> str:
+        """Submit the background removal job for a verified *alias*."""
 
         # Create no-args wrapper for background execution
         def background_worker() -> Dict[str, Any]:
@@ -3416,23 +3521,6 @@ class GoldenRepoManager:
             f"  2. Versioned path: {versioned_base}/v_*/"
         )
 
-    def user_can_access_golden_repo(self, alias: str, user: Any) -> bool:
-        """
-        Check if a user can access a golden repository.
-
-        For now, all authenticated users can access all golden repositories.
-        This method exists for future permission system expansion.
-
-        Args:
-            alias: Repository alias
-            user: User object (can be None for unauthenticated)
-
-        Returns:
-            True if user can access repository, False otherwise
-        """
-        # Golden repositories are accessible to all authenticated users
-        return user is not None
-
     def get_golden_repo_branches(self, alias: str) -> List["GoldenRepoBranchInfo"]:
         """
         Get branches for a golden repository.
@@ -4069,10 +4157,18 @@ class GoldenRepoManager:
             if scheduler is not None:
                 scheduler.release_write_lock(alias, owner_name="branch_change")
 
+    def _verified_alias_or_none(self, alias: str) -> Optional[str]:
+        """*alias* when a golden repo is registered under it, else None."""
+        try:
+            return alias if self._resolve_golden_repo(alias) is not None else None
+        except Exception:  # noqa: BLE001 - audit target lookup only
+            return None
+
     def change_branch_async(
         self,
         alias: str,
         target_branch: str,
+        *,
         submitter_username: str,
     ) -> Dict[str, Any]:
         """
@@ -4080,11 +4176,14 @@ class GoldenRepoManager:
 
         Validates inputs eagerly and returns immediately with a job_id.
         The actual branch change runs in a background thread via BackgroundJobManager.
+        Records one ``golden_repo_branch_changed`` row naming the caller when
+        a job is submitted or the request is refused; a request for the
+        branch already checked out changes nothing and writes no row.
 
         Args:
             alias: Golden repository alias (without -global suffix).
             target_branch: Branch name to switch to.
-            submitter_username: Username submitting the request (for audit logging).
+            submitter_username: The authenticated caller (job and audit actor).
 
         Returns:
             Dict with keys:
@@ -4096,6 +4195,38 @@ class GoldenRepoManager:
             GoldenRepoNotFoundError: If alias is not registered.
             DuplicateJobError: If a change_branch job is already running for this repo.
         """
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            record_repo_outcome,
+        )
+
+        try:
+            result = self._submit_branch_change(
+                alias, target_branch, submitter_username
+            )
+        except Exception:
+            record_repo_outcome(
+                submitter_username,
+                "golden_repo_branch_changed",
+                self._verified_alias_or_none(alias),
+                "failure",
+                new_branch=target_branch,
+            )
+            raise
+        if result.get("job_id") is not None:
+            record_repo_outcome(
+                submitter_username,
+                "golden_repo_branch_changed",
+                alias,
+                "success",
+                new_branch=target_branch,
+                job_id=result["job_id"],
+            )
+        return result
+
+    def _submit_branch_change(
+        self, alias: str, target_branch: str, submitter_username: str
+    ) -> Dict[str, Any]:
+        """Validate a branch change and submit its background job."""
         if not target_branch or not re.match(
             r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$", target_branch
         ):
@@ -4136,7 +4267,8 @@ class GoldenRepoManager:
         self,
         alias: str,
         index_type: str,
-        submitter_username: str = "admin",
+        *,
+        submitter_username: str,
     ) -> str:
         """
         Add a single index type to an existing golden repository.
@@ -4147,7 +4279,7 @@ class GoldenRepoManager:
         Args:
             alias: The golden repo alias
             index_type: One of "semantic", "fts", "temporal", "scip"
-            submitter_username: Username for audit logging
+            submitter_username: The authenticated caller (job and audit actor)
 
         Returns:
             job_id: The background job ID for tracking
@@ -4165,7 +4297,8 @@ class GoldenRepoManager:
         self,
         alias: str,
         index_types: List[str],
-        submitter_username: str = "admin",
+        *,
+        submitter_username: str,
     ) -> str:
         """
         Add one or more index types to an existing golden repository atomically.
@@ -4175,11 +4308,12 @@ class GoldenRepoManager:
         a CoW snapshot + alias swap so the rebuilt indexes become visible to queries.
 
         The old add_index_to_golden_repo (singular) delegates to this method.
+        Records one ``golden_repo_index_added`` row naming the caller.
 
         Args:
             alias: The golden repo alias
             index_types: List of index types, each one of "semantic", "fts", "temporal", "scip"
-            submitter_username: Username for audit logging
+            submitter_username: The authenticated caller (job and audit actor)
 
         Returns:
             job_id: The background job ID for tracking
@@ -4187,6 +4321,38 @@ class GoldenRepoManager:
         Raises:
             ValueError: If alias not found or any index_type is invalid
         """
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            record_repo_outcome,
+        )
+
+        requested = list(index_types)
+        try:
+            job_id = self._submit_add_indexes_job(
+                alias, index_types, submitter_username
+            )
+        except Exception:
+            record_repo_outcome(
+                submitter_username,
+                "golden_repo_index_added",
+                self._verified_alias_or_none(alias),
+                "failure",
+                index_types=requested,
+            )
+            raise
+        record_repo_outcome(
+            submitter_username,
+            "golden_repo_index_added",
+            alias,
+            "success",
+            index_types=requested,
+            job_id=job_id,
+        )
+        return job_id
+
+    def _submit_add_indexes_job(
+        self, alias: str, index_types: List[str], submitter_username: str
+    ) -> str:
+        """Validate an add-indexes request and submit its one background job."""
         # Validate alias exists (Bug #1314: resolve via shared backend on a
         # local cache miss so a repo registered by ANOTHER worker/node is
         # found here too -- this is the named add_golden_repo_index symptom)

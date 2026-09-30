@@ -5,6 +5,154 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.78.0] - 2026-09-30
+
+### Security
+
+- Every REST route that names or lists golden repositories checks the caller's group access before any lookup or work: activation (single, composite and with a branch), the golden repository details and branches routes, discovery, the available and status listings, the v2 repository details, branches, sync and search routes, the global repository list and status, and body-based sync. Listings show only accessible repositories, and an unknown repository and an ungranted one are refused alike. These routes and the SCIP query routes fail closed when the access service is unavailable.
+- A query searches only the repositories the caller can access. Repositories are narrowed to the caller's access before the search, so result rows, stored asynchronous query results, the searched-repository count and repository names in query metadata involve only accessible repositories, on REST (synchronous and asynchronous), MCP search and the wiki. When the access service is unavailable, a query that would involve any global repository is refused; a query scoped to the caller's own activated repository still runs.
+
+### Changed
+
+- A REST query that names a global repository the caller cannot access returns 404, the same as an unknown repository.
+- Administrator visibility of repositories on the repository routes, listings and queries follows membership of the admins group, not the user role. A user with the admin role who is not in the admins group sees and reaches only the repositories granted to their own group.
+
+### Fixed
+
+- The v2 branch listing (`GET /api/repositories/{repo_id}/branches`) returns the branches of a golden repository; it previously failed with a server error.
+- A query returns a full page of results, up to the requested limit, from the repositories the caller can access.
+
+### Tests
+
+- Repository access route tests record submitted activation and sync jobs instead of running them, and a test pins administrator repository visibility to membership of the admins group.
+
+## [12.77.0] - 2026-09-30
+
+### Security
+
+- Golden repository add, remove, refresh, branch change and index add require TOTP elevation on REST and MCP, as on the Web UI. MCP-credential and OAuth callers are elevated automatically, and the tool documentation lists the elevation requirement and its error codes.
+- Removing another user's activated repository over REST requires the caller's elevation window, as on the Web UI.
+- Deleting an API key over REST requires the caller's own elevation window, as the MCP `delete_api_key` tool does.
+- Admin-only MCP tools (user, group, global configuration, memory statistics, dependency analysis, SSH key, destructive git, and admin log and audit query tools) check the admin role inside the handler, before any elevation step, whatever tool grant admitted the call. This matches their REST and Web routes.
+- MCP `manage_provider_indexes`, `add_golden_repo_index` and `bulk_add_provider_index` require the admin role and TOTP elevation, checked in the handler, as their REST routes do. MCP `get_provider_health` requires the admin role, as the REST route does.
+- With elevation enforcement enabled, creating a personal API key requires TOTP to be set up and the caller's own elevation window, and the API Keys menu is shown only once MFA is set up. The self-service elevation check is shared with MCP credential self-service and recognises an elevation window opened with the caller's bearer token.
+- With elevation enforcement enabled, adding, updating or deleting your own git-forge credential requires your own elevation window on the Web routes and the MCP tools.
+- With elevation enforcement enabled, starting a new TOTP enrollment on an account that already has MFA requires the caller's own elevation window, opened with a current TOTP or recovery code. First-time enrollment, viewing the current setup and an admin resetting another user are unchanged.
+- REST `/auth/elevate`, the Web elevation form and AJAX endpoints and MCP `elevate_session` share one step-up routine and one failed-attempt limiter keyed on client address and username, so failed attempts on every door count toward one lockout. Each door reads the new elevation window back before clearing failed attempts. MCP `elevate_session` is registered in the tool registry with its tool documentation.
+- Server-spawned indexing resumes an interrupted run only from resume state sealed with a key kept in the server data directory; any other stored state is ignored and the run reconciles.
+- Server-spawned indexing, auto-watch, search, in-process git sync and server-side X-Ray keep files inside the resolved repository root. The marker that selects this is set at runtime only; configuration files cannot set or clear it.
+- Audit rows store only the detail fields the audit reader may show for their action type. Pull request URLs are kept only when they have a pull or merge request path, and are reported without credentials, query string or fragment; group create and update rows do not carry the free-text description.
+
+### Added
+
+- Audit capture: every audit row records the acting user, request source, client address, correlation id, authentication method, outcome and a unique event id (additive schema changes on SQLite and PostgreSQL). Every writer goes through one capture path that never blocks the event loop and never fails the caller; write failures are logged and counted, and `/health` and MCP `check_health` report `audit.records_dropped_since_boot`. MCP `query_audit_logs` returns the new fields.
+- Audit rows on every mutating door (REST, MCP and Web), each naming the acting user or a system actor and recording one success or failure row:
+  - login outcomes: REST login and MFA verification, the Web login form (including the password-expired branch), the Web MFA challenge, the SSO callback, OAuth authorize and OAuth MFA verification, and MCP `authenticate`, one row per attempt; the attempt that starts a lockout writes one row, and refusals while rate limited or locked out write none;
+  - elevation granted or failed;
+  - MFA activation, disable, recovery-code regeneration and cross-user secret reset;
+  - user create, role change, password reset, email change and delete; API key and MCP credential creation and revocation; SSH key create, host assignment and delete; git credential configure and delete;
+  - group tool-access changes, adding a user to a group, and revoking a group's access to one repository (a bulk revoke records one row per revoked repository and one summary row for repositories that were not in the group);
+  - golden repository add, remove, refresh, branch change and index changes; provider-index add, recreate, remove and bulk add;
+  - every configuration write path, provider API keys, CI tokens and git settings (rows name the changed keys, never secret values);
+  - entering and leaving maintenance mode, an admin-requested restart (recorded before the restart runs), and an admin activating or removing another user's repository (the row names both users).
+- Audit Logs admin page (`/admin/audit-logs`, admin only, elevation required for data): a Security view (7-day default window) and an authentication-activity aggregate (24-hour default) with drill-down, filters for actor, action, target, outcome, source, IP address, correlation id and a UTC range, Newer/Older cursor paging, and a bounded CSV/JSON export of the filtered rows.
+- MCP `query_audit_logs` accepts `target_type`, `target_id`, `outcome`, `source`, `ip_address`, `correlation_id`, `tier` (default `all`), `cursor`, `direction`, `aggregate` and `all_time`, and returns `total_capped`, `next_cursor`, `prev_cursor` and `has_more`. Entries carry `pairing_state`, `submitted_only` and `actor_is_authenticated`.
+- REST `GET /api/v1/audit-logs` accepts the same filters plus `tier`, `cursor`, `direction`, `aggregate` and `all_time`, and returns the same additive fields.
+
+### Changed
+
+- The Audit Logs page, MCP `query_audit_logs` and REST `GET /api/v1/audit-logs` read through one shared query, so the same filters return the same rows, order, counts and paging tokens on every door. Invalid arguments (including a malformed cursor) return HTTP 400 on REST and `success: false` on MCP.
+- REST `GET /api/v1/audit-logs` without `tier` or `target_type` now returns the Security tier: every non-authentication row plus password changes, rate-limit trips, security incidents and impersonation. Routine logins and token refreshes are available with `tier=auth_activity`. Previously every authentication row was left out.
+- REST `GET /api/v1/audit-logs` without `limit` now returns 100 rows and a `next_cursor` token instead of every row; a `limit` above 1000 is clamped to 1000. Callers that need everything follow `next_cursor` until it is null. `offset` still works and cannot be combined with `cursor`.
+- Audit-log `total` is exact up to 10,000; above that it reads 10,000 and `total_capped` is true.
+- Audit-log `details` on every door show only the fields allowed for that action type. The names of other stored fields are listed under `omitted_fields`, and stored content that is not a JSON object is reported as `omitted_fields: ["(unstructured)"]` instead of being echoed.
+- The local CLI again indexes and searches files reached through symlinks that point outside the repository. Resolved-root containment applies to server-spawned work (see Security); server-side X-Ray stays confined by default and only the local X-Ray CLI opts out.
+- Indexing runs report analysis and processing failures in their statistics and record every failed path.
+- A configuration change is published once its runtime row commits, and OIDC settings take effect only after a successful save.
+- MCP git read tools log a rejected argument as a warning without a stack trace, as the REST routes do. Responses are unchanged.
+
+### Fixed
+
+- Cluster mode: new users can activate repositories. New user directories are created group-writable with setgid and the server's primary group, whatever the umask. The installer and an auto-updater self-heal add the copy-on-write storage daemon account (resolved from its systemd unit and validated) to its configured service group, require that group to be the cidx service user's primary group, and restart the daemon only when its running process lacks the group.
+- Trigram index build files (`trigrams.*.db.building`) left behind by an interrupted build are removed before a refresh builds the trigram index and before a snapshot copies a base clone. Only regular files untouched for six hours are removed, so a live build is left alone, and files inside versioned snapshots are never modified.
+- Indexing retries the paths that failed on a previous run until they succeed.
+- Configuration saves no longer fail on an unchanged stored server host; the host is validated only when it changes, and every layer stores the stripped value. Hostnames with underscores or a single trailing dot are accepted again, and a value made only of numeric labels must be a canonical IPv4 address. The deployer applies the same validator before rewriting the service unit.
+- The repository health check and index status routes accept the caller's own activated composite repository when every component golden repository still exists and is accessible to the caller.
+- Stopping the audit writer counts every queued and in-flight row it cannot confirm as written, with one summary error, and stops only after the components that emit audit rows have shut down. Building and stopping the audit service and binding the password audit logger run off the event loop.
+
+### Removed
+
+- The Audit Logs tab of the Group Management page and its `/admin/partials/groups-audit-logs` partial; audit reading lives on the Audit Logs page. `active_tab=audit` opens the Groups tab.
+
+### Tests
+
+- Audit catalog completeness, no-secret-in-rows and wiring checks cover every mutating route, including the non-production fault-injection router, and match each door to exactly the rows it writes.
+- The in-process server E2E phase restores the shared app wiring around tests that start their own app.
+- Resume seal tests assert a complete index; job sorting tests wait for jobs to reach a terminal status instead of sleeping; the API-model fresh-import check runs in a subprocess; lifespan and git sync tests no longer leak environment or patched modules into later tests.
+
+## [12.76.0] - 2026-09-27
+
+### Security
+
+- Repository access is enforced on every REST route that names repositories: regex search, multi-repository query, the SCIP multi-repository queries, X-Ray search and batch, and the repository description, index-status and health routes. Access is checked against group grants before any work is done, and fails closed when the access service is unavailable.
+- MCP tool calls authorize every repository argument they carry, not only the first one.
+- Git argument validation now rejects only option-position and control-character hazards: a caller-supplied value may not be read as an option by git, and may not contain a control character. Pathspecs always follow `--`, remotes must be configured remotes of the repository, and every git REST route declares the same permission tier as its MCP counterpart.
+- SSH host names and key names are validated where they are written into `~/.ssh/config`: no value may end or extend a config line or trigger OpenSSH token or variable expansion, and key names may not coincide with OpenSSH-managed files in the ssh directory.
+- Usernames must be a single path component, and server-owned directory names under the activated-repositories directory are reserved. Every per-user repository path is verified to stay inside that user's directory, and a clone never proceeds into an already-existing destination directory.
+- Indexed and searched files stay inside the repository root; symlinks that resolve outside it are skipped. Server-spawned indexing ignores repository-stored resume state and always uses server-managed embedding provider endpoints.
+- TOTP elevation is required for the admin MCP-credential routes, SSH key create, delete and assign-host over MCP, global and git settings changes, and bulk provider-index adds. An elevation window applies only to the user who opened it. Creating or deleting your own MCP credential requires your own elevation window, and user self-service pages offer the elevation prompt.
+- Every login path completes the MFA step when MFA is enabled.
+- Managing another user's MCP credentials requires the admin role, and the admin diagnostics page and its status partial require admin authentication.
+- CI/CD read tools check repository access first. The server-wide token is used only for registered golden repositories the caller may access, and is sent only to that repository's own forge host.
+- Server host, port and worker settings are validated on every write path and again before the auto-updater rewrites the service unit.
+- Repository analysis agents run from a neutral working directory with an explicit MCP configuration, so repository instruction and settings files are never loaded as CLI configuration. The self-monitoring scan runs with a read-only tool allowlist.
+- Web pages pass user-supplied values to page handlers as data, never as markup.
+
+### Changed
+
+- Git: revisions, ranges, refspecs, branch names and pathspecs are passed to git unchanged apart from the two checks above, so git itself resolves or rejects them; validation errors return HTTP 400 on REST and a structured error on MCP.
+- SSH: key names accept `@`, `+`, `#`, non-ASCII letters and a leading `.`, and host names accept `_` and a trailing `.`. Existing keys stay listed, deletable and written to disk; a value that cannot be written safely is left out of the generated config and logged once per key, and a sync refuses unsafe rows one by one without aborting.
+- Usernames: display-style names with spaces, accents, apostrophes and non-Latin characters are accepted, including through OIDC provisioning.
+- Analysis agents keep one stable working directory per target and load the service user's own CLI settings; dependency-map prompts reference the workspace orientation and guideline files by absolute path.
+- MCP credential management treats the caller's own username as self-service.
+
+### Tests
+
+- Several test files were renamed to describe the behaviour they cover.
+- Git push and merge service tests run against real repositories, elevation tests no longer change shared server state, and SSH and git argument tests use neutral example values.
+
+## [12.75.0] - 2026-09-27
+
+### Fixed
+
+- **#1979: `clear=true` always rebuilds from scratch and never ends with a blank index.** An activated-repo semantic reindex with `clear=true` deleted the index directory but kept per-provider progress metadata, then ran an incremental index that found no changes, so the repo ended with an empty semantic index that later writes turned into the legacy per-file layout. The server now passes `--clear` to the child, so clear is a true full rebuild. A clear also clears each provider's multimodal collection and fails loudly if a clear fails. `--clear` builds CHUNKS_DB collections by default (foreground and daemon). `--clear` combined with `--new-collection-layout=sharded_json`, `--reconcile` or a `--rebuild-*` flag is rejected before any work. After every clear, on the CLI, daemon and server paths, one shared check requires each configured provider to have completed progress and real committed rows, or the run fails. A cancelled clear exits non-zero. Daemon-mode clears require exactly one provider matching the daemon's (multi-provider daemon support is tracked in #1980).
+- **#1978: a failed activated-repo reindex reports the real error.** The job's error field now carries each failed index type's actual error (truncated) instead of the generic "job failed". The storage-side fix, which grants the cidx service group write access on every copy-on-write clone so cluster reindexes stop failing with a permission error, ships in cow-storage-daemon 0.3.0.
+
+## [12.74.0] - 2026-09-26
+
+12.73.0 was never tagged or released: its CI run failed because `requests`, which the server's auto-updater imports, was not a declared dependency. This release declares it and supersedes 12.73.0.
+
+### Fixed
+
+- **Bug #1969**: `cidx index` no longer aborts with "operator intervention
+  required" when a legacy SHARDED_JSON collection has a corrupt `id_index.bin`
+  and duplicate point_ids left by the historical Bug #1502 chunk-index defect.
+  Indexing now self-heals: when the duplicate cannot be resolved safely it
+  removes every chunk of the affected file and re-indexes it, so no file is
+  left partially indexed or silently unsearchable. The files to re-index are
+  recorded as one marker file per event, written before anything is deleted,
+  so the record survives a crash and concurrent writers on shared storage
+  cannot lose each other's entries without relying on file locks. A marker is
+  cleared only after its file is indexed again; an unreadable or damaged
+  marker triggers a full reconcile instead of being ignored. Query and search
+  paths never modify the index, and immutable versioned snapshots are never
+  repaired in place. Writer serialization across operation types remains
+  tracked separately in #1970.
+- **Bug #1971**: `cidx index --reconcile` now reads the whole collection. The
+  snapshot loop compared its cursor with itself after advancing it, so every
+  reconcile stopped after the first 5000 points, logged a false "Pagination
+  stuck" error, and re-embedded files that were already indexed.
+
 ## [12.72.1] - 2026-09-25
 
 ### Security

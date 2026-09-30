@@ -159,13 +159,13 @@
 
         <!-- Add Index Button and Form -->
         <div class="add-index-container" id="add-index-container-{{ repo.alias }}">
-            <button class="outline small" onclick="showAddIndexForm('{{ repo.alias }}')">Add/Rebuild Index</button>
+            <button class="outline small" data-repo-alias="{{ repo.alias }}" onclick="showAddIndexForm(this.dataset.repoAlias)">Add/Rebuild Index</button>
 
             <div id="add-index-form-{{ repo.alias }}" class="add-index-form" style="display: none;">
                 <label>Select Index Type(s):</label>
                 <div class="index-checkboxes" id="index-checkboxes-{{ repo.alias }}">
                     <label class="checkbox-label">
-                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic" onchange="toggleProviderCheckboxes('{{ repo.alias }}')">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic" data-repo-alias="{{ repo.alias }}" onchange="toggleProviderCheckboxes(this.dataset.repoAlias)">
                         Semantic{% if repo.has_semantic %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                     </label>
                     <label class="checkbox-label">
@@ -173,7 +173,7 @@
                         FTS{% if repo.has_fts %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                     </label>
                     <label class="checkbox-label">
-                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-temporal-{{ repo.alias }}" value="temporal" onchange="toggleProviderCheckboxes('{{ repo.alias }}')">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-temporal-{{ repo.alias }}" value="temporal" data-repo-alias="{{ repo.alias }}" onchange="toggleProviderCheckboxes(this.dataset.repoAlias)">
                         Temporal{% if repo.has_temporal %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                     </label>
                     <label class="checkbox-label">
@@ -246,8 +246,8 @@
                 </details>
 
                 <div class="form-actions">
-                    <button class="small" onclick="submitAddIndex('{{ repo.alias }}')">Submit</button>
-                    <button class="outline small" onclick="hideAddIndexForm('{{ repo.alias }}')">Cancel</button>
+                    <button class="small" data-repo-alias="{{ repo.alias }}" onclick="submitAddIndex(this.dataset.repoAlias)">Submit</button>
+                    <button class="outline small" data-repo-alias="{{ repo.alias }}" onclick="hideAddIndexForm(this.dataset.repoAlias)">Cancel</button>
                 </div>
             </div>
         </div>
@@ -269,7 +269,8 @@
             <button
                 id="health-refresh-{{ repo.alias }}"
                 class="outline small"
-                onclick="refreshHealthData('{{ repo.alias }}')"
+                data-repo-alias="{{ repo.alias }}"
+                onclick="refreshHealthData(this.dataset.repoAlias)"
                 title="Refresh health data (bypass cache)"
             >
                 Refresh
@@ -279,7 +280,8 @@
         <div
             id="health-indicator-{{ repo.alias }}"
             class="health-indicator-container"
-            onclick="toggleHealthDetails('{{ repo.alias }}')"
+            data-repo-alias="{{ repo.alias }}"
+            onclick="toggleHealthDetails(this.dataset.repoAlias)"
             style="cursor: pointer;"
         >
             <span class="health-status health-unknown">Deep health check</span>
@@ -340,7 +342,8 @@
                 <button
                     id="global-health-refresh-{{ repo.alias }}"
                     class="outline small"
-                    onclick="refreshGlobalHealthData('{{ repo.alias }}')"
+                    data-repo-alias="{{ repo.alias }}"
+                    onclick="refreshGlobalHealthData(this.dataset.repoAlias)"
                     title="Refresh global activated health data (bypass cache)"
                 >
                     Refresh
@@ -350,7 +353,8 @@
             <div
                 id="global-health-indicator-{{ repo.alias }}"
                 class="health-indicator-container"
-                onclick="toggleGlobalHealthDetails('{{ repo.alias }}')"
+                data-repo-alias="{{ repo.alias }}"
+                onclick="toggleGlobalHealthDetails(this.dataset.repoAlias)"
                 style="cursor: pointer;"
             >
                 <span class="health-status health-unknown">Deep health check</span>

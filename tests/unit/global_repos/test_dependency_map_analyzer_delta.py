@@ -1209,8 +1209,15 @@ class TestInvokeDeltaMergeFile:
             result = self._call(analyzer, tmp_path)
         assert result == _UPDATED_DELTA
 
-    def test_uses_dangerously_skip_permissions(self, analyzer, tmp_path):
-        """subprocess.run command must include --dangerously-skip-permissions flag.
+    def test_uses_dangerously_skip_permissions_and_neutral_cwd_controls(
+        self, analyzer, tmp_path
+    ):
+        """subprocess.run command must include --dangerously-skip-permissions
+        (needed for the Edit tool to run non-interactively) and
+        --strict-mcp-config (so the account's other MCP servers stay out of
+        the session), and must NEVER include --restricted — delta merge
+        keeps its full command capability. See
+        test_claude_invoker_agent_isolation.py for the full suite.
 
         Asserts across every recorded Claude CLI call (via _claude_cli_calls),
         not mock_run.call_args (the last call). subprocess.run is patched at
@@ -1235,6 +1242,8 @@ class TestInvokeDeltaMergeFile:
             f"got {mock_run.call_args_list!r}"
         )
         assert all("--dangerously-skip-permissions" in cmd[4] for cmd in claude_calls)
+        assert all("--strict-mcp-config" in cmd[4] for cmd in claude_calls)
+        assert all("--restricted" not in cmd[4] for cmd in claude_calls)
 
     @pytest.mark.parametrize("exception_cls", [RuntimeError, Exception])
     def test_cli_exception_returns_none_and_cleans_up(
@@ -1309,15 +1318,20 @@ class TestInvokeRefinementFile:
             result = self._call(analyzer, tmp_path)
         assert result == _REFINED_CONTENT
 
-    def test_uses_dangerously_skip_permissions_and_all_tools(self, analyzer, tmp_path):
-        """subprocess.run command includes --dangerously-skip-permissions; no --allowedTools restriction.
+    def test_uses_dangerously_skip_permissions_and_neutral_cwd_controls(
+        self, analyzer, tmp_path
+    ):
+        """subprocess.run command includes --dangerously-skip-permissions and
+        --strict-mcp-config, and never includes --restricted — refinement
+        keeps its full command capability, same as delta merge. See
+        test_claude_invoker_agent_isolation.py for the full suite.
 
         Asserts across every recorded Claude CLI call (via _claude_cli_calls),
         not mock_run.call_args (the last call) -- see
-        test_uses_dangerously_skip_permissions above for why: subprocess.run
-        is patched at the shared stdlib module level, so an unrelated
-        interleaved call can become the chronologically-last recorded call
-        under full-suite load.
+        test_uses_dangerously_skip_permissions_and_neutral_cwd_controls above
+        for why: subprocess.run is patched at the shared stdlib module level,
+        so an unrelated interleaved call can become the chronologically-last
+        recorded call under full-suite load.
         """
         with patch(
             _SUBPROCESS_PATH,
@@ -1334,8 +1348,8 @@ class TestInvokeRefinementFile:
             f"got {mock_run.call_args_list!r}"
         )
         assert all("--dangerously-skip-permissions" in cmd[4] for cmd in claude_calls)
-        # Refinement uses allowed_tools=None → no MCP tool restriction passed
-        assert all("mcp__cidx-local__search_code" not in cmd[4] for cmd in claude_calls)
+        assert all("--strict-mcp-config" in cmd[4] for cmd in claude_calls)
+        assert all("--restricted" not in cmd[4] for cmd in claude_calls)
 
     def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
         """When subprocess does not modify the file, returns None."""

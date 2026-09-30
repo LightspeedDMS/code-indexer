@@ -8,6 +8,16 @@
     <link rel="stylesheet" href="/admin/static/pico.min.css?v={{ static_version }}">
     <link rel="stylesheet" href="/admin/static/admin.css?v={{ static_version }}">
     <script src="/admin/static/htmx.min.js?v={{ static_version }}"></script>
+    <script>
+        // Bug #955 (Story #923 AC7): Show inline TOTP modal on 403 elevation errors
+        // (no page redirect), same as base.html. The interceptor logic itself lives
+        // in elevation_interceptor.js, shared with base.html; these two globals are
+        // this page's own role-appropriate values -- the self-service TOTP setup
+        // page, reachable by every role, not the admin-only one.
+        window._cidxTotpSetupFallbackUrl = '/user/mfa/setup';
+        window._cidxFormInterceptPrefix = '/user/';
+    </script>
+    <script src="/admin/static/js/elevation_interceptor.js?v={{ static_version }}"></script>
 </head>
 <body>
     <main class="container">
@@ -15,7 +25,9 @@
         <header class="admin-header">
             <nav class="admin-nav">
                 <ul>
+                    {% if personal_api_keys_menu_visible(request) %}
                     <li><a href="/user/api-keys" {% if current_page == 'api-keys' %}aria-current="page"{% endif %}>API Keys</a></li>
+                    {% endif %}
                     <li><a href="/user/mcp-credentials" {% if current_page == 'mcp-credentials' %}aria-current="page"{% endif %}>MCP Credentials</a></li>
                     <li><a href="/user/git-credentials" {% if current_page == 'git-credentials' %}aria-current="page"{% endif %}>Git Credentials</a></li>
                     <li><a href="/user/mfa/setup" {% if current_page == 'mfa' %}aria-current="page"{% endif %}>MFA</a></li>
@@ -26,6 +38,36 @@
         {% endif %}
 
         {% block content %}{% endblock %}
+
+        <!-- TOTP Elevation Modal: inline dialog replaces full-page redirect (matches base.html) -->
+        <dialog id="elevationModal" aria-modal="true" aria-labelledby="elevationModalTitle">
+            <article>
+                <header>
+                    <h2 id="elevationModalTitle">Verify your identity</h2>
+                </header>
+                <p>Enter <strong>your</strong> authenticator code to continue.</p>
+                <div id="elevationError" role="alert" class="error-message" style="display:none"></div>
+                <label for="elevationTotpCode">
+                    Authenticator code
+                    <input type="text" id="elevationTotpCode"
+                           autocomplete="one-time-code"
+                           inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                           placeholder="6-digit code">
+                </label>
+                <details>
+                    <summary>Use a recovery code instead</summary>
+                    <label for="elevationRecoveryCode">
+                        Recovery code
+                        <input type="text" id="elevationRecoveryCode"
+                               pattern="[A-Z0-9-]+" placeholder="XXXX-XXXX-XXXX-XXXX">
+                    </label>
+                </details>
+                <footer>
+                    <button id="elevationVerifyBtn" type="button">Verify</button>
+                    <button id="elevationCancelBtn" type="button" class="secondary outline">Cancel</button>
+                </footer>
+            </article>
+        </dialog>
     </main>
 </body>
 </html>

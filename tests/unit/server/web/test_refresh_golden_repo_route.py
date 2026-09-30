@@ -192,6 +192,7 @@ class TestRefreshGoldenRepoRoute:
         mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
             "my-repo",
             submitter_username="admin",
+            force_reset=False,
         )
 
     def test_refresh_success_response_includes_job_id(self):
@@ -348,6 +349,7 @@ class TestRefreshGoldenRepoRoute:
         mock_scheduler.trigger_refresh_for_repo.assert_called_once_with(
             "mock-test",
             submitter_username="admin",
+            force_reset=False,
         )
         call_kwargs = mock_page.call_args[1] if mock_page.call_args[1] else {}
         assert "success_message" in call_kwargs

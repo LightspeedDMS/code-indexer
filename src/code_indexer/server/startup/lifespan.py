@@ -1,6 +1,7 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
 import asyncio
+import functools
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -1201,20 +1202,51 @@ def make_lifespan(
                 migrate_flat_file_to_sqlite,
             )
 
-            audit_service = AuditLogService(
-                groups_db_path,
-                storage_backend=(
-                    backend_registry.audit_log if backend_registry is not None else None
-                ),
+            # Off the event loop: construction runs the audit schema upgrade
+            # (ALTER TABLE / CREATE INDEX under an exclusive lock), which can
+            # take seconds on a large audit table.
+            audit_service = await anyio.to_thread.run_sync(
+                functools.partial(
+                    AuditLogService,
+                    groups_db_path,
+                    storage_backend=(
+                        backend_registry.audit_log
+                        if backend_registry is not None
+                        else None
+                    ),
+                )
             )
             # Issue #1241 P1.3: start the async background writer so log() and
             # log_raw() enqueue records instead of blocking the request thread.
             audit_service.start()
             app.state.audit_service = audit_service
+            # Unified audit capture: bind the ONE started service as the
+            # process-wide sink.  No manager holds its own audit reference;
+            # every capture resolves this binding at emission time.  node_id
+            # is the bootstrap cluster.node_id (None in solo mode).
+            from code_indexer.server.services.audit_capture import (
+                bind_audit_service,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _audit_get_config_service,
+            )
+
+            _audit_cluster_cfg = _audit_get_config_service().get_config().cluster
+            bind_audit_service(
+                audit_service,
+                node_id=(
+                    _audit_cluster_cfg.node_id
+                    if _audit_cluster_cfg is not None
+                    else None
+                ),
+            )
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
-            # calls from password_audit_logger also route to SQLite
-            password_audit_logger.set_audit_service(audit_service)
+            # calls from password_audit_logger also route to SQLite.  Off the
+            # event loop: switching modes closes the flat-file handler.
+            await anyio.to_thread.run_sync(
+                password_audit_logger.set_audit_service, audit_service
+            )
 
             logger.info(
                 "Story #399: AuditLogService initialized and injected into GroupAccessManager",
@@ -1224,8 +1256,9 @@ def make_lifespan(
             # AC4: Migration is recoverable — historical data loss, not functional failure
             try:
                 flat_file = Path(server_data_dir) / "password_audit.log"
-                migrated, skipped = migrate_flat_file_to_sqlite(
-                    flat_file, audit_service
+                # Off the event loop: file reads plus durable audit writes.
+                migrated, skipped = await anyio.to_thread.run_sync(
+                    migrate_flat_file_to_sqlite, flat_file, audit_service
                 )
                 if migrated > 0 or skipped > 0:
                     logger.info(
@@ -5256,19 +5289,6 @@ def make_lifespan(
                 _see_stop_exc,
             )
 
-        # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
-        # enqueued audit records are lost on graceful restart/stop.
-        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
-        try:
-            _audit_svc = getattr(app.state, "audit_service", None)
-            if _audit_svc is not None:
-                _audit_svc.stop()
-        except Exception as _audit_stop_exc:
-            logger.warning(
-                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
-                _audit_stop_exc,
-            )
-
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
         # root QueueHandler; stop() drains every queued record and then closes the
@@ -5911,6 +5931,48 @@ def make_lifespan(
                         f"Error stopping TelemetryManager: {e}",
                     ),
                     exc_info=True,
+                )
+
+        # Issue #1241 P1.3: drain the audit-log async writer on shutdown; rows
+        # it cannot write in time are counted (see AuditLogService.stop).
+        # Placed AFTER every audit emitter above has stopped (MCP executor,
+        # global repos lifecycle, schedulers, self-monitoring), so their
+        # shutdown-time captures still reach the store.  The log listener is
+        # already stopped here: drop ERROR lines reach the last-resort stderr
+        # handler (the journal), and the drop COUNT stays exact.  Accepted
+        # residual: _mcp_executor.shutdown(wait=False) does not wait, so an MCP
+        # handler still running after the unbind records a counted drop.
+        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        # The unbind runs even when the stop raises, so no process-wide
+        # binding -- the capture sink or the module-level password audit
+        # logger -- outlives the writer.  Off the event loop: stop() joins
+        # the writer (up to its timeout) and the unbind opens a file.
+        try:
+            _audit_svc = getattr(app.state, "audit_service", None)
+            if _audit_svc is not None:
+                await anyio.to_thread.run_sync(_audit_svc.stop)
+        except Exception as _audit_stop_exc:
+            logger.warning(
+                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
+                _audit_stop_exc,
+            )
+        finally:
+            try:
+                from code_indexer.server.auth.audit_logger import (
+                    password_audit_logger as _shutdown_password_audit_logger,
+                )
+                from code_indexer.server.services.audit_capture import (
+                    clear_audit_service,
+                )
+
+                clear_audit_service()
+                await anyio.to_thread.run_sync(
+                    _shutdown_password_audit_logger.set_audit_service, None
+                )
+            except Exception as _audit_clear_exc:
+                logger.warning(
+                    "failed to unbind the audit service during shutdown: %s",
+                    _audit_clear_exc,
                 )
 
         # Bug #878 Fix A.2: stop the DatabaseConnectionManager cleanup daemon.

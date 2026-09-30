@@ -69,6 +69,12 @@ def app():
     Sets a default get_current_user override that raises 401 so no-auth tests work
     without needing jwt_manager/user_manager to be initialized. Tests that need an
     authenticated user replace this override via app.dependency_overrides[get_current_user].
+
+    xray_search() now enforces repo-level access via
+    app.state.access_filtering_service. This fixture wires a permissive stub
+    (admin bypass) so the many pre-existing behavioral tests below (none of
+    which exercise authorization) are unaffected -- authorization-denial
+    behavior is covered separately by test_xray_routes_repo_authz.py.
     """
     from fastapi import FastAPI, HTTPException, status
     from code_indexer.server.routes.xray_routes import router as xray_router
@@ -83,6 +89,9 @@ def app():
         )
 
     test_app.dependency_overrides[get_current_user] = _unauthenticated
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    test_app.state.access_filtering_service = mock_access_service
     return test_app
 
 
@@ -90,6 +99,23 @@ def app():
 def client(app):
     """Create test client."""
     return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture(autouse=True)
+def _xray_batch_access_filtering_bypass():
+    """handle_xray_search_batch() now enforces
+    repo-level access via its own _get_access_filtering_service() seam
+    (mcp/handlers/xray_batch.py). Autouse admin-bypass for every test in
+    this file -- none of the pre-existing batch tests exercise
+    authorization (that is covered separately by
+    test_xray_routes_repo_authz.py)."""
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    with patch(
+        "code_indexer.server.mcp.handlers.xray_batch._get_access_filtering_service",
+        return_value=mock_access_service,
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------

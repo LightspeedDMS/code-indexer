@@ -25,6 +25,22 @@ import platform
 import requests
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.config import write_json_atomic
+from code_indexer.server.utils.host_validation import is_valid_server_host
+from code_indexer.server.auto_update.cow_daemon_service_group import (
+    COW_DAEMON_SERVICE_NAME,
+    account_name_for_uid,
+    primary_group_name,
+    process_has_gid,
+    process_real_uid,
+    read_daemon_service_group,
+    resolve_group_gid,
+    user_in_group,
+    validate_daemon_user,
+)
+from code_indexer.server.utils.config_manager import (
+    _SERVER_WORKERS_MIN,
+    _SERVER_WORKERS_MAX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3096,6 +3112,20 @@ class DeploymentExecutor:
             if values is None:
                 return None
             host, port, workers = values["host"], values["port"], values["workers"]
+            if (
+                not is_valid_server_host(host)
+                or not (1 <= int(port) <= 65535)
+                or not (_SERVER_WORKERS_MIN <= int(workers) <= _SERVER_WORKERS_MAX)
+            ):
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-223",
+                        "_ensure_launch_config: resolved host/port/workers failed "
+                        f"validation (host={host!r}, port={port!r}, "
+                        f"workers={workers!r}); refusing rewrite, unit left unchanged",
+                    )
+                )
+                return None
             service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
             lines = self._read_cidx_service_lines(service_path)
             if lines is None:
@@ -4469,6 +4499,19 @@ class DeploymentExecutor:
                     "cow-storage NFSv3+nolock mount upgrade self-heal failed - "
                     "NFSv4 lock-manager state loss may still cause SQLite "
                     "disk I/O errors on this node",
+                )
+            )
+
+        # Step 14.9: on the CoW daemon host, the daemon's OS user must be in
+        # its configured service_group (and the running daemon must carry
+        # that gid) so it can create clones inside the service-owned,
+        # group-writable activated-repos/<user>/ directories (non-fatal).
+        if not self._ensure_cow_daemon_user_in_service_group():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-225",
+                    "CoW daemon service-group self-heal failed - "
+                    "new users may be unable to activate repositories",
                 )
             )
 
@@ -6123,6 +6166,154 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+    def _ensure_cow_daemon_user_in_service_group(
+        self,
+        *,
+        daemon_config_path: Path = COW_DAEMON_HOST_CONFIG_PATH,
+        proc_root: Path = Path("/proc"),
+        server_unit_path: Optional[Path] = None,
+    ) -> bool:
+        """Idempotently make the co-located CoW daemon's OS user a member of
+        its configured ``service_group`` and make sure the RUNNING daemon
+        carries that gid.
+
+        cidx-server creates ``activated-repos/<user>/`` as the service user
+        (mode 0o2775, group = the service user's primary group); the daemon
+        -- a different OS user -- must create the clone inside it. Without
+        membership it falls into the "other" class and a brand-new user
+        cannot activate any repo. Supplementary groups are fixed at process
+        start, so a daemon started before the membership existed is
+        restarted once.
+
+        Safety: the daemon identity comes from its systemd unit (``User=``),
+        else the running MainPID's real uid, and must be an existing,
+        non-root, conservatively named account -- never guessed. The
+        ``service_group`` must EQUAL the cidx service user's primary group
+        (the cidx-server unit's ``User=``): new user directories carry that
+        primary gid (``ensure_activated_user_dir``), so joining any other
+        group would not help and an ERROR names both groups.
+
+        Runs only on the daemon-host node (the daemon's own config file
+        exists); every other node is a no-op. A config that exists but
+        cannot be stat-ed (permission/I-O error) is an ERROR, never mistaken
+        for "no daemon here". Converges in at most one ``usermod`` plus one
+        daemon restart, then stays a read-only check. The fresh-install twin
+        is ``ensure_cow_daemon_service_group_membership`` in
+        scripts/install-cidx-server.sh.
+
+        Returns True when converged or not applicable, False on any failure
+        (logged at ERROR; non-fatal to the deploy).
+        """
+        try:
+            os.stat(daemon_config_path)
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-224",
+                    "CoW daemon service-group membership self-heal skipped: "
+                    f"cannot stat {daemon_config_path}: {e}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        unit_path = server_unit_path or (
+            SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        )
+        try:
+            service_group = read_daemon_service_group(daemon_config_path)
+            gid = resolve_group_gid(service_group)
+            self._require_service_group_is_cidx_primary_group(
+                unit_path, service_group, gid
+            )
+            main_pid = int(self._systemctl_show("MainPID") or "0")
+            daemon_user = self._resolve_cow_daemon_user(main_pid, proc_root)
+            if not user_in_group(daemon_user, service_group):
+                added = self._run_systemd_op_with_retry(
+                    ["sudo", "usermod", "-aG", service_group, daemon_user]
+                )
+                if added.returncode != 0:
+                    raise RuntimeError(f"usermod failed: {added.stderr}")
+                logger.info(
+                    "Added CoW daemon user %s to service group %s",
+                    daemon_user,
+                    service_group,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            if main_pid == 0 or process_has_gid(
+                (proc_root / str(main_pid) / "status").read_text(), gid
+            ):
+                return True
+            restarted = self._run_systemd_op_with_retry(
+                ["sudo", "systemctl", "restart", COW_DAEMON_SERVICE_NAME]
+            )
+            if restarted.returncode != 0:
+                raise RuntimeError(f"daemon restart failed: {restarted.stderr}")
+            logger.info(
+                "Restarted %s so it picks up service group %s",
+                COW_DAEMON_SERVICE_NAME,
+                service_group,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-224",
+                    f"CoW daemon service-group membership self-heal skipped: {e}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _systemctl_show(self, prop: str) -> str:
+        """Return ``systemctl show -p <prop> --value`` for the CoW daemon."""
+        shown = self._run_systemd_op_with_retry(
+            ["systemctl", "show", "-p", prop, "--value", COW_DAEMON_SERVICE_NAME]
+        )
+        if shown.returncode != 0:
+            raise RuntimeError(f"systemctl show -p {prop} failed: {shown.stderr}")
+        return str(shown.stdout).strip()
+
+    def _resolve_cow_daemon_user(self, main_pid: int, proc_root: Path) -> str:
+        """Daemon account from the unit's ``User=``, else the running
+        process's real uid; validated, never guessed (ValueError)."""
+        unit_user = self._systemctl_show("User")
+        if unit_user:
+            return validate_daemon_user(unit_user)
+        if main_pid == 0:
+            raise ValueError(
+                f"{COW_DAEMON_SERVICE_NAME} unit has no User= and the daemon "
+                "is not running; cannot determine the daemon user"
+            )
+        status_text = (proc_root / str(main_pid) / "status").read_text()
+        return validate_daemon_user(account_name_for_uid(process_real_uid(status_text)))
+
+    def _require_service_group_is_cidx_primary_group(
+        self, unit_path: Path, service_group: str, service_gid: int
+    ) -> None:
+        """ValueError naming both groups unless ``service_group`` IS the
+        primary group of the cidx service user (the cidx-server unit's
+        ``User=``) -- the gid every new activated-repos user dir carries."""
+        service_user = self._extract_service_user(unit_path.read_text())
+        if not service_user:
+            raise ValueError(
+                f"cannot determine the cidx service user: no User= in {unit_path}"
+            )
+        try:
+            primary_gid = pwd.getpwnam(service_user).pw_gid
+        except KeyError:
+            raise ValueError(f"cidx service user '{service_user}' does not exist")
+        if primary_gid != service_gid:
+            raise ValueError(
+                f"CoW daemon service_group '{service_group}' is not the primary "
+                f"group of the cidx service user '{service_user}' (primary "
+                f"group '{primary_group_name(service_user)}'); new "
+                "activated-repos user directories would not be writable by "
+                "the daemon"
+            )
 
     @staticmethod
     def _upgrade_cow_storage_fstab_entry_to_nfsv3(

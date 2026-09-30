@@ -10,20 +10,79 @@ the encrypted blob to the PostgreSQL backend so the sync service can distribute
 the key to all cluster nodes.
 """
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 import filelock
 
 from .ssh_key_generator import SSHKeyGenerator
 from .ssh_config_manager import SSHConfigManager, HostEntry
 from .key_discovery_service import KeyDiscoveryService, KeyInfo
+from .ssh_input_validation import (
+    RESERVED_SSH_FILE_NAMES,
+    is_valid_hostname,
+    is_valid_key_name,
+    validate_hostname,
+)
+from .audit_outcome import conforming_details, record_outcome
 
 logger = logging.getLogger(__name__)
+
+
+_SHA256_FINGERPRINT_PREFIX = "SHA256:"
+_SHA256_DIGEST_BYTES = 32
+
+
+def audit_key_id(fingerprint: Optional[str]) -> Optional[str]:
+    """The identifier an SSH key is audited under, derived by the server.
+
+    Audit rows never carry a key's user-chosen name.  They carry the key's
+    SHA-256 fingerprint digest (from ``ssh-keygen -l`` output, as persisted
+    when the key was created), hex-encoded as ``sha256:<hex>`` so it fits the
+    opaque-id type.  Returns None when no such fingerprint is available.
+    """
+    if not fingerprint:
+        return None
+    for token in fingerprint.split():
+        if not token.startswith(_SHA256_FINGERPRINT_PREFIX):
+            continue
+        encoded = token[len(_SHA256_FINGERPRINT_PREFIX) :]
+        try:
+            digest = base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4), validate=True
+            )
+        except (binascii.Error, ValueError):
+            return None
+        if len(digest) != _SHA256_DIGEST_BYTES:
+            return None
+        return "sha256:" + digest.hex()
+    return None
+
+
+def _record_ssh(
+    actor: str,
+    action_type: str,
+    key_id: Optional[str],
+    outcome: str,
+    details: dict,
+) -> None:
+    """Record one SSH key row; *key_id* comes from :func:`audit_key_id`."""
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="ssh_key",
+        target_id=key_id,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class KeyNotFoundError(Exception):
@@ -87,6 +146,54 @@ class SSHKeyManager:
     # Instances fall back to these when not explicitly passed to __init__.
     _cluster_pg_backend: Optional[Any] = None
     _cluster_fernet: Optional[Any] = None
+
+    # A key/hostname that still fails the config-line grammar must not be
+    # silently dropped, but the ERROR log documenting it must fire ONLY ONCE
+    # per key for the lifetime of the process -- list_keys() may be invoked
+    # on every single admin request, and the ERROR log is the sole
+    # surfacing channel. Class-level so the dedup holds across every
+    # SSHKeyManager instance constructed by a request handler, not just one.
+    _logged_config_exclusion_fingerprints: Set[str] = set()
+    _config_exclusion_log_lock = threading.Lock()
+
+    @classmethod
+    def _reset_config_exclusion_log_dedup_for_tests(cls) -> None:
+        """Clear the once-per-process log dedup set. Test-only: pytest runs
+        many test functions in one process, so without this a dedup key
+        used by an earlier test would silently suppress logging in a
+        later one that reuses the same identifier."""
+        with cls._config_exclusion_log_lock:
+            cls._logged_config_exclusion_fingerprints.clear()
+
+    @staticmethod
+    def _config_exclusion_dedup_key(fingerprint: Optional[str], name: str) -> str:
+        """A stable identifier used ONLY to decide whether an exclusion for
+        this key has already been logged -- it is never itself logged.
+
+        Prefers the key's fingerprint. Falls back to a SHA-256 hash of
+        ``name`` (not the raw name) when no fingerprint is recorded, so
+        multiple fingerprint-less rows do not collapse onto one shared key
+        and silently suppress each other's ERROR log.
+        """
+        if isinstance(fingerprint, str) and fingerprint:
+            return f"fp:{fingerprint}"
+        digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()
+        return f"name:{digest}"
+
+    @classmethod
+    def _log_config_exclusion_once(cls, dedup_key: str, message: str) -> None:
+        """Log ``message`` at ERROR the first time ``dedup_key`` is seen;
+        a no-op on every subsequent call for the same key.
+
+        ``message`` may only embed a safe identifier (a fingerprint, or an
+        already-valid name) -- never the raw invalid name/hostname -- so an
+        invalid value can never reach a log line.
+        """
+        with cls._config_exclusion_log_lock:
+            if dedup_key in cls._logged_config_exclusion_fingerprints:
+                return
+            cls._logged_config_exclusion_fingerprints.add(dedup_key)
+        logger.error(message)
 
     @classmethod
     def set_cluster_dependencies(cls, pg_backend: Any, fernet: Any) -> None:
@@ -288,7 +395,16 @@ class SSHKeyManager:
 
         Returns:
             Updated KeyMetadata
+
+        Raises:
+            InvalidHostnameError: ``hostname`` fails the strict grammar.
+                Validated BEFORE any branching, so an invalid value is
+                rejected before it can reach node-local
+                metadata, the shared cluster backend, or ``~/.ssh/config`` --
+                ``force=True`` only bypasses the user-section conflict guard
+                below, never this check.
         """
+        validate_hostname(hostname)
 
         with self._get_lock():
             if self._use_sqlite and self._sqlite_backend is not None:
@@ -341,6 +457,95 @@ class SSHKeyManager:
                 self._update_ssh_config()
 
                 return metadata
+
+    # ------------------------------------------------------------------
+    # Audited entry points.  Every front door (REST, MCP, Web, CLI) calls
+    # these.  The key name is the key's identifier; the description, email
+    # and key material are never recorded.  In the standalone CLI (no
+    # server process) recording is a no-op by design.
+    # ------------------------------------------------------------------
+
+    def create_key_audited(
+        self,
+        name: str,
+        key_type: str = "ed25519",
+        email: Optional[str] = None,
+        description: Optional[str] = None,
+        *,
+        actor: str,
+    ) -> KeyMetadata:
+        """:meth:`create_key`, recording ``ssh_key_created``."""
+        try:
+            metadata = self.create_key(
+                name, key_type=key_type, email=email, description=description
+            )
+        except Exception:
+            _record_ssh(actor, "ssh_key_created", None, "failure", {})
+            raise
+        details = conforming_details("ssh_key_created", key_type=key_type)
+        _record_ssh(
+            actor,
+            "ssh_key_created",
+            audit_key_id(metadata.fingerprint),
+            "success",
+            details,
+        )
+        return metadata
+
+    def assign_key_to_host_audited(
+        self, key_name: str, hostname: str, force: bool = False, *, actor: str
+    ) -> KeyMetadata:
+        """:meth:`assign_key_to_host`, recording ``ssh_key_host_assigned``."""
+        key_id: Optional[str] = None
+        try:
+            key_id = audit_key_id(self._persisted_fingerprint(key_name))
+            metadata = self.assign_key_to_host(key_name, hostname, force=force)
+        except Exception:
+            _record_ssh(actor, "ssh_key_host_assigned", key_id, "failure", {})
+            raise
+        details = conforming_details("ssh_key_host_assigned", host=hostname)
+        _record_ssh(
+            actor,
+            "ssh_key_host_assigned",
+            audit_key_id(metadata.fingerprint),
+            "success",
+            details,
+        )
+        return metadata
+
+    def delete_key_audited(self, key_name: str, *, actor: str) -> bool:
+        """:meth:`delete_key`, recording ``ssh_key_deleted``.
+
+        The row names the key by its fingerprint as looked up before the
+        deletion; a key with no persisted record is the placeholder.
+        """
+        key_id: Optional[str] = None
+        try:
+            key_id = audit_key_id(self._persisted_fingerprint(key_name))
+            deleted = self.delete_key(key_name)
+        except Exception:
+            _record_ssh(actor, "ssh_key_deleted", key_id, "failure", {})
+            raise
+        if not deleted:
+            _record_ssh(actor, "ssh_key_deleted", None, "failure", {})
+            return False
+        _record_ssh(actor, "ssh_key_deleted", key_id, "success", {})
+        return True
+
+    def _persisted_fingerprint(self, key_name: str) -> Optional[str]:
+        """The fingerprint this server persisted for *key_name*, or None."""
+        if not is_valid_key_name(key_name):
+            return None
+        if self._use_sqlite and self._sqlite_backend is not None:
+            data = self._sqlite_backend.get_key(key_name)
+            if data:
+                return str(data["fingerprint"])
+        else:
+            metadata = self._load_metadata(key_name)
+            if metadata is not None:
+                return metadata.fingerprint
+        cluster = self._cluster_managed_key_metadata(key_name)
+        return cluster.fingerprint if cluster is not None else None
 
     def _raise_on_user_section_conflict(self, hostname: str, force: bool) -> None:
         """Refuse to shadow a hand-written ``~/.ssh/config`` Host entry.
@@ -477,8 +682,20 @@ class SSHKeyManager:
         cannot drift.  Absent files are not an error: delete is idempotent, and
         a cluster-managed key legitimately has no local copy on a node that
         never ran ``SSHKeySyncService.sync()``.
+        Refuses (WARNING, never the raw name) to remove any path whose
+        basename coincides with an OpenSSH-managed file in the ssh
+        directory (``RESERVED_SSH_FILE_NAMES``), whatever record or delete
+        path names it -- e.g. a key record named "authorized_keys" never
+        deletes the ``authorized_keys`` file.
         """
         for path in (Path(private_path), Path(public_path)):
+            if path.name in RESERVED_SSH_FILE_NAMES:
+                logger.warning(
+                    "SSHKeyManager: refusing to remove a file whose name "
+                    "coincides with an OpenSSH-managed file in the ssh "
+                    "directory"
+                )
+                continue
             if path.exists():
                 path.unlink()
 
@@ -676,7 +893,10 @@ class SSHKeyManager:
             if str(key_info.private_path) not in managed_paths:
                 unmanaged_keys.append(key_info)
 
-        return KeyListResult(managed=managed_keys, unmanaged=unmanaged_keys)
+        return KeyListResult(
+            managed=managed_keys,
+            unmanaged=unmanaged_keys,
+        )
 
     def _local_materialized_paths(self, key_name: str) -> Optional[Tuple[str, str]]:
         """Resolve where a cluster-tracked key named ``key_name`` lives on THIS node.
@@ -689,16 +909,38 @@ class SSHKeyManager:
            rejects anything carrying a separator (``a/b``, ``foo/../bar``), the
            traversal names ``.``/``..``, and absolute paths, before any
            filesystem call happens.
-        2. Both resolved paths must still be direct children of
+        2. The name must not coincide with an OpenSSH-managed file that
+           lives directly in the ssh directory (``RESERVED_SSH_FILE_NAMES``)
+           -- a bare-filename check alone does not reject "authorized_keys",
+           and materializing THAT as a managed key would make it listable
+           and deletable over the real file.
+        3. Both resolved paths must still be direct children of
            ``self.ssh_dir`` -- defense in depth against a symlinked ssh_dir
            entry, using the same containment technique
            ``_has_untracked_conflicting_file`` applies for Bug #1519.
+
+        Listing and deleting a key is a different surface from writing a
+        config line: this method gates ONLY on the checks above, never on
+        the config-line grammar that guards ``~/.ssh/config`` Host blocks
+        (that grammar is enforced separately, only where a Host block is
+        actually built, in ``_build_host_entries``). A key whose stored
+        name fails the config-line grammar (a space, a ``#``, an ``@``) is
+        therefore still visible in ``list_keys()`` and deletable via
+        ``delete_key`` -- unlike a reserved name, which is never visible.
         """
         if not key_name or key_name != Path(key_name).name:
             logger.warning(
                 "SSHKeyManager: cluster key name %r is not a bare filename -- "
                 "excluding it from this node's key list",
                 key_name,
+            )
+            return None
+
+        if key_name in RESERVED_SSH_FILE_NAMES:
+            logger.warning(
+                "SSHKeyManager: excluding a cluster key whose name "
+                "coincides with an OpenSSH-managed file in the ssh "
+                "directory"
             )
             return None
 
@@ -770,6 +1012,17 @@ class SSHKeyManager:
                 continue
             metadata = self._cluster_row_to_local_metadata(row)
             if metadata is None:
+                fingerprint = row.get("fingerprint")
+                row_name = row.get("name")
+                dedup_key = self._config_exclusion_dedup_key(
+                    fingerprint, row_name if isinstance(row_name, str) else ""
+                )
+                self._log_config_exclusion_once(
+                    dedup_key,
+                    f"SSH key with fingerprint {fingerprint!r} could not be "
+                    "materialized on this node because its stored name "
+                    "is not a safe path component -- delete and recreate it",
+                )
                 continue
             known_names.add(metadata.name)
             merged.append(metadata)
@@ -916,13 +1169,50 @@ class SSHKeyManager:
 
         raise PublicKeyNotFoundError(f"Public key file missing: {metadata.public_path}")
 
-    def _update_ssh_config(self) -> None:
-        """Update SSH config with all managed key-host mappings."""
-        all_keys = self._list_keys_internal()
+    def _build_host_entries(self, managed_keys: List[KeyMetadata]) -> List[HostEntry]:
+        """Build the safe ``HostEntry`` list for ``~/.ssh/config`` from
+        managed key metadata.
 
+        An excluded entry is logged via ``_log_config_exclusion_once``,
+        identified by a SAFE field only (the key's FINGERPRINT, or a hash
+        of its name when no fingerprint is recorded) -- never by the raw
+        invalid name/hostname content, so an unsafe value can never reach
+        a log line. The dedup means calling this repeatedly for the same
+        key logs it exactly once per process.
+
+        Args:
+            managed_keys: Metadata for every key this node/cluster considers managed.
+
+        Returns:
+            The HostEntry objects safe to write into ``~/.ssh/config``.
+        """
         entries: List[HostEntry] = []
-        for metadata in all_keys.managed:
+
+        for metadata in managed_keys:
+            if not is_valid_key_name(metadata.name):
+                dedup_key = self._config_exclusion_dedup_key(
+                    metadata.fingerprint, metadata.name
+                )
+                self._log_config_exclusion_once(
+                    dedup_key,
+                    f"SSH key with fingerprint {metadata.fingerprint!r} has "
+                    "an invalid stored name and was excluded from "
+                    "~/.ssh/config -- delete and recreate it",
+                )
+                continue
+
             for hostname in metadata.hosts:
+                if not is_valid_hostname(hostname):
+                    dedup_key = self._config_exclusion_dedup_key(
+                        metadata.fingerprint, metadata.name
+                    )
+                    self._log_config_exclusion_once(
+                        dedup_key,
+                        f"SSH key {metadata.name!r} has an invalid host "
+                        "mapping and it was excluded from ~/.ssh/config -- "
+                        "review and reassign its hosts",
+                    )
+                    continue
                 entries.append(
                     HostEntry(
                         host=hostname,
@@ -930,6 +1220,31 @@ class SSHKeyManager:
                         key_path=metadata.private_path,
                     )
                 )
+
+        return entries
+
+    def _update_ssh_config(self) -> None:
+        """Update SSH config with all managed key-host mappings.
+
+        Only values that pass the config-line grammar are rendered.
+        ``assign_key_to_host`` validates a hostname and
+        ``create_key``/``SSHKeyGenerator`` validate a key name before either
+        is persisted; ``_build_host_entries`` applies the same grammar to
+        every stored record, including one written outside this class
+        (e.g. directly to the metadata/PG store). A record that fails it is
+        left out of ``~/.ssh/config`` on its own (ERROR logged once per
+        fingerprint, never the raw value) and every other record's Host
+        block is still written; the record itself stays listed and
+        deletable.
+
+        The key-name check runs first, once per record: a key name that
+        fails the grammar excludes that record's whole ``hosts`` list before
+        any HostEntry is built, so it never reaches the ``IdentityFile``
+        line or the format-time backstop.
+        """
+        all_keys = self._list_keys_internal()
+
+        entries = self._build_host_entries(all_keys.managed)
 
         # Parse existing config to preserve user section
         parsed = self.config_manager.parse_config(self.config_path)

@@ -149,9 +149,25 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 12.72.0 shifted them another +30. FIVE consecutive releases now.
         # 12.72.1 (hotfix) shifted them another +16 (9822/10193/10674 ->
         # 9838/10209/10690).
-        "CHANGELOG.md:9838",
-        "CHANGELOG.md:10209",
-        "CHANGELOG.md:10690",
+        # 12.73.0 shifted them another +23 (9838/10209/10690 ->
+        # 9861/10232/10713).
+        # 12.74.0 shifted them another +2 (9861/10232/10713 ->
+        # 9863/10234/10715). 12.73.0's CI run failed (missing `requests`
+        # dependency) so it was never tagged; 12.74.0's changelog entry
+        # documents that and supersedes it.
+        # 12.75.0 shifted them another +7 (9863/10234/10715 ->
+        # 9870/10241/10722).
+        # 12.76.0 shifted them another +31 (9870/10241/10722 ->
+        # 9901/10272/10753).
+        # The Unreleased audit-log read entry shifted them another +20
+        # (9901/10272/10753 -> 9921/10292/10773).
+        # 12.77.0 shifted them another +44 (9921/10292/10773 ->
+        # 9965/10336/10817).
+        # 12.78.0 shifted them another +21 (9965/10336/10817 ->
+        # 9986/10357/10838).
+        "CHANGELOG.md:9986",
+        "CHANGELOG.md:10357",
+        "CHANGELOG.md:10838",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

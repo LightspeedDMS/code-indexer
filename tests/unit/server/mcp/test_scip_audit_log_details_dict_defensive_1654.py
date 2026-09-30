@@ -29,8 +29,8 @@ This file keeps the dict-handling behavior change (routing through the
 shared `parse_json_column()` helper from `server/storage/json_column.py`,
 same helper used by Bug #1622/#1652/#1655's genuinely-live JSONB
 columns) as a DEFENSIVE-CONTRACT improvement: it makes `_parse_log_details`
-consistent with `mcp/handlers/admin/__init__.py`'s
-`_decode_audit_log_details()` (which already tolerates dict-or-str for
+consistent with the shared audit read path's
+`services/audit_log_query.decode_details()` (which tolerates dict-or-str for
 this same column) and removes a 4th independently-drifted copy of that
 accept-dict-or-str normalization logic (Messi Rule #4 anti-duplication).
 It also guards against a possible future migration of this column to

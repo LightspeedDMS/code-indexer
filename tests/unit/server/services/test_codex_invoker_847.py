@@ -344,10 +344,14 @@ class TestCodexInvokerSubprocessSetup:
         assert kwargs.get("start_new_session") is True
 
     def test_cwd_passed_to_popen(self) -> None:
-        """The cwd parameter is forwarded to Popen."""
+        """The analyzed directory is never the subprocess's own cwd (codex
+        auto-loads AGENTS.md from its cwd) — a neutral scratch directory is
+        used instead. See test_codex_invoker_agent_isolation.py for the full
+        isolation-behavior test suite."""
         invoker = _make_invoker()
         _, kwargs = _invoke_and_capture_popen(invoker, cwd=_SPECIAL_CWD)
-        assert kwargs.get("cwd") == _SPECIAL_CWD
+        actual_cwd = kwargs.get("cwd")
+        assert actual_cwd != _SPECIAL_CWD
 
 
 # ---------------------------------------------------------------------------

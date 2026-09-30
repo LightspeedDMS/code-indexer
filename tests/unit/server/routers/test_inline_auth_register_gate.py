@@ -42,6 +42,7 @@ class RecordingUserManager:
         self._existing = set(existing or ())
         self.get_user_calls: List[str] = []
         self.create_user_calls: List[Tuple[str, str, object]] = []
+        self.create_actors: List[object] = []
 
     def get_user(self, username):
         self.get_user_calls.append(username)
@@ -51,6 +52,11 @@ class RecordingUserManager:
         self.create_user_calls.append((username, password, role))
         self._existing.add(username)
         return object()
+
+    def create_user_audited(self, username, password, role, *, actor):
+        """The audited entry point the registration door calls."""
+        self.create_actors.append(actor)
+        return self.create_user(username, password, role)
 
 
 class _Unused:
@@ -147,6 +153,9 @@ class TestRegistrationEnabled:
                 UserRole.NORMAL_USER,
             )
         ]
+        from code_indexer.server.services.audit_events import SystemComponent
+
+        assert user_manager.create_actors == [SystemComponent.SELF_REGISTRATION]
 
     def test_existing_account_gets_same_generic_success_without_create(
         self, config_svc

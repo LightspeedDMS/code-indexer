@@ -7,6 +7,7 @@ import pathspec
 
 from ..config import Config
 from ..services.override_filter_service import OverrideFilterService
+from ..utils.path_confinement import is_resolved_within_root
 
 
 class FileFinder:
@@ -14,6 +15,10 @@ class FileFinder:
 
     def __init__(self, config: Config):
         self.config = config
+        # Resolved ONCE per FileFinder instance (i.e. once per indexing
+        # run), never per candidate file -- every containment check below
+        # reuses this same value.
+        self.resolved_codebase_dir = Path(self.config.codebase_dir).resolve()
         self._create_gitignore_spec()
 
         # Initialize override filter service if override config is available
@@ -183,15 +188,56 @@ class FileFinder:
         except (OSError, IOError):
             return False
 
+    def is_eligible(self, file_path: Path) -> bool:
+        """Public wrapper for the eligibility decision a fresh
+        ``find_files()`` walk applies to a single file (size, extension,
+        exclude patterns, text-file check, override filters). No behaviour
+        change from ``_should_include_file()`` -- exists so callers outside
+        this class (e.g. SmartIndexer's resume-path safety check) do not
+        need to reach into a private method."""
+        return self._should_include_file(file_path)
+
     def _should_include_file(self, file_path: Path) -> bool:
         """Check if a file should be included in indexing."""
         try:
+            # Cheap, string-only filtering (extension + exclude patterns;
+            # no syscalls) runs FIRST. When no override filter is
+            # configured -- the common case -- a name-excluded file is
+            # excluded outright, skipping the containment check and the
+            # size stat() below entirely. This short-circuit is safe only
+            # in the override's absence: override_filter_service.
+            # force_include_patterns can otherwise rescue a name-excluded
+            # file, so that path still needs both checks to run.
+            base_result = self._get_base_filtering_result(file_path)
+            if not self.override_filter_service and not base_result:
+                return False
+
+            # Server context only (config.confined_to_codebase_root): reject
+            # any candidate whose resolved location (following symlinks,
+            # collapsing '..') is not strictly inside the resolved codebase
+            # root -- a symlink in-tree can have an eligible name/extension
+            # while its real target lies outside the codebase directory
+            # entirely. Local CLI indexing follows such symlinks.
+            #
+            # os.walk() is called with followlinks=False, which means it
+            # never descends into a symlinked directory -- every
+            # directory in file_path's chain (as actually walked) is
+            # therefore a real, non-symlink directory, and file_path can
+            # only escape the codebase root through its OWN final
+            # component being a symlink. is_symlink() is a single lstat
+            # on that final component; the full resolve()+containment
+            # check (several stats, one per path component) only runs
+            # when it fires, instead of unconditionally on every file.
+            if (
+                self.config.confined_to_codebase_root
+                and file_path.is_symlink()
+                and not is_resolved_within_root(file_path, self.resolved_codebase_dir)
+            ):
+                return False
+
             # Check file size
             if file_path.stat().st_size > self.config.indexing.max_file_size:
                 return False
-
-            # Base filtering logic
-            base_result = self._get_base_filtering_result(file_path)
 
             # Apply override filtering if available
             if self.override_filter_service:
@@ -306,8 +352,17 @@ class FileFinder:
             for file_name in files:
                 file_path = root_path / file_name
 
-                # Debug: Log file being checked
-                if file_name == "ruff_output.json" or file_path.stat().st_size > 500000:
+                # Debug: Log file being checked. Wrapped in try/except
+                # OSError so a symlink loop or broken link does not crash
+                # the walk before containment filtering gets to run.
+                try:
+                    file_is_large_or_named = (
+                        file_name == "ruff_output.json"
+                        or file_path.stat().st_size > 500000
+                    )
+                except OSError:
+                    file_is_large_or_named = False
+                if file_is_large_or_named:
                     with open(debug_file, "a") as f:
                         f.write(
                             f"[{datetime.datetime.now().isoformat()}] Checking large file: {file_path} ({file_path.stat().st_size} bytes)\n"

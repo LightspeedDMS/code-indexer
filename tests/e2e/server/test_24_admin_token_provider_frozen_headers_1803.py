@@ -44,9 +44,8 @@ depth alongside conftest.py's existing autouse
 ``_restore_auth_dependencies_globals`` guard (which additionally swaps
 the whole ``jwt_manager`` object reference back after every test).
 
-``_isolated_server_data_dir`` mutates the process-global
-``CIDX_SERVER_DATA_DIR`` env var for its duration -- unguarded by a lock,
-matching test_23_shared_app_globals_isolation.py's identical helper: this
+conftest.py's ``isolated_server_data_dir`` mutates the process-global
+``CIDX_SERVER_DATA_DIR`` env var for its duration -- unguarded by a lock: this
 suite runs single-threaded/sequential (no pytest-randomly/xdist plugin,
 per this directory's own execution-order documentation), so no concurrent
 test can observe the mutation.
@@ -69,7 +68,6 @@ from __future__ import annotations
 
 import os
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Tuple, cast
 
@@ -81,6 +79,7 @@ from code_indexer.server.auth import dependencies as auth_dependencies
 from tests.e2e.server.conftest import (
     AdminTokenProvider,
     _require_env,
+    isolated_server_data_dir,
     preserve_root_logging_handlers,
     wait_for_terminal_job,
 )
@@ -125,26 +124,6 @@ _HTTP_OK = 200
 _HTTP_UNAUTHORIZED = 401
 
 
-@contextmanager
-def _isolated_server_data_dir(data_dir: Path) -> Iterator[None]:
-    """Temporarily point CIDX_SERVER_DATA_DIR at an isolated directory.
-
-    Mirrors test_23_shared_app_globals_isolation.py's helper of the same
-    name/purpose: an isolated data dir prevents this throwaway app from
-    sharing the shared session test_client's SQLite connection.
-    """
-    previous_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["CIDX_SERVER_DATA_DIR"] = str(data_dir)
-    try:
-        yield
-    finally:
-        if previous_data_dir is None:
-            os.environ.pop("CIDX_SERVER_DATA_DIR", None)
-        else:
-            os.environ["CIDX_SERVER_DATA_DIR"] = previous_data_dir
-
-
 def _do_login(client: TestClient) -> Tuple[str, str | None]:
     resp = client.post(
         "/auth/login",
@@ -173,7 +152,7 @@ def short_lived_provider(
     """
     from code_indexer.server.app import create_app
 
-    with _isolated_server_data_dir(tmp_path / "isolated-data-dir"):
+    with isolated_server_data_dir(tmp_path / "isolated-data-dir"):
         app = create_app()
         this_jwt_manager = auth_dependencies.jwt_manager
         assert this_jwt_manager is not None, (

@@ -5,9 +5,12 @@ write-lock ownership immediately before publishing the swap.
 Structural (AST-based) regression test -- same established pattern as
 test_golden_repo_manager_ownership_loss_checkpoint_1546.py (parses real
 method source via `ast`/`inspect`, no mocking of the system under test).
-The publish sequence lives inside this method's nested `background_worker`
-closure; `inspect.getsource()` on the outer method still captures the
-closure's full body, so the same textual-order check applies.
+The public method records the audit row and delegates submission to
+`_submit_add_indexes_job`; the publish sequence lives inside that helper's
+nested `background_worker` closure.  `inspect.getsource()` on the helper
+still captures the closure's full body, so the same textual-order check
+applies there, and the delegation itself is asserted so the checked body
+stays on the public entry point's path.
 """
 
 from __future__ import annotations
@@ -34,9 +37,19 @@ def _call_names_in_order(source: str) -> list:
 
 
 class TestOwnershipCheckpointPrecedesAddIndexesSwapStructurally:
-    def test_checkpoint_call_appears_before_swap_alias_call(self):
+    def test_public_entry_point_delegates_to_submit_helper(self):
         source = textwrap.dedent(
             inspect.getsource(GoldenRepoManager.add_indexes_to_golden_repo)
+        )
+        assert "_submit_add_indexes_job" in _call_names_in_order(source), (
+            "add_indexes_to_golden_repo() must submit through "
+            "_submit_add_indexes_job(), the body whose publish sequence "
+            "the checkpoint test below inspects"
+        )
+
+    def test_checkpoint_call_appears_before_swap_alias_call(self):
+        source = textwrap.dedent(
+            inspect.getsource(GoldenRepoManager._submit_add_indexes_job)
         )
         names = _call_names_in_order(source)
 

@@ -19,12 +19,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from ..models.api_models import (
+    AuditHealthInfo,
     HealthCheckResponse,
     ServiceHealthInfo,
     SystemHealthInfo,
     HealthStatus,
     VolumeInfo,
 )
+from code_indexer.server.services import audit_capture
 from ...config import ConfigManager
 from .database_health_service import (
     DatabaseHealthStatus,
@@ -118,6 +120,14 @@ def _load_thresholds_from_config() -> None:
                 f"Could not read health config, using defaults: {e}",
             )
         )
+
+
+def _audit_health_info() -> AuditHealthInfo:
+    """This process's audit capture telemetry (O(1), no I/O)."""
+    return AuditHealthInfo(
+        records_dropped_since_boot=audit_capture.records_dropped_since_boot(),
+        node_id=audit_capture.audit_node_id(),
+    )
 
 
 class HealthCheckService:
@@ -253,6 +263,7 @@ class HealthCheckService:
             failure_reasons=failure_reasons,
             last_golden_repo_reconcile_auto_heal=auto_heal_event,
             fleet_migration_dedup_state=dedup_state_summary,
+            audit=_audit_health_info(),
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:

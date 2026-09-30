@@ -180,7 +180,9 @@ class TestBranchIsolationPerformance:
             return_value=all_paths
         )
 
-        def _fetch_points_for_paths(_collection_name, paths):
+        def _fetch_points_for_paths(
+            _collection_name, paths, _subdirectory=None, *, self_heal=False
+        ):
             return [
                 point
                 for point in all_content_points

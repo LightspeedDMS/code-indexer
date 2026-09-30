@@ -1,18 +1,19 @@
 """Regression tests for Bug #1802.
 
 `GroupAccessManager.log_audit(details=...)` used to accept a bare free-text
-string. The reader, `_decode_audit_log_details`
-(mcp/handlers/admin/__init__.py), always `json.loads()`s the stored
-`details` column -- so every free-text writer produced a row the reader
-could not parse, and `handle_query_audit_logs` emitted a malformed-JSON
-WARNING per affected row instead of returning usable structured detail.
+string. The reader always `json.loads()`d the stored `details` column -- so
+every free-text writer produced a row the reader could not parse, and
+`handle_query_audit_logs` emitted a malformed-JSON WARNING per affected row
+instead of returning usable structured detail.
 
 The fix makes the contract impossible to get wrong: `log_audit()` now
 requires `details` to be a dict (or None) and serializes it internally, so
 there is exactly ONE JSON-serialization path for every one of its 22
 call sites. Legacy free-text rows written before this fix must still be
-readable without crashing and without being silently treated as empty --
-they are surfaced as ``{"raw": <original text>}``.
+readable without crashing and without being silently treated as empty.
+The shared read path (``services/audit_log_query.project_details``) shows
+only allowlisted fields, so such a row surfaces as
+``{"omitted_fields": ["(unstructured)"]}`` -- never the text itself.
 
 These tests use REAL GroupAccessManager/AuditLogService instances backed
 by a real temporary SQLite database (no mocks), and drive the actual MCP
@@ -130,11 +131,9 @@ class TestStructuredRoundTripThroughFrontDoor:
 
         # The whole point of the fix: details is a genuine structured
         # object with the real field values, not an empty/opaque blob.
-        assert entry["details"] == {
-            "name": "structured-test",
-            "description": "structured test group",
-            "source": "mcp",
-        }
+        # A legacy writer stores only the allowlisted fields (the free-text
+        # description is never stored).
+        assert entry["details"] == {"name": "structured-test"}
 
 
 class TestLegacyFreeTextRowIsHandledWithoutCrashingOrHidingContent:
@@ -142,19 +141,26 @@ class TestLegacyFreeTextRowIsHandledWithoutCrashingOrHidingContent:
     the documented contract, without crashing and without being silently
     treated as empty."""
 
-    def test_legacy_free_text_row_surfaces_as_raw_not_empty(
+    def test_legacy_free_text_row_surfaces_as_summary_not_empty(
         self, admin_user, wired_app_state, audit_service
     ):
         from code_indexer.server.mcp.handlers.admin import handle_query_audit_logs
+        from tests.unit.server._audit_read_support import make_event
 
         legacy_text = "Created group 'legacy' via MCP"
-        audit_service.log_raw(
-            timestamp="2026-08-20T10:00:00+00:00",
-            admin_id="admin",
-            action_type="group_create",
-            target_type="group",
-            target_id="999",
-            details=legacy_text,
+        # A row stored before the write-time allowlist existed: inserted as
+        # stored, not through a legacy writer (which would restrict it now).
+        audit_service.insert_events(
+            [
+                make_event(
+                    ts="2026-08-20T10:00:00+00:00",
+                    actor="admin",
+                    action_type="group_create",
+                    target_type="group",
+                    target_id="999",
+                    details_json=legacy_text,
+                )
+            ]
         )
 
         result = handle_query_audit_logs.__wrapped__(
@@ -166,8 +172,10 @@ class TestLegacyFreeTextRowIsHandledWithoutCrashingOrHidingContent:
         entry = _entries_for_action(payload, "group_create", "999")
 
         # Must not crash (getting here proves that) and must not silently
-        # pretend the row is empty: the original free text is preserved.
-        assert entry["details"] == {"raw": legacy_text}
+        # pretend the row is empty: the entry says unstructured content was
+        # recorded, without echoing it.
+        assert entry["details"] == {"omitted_fields": ["(unstructured)"]}
+        assert legacy_text not in json.dumps(payload)
 
 
 class TestLogAuditRejectsBareStringDetails:

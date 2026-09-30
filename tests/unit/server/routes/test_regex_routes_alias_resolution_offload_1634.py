@@ -69,6 +69,22 @@ def _make_user(role: UserRole = UserRole.NORMAL_USER) -> User:
     )
 
 
+def _make_admin_bypass_request() -> Any:
+    """Minimal stand-in for FastAPI's injected Request.
+
+    regex_search() now requires a real Request
+    (keyword-only, no default) to enforce repo-level access. These tests
+    exercise unrelated behavior (thread-offload proofs, alias resolution
+    correctness), so the stand-in's access_filtering_service
+    admin-bypasses the check.
+    """
+    mock_access_service = MagicMock()
+    mock_access_service.is_admin_user.return_value = True
+    request = MagicMock()
+    request.app.state.access_filtering_service = mock_access_service
+    return request
+
+
 def _install_read_alias_thread_spy() -> Tuple[List[int], Callable[..., Any]]:
     """Wrap the real AliasManager.read_alias so each call records the OS
     thread identity it executed on, then delegates to the real
@@ -150,7 +166,9 @@ class TestSingleAliasResolutionOffload:
             ),
             _patch_config_service(),
         ):
-            result = await regex_search(body, user)
+            result = await regex_search(
+                body, user=user, request=_make_admin_bypass_request()
+            )
 
         assert result == _STUB_RESULT
         assert threads, "AliasManager.read_alias was never called"
@@ -267,7 +285,9 @@ class TestBehaviorPreservation:
             ),
             _patch_config_service(),
         ):
-            result = await regex_search(body, user)
+            result = await regex_search(
+                body, user=user, request=_make_admin_bypass_request()
+            )
 
         assert result == _STUB_RESULT
         assert captured["repo_path_str"] == expected_target
@@ -289,7 +309,9 @@ class TestBehaviorPreservation:
             _patch_config_service(),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await regex_search(body, user)
+                await regex_search(
+                    body, user=user, request=_make_admin_bypass_request()
+                )
 
         assert exc_info.value.status_code == 404
         detail = exc_info.value.detail
@@ -313,7 +335,9 @@ class TestBehaviorPreservation:
             _patch_config_service(),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await regex_search(body, user)
+                await regex_search(
+                    body, user=user, request=_make_admin_bypass_request()
+                )
 
         assert exc_info.value.status_code == 404
         detail = exc_info.value.detail

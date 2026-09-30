@@ -80,19 +80,19 @@ class TestUpdateIndexingSetting:
 
     def test_voyage_ai_parallel_clamped_from_zero_to_one(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("voyage_ai_parallel_requests", "0")
+        svc.update_setting("indexing", "voyage_ai_parallel_requests", "0")
         cfg = svc.get_config()
         assert cfg.indexing_config.voyage_ai_parallel_requests == 1
 
     def test_voyage_ai_parallel_clamped_from_100_to_32(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("voyage_ai_parallel_requests", "100")
+        svc.update_setting("indexing", "voyage_ai_parallel_requests", "100")
         cfg = svc.get_config()
         assert cfg.indexing_config.voyage_ai_parallel_requests == 32
 
     def test_voyage_ai_parallel_valid_16_stored_as_16(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("voyage_ai_parallel_requests", "16")
+        svc.update_setting("indexing", "voyage_ai_parallel_requests", "16")
         cfg = svc.get_config()
         assert cfg.indexing_config.voyage_ai_parallel_requests == 16
 
@@ -100,19 +100,19 @@ class TestUpdateIndexingSetting:
 
     def test_cohere_parallel_clamped_from_zero_to_one(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("cohere_parallel_requests", "0")
+        svc.update_setting("indexing", "cohere_parallel_requests", "0")
         cfg = svc.get_config()
         assert cfg.indexing_config.cohere_parallel_requests == 1
 
     def test_cohere_parallel_clamped_from_100_to_32(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("cohere_parallel_requests", "100")
+        svc.update_setting("indexing", "cohere_parallel_requests", "100")
         cfg = svc.get_config()
         assert cfg.indexing_config.cohere_parallel_requests == 32
 
     def test_cohere_parallel_valid_16_stored_as_16(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("cohere_parallel_requests", "16")
+        svc.update_setting("indexing", "cohere_parallel_requests", "16")
         cfg = svc.get_config()
         assert cfg.indexing_config.cohere_parallel_requests == 16
 
@@ -120,45 +120,45 @@ class TestUpdateIndexingSetting:
 
     def test_temporal_parallel_empty_string_stores_none(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("temporal_parallel_requests", "")
+        svc.update_setting("indexing", "temporal_parallel_requests", "")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests is None
 
     def test_temporal_parallel_none_value_stores_none(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("temporal_parallel_requests", None)
+        svc.update_setting("indexing", "temporal_parallel_requests", None)
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests is None
 
     def test_temporal_parallel_valid_2_stored_as_2(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("temporal_parallel_requests", "2")
+        svc.update_setting("indexing", "temporal_parallel_requests", "2")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests == 2
 
     def test_temporal_parallel_clamped_from_100_to_32(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("temporal_parallel_requests", "100")
+        svc.update_setting("indexing", "temporal_parallel_requests", "100")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests == 32
 
     def test_temporal_parallel_clamped_from_zero_to_one(self) -> None:
         svc = self._make_service()
-        svc._update_indexing_setting("temporal_parallel_requests", "0")
+        svc.update_setting("indexing", "temporal_parallel_requests", "0")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests == 1
 
     def test_temporal_parallel_nonnumeric_raises_value_error(self) -> None:
         svc = self._make_service()
         with pytest.raises(ValueError):
-            svc._update_indexing_setting("temporal_parallel_requests", "abc")
+            svc.update_setting("indexing", "temporal_parallel_requests", "abc")
 
     # --- unknown key still raises ---
 
     def test_unknown_key_raises_value_error(self) -> None:
         svc = self._make_service()
         with pytest.raises(ValueError):
-            svc._update_indexing_setting("nonexistent_key", "5")
+            svc.update_setting("indexing", "nonexistent_key", "5")
 
 
 # ---------------------------------------------------------------------------
@@ -609,9 +609,9 @@ class TestGetAllSettingsIncludesParallelRequests:
     def test_get_all_settings_reflects_saved_values(self, tmp_path) -> None:
         """After saving all 3 fields, get_all_settings returns the saved values."""
         svc = self._make_service(tmp_path)
-        svc._update_indexing_setting("voyage_ai_parallel_requests", "16")
-        svc._update_indexing_setting("cohere_parallel_requests", "4")
-        svc._update_indexing_setting("temporal_parallel_requests", "2")
+        svc.update_setting("indexing", "voyage_ai_parallel_requests", "16")
+        svc.update_setting("indexing", "cohere_parallel_requests", "4")
+        svc.update_setting("indexing", "temporal_parallel_requests", "2")
         settings = svc.get_all_settings()
         indexing = settings.get("indexing", {})
         assert indexing.get("voyage_ai_parallel_requests") == 16

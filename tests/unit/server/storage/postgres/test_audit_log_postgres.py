@@ -58,8 +58,11 @@ class TestProtocolCompliance:
     def test_has_log_raw_method(self, backend):
         assert callable(getattr(backend, "log_raw", None))
 
-    def test_has_query_method(self, backend):
-        assert callable(getattr(backend, "query", None))
+    def test_has_the_shared_read_methods_and_no_legacy_query(self, backend):
+        # Rows are read only through services/audit_log_query.query_audit_log.
+        for name in ("query_page", "count_capped", "aggregate", "find_terminal_rows"):
+            assert callable(getattr(backend, name, None)), name
+        assert not hasattr(backend, "query")
 
     def test_has_get_pr_logs_method(self, backend):
         assert callable(getattr(backend, "get_pr_logs", None))
@@ -73,29 +76,37 @@ class TestProtocolCompliance:
 # ---------------------------------------------------------------------------
 
 
+def _single_row_params(cursor):
+    """The one row written by the backend's single write function."""
+    cursor.executemany.assert_called_once()
+    rows = cursor.executemany.call_args[0][1]
+    assert len(rows) == 1
+    return rows[0]
+
+
 class TestLog:
-    """Tests for log() method."""
+    """Tests for log() method (routed through insert_events)."""
 
     def test_log_inserts_row(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice", "some details")
-        cursor.execute.assert_called_once()
-        sql = cursor.execute.call_args[0][0]
+        _single_row_params(cursor)
+        sql = cursor.executemany.call_args[0][0]
         assert "INSERT INTO audit_logs" in sql
         assert "%s" in sql
 
-    def test_log_commits(self, mock_pool):
+    def test_log_runs_in_one_transaction(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice")
-        conn.commit.assert_called_once()
+        conn.transaction.assert_called_once()
 
     def test_log_passes_all_params(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "user_created", "user", "alice", "details")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[1] == "admin"
         assert params[2] == "user_created"
         assert params[3] == "user"
@@ -106,7 +117,7 @@ class TestLog:
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log("admin", "login", "auth", "admin")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[5] is None
 
 
@@ -122,68 +133,14 @@ class TestLogRaw:
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log_raw("2026-01-01T00:00:00", "admin", "migrated", "system", "all")
-        params = cursor.execute.call_args[0][1]
+        params = _single_row_params(cursor)
         assert params[0] == "2026-01-01T00:00:00"
 
-    def test_log_raw_commits(self, mock_pool):
+    def test_log_raw_runs_in_one_transaction(self, mock_pool):
         pool, conn, cursor = mock_pool
         backend = AuditLogPostgresBackend(pool)
         backend.log_raw("2026-01-01T00:00:00", "admin", "migrated", "system", "all")
-        conn.commit.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# query()
-# ---------------------------------------------------------------------------
-
-
-class TestQuery:
-    """Tests for query() method."""
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_returns_tuple_of_list_and_count(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 5}
-        cursor.fetchall.return_value = [{"id": 1}, {"id": 2}]
-        backend = AuditLogPostgresBackend(pool)
-        rows, total = backend.query(limit=10)
-        assert total == 5
-        assert len(rows) == 2
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_action_type_filter(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 1}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(action_type="login")
-        count_sql = cursor.execute.call_args_list[0][0][0]
-        assert "action_type = %s" in count_sql
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_date_range(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 0}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(date_from="2026-01-01", date_to="2026-12-31")
-        count_sql = cursor.execute.call_args_list[0][0][0]
-        assert "timestamp >= %s" in count_sql
-        assert "timestamp <= %s" in count_sql
-
-    @patch("code_indexer.server.storage.postgres.audit_log_backend._dict_row_factory")
-    def test_query_with_limit_and_offset(self, mock_factory, mock_pool):
-        pool, conn, cursor = mock_pool
-        mock_factory.return_value = None
-        cursor.fetchone.return_value = {"cnt": 100}
-        cursor.fetchall.return_value = []
-        backend = AuditLogPostgresBackend(pool)
-        backend.query(limit=10, offset=20)
-        query_sql = cursor.execute.call_args_list[1][0][0]
-        assert "LIMIT %s OFFSET %s" in query_sql
+        conn.transaction.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

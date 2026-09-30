@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 from code_indexer.config import ConfigManager
-from code_indexer.server.auth.dependencies import get_current_user_web_or_api
+from code_indexer.server.auth import dependencies
+from code_indexer.server.auth.dependencies import (
+    get_current_admin_user_hybrid,
+    get_current_user_web_or_api,
+)
 from code_indexer.server.auth.user_manager import User
 
 
@@ -118,37 +122,48 @@ def get_git_settings(
     )
 
 
-@router.put("/git", response_model=GitServiceConfigResponse)
+@router.put(
+    "/git",
+    response_model=GitServiceConfigResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_git_settings(
     updates: GitServiceConfigUpdate,
-    current_user: User = Depends(get_current_user_web_or_api),
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> GitServiceConfigResponse:
     """
     Update git service configuration.
 
-    Requires authentication. Updates default_committer_email and persists to
-    config.json. Other fields (service_committer_name, service_committer_email)
-    remain unchanged.
+    default_committer_email is the fallback git committer
+    identity used server-wide for pushes made on OTHER users' behalf -- it sets commit
+    authorship metadata fleet-wide, so changing it requires admin role AND an
+    active TOTP elevation window, matching the MCP twin `set_global_config`
+    (`@require_mcp_elevation()` in `mcp/handlers/admin/__init__.py`).
+
+    Updates default_committer_email and persists to config.json. Other fields
+    (service_committer_name, service_committer_email) remain unchanged.
 
     Args:
         updates: Git service configuration updates
-        current_user: Authenticated user (injected by dependency)
+        current_user: Authenticated admin user (injected by dependency)
 
     Returns:
         GitServiceConfigResponse with updated settings
 
     Raises:
-        HTTPException: 401 if not authenticated (handled by dependency)
+        HTTPException: 401/403 if not authenticated/authorized/elevated (handled by dependency)
         HTTPException: 422 if email validation fails (handled by Pydantic)
     """
-    config_manager = _get_config_manager()
-    config = config_manager.load()
+    from code_indexer.server.services.config_change_audit import (
+        apply_git_settings_change,
+    )
 
-    # Update only the default_committer_email field
-    config.git_service.default_committer_email = updates.default_committer_email
-
-    # Save the updated config
-    config_manager.save(config)
+    # Update only the default_committer_email field (one audited change).
+    config = apply_git_settings_change(
+        _get_config_manager(),
+        default_committer_email=updates.default_committer_email,
+        actor=current_user.username,
+    )
 
     return GitServiceConfigResponse(
         service_committer_name=config.git_service.service_committer_name,

@@ -13,9 +13,18 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+class FailureOutcome(NamedTuple):
+    """Result of recording one failed login attempt."""
+
+    locked: bool
+    remaining_seconds: float
+    # True only for the failure that started the lockout (the transition).
+    lockout_started: bool
 
 
 class LoginRateLimiter:
@@ -100,23 +109,34 @@ class LoginRateLimiter:
         Returns:
             (is_locked, remaining_seconds) - True if account is now locked
         """
+        outcome = self.record_failure(username)
+        return outcome.locked, outcome.remaining_seconds
+
+    def record_failure(self, username: str) -> FailureOutcome:
+        """Record a failed login attempt; report whether it started a lockout.
+
+        ``lockout_started`` is True only for the one failure that locks the
+        account.  In cluster mode the transition is decided atomically in
+        PostgreSQL, so exactly one node sees it per lockout.  A failure
+        recorded while the account is already locked never reports it.
+        """
         if not self._enabled:
-            return False, 0
+            return FailureOutcome(False, 0, False)
 
         with self._lock:
             # If currently locked, report locked state without adding another failure
             locked, remaining = self._check_locked(username)
             if locked:
                 self._emit_failure_audit(username)
-                return True, remaining
+                return FailureOutcome(True, remaining, False)
 
             # Cluster mode: delegate to PostgreSQL
             if self._pool is not None:
                 self._emit_failure_audit(username)
-                is_locked, remaining = self._pg_record_failure(username)
-                if is_locked:
+                outcome = self._pg_record_failure(username)
+                if outcome.lockout_started:
                     self._emit_lockout_audit(username, self._max_attempts)
-                return is_locked, remaining
+                return outcome
 
             now = time.time()
 
@@ -139,9 +159,9 @@ class LoginRateLimiter:
                 remaining = self._lockout_duration_seconds
                 # Audit-log the lockout event (AC7)
                 self._emit_lockout_audit(username, failure_count)
-                return True, remaining
+                return FailureOutcome(True, remaining, True)
 
-            return False, 0
+            return FailureOutcome(False, 0, False)
 
     def record_success(self, username: str) -> None:
         """
@@ -207,8 +227,14 @@ class LoginRateLimiter:
         locked_until = row[0]
         return True, locked_until - now
 
-    def _pg_record_failure(self, username: str) -> Tuple[bool, float]:
-        """Record failure in PostgreSQL and check for lockout. Called under self._lock."""
+    def _pg_record_failure(self, username: str) -> FailureOutcome:
+        """Record failure in PostgreSQL and check for lockout. Called under self._lock.
+
+        The lockout row is written by a conditional upsert: it inserts, or
+        replaces an EXPIRED lockout, and only then affects a row.  A node
+        racing another node's still-active lockout affects none, so the
+        lockout transition is reported by exactly one node.
+        """
         assert self._pool is not None
         now = time.time()
         with self._pool.connection() as conn:
@@ -231,16 +257,21 @@ class LoginRateLimiter:
             # Check if lockout threshold reached
             if failure_count >= self._max_attempts:
                 locked_until = now + self._lockout_duration_seconds
-                conn.execute(
+                upsert = conn.execute(
                     "INSERT INTO login_lockouts (username, locked_until) "
                     "VALUES (%s, %s) "
-                    "ON CONFLICT (username) DO UPDATE SET locked_until = %s",
-                    (username, locked_until, locked_until),
+                    "ON CONFLICT (username) DO UPDATE "
+                    "SET locked_until = EXCLUDED.locked_until "
+                    "WHERE login_lockouts.locked_until <= %s",
+                    (username, locked_until, now),
                 )
+                # 1 row: inserted or replaced an expired lockout (the
+                # transition); 0 rows: another node's lockout is active.
+                started = upsert.rowcount == 1
                 conn.commit()
-                return True, self._lockout_duration_seconds
+                return FailureOutcome(True, self._lockout_duration_seconds, started)
             conn.commit()
-        return False, 0
+        return FailureOutcome(False, 0, False)
 
     def _prune_old_failures(self, username: str, now: float) -> None:
         """Remove failure timestamps older than the sliding window."""

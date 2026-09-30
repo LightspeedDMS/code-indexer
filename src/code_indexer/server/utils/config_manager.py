@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
+from .host_validation import validate_server_host
+
 logger = logging.getLogger(__name__)
 
 # Top-level ServerConfig keys that have been removed from the dataclass but may
@@ -35,6 +37,11 @@ _MCP_DISPATCH_POOL_MAX: int = 1024
 # perf - bounds for query_executor_pool_size bootstrap config key (range 1-2048)
 _QUERY_EXECUTOR_POOL_MIN: int = 1
 _QUERY_EXECUTOR_POOL_MAX: int = 2048
+
+# bounds for the server `workers` bootstrap config key, matching the range
+# already enforced on the Web UI side (routes.py _validate_config_section).
+_SERVER_WORKERS_MIN: int = 1
+_SERVER_WORKERS_MAX: int = 64
 
 # Story #1676 AC1: telemetry configuration is managed exclusively via the Web
 # UI Config Screen (DB-backed) -- these 5 legacy environment variables no
@@ -2991,16 +2998,36 @@ class ServerConfigManager:
 
         return config
 
-    def validate_config(self, config: ServerConfig) -> None:
+    def validate_config(
+        self, config: ServerConfig, *, previous_host: Optional[str] = None
+    ) -> None:
         """
         Validate configuration settings.
 
         Args:
             config: Configuration to validate
+            previous_host: The host value currently persisted, when config is
+                an edited copy of the persisted config. The host is then only
+                validated if it CHANGED, so a host persisted before host
+                validation existed never blocks saves of unrelated settings.
+                None (default) validates the host unconditionally.
 
         Raises:
             ValueError: If any configuration value is invalid
         """
+        # Validate host (must be an IP literal or hostname; this value
+        # ultimately flows into privileged system-service config). The
+        # auto-updater re-validates it before writing the service unit.
+        if previous_host is None or config.host != previous_host:
+            validate_server_host(config.host)
+
+        # Validate workers range
+        if not (_SERVER_WORKERS_MIN <= config.workers <= _SERVER_WORKERS_MAX):
+            raise ValueError(
+                f"workers must be between {_SERVER_WORKERS_MIN} "
+                f"and {_SERVER_WORKERS_MAX}, got {config.workers}"
+            )
+
         # Validate mcp_dispatch_pool_size (Story #1009)
         if not (
             _MCP_DISPATCH_POOL_MIN

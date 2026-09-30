@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 if TYPE_CHECKING:
     from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
+from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
@@ -189,7 +190,11 @@ class XRaySearchEngine:
     parallel AST evaluation via RustNativeBackend.
     """
 
-    def __init__(self, identity_cache: Optional["SharedIdentityCache"] = None) -> None:
+    def __init__(
+        self,
+        identity_cache: Optional["SharedIdentityCache"] = None,
+        confine_to_repo_root: bool = True,
+    ) -> None:
         """Initialise the engine, importing tree-sitter at this point.
 
         Args:
@@ -203,14 +208,22 @@ class XRaySearchEngine:
                 instead of once per cell. None (default) makes
                 RustNativeBackend create its own private, per-instance
                 cache -- unchanged single-repo xray_search behaviour.
+            confine_to_repo_root: True (default, every server-side caller)
+                keeps filename-target candidates and line-content reads
+                inside the resolved repository root. The local
+                ``cidx xray`` commands pass False: a user searching their
+                own checkout follows symlinks wherever they point.
         """
         from code_indexer.xray.ast_engine import AstSearchEngine
         from code_indexer.xray.rust_backend import RustNativeBackend
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
+        self._confine_to_repo_root = confine_to_repo_root
         self.ast_engine = AstSearchEngine()
         self.rust_backend = RustNativeBackend(
-            xray_cache_backend=_get_cluster_cache(), identity_cache=identity_cache
+            xray_cache_backend=_get_cluster_cache(),
+            identity_cache=identity_cache,
+            confine_to_repo_root=confine_to_repo_root,
         )
         self.sandbox = PythonEvaluatorSandbox()
 
@@ -1074,6 +1087,8 @@ class XRaySearchEngine:
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
         start = time.monotonic()
+        # Resolved ONCE for the whole walk, never per candidate.
+        resolved_repo_root = repo_path.resolve()
 
         # Bug #1598: iterate rglob() directly (unsorted) instead of
         # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
@@ -1087,6 +1102,15 @@ class XRaySearchEngine:
                 raise XRayPhase1TimeoutError(candidates=sorted(candidates))
 
             if not p.is_file():
+                continue
+
+            # p.is_file() follows a symlink's target regardless of where
+            # it points -- when confined (server context), reject any
+            # candidate whose resolved location is not strictly inside the
+            # repository root.
+            if self._confine_to_repo_root and not is_resolved_within_root(
+                p, resolved_repo_root
+            ):
                 continue
 
             rel = str(p.relative_to(repo_path))

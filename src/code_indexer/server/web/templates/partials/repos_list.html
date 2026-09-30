@@ -20,7 +20,7 @@
         {% for repo in repos %}
         <tr data-repo-alias="{{ repo.user_alias }}" data-category-id="{{ repo.category_id or '' }}" data-category-name="{{ repo.category_name or 'Unassigned' }}" data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
             <td>
-                <a href="#" onclick="toggleDetails('{{ repo.username }}', '{{ repo.user_alias }}'); return false;">
+                <a href="#" data-username="{{ repo.username }}" data-user-alias="{{ repo.user_alias }}" onclick="toggleDetails(this.dataset.username, this.dataset.userAlias); return false;">
                     {{ repo.user_alias }}
                 </a>
             </td>
@@ -53,9 +53,9 @@
                 {% if deact_job_id %}
                 <a href="/admin/jobs?search={{ deact_job_id }}" class="badge-deactivating" title="Deactivation in progress — click to view job">Deactivating...</a>
                 {% else %}
-                <button class="outline small" onclick="toggleDetails('{{ repo.username }}', '{{ repo.user_alias }}')" title="View details">Details</button>
-                <button class="small" onclick="triggerActivatedRepoReindex('{{ repo.user_alias }}')" title="Re-index repository">Reindex</button>
-                <button class="outline small danger" onclick="confirmDeactivate('{{ repo.username }}', '{{ repo.user_alias }}')" title="Deactivate repository">Deactivate</button>
+                <button class="outline small" data-username="{{ repo.username }}" data-user-alias="{{ repo.user_alias }}" onclick="toggleDetails(this.dataset.username, this.dataset.userAlias)" title="View details">Details</button>
+                <button class="small" data-user-alias="{{ repo.user_alias }}" onclick="triggerActivatedRepoReindex(this.dataset.userAlias)" title="Re-index repository">Reindex</button>
+                <button class="outline small danger" data-username="{{ repo.username }}" data-user-alias="{{ repo.user_alias }}" onclick="confirmDeactivate(this.dataset.username, this.dataset.userAlias)" title="Deactivate repository">Deactivate</button>
                 {% endif %}
             </td>
         </tr>
@@ -130,7 +130,7 @@
                                            data-username="{{ repo.username }}"
                                            data-alias="{{ repo.user_alias }}"
                                            {% if repo.wiki_enabled %}checked{% endif %}
-                                           onchange="toggleUserWiki(this, '{{ repo.username }}', '{{ repo.user_alias }}')" />
+                                           onchange="toggleUserWiki(this, this.dataset.username, this.dataset.alias)" />
                                     Enable Wiki
                                 </label>
                                 {% if repo.wiki_enabled %}
@@ -179,7 +179,7 @@
 
                             <!-- Add Index Button and Form -->
                             <div class="add-index-container" id="add-index-container-{{ repo.user_alias }}">
-                                <button class="outline small" onclick="showActivatedRepoAddIndexForm('{{ repo.user_alias }}')">Add Index</button>
+                                <button class="outline small" data-user-alias="{{ repo.user_alias }}" onclick="showActivatedRepoAddIndexForm(this.dataset.userAlias)">Add Index</button>
 
                                 <div id="add-index-form-{{ repo.user_alias }}" class="add-index-form" style="display: none;">
                                     <label for="add-index-type-{{ repo.user_alias }}">Select Index Type:</label>
@@ -191,8 +191,8 @@
                                         <option value="scip">SCIP (Code Intelligence)</option>
                                     </select>
                                     <div class="form-actions">
-                                        <button class="small" onclick="submitActivatedRepoAddIndex('{{ repo.user_alias }}')">Submit</button>
-                                        <button class="outline small" onclick="hideActivatedRepoAddIndexForm('{{ repo.user_alias }}')">Cancel</button>
+                                        <button class="small" data-user-alias="{{ repo.user_alias }}" onclick="submitActivatedRepoAddIndex(this.dataset.userAlias)">Submit</button>
+                                        <button class="outline small" data-user-alias="{{ repo.user_alias }}" onclick="hideActivatedRepoAddIndexForm(this.dataset.userAlias)">Cancel</button>
                                     </div>
                                 </div>
                             </div>
@@ -211,8 +211,8 @@
                         <div class="branch-management" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
                             <h5>Branch Management</h5>
                             <div class="branch-actions">
-                                <button class="outline small" onclick="showBranchSelector('{{ repo.user_alias }}')" title="Switch to different branch">Switch Branch</button>
-                                <button class="outline small" onclick="syncWithGoldenRepo('{{ repo.user_alias }}')" title="Sync with golden repository source">Sync with Golden</button>
+                                <button class="outline small" data-user-alias="{{ repo.user_alias }}" onclick="showBranchSelector(this.dataset.userAlias)" title="Switch to different branch">Switch Branch</button>
+                                <button class="outline small" data-user-alias="{{ repo.user_alias }}" onclick="syncWithGoldenRepo(this.dataset.userAlias)" title="Sync with golden repository source">Sync with Golden</button>
                             </div>
                         </div>
 
@@ -223,7 +223,9 @@
                                 <button
                                     id="health-refresh-{{ repo.user_alias }}"
                                     class="outline small"
-                                    onclick="refreshActivatedRepoHealthData('{{ repo.user_alias }}', '{{ repo.username }}')"
+                                    data-user-alias="{{ repo.user_alias }}"
+                                    data-username="{{ repo.username }}"
+                                    onclick="refreshActivatedRepoHealthData(this.dataset.userAlias, this.dataset.username)"
                                     title="Refresh health data (bypass cache)"
                                 >
                                     Refresh
@@ -234,7 +236,9 @@
                             <div
                                 id="health-indicator-{{ repo.user_alias }}"
                                 class="health-indicator-container"
-                                onclick="toggleActivatedRepoHealthDetails('{{ repo.user_alias }}', '{{ repo.username }}')"
+                                data-user-alias="{{ repo.user_alias }}"
+                                data-username="{{ repo.username }}"
+                                onclick="toggleActivatedRepoHealthDetails(this.dataset.userAlias, this.dataset.username)"
                                 style="cursor: pointer;"
                             >
                                 <span class="health-status health-unknown">Deep health check</span>

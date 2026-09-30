@@ -36,6 +36,11 @@ from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
 )
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +211,22 @@ def _get_arm_and_grm() -> Tuple[Any, Any]:
     arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
     grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     return arm, grm
+
+
+def _get_access_filtering_service() -> Any:
+    """Return app.state.access_filtering_service, or None if not wired.
+
+    Probes via `_lazy_singleton_app_or_none()` (the
+    same side-effect-free helper Bug #1678/#1693/#1709 introduced for
+    every other app-state accessor in this file) instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side
+    effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
+    if app is None:
+        return None
+    return getattr(getattr(app, "state", None), "access_filtering_service", None)
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
@@ -511,6 +532,7 @@ def handle_xray_search_batch(
 
     1. Auth: query_repos permission required.
     2. Parse + validate inputs (hard-fail on structural/static errors).
+    2b. Repo-level access check — see below.
     3. Resolve repos (graceful-partial) with global-alias fallback.
     4. Submit ONE background job.
 
@@ -518,6 +540,8 @@ def handle_xray_search_batch(
         auth_required                  — unauthenticated or missing query_repos.
         alias_required                 — repository_alias missing or empty.
         scans_required                 — scans missing, not a list, or empty.
+        access_denied                  — caller lacks access to a requested repo.
+        access_control_unavailable     — access_filtering_service missing.
         too_many_repositories          — len(aliases) > 50.
         too_many_scans                 — len(scans) > 50.
         timeout_out_of_range           — timeout_seconds outside [10, 7200].
@@ -526,6 +550,16 @@ def handle_xray_search_batch(
         mutually_exclusive_params      — both evaluator_code and pattern_name set.
         xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
         no_repositories_resolved       — all aliases unresolvable.
+
+    The REST route POST /api/xray/search/batch
+    (routes/xray_routes.py) calls this handler function DIRECTLY,
+    bypassing mcp/protocol.py's handle_tools_call() dispatch layer
+    entirely -- which is where _check_repository_access() normally runs
+    for the genuine MCP xray_search_batch tool call. This handler is
+    therefore the ONLY place that can enforce repo-level access for the
+    REST front door; the check below is redundant-but-harmless for the
+    real MCP tool call (the dispatcher already denies first, so a
+    genuinely unauthorized MCP call never reaches here at all).
     """
     _admission = check_query_admission()
     if not _admission.allowed:
@@ -580,6 +614,22 @@ def handle_xray_search_batch(
         return _mcp_response(
             {"error": "alias_required", "message": "repository_alias is required"}
         )
+
+    # ------------------------------------------------------------------
+    # 2b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE scan validation, repo resolution, or job submission. The
+    #     REST route calls this handler directly (bypassing the MCP
+    #     dispatcher's own _check_repository_access()), so this is the
+    #     ONLY enforcement point for that front door. Never skipped:
+    #     access_filtering_service missing fails closed, it does not
+    #     bypass the check.
+    # ------------------------------------------------------------------
+    try:
+        require_repo_access(_get_access_filtering_service(), user.username, aliases)
+    except RepoAccessDeniedError as e:
+        return _mcp_response({"error": "access_denied", "message": str(e)})
+    except AccessFilteringServiceUnavailableError as e:
+        return _mcp_response({"error": "access_control_unavailable", "message": str(e)})
 
     # Validate scans.
     if raw_scans is None or not isinstance(raw_scans, list) or len(raw_scans) == 0:

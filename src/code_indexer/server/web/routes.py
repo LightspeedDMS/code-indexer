@@ -6,10 +6,15 @@ Provides admin web interface routes for CIDX server administration.
 
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import asyncio
 import functools
 import html
+
+import anyio
+import anyio.from_thread
+import anyio.to_thread
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
@@ -44,16 +49,19 @@ from fastapi.templating import Jinja2Templates
 
 from ..auth.user_manager import UserRole, SSOPasswordChangeError
 from ..auth import dependencies
+from ..auth.login_outcome import complete_login, reject_login
 from .auth import (
     get_session_manager,
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
-from ..services.config_service import get_config_service
+from ..services.config_service import BootstrapFileNotWritten, get_config_service
+from ..services.golden_repo_audited_ops import request_golden_repo_refresh
 from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
     SubmissionGateOverloadedError,
 )
+from ..utils.host_validation import normalize_server_host
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -357,6 +365,38 @@ def _get_server_time_for_template() -> str:
 templates.env.globals["get_server_time"] = _get_server_time_for_template
 # Cache busting: version appended to static asset URLs
 templates.env.globals["static_version"] = _cidx_version
+
+
+def _personal_api_keys_menu_visible(request: Any) -> bool:
+    """Whether the nav shows the personal API Keys entry to this viewer.
+
+    Creating a personal API key requires TOTP when elevation enforcement is
+    on, so the entry is hidden until the viewer has MFA enabled. It is shown
+    as before when enforcement is off, when the viewer's session cannot be
+    resolved, or when the TOTP service is not wired (the creation gate does
+    not block in that case either).
+    """
+    if not isinstance(request, Request):
+        return True
+    if not dependencies._is_elevation_enforcement_enabled():
+        return True
+    try:
+        session = get_session_manager().get_session(request)
+    except RuntimeError:
+        return True
+    if session is None:
+        return True
+    from . import mfa_routes
+
+    totp_service = mfa_routes.get_totp_service()
+    if totp_service is None:
+        return True
+    return bool(totp_service.is_mfa_enabled(session.username))
+
+
+templates.env.globals["personal_api_keys_menu_visible"] = (
+    _personal_api_keys_menu_visible
+)
 
 # Create router
 web_router = APIRouter()
@@ -1568,6 +1608,21 @@ def _get_users_list():
     return sorted(users, key=lambda u: u.username.lower())
 
 
+# Login method recorded by the Web login form.
+_WEB_LOGIN_METHOD = "password"
+
+
+def _web_login_mfa_state() -> str:
+    """MFA state recorded for a Web login that issues a session directly.
+
+    Only called when the user has no MFA enrolled (an enrolled user gets a
+    challenge instead, recorded when it is answered).
+    """
+    from . import mfa_routes
+
+    return "not_applicable" if mfa_routes._totp_service is None else "not_enrolled"
+
+
 def _get_user_mfa_status(username: str) -> bool:
     """Check if a user has MFA enabled (Story #559).
 
@@ -1709,7 +1764,9 @@ def create_user(
         )
 
     try:
-        user_manager.create_user(new_username, new_password, role_enum)
+        user_manager.create_user_audited(
+            new_username, new_password, role_enum, actor=session.username
+        )
 
         # Auto-assign new user to appropriate group based on role.
         # Story #1593 AC7: routed through the shared
@@ -1798,7 +1855,12 @@ def update_user_role(
         )
 
     try:
-        user_manager.update_user_role(username, role_enum)
+        if not user_manager.update_user_role_audited(
+            username, role_enum, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
         return RedirectResponse(
             url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
             status_code=303,
@@ -1846,7 +1908,12 @@ def change_user_password(
         )
 
     try:
-        user_manager.change_password(username, new_password)
+        if not user_manager.change_password_audited(
+            username, new_password, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
         return RedirectResponse(
             url=f"/admin/users?success=password_changed&u={quote(username, safe='')}",
             status_code=303,
@@ -1895,9 +1962,12 @@ def update_user_email(
     try:
         # Allow empty email to clear it
         email_value = new_email.strip() if new_email else None
-        user_manager.update_user(
-            username, new_email=email_value if email_value else None
-        )
+        if not user_manager.update_user_email_audited(
+            username, email_value if email_value else None, actor=session.username
+        ):
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
 
         return RedirectResponse(
             url=f"/admin/users?success=email_updated&u={quote(username, safe='')}",
@@ -1944,7 +2014,15 @@ async def delete_user(
         )
 
     try:
-        user_manager.delete_user(username)
+        # Account write plus its durable audit row: off the event loop.
+        deleted = await asyncio.to_thread(
+            user_manager.delete_user_audited, username, actor=session.username
+        )
+        if not deleted:
+            # Nothing was deleted: no identity-link or membership cleanup.
+            return RedirectResponse(
+                url="/admin/users?error=user_not_found", status_code=303
+            )
 
         # Clean up OIDC identity link if OIDC manager exists
         from ..auth.oidc import routes as oidc_routes
@@ -1961,10 +2039,10 @@ async def delete_user(
         # Clean up group membership (Bug fix: prevent orphaned group memberships)
         try:
             group_manager = _get_group_manager()
-            user_group = group_manager.get_user_group(username)
-            if user_group:
-                group_manager.remove_user_from_group(username, user_group.id)
-                logger.info(f"Cleaned up group membership for deleted user: {username}")
+            # Synchronous group store work: off the event loop.
+            await asyncio.to_thread(
+                _remove_deleted_user_membership, group_manager, username
+            )
         except RuntimeError:
             # group_manager not available - skip cleanup
             logger.warning(
@@ -1980,6 +2058,14 @@ async def delete_user(
         )
     except ValueError:
         return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
+
+
+def _remove_deleted_user_membership(group_manager: Any, username: str) -> None:
+    """Remove a deleted user's group membership (synchronous store work)."""
+    user_group = group_manager.get_user_group(username)
+    if user_group:
+        group_manager.remove_user_from_group(username, user_group.id)
+        logger.info(f"Cleaned up group membership for deleted user: {username}")
 
 
 @web_router.get(
@@ -2125,6 +2211,10 @@ def _get_groups_data() -> List[Dict[str, Any]]:
     return groups_data
 
 
+# The tabs of the Group Management page.
+_GROUPS_PAGE_TABS = frozenset({"groups", "users", "repos"})
+
+
 def _create_groups_page_response(
     request: Request,
     session: SessionData,
@@ -2132,7 +2222,13 @@ def _create_groups_page_response(
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
 ) -> HTMLResponse:
-    """Create groups page response with all necessary context."""
+    """Create groups page response with all necessary context.
+
+    A tab the page does not have (such as the removed audit tab) renders the
+    Groups tab; audit reading lives on the Audit Logs page.
+    """
+    if active_tab not in _GROUPS_PAGE_TABS:
+        active_tab = "groups"
     csrf_token = generate_csrf_token()
     group_manager = _get_group_manager()
 
@@ -2174,15 +2270,6 @@ def _create_groups_page_response(
         {"id": g.id, "name": g.name, "is_default": g.is_default}
         for g in group_manager.get_all_groups()
     ]
-
-    # Get audit logs (limited to 100 most recent, exclude auth events per AC5)
-    audit_logs, total_count = group_manager.get_audit_logs(
-        limit=100, exclude_target_type="auth"
-    )
-    for log in audit_logs:
-        log["timestamp"] = _format_datetime_display(
-            log.get("timestamp"), "%Y-%m-%d %H:%M:%S"
-        )
 
     # Get golden repos for repo access tab
     golden_repos = []
@@ -2242,8 +2329,6 @@ def _create_groups_page_response(
             "groups": groups_data,
             "users_with_groups": users_with_groups,
             "all_groups": all_groups,
-            "audit_logs": audit_logs,
-            "total_count": total_count,
             "golden_repos": golden_repos,
             "repo_access_map": repo_access_map,
             "success_message": success_message,
@@ -2295,7 +2380,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details={"name": group.name, "description": group.description},
+            details={"name": group.name},
         )
 
         return _create_groups_page_response(
@@ -2345,12 +2430,7 @@ def update_group(
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details={
-                    "old_name": old_group.name,
-                    "new_name": name,
-                    "old_description": old_group.description,
-                    "new_description": description,
-                },
+                details={"old_name": old_group.name, "new_name": name},
             )
             return _create_groups_page_response(
                 request, session, success_message=f"Group '{name}' updated successfully"
@@ -2436,32 +2516,21 @@ def assign_user_to_group(
             request, session, active_tab="users", error_message="Invalid CSRF token"
         )
 
+    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+
     try:
         group_manager = _get_group_manager()
-        old_group = group_manager.get_user_group(user_id)
-        old_group_name = old_group.name if old_group else "None"
-
-        new_group = group_manager.get_group(group_id)
-        if not new_group:
+        try:
+            new_group = group_manager.assign_user_to_group_audited(
+                user_id, group_id, actor=session.username
+            )
+        except GroupNotFoundError:
             return _create_groups_page_response(
                 request,
                 session,
                 active_tab="users",
                 error_message=f"Group {group_id} not found",
             )
-
-        group_manager.assign_user_to_group(user_id, group_id, session.username)
-
-        group_manager.log_audit(
-            admin_id=session.username,
-            action_type="user_group_change",
-            target_type="user",
-            target_id=user_id,
-            details={
-                "old_group": old_group_name,
-                "new_group": new_group.name,
-            },
-        )
 
         return _create_groups_page_response(
             request,
@@ -2550,39 +2619,6 @@ def groups_users_list_partial(request: Request):
     )
     set_csrf_cookie(response, csrf_token)
     return response
-
-
-@web_router.get("/partials/groups-audit-logs", response_class=HTMLResponse)
-def groups_audit_logs_partial(
-    request: Request,
-    action_type: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-):
-    """Partial refresh endpoint for audit logs section with filtering."""
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    group_manager = _get_group_manager()
-    audit_logs, total_count = group_manager.get_audit_logs(
-        action_type=action_type or None,
-        date_from=date_from or None,
-        date_to=date_to or None,
-        limit=100,
-        exclude_target_type="auth",
-    )
-
-    for log in audit_logs:
-        log["timestamp"] = _format_datetime_display(
-            log.get("timestamp"), "%Y-%m-%d %H:%M:%S"
-        )
-
-    return templates.TemplateResponse(
-        request,
-        "partials/groups_audit_logs.html",
-        {"request": request, "audit_logs": audit_logs, "total_count": total_count},
-    )
 
 
 @web_router.get("/partials/groups-repo-access", response_class=HTMLResponse)
@@ -2737,6 +2773,51 @@ def _repo_access_success_response(
     )
 
 
+def _grant_repo_access_recorded(
+    group_manager: Any, repo_name: str, group_id: int, actor: str
+) -> Tuple[Any, bool]:
+    """Grant *repo_name* to a group and record the grant (synchronous).
+
+    Returns ``(group, granted)``; ``group`` is None when it does not exist.
+    """
+    group = group_manager.get_group(group_id)
+    if not group:
+        return None, False
+    granted = bool(
+        group_manager.grant_repo_access(
+            repo_name=repo_name, group_id=group_id, granted_by=actor
+        )
+    )
+    if granted:
+        group_manager.log_audit(
+            admin_id=actor,
+            action_type="repo_access_grant",
+            target_type="repo",
+            target_id=repo_name,
+            details={"repo": repo_name, "group": group.name},
+        )
+    return group, granted
+
+
+def _revoke_repo_access_recorded(
+    group_manager: Any, repo_name: str, group_id: int, actor: str
+) -> Tuple[Any, bool]:
+    """Revoke *repo_name* from a group and record the revocation (synchronous).
+
+    Returns ``(group, revoked)``; ``group`` is None when it does not exist.
+    The audited entry point writes the one row of the attempt.
+    """
+    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+
+    try:
+        revoked = bool(
+            group_manager.revoke_repo_access_audited(repo_name, group_id, actor=actor)
+        )
+    except GroupNotFoundError:
+        return None, False
+    return group_manager.get_group(group_id), revoked
+
+
 @web_router.post(
     "/groups/repo-access/grant",
     dependencies=[Depends(dependencies.require_elevation())],
@@ -2781,25 +2862,18 @@ async def grant_repo_access(
     group_manager = _get_group_manager()
 
     try:
-        group = group_manager.get_group(group_id)
+        # The whole synchronous operation (lookup, grant, durable audit row)
+        # runs off the event loop.
+        group, success = await asyncio.to_thread(
+            _grant_repo_access_recorded,
+            group_manager,
+            repo_name,
+            group_id,
+            session.username,
+        )
         if not group:
             return _repo_access_error_response(
                 is_ajax, request, session, "Group not found", 404
-            )
-
-        success = group_manager.grant_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
-            granted_by=session.username,
-        )
-
-        if success:
-            group_manager.log_audit(
-                admin_id=session.username,
-                action_type="repo_access_grant",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -2865,24 +2939,18 @@ async def revoke_repo_access(
     group_manager = _get_group_manager()
 
     try:
-        group = group_manager.get_group(group_id)
+        # The whole synchronous operation (lookup, revoke, durable audit row)
+        # runs off the event loop.
+        group, success = await asyncio.to_thread(
+            _revoke_repo_access_recorded,
+            group_manager,
+            repo_name,
+            group_id,
+            session.username,
+        )
         if not group:
             return _repo_access_error_response(
                 is_ajax, request, session, "Group not found", 404
-            )
-
-        success = group_manager.revoke_repo_access(
-            repo_name=repo_name,
-            group_id=group_id,
-        )
-
-        if success:
-            group_manager.log_audit(
-                admin_id=session.username,
-                action_type="repo_access_revoke",
-                target_type="repo",
-                target_id=repo_name,
-                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -3637,8 +3705,8 @@ def refresh_golden_repo(
         if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
             raise Exception("RefreshScheduler not available")
         # Resolution from bare alias to global format happens inside RefreshScheduler
-        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=session.username
+        job_id = request_golden_repo_refresh(
+            lifecycle_manager.refresh_scheduler, alias, actor=session.username
         )
         return _create_golden_repos_page_response(
             request,
@@ -3694,8 +3762,11 @@ def force_resync_golden_repo(
         if not lifecycle_manager or not lifecycle_manager.refresh_scheduler:
             raise Exception("RefreshScheduler not available")
         # force_reset=True discards divergent local state before re-indexing
-        job_id = lifecycle_manager.refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=session.username, force_reset=True
+        job_id = request_golden_repo_refresh(
+            lifecycle_manager.refresh_scheduler,
+            alias,
+            actor=session.username,
+            force_reset=True,
         )
         return _create_golden_repos_page_response(
             request,
@@ -3958,7 +4029,16 @@ async def change_golden_repo_branch(
             )
 
         manager = _get_golden_repo_manager()
-        result = manager.change_branch_async(alias, branch, session.username)
+        # The whole audited submission (DB reads, job submit, audit row)
+        # runs off the event loop.
+        result = await asyncio.to_thread(
+            functools.partial(
+                manager.change_branch_async,
+                alias,
+                branch,
+                submitter_username=session.username,
+            )
+        )
         job_id = result.get("job_id")
         if job_id is None:
             # Already on the target branch - no background job needed
@@ -4076,12 +4156,17 @@ def activate_golden_repo(
     )
 
     # Try to activate the repository
+    from code_indexer.server.services.activated_repo_audited_ops import (
+        activate_repository_for_user,
+    )
+
     try:
-        activated_manager = _get_activated_repo_manager()
-        job_id = activated_manager.activate_repository(
-            username=username.strip(),
-            golden_repo_alias=golden_alias.strip(),
+        job_id = activate_repository_for_user(
+            _get_activated_repo_manager(),
+            username.strip(),
+            golden_alias.strip(),
             user_alias=effective_user_alias,
+            actor=session.username,
         )
         return _create_golden_repos_page_response(
             request,
@@ -4425,6 +4510,9 @@ def _get_all_activated_repos() -> list:
 
         # Iterate over all user directories
         for username in os.listdir(activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(activated_repos_dir, username)
             if os.path.isdir(user_dir):
                 # Get repositories for this user
@@ -4807,12 +4895,16 @@ def deactivate_repo(
         )
 
     # Try to deactivate the repository
+    from code_indexer.server.services.activated_repo_audited_ops import (
+        deactivate_repository_for_user,
+    )
+
     try:
-        manager = _get_activated_repo_manager()
-        job_id = manager.deactivate_repository(
-            username=username,
-            user_alias=user_alias,
-            actor_username=session.username,  # AC12: attribute to admin who clicked
+        job_id = deactivate_repository_for_user(
+            _get_activated_repo_manager(),
+            username,
+            user_alias,
+            actor=session.username,  # AC12: attribute to admin who clicked
         )
         job_link = f'<a href="/admin/jobs?search={job_id}">{job_id}</a>'
         return _create_repos_page_response(
@@ -6497,38 +6589,105 @@ def _detect_language_from_path(file_path: str) -> str:
     return ext_to_lang.get(ext, "plaintext")
 
 
-async def _reload_oidc_configuration():
-    """Reload OIDC configuration without server restart."""
+class _OidcReloadFailed(Exception):
+    """The OIDC test-reload rejected a candidate configuration."""
+
+
+def _prepare_oidc_candidate_from_worker_thread(
+    candidate, prepared: Dict[str, Any]
+) -> None:
+    """``before_publish`` for an OIDC section change.
+
+    Runs on the worker thread of the audited change: builds and initializes
+    OIDC managers for the CANDIDATE configuration WITHOUT making them live,
+    and keeps them in *prepared*.  A failure raises :class:`_OidcReloadFailed`,
+    so nothing is published.  The caller swaps them in with
+    :func:`_install_oidc_managers` only after persistence.
+    """
+    try:
+        prepared["managers"] = _prepare_oidc_managers(candidate)
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-047",
+                f"Failed to reload OIDC configuration: {e}",
+            ),
+            exc_info=True,
+        )
+        raise _OidcReloadFailed(str(e)) from e
+    logger.info(
+        "OIDC configuration validated and reloaded successfully",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
+
+def _install_oidc_managers(prepared: Dict[str, Any]) -> None:
+    """Make the managers prepared for a PUBLISHED OIDC change live.
+
+    A no-op when nothing was prepared (not an OIDC section change).
+    """
     from ..auth.oidc import routes as oidc_routes
-    from ..auth.oidc.oidc_manager import OIDCManager
-    from ..auth.oidc.state_manager import StateManager
-    from ..services.config_service import get_config_service
 
-    config_service = get_config_service()
-    config = config_service.get_config()
+    if "managers" not in prepared:
+        return
+    oidc_routes.oidc_manager, oidc_routes.state_manager = prepared["managers"]
 
-    # Only reload if OIDC is enabled
+
+def _prepare_oidc_managers(config) -> Tuple[Any, Any]:
+    """Build (oidc_manager, state_manager) for *config* WITHOUT making them live.
+
+    Runs on a worker thread (the ``before_publish`` step).  Returns
+    (None, None) when OIDC is disabled in *config* (installing that clears
+    the live managers).  Never touches the live module globals.
+    """
     oidc_config = config.oidc_provider_config
     if oidc_config is None or not oidc_config.enabled:
         logger.info(
-            "OIDC is disabled, skipping reload",
+            "OIDC is disabled, the live OIDC managers will be cleared",
             extra={"correlation_id": get_correlation_id()},
         )
-        # Clear the existing OIDC manager
-        oidc_routes.oidc_manager = None
-        oidc_routes.state_manager = None
-        return
+        return None, None
+    state_manager = _build_oidc_state_manager()
+    oidc_manager = anyio.from_thread.run(_initialized_oidc_manager, oidc_config)
+    logger.info(
+        f"OIDC managers prepared for provider: {oidc_config.provider_name} (will initialize on next login)",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return oidc_manager, state_manager
 
-    # Create new OIDC manager with updated configuration
-    # Reuse existing user_manager and jwt_manager from module level
+
+def _build_oidc_state_manager() -> Any:
+    """A StateManager wired exactly as startup wires it; call OFF the event loop.
+
+    Construction opens its SQLite store and ensures its schema.  In cluster
+    mode the shared PostgreSQL pool (critical pool first, else the general
+    pool -- the startup rule) is attached so SSO state is shared across nodes.
+    """
     from .. import app as app_module
+    from ..auth.oidc import state_manager as state_module
 
+    state_manager = state_module.StateManager()
+    registry = getattr(app_module.app.state, "backend_registry", None)
+    pool = (
+        (registry.critical_connection_pool or registry.connection_pool)
+        if registry is not None
+        else None
+    )
+    if pool is not None:
+        state_manager.set_connection_pool(pool)
+    return state_manager
+
+
+async def _initialized_oidc_manager(oidc_config) -> Any:
+    """Construct and initialize an OIDCManager for *oidc_config* (event loop)."""
+    from .. import app as app_module
+    from ..auth.oidc.oidc_manager import OIDCManager
+
+    # Reuse existing user_manager and jwt_manager from module level
     logger.info(
         f"Creating new OIDC manager with config: email_claim={oidc_config.email_claim}, username_claim={oidc_config.username_claim}",
         extra={"correlation_id": get_correlation_id()},
     )
-
-    state_manager = StateManager()
     oidc_manager = OIDCManager(
         config=oidc_config,
         user_manager=app_module.user_manager,
@@ -6549,19 +6708,7 @@ async def _reload_oidc_configuration():
             "GroupAccessManager injected into reloaded OIDCManager for SSO auto-provisioning",
             extra={"correlation_id": get_correlation_id()},
         )
-
-    # Replace the old managers with new ones
-    oidc_routes.oidc_manager = oidc_manager
-    oidc_routes.state_manager = state_manager
-
-    logger.info(
-        f"OIDC configuration reloaded for provider: {oidc_config.provider_name} (will initialize on next login)",
-        extra={"correlation_id": get_correlation_id()},
-    )
-    logger.info(
-        f"New OIDC manager config - email_claim: {oidc_manager.config.email_claim}, username_claim: {oidc_manager.config.username_claim}",
-        extra={"correlation_id": get_correlation_id()},
-    )
+    return oidc_manager
 
 
 def _get_qec_total_entries() -> int:
@@ -6921,8 +7068,16 @@ def _get_current_config() -> dict:
     }
 
 
-def _validate_config_section(section: str, data: dict) -> Optional[str]:
-    """Validate configuration for a section, return error message if invalid."""
+def _validate_config_section(
+    section: str, data: dict, *, persisted_host: Optional[str] = None
+) -> Optional[str]:
+    """Validate configuration for a section, return error message if invalid.
+
+    persisted_host: the currently persisted server host. A submitted host
+    equal to it (after stripping) is not a host change and is not
+    re-validated, so a host persisted before host validation existed never
+    blocks a server-section save that leaves it untouched.
+    """
     if section == "server":
         # Validate host - cannot be empty
         host = data.get("host")
@@ -6930,6 +7085,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             host_str = str(host).strip()
             if not host_str:
                 return "Host cannot be empty"
+            try:
+                normalize_server_host(host_str, current_host=persisted_host)
+            except ValueError:
+                return "Host must be a valid IPv4/IPv6 address or hostname"
 
         port = data.get("port")
         if port is not None:
@@ -9140,13 +9299,9 @@ def reset_config(
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    # Reset to defaults using ConfigService
+    # Reset to defaults using ConfigService (one audited change)
     try:
-        config_service = get_config_service()
-        # Create a fresh default config and save it
-        default_config = config_service.config_manager.create_default_config()
-        config_service.save_config(default_config)
-        config_service._config = default_config  # Update cached config
+        get_config_service().reset_to_defaults_audited(actor=session.username)
 
         return _create_config_page_response(
             request,
@@ -9196,35 +9351,40 @@ async def update_langfuse_pull_config(
     config_service = get_config_service()
 
     try:
-        # Update scalar settings
-        config_service.update_setting(
-            "langfuse", "pull_enabled", form_data.get("pull_enabled", "false")
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_host",
-            form_data.get("pull_host", "https://cloud.langfuse.com"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_sync_interval_seconds",
-            form_data.get("pull_sync_interval_seconds", "300"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_trace_age_days",
-            form_data.get("pull_trace_age_days", "30"),
-        )
-        config_service.update_setting(
-            "langfuse",
-            "pull_max_concurrent_observations",
-            form_data.get("pull_max_concurrent_observations", "5"),
-        )
-
-        # Update projects from JSON
+        # Scalar settings plus the projects JSON, as ONE audited change.
+        updates: List[Tuple[str, str, Any]] = [
+            ("langfuse", "pull_enabled", form_data.get("pull_enabled", "false")),
+            (
+                "langfuse",
+                "pull_host",
+                form_data.get("pull_host", "https://cloud.langfuse.com"),
+            ),
+            (
+                "langfuse",
+                "pull_sync_interval_seconds",
+                form_data.get("pull_sync_interval_seconds", "300"),
+            ),
+            (
+                "langfuse",
+                "pull_trace_age_days",
+                form_data.get("pull_trace_age_days", "30"),
+            ),
+            (
+                "langfuse",
+                "pull_max_concurrent_observations",
+                form_data.get("pull_max_concurrent_observations", "5"),
+            ),
+        ]
         projects_json = form_data.get("pull_projects", "[]")
         if projects_json:
-            config_service.update_setting("langfuse", "pull_projects", projects_json)
+            updates.append(("langfuse", "pull_projects", projects_json))
+        await asyncio.to_thread(
+            functools.partial(
+                config_service.update_settings_audited,
+                updates,
+                actor=session.username,
+            )
+        )
 
         return _create_config_page_response(
             request,
@@ -9303,16 +9463,24 @@ async def update_cidx_meta_backup_config(
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-    try:
+    def _save_and_bootstrap() -> None:
         config_service = get_config_service()
-        config_service.update_setting("cidx_meta_backup", "enabled", enabled)
-        config_service.update_setting("cidx_meta_backup", "remote_url", remote_url)
-
+        config_service.update_settings_audited(
+            [
+                ("cidx_meta_backup", "enabled", enabled),
+                ("cidx_meta_backup", "remote_url", remote_url),
+            ],
+            actor=session.username,
+        )
         if remote_url:
             from ..services.cidx_meta_backup import get_cidx_meta_path
 
             repo_root = get_cidx_meta_path(config_service.config_manager.server_dir)
             CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
+
+    try:
+        # One audited change plus the bootstrap, off the event loop.
+        await asyncio.to_thread(_save_and_bootstrap)
 
         return _create_config_page_response(
             request,
@@ -9434,8 +9602,15 @@ async def update_config_section(
     form_data = await request.form()
     data = {k: v for k, v in form_data.items() if k != "csrf_token"}
 
+    # The server host is stripped ONCE here, so the change guardrail, the
+    # validation and the stored value all see the same normalised string.
+    _persisted_host: Optional[str] = None
+    if section == "server" and data.get("host") is not None:
+        data["host"] = str(data["host"]).strip()
+        _persisted_host = get_config_service().get_config().host
+
     # Validate configuration
-    error = _validate_config_section(section, data)
+    error = _validate_config_section(section, data, persisted_host=_persisted_host)
     if error:
         return _create_config_page_response(
             request,
@@ -9488,11 +9663,16 @@ async def update_config_section(
                 )
 
             _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
-            config_service.update_totp_elevation_atomic(
-                enabled=_enabled,
-                idle_timeout_seconds=_idle,
-                max_age_seconds=_max_age,
-                session_manager=_esm,
+            # One audited change, off the event loop.
+            await anyio.to_thread.run_sync(
+                functools.partial(
+                    config_service.update_totp_elevation_audited,
+                    enabled=_enabled,
+                    idle_timeout_seconds=_idle,
+                    max_age_seconds=_max_age,
+                    session_manager=_esm,
+                    actor=session.username,
+                )
             )
             return _create_config_page_response(
                 request,
@@ -9553,47 +9733,40 @@ async def update_config_section(
             for key, value in data.items()
         ]
 
-        # Story #1400 CRITICAL 6: the whole section is now applied as ONE
-        # atomic unit via update_settings_atomic (validate-copy-then-publish
-        # -- a rejected batch never touches the live config, no per-key
-        # partial application). OIDC is the one exception: it needs a live
-        # test-reload BEFORE anything is durably published, so it cannot use
-        # the copy-then-publish primitive (which always publishes on
-        # validation success). It keeps its pre-#1400 shape -- apply
-        # directly against the LIVE config via _apply_setting, validate,
-        # test-reload, and only THEN persist; reload-from-file on failure
-        # undoes the in-memory mutation exactly as before.
-        if section == "oidc":
-            config = config_service.get_config()
-            for category, key, value in _updates:
-                config_service._apply_setting(config, category, key, value)
-            config_service.config_manager.validate_config(config)
-            try:
-                # Try to reload with new config (don't save yet)
-                await _reload_oidc_configuration()
-                logger.info(
-                    "OIDC configuration validated and reloaded successfully",
-                    extra={"correlation_id": get_correlation_id()},
+        # Story #1400 CRITICAL 6: the whole section is applied as ONE atomic,
+        # audited change (validate-copy-then-publish -- a rejected batch
+        # never touches the live config, no per-key partial application),
+        # off the event loop.  OIDC builds managers for the CANDIDATE before
+        # anything is published (a failed build publishes nothing) and they
+        # go live only once the change is published.
+        prepared_oidc: Dict[str, Any] = {}
+        before_publish = (
+            functools.partial(
+                _prepare_oidc_candidate_from_worker_thread, prepared=prepared_oidc
+            )
+            if section == "oidc"
+            else None
+        )
+        try:
+            await anyio.to_thread.run_sync(
+                functools.partial(
+                    config_service.update_settings_audited,
+                    _updates,
+                    actor=session.username,
+                    before_publish=before_publish,
                 )
-            except Exception as e:
-                # Reload failed - reload original config from file to restore working state
-                logger.error(
-                    format_error_log(
-                        "STORE-GENERAL-047",
-                        f"Failed to reload OIDC configuration: {e}",
-                    ),
-                    exc_info=True,
-                )
-                config_service.load_config()  # Reload from file to undo in-memory changes
-                return _create_config_page_response(
-                    request,
-                    session,
-                    error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-            config_service.save_config(config)
-        else:
-            config_service.update_settings_atomic(_updates)
+            )
+        except _OidcReloadFailed as e:
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        except BootstrapFileNotWritten:
+            _install_oidc_managers(prepared_oidc)  # published all the same
+            raise
+        _install_oidc_managers(prepared_oidc)
 
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
@@ -9720,7 +9893,9 @@ def save_api_key(
         token_manager = _get_token_manager()
         # Strip whitespace from token before validation (Issue #716 Bug 2a)
         token = token.strip()
-        token_manager.save_token(platform, token, base_url=api_url)
+        token_manager.save_token_audited(
+            platform, token, base_url=api_url, actor=session.username
+        )
 
         platform_name = "GitHub" if platform == "github" else "GitLab"
         return _create_config_page_response(
@@ -9785,7 +9960,7 @@ def delete_api_key(
     # Delete token using CITokenManager - use same server_dir as config service
     try:
         token_manager = _get_token_manager()
-        token_manager.delete_token(platform)
+        token_manager.delete_token_audited(platform, actor=session.username)
 
         platform_name = "GitHub" if platform == "github" else "GitLab"
         logger.info(
@@ -10087,6 +10262,27 @@ def admin_git_credentials_list_partial(request: Request):
     return response
 
 
+def _build_git_credential_manager() -> Any:
+    """Build this server's git credential manager (synchronous I/O).
+
+    Loads the bootstrap config and constructs the manager, which may read or
+    create the encryption salt file; async routes call this off the loop.
+    """
+    from ..services.config_service import get_config_service
+    from ..services.git_credential_manager import create_git_credential_manager
+
+    config_service = get_config_service()
+    server_dir = config_service.config_manager.server_dir
+    # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+    # flag .storage_mode access — config is always present when server is running.
+    storage_mode = cast(Any, config_service.config_manager.load_config()).storage_mode
+    return create_git_credential_manager(
+        db_path=str(server_dir / "data" / "cidx_server.db"),
+        server_dir=str(server_dir),
+        storage_mode=storage_mode,
+    )
+
+
 @web_router.post(
     "/git-credentials",
     dependencies=[Depends(dependencies.require_elevation())],
@@ -10099,8 +10295,6 @@ async def admin_git_credentials_add(request: Request):
             {"success": False, "error": "Session expired"}, status_code=401
         )
 
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -10115,26 +10309,16 @@ async def admin_git_credentials_add(request: Request):
                 {"success": False, "error": "Missing required fields"}, status_code=400
             )
 
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-        # cast: load_config() is Optional[ServerConfig] but is always non-None when
-        # the server is running; a raise here would be swallowed by except Exception.
-        from code_indexer.server.config.server_config import ServerConfig as _SC
+        # Config load and manager construction are synchronous I/O.
+        manager = await asyncio.to_thread(_build_git_credential_manager)
 
-        storage_mode = cast(
-            _SC, config_service.config_manager.load_config()
-        ).storage_mode
-        manager = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
-        )
-
-        result = await manager.configure_credential(
-            username=session.username,
-            forge_type=forge_type,
-            forge_host=forge_host,
-            token=token,
+        result = await manager.configure_credential_audited(
+            session.username,
+            forge_type,
+            forge_host,
+            token,
             name=name,
+            actor=session.username,
         )
         return JSONResponse(result)
 
@@ -10173,7 +10357,9 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager.delete_credential(session.username, credential_id)
+        manager.delete_credential_audited(
+            session.username, credential_id, actor=session.username
+        )
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
 
@@ -10408,17 +10594,39 @@ def user_git_credentials_list_partial(request: Request):
     return response
 
 
-@user_router.post("/git-credentials")
+def _git_credential_self_elevation(request: Request) -> None:
+    """Self-service elevation gate for the caller's own git credentials.
+
+    An unauthenticated request is left to the route itself, so it keeps its
+    own 401 "Session expired" body. For an authenticated web session the
+    shared self-service gate applies: TOTP set up plus the caller's own
+    elevation window when enforcement is on. With enforcement off this is a
+    no-op.
+    """
+    if _require_authenticated_session(request) is None:
+        return
+    if not dependencies._is_elevation_enforcement_enabled():
+        return
+    user = dependencies.get_current_user_web_or_api(request, None)
+    dependencies.require_self_elevation(request, user, None)
+
+
+@user_router.post(
+    "/git-credentials",
+    dependencies=[Depends(_git_credential_self_elevation)],
+)
 async def user_git_credentials_add(request: Request):
-    """Add a new git credential via form submission."""
+    """Add a new git credential via form submission.
+
+    Requires TOTP plus the caller's own elevation window when enforcement is
+    on, matching the admin route and the MCP twin configure_git_credential.
+    """
     session = _require_authenticated_session(request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
         )
 
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -10433,26 +10641,16 @@ async def user_git_credentials_add(request: Request):
                 {"success": False, "error": "Missing required fields"}, status_code=400
             )
 
-        config_service = get_config_service()
-        db_path = str(
-            config_service.config_manager.server_dir / "data" / "cidx_server.db"
-        )
-        server_dir = config_service.config_manager.server_dir
-        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
-        # flag .storage_mode access — config is always present when server is running.
-        storage_mode = cast(
-            Any, config_service.config_manager.load_config()
-        ).storage_mode
-        manager = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
-        )
+        # Config load and manager construction are synchronous I/O.
+        manager = await asyncio.to_thread(_build_git_credential_manager)
 
-        result = await manager.configure_credential(
-            username=session.username,
-            forge_type=forge_type,
-            forge_host=forge_host,
-            token=token,
+        result = await manager.configure_credential_audited(
+            session.username,
+            forge_type,
+            forge_host,
+            token,
             name=name,
+            actor=session.username,
         )
         return JSONResponse(result)
 
@@ -10462,9 +10660,16 @@ async def user_git_credentials_add(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-@user_router.delete("/git-credentials/{credential_id}")
+@user_router.delete(
+    "/git-credentials/{credential_id}",
+    dependencies=[Depends(_git_credential_self_elevation)],
+)
 def user_git_credentials_delete(request: Request, credential_id: str):
-    """Delete a git credential."""
+    """Delete a git credential.
+
+    Requires TOTP plus the caller's own elevation window when enforcement is
+    on, matching the admin route and the MCP twin delete_git_credential.
+    """
     session = _require_authenticated_session(request)
     if not session:
         return JSONResponse(
@@ -10488,7 +10693,9 @@ def user_git_credentials_delete(request: Request, credential_id: str):
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager.delete_credential(session.username, credential_id)
+        manager.delete_credential_audited(
+            session.username, credential_id, actor=session.username
+        )
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
 
@@ -10682,11 +10889,12 @@ def create_ssh_key(
         )
 
         manager = _get_ssh_key_manager()
-        manager.create_key(
-            name=key_name,
+        manager.create_key_audited(
+            key_name,
             key_type=key_type,
             email=email if email else None,
             description=description if description else None,
+            actor=session.username,
         )
 
         return _create_ssh_keys_page_response(
@@ -10743,7 +10951,7 @@ def delete_ssh_key(
         # wrote. That return value used to be discarded, so a refused deletion
         # was rendered as a success -- a silent lie about a safety-critical
         # operation.
-        if not manager.delete_key(key_name):
+        if not manager.delete_key_audited(key_name, actor=session.username):
             return _create_ssh_keys_page_response(
                 request,
                 session,
@@ -10798,7 +11006,7 @@ def assign_host_to_key(
         from ..services.ssh_key_manager import HostConflictError
 
         manager = _get_ssh_key_manager()
-        manager.assign_key_to_host(key_name, hostname)
+        manager.assign_key_to_host_audited(key_name, hostname, actor=session.username)
 
         return _create_ssh_keys_page_response(
             request,
@@ -11189,6 +11397,15 @@ def unified_login_submit(
     user = user_manager.authenticate_user(username, password)
 
     if user is None:
+        # The attempt's one outcome row; the typed name is recorded only
+        # when it names an existing account.
+        reject_login(
+            username,
+            account_exists=user_manager.get_user(username) is not None,
+            method=_WEB_LOGIN_METHOD,
+            stage="credentials",
+            reason="bad_credentials",
+        )
         # Invalid credentials - show error with new CSRF token
         new_csrf_token = generate_csrf_token()
 
@@ -11225,15 +11442,37 @@ def unified_login_submit(
             if user.role.value == "admin"
             else "/user/change-password?info=password_expired"
         )
+
+        # MFA enforcement -- check before creating session (same condition
+        # and helper as the standard login branch below).
+        if _get_user_mfa_status(user.username):
+            from ..auth.mfa_challenge import mfa_challenge_manager
+            from .mfa_routes import render_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url=redirect_url,
+            )
+            return render_mfa_challenge_page(challenge_token)
+
         session_manager = get_session_manager()
         expiry_response = RedirectResponse(
             url=redirect_url,
             status_code=status.HTTP_303_SEE_OTHER,
         )
-        session_manager.create_session(
-            expiry_response,
-            username=user.username,
-            role=user.role.value,
+        complete_login(
+            user.username,
+            method=_WEB_LOGIN_METHOD,
+            mfa=_web_login_mfa_state(),
+            flow="web_session",
+            issue=lambda: session_manager.create_session(
+                expiry_response,
+                username=user.username,
+                role=user.role.value,
+            ),
         )
         return expiry_response
 
@@ -11275,10 +11514,16 @@ def unified_login_submit(
         url=redirect_url,
         status_code=status.HTTP_303_SEE_OTHER,
     )
-    session_manager.create_session(
-        redirect_response,
-        username=user.username,
-        role=user.role.value,
+    complete_login(
+        user.username,
+        method=_WEB_LOGIN_METHOD,
+        mfa=_web_login_mfa_state(),
+        flow="web_session",
+        issue=lambda: session_manager.create_session(
+            redirect_response,
+            username=user.username,
+            role=user.role.value,
+        ),
     )
 
     return redirect_response
@@ -11903,13 +12148,21 @@ async def save_self_monitoring_config(
     if model not in ("opus", "sonnet", "haiku"):
         model = "opus"
 
-    # Update configuration (enabled, cadence, and model only)
-    config.self_monitoring_config.enabled = enabled  # type: ignore[union-attr]
-    config.self_monitoring_config.cadence_minutes = cadence_minutes  # type: ignore[union-attr]
-    config.self_monitoring_config.model = model  # type: ignore[union-attr]
+    # Update configuration (enabled, cadence, and model only) as ONE audited
+    # change on a candidate copy, off the event loop.
+    def _set_self_monitoring(candidate) -> None:
+        candidate.self_monitoring_config.enabled = enabled
+        candidate.self_monitoring_config.cadence_minutes = cadence_minutes
+        candidate.self_monitoring_config.model = model
 
-    # Save configuration
-    config_service.save_config(config)
+    config = await asyncio.to_thread(
+        functools.partial(
+            config_service.apply_audited_change,
+            _set_self_monitoring,
+            actor=session.username,
+            target_id="self_monitoring",
+        )
+    )
 
     # Bug #128: Start/stop service based on enabled flag
     service = getattr(request.app.state, "self_monitoring_service", None)
@@ -12297,10 +12550,17 @@ def restart_server(request: Request) -> JSONResponse:
     #
     # Solo: retain the existing single-node restart path (materialize + signal /
     # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+    from code_indexer.server.services.server_restart_audited import (
+        request_server_restart,
+    )
+
     config_svc = get_config_service()
     if config_svc._pool is not None:
-        # Cluster mode: bump generation, let per-poll check handle restart.signal
-        config_svc.bump_launch_restart_generation()
+        # Cluster mode: bump generation, let per-poll check handle restart.signal.
+        # The audit row is written durably BEFORE the bump.
+        request_server_restart(
+            config_svc.bump_launch_restart_generation, actor=username, scope="cluster"
+        )
         with _restart_lock:
             _restart_in_progress = False
         return JSONResponse(
@@ -12313,9 +12573,13 @@ def restart_server(request: Request) -> JSONResponse:
             },
         )
 
-    # Solo mode: materialize launch config then schedule single-node restart
-    config_svc.materialize_launch_config()
-    _schedule_delayed_restart(delay=2)
+    # Solo mode: materialize launch config then schedule single-node restart.
+    # The audit row is written durably BEFORE the restart is scheduled.
+    def _restart_this_node() -> None:
+        config_svc.materialize_launch_config()
+        _schedule_delayed_restart(delay=2)
+
+    request_server_restart(_restart_this_node, actor=username, scope="node")
 
     # Return 202 Accepted immediately
     return JSONResponse(

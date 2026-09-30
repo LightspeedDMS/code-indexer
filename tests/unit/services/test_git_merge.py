@@ -95,6 +95,40 @@ class TestMergeBranchClean:
         assert result["conflicts"] == []
         assert "merge_summary" in result
 
+    def test_clean_merge_using_previous_ref_shorthand(self, tmp_path: Path) -> None:
+        """`source_branch="-"` is git's own `git merge -` shorthand for
+        the branch just switched away from -- not an option."""
+        _create_test_repo(tmp_path)
+        service = _get_service()
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True,
+            capture_output=True,
+        )
+        (tmp_path / "feature.txt").write_text("feature content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feature commit"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Switch back to master; "-" now refers to "feature".
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "master"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = service.merge_branch(tmp_path, "-")
+
+        assert result["success"] is True
+        assert result["conflicts"] == []
+        assert (tmp_path / "feature.txt").exists()
+
     def test_clean_merge_already_up_to_date(self, tmp_path: Path) -> None:
         """Merging a branch already merged returns success=True."""
         _create_test_repo(tmp_path)
@@ -242,8 +276,15 @@ class TestMergeBranchBinaryDetection:
 class TestMergeBranchErrors:
     """Tests for error conditions in merge_branch."""
 
-    def test_invalid_branch_raises_git_error(self, tmp_path: Path) -> None:
-        """Merging a nonexistent branch raises GitCommandError."""
+    def test_invalid_branch_raises_git_command_error(self, tmp_path: Path) -> None:
+        """Merging a nonexistent branch raises GitCommandError.
+
+        merge_branch()'s validate_revision() call checks only a leading
+        '-' and control characters -- it does not resolve source_branch
+        itself, so a name that never resolves to a revision reaches the
+        `git merge` subprocess unchanged and surfaces as that subprocess's
+        own failure, exactly as it did with no validation at all.
+        """
         _create_test_repo(tmp_path)
         service = _get_service()
 

@@ -141,7 +141,7 @@ class TestVersionedSnapshotCleanupOnRemovalBug1570:
         register_globally_active_repo_with_versioned_snapshot(manager, alias)
         ns_dir = versioned_namespace_dir(manager, alias)
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         result = captured_worker(manager)()
 
         assert result["success"] is True
@@ -163,7 +163,7 @@ class TestVersionedSnapshotCleanupOnRemovalBug1570:
 
         manager._snapshot_manager = None  # simulate startup wiring failure
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         result = captured_worker(manager)()
 
         assert result["success"] is True
@@ -190,7 +190,7 @@ class TestVersionedSnapshotCleanupOnRemovalBug1570:
                 )
             return real_rmtree(path, *args, **kwargs)
 
-        manager.remove_golden_repo(alias)
+        manager.remove_golden_repo(alias, submitter_username="example-admin")
         worker = captured_worker(manager)
 
         with patch.object(shutil, "rmtree", side_effect=recording_rmtree):
