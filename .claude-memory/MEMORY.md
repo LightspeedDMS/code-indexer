@@ -60,6 +60,7 @@
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - work autonomously; every defect = file + fix + iterate until clean
 - [feedback_bug_report_means_report_not_fix.md](feedback_bug_report_means_report_not_fix.md) - "root cause + bug report" = investigate, file, STOP
+- [feedback_issue_routing_public_vs_security.md](feedback_issue_routing_public_vs_security.md) - security issues -> private security repo; regular bugs -> PUBLIC repo issues (issue_manager defaults to the private origin)
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - always commit on development, never master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - bump version + tag BEFORE promoting to staging
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - run ruff/mypy before staging; the hook is a safety net
