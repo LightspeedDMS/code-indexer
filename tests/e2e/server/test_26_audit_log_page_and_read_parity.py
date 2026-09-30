@@ -70,7 +70,10 @@ def seeded_query(
 ) -> Iterator[Dict[str, Any]]:
     """Three group_create rows inside an explicit UTC window."""
     headers = {"Authorization": f"Bearer {admin_token_provider.get_token()}"}
-    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+    # No backward margin: the in-process server stamps rows from the same
+    # clock after this instant, and a margin would admit the previous
+    # test's own group_create row (same admin) into the window.
+    start = datetime.now(timezone.utc)
     group_ids: List[int] = []
     try:
         for _ in range(_GROUPS):
