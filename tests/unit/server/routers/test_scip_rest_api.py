@@ -33,19 +33,41 @@ def mock_scip_service():
     return service
 
 
+_UNSET = object()
+
+
 @pytest.fixture
-def test_client(mock_user):
-    """Create a test client with auth mocked."""
+def test_client(mock_user, tmp_path):
+    """Create a test client with auth mocked and a REAL access service wired.
+
+    The SCIP routes filter by group access and refuse to run without the
+    access service, so it is wired on app.state for the test and restored.
+    """
     from code_indexer.server.app import app
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
 
     # Override auth dependency to return mock user
     app.dependency_overrides[get_current_user] = lambda: mock_user
+    previous = getattr(app.state, "access_filtering_service", _UNSET)
+    app.state.access_filtering_service = AccessFilteringService(
+        GroupAccessManager(tmp_path / "groups.db")
+    )
 
     client = TestClient(app)
-    yield client
-
-    # Clean up overrides
-    app.dependency_overrides.clear()
+    try:
+        yield client
+    finally:
+        # Clean up overrides
+        app.dependency_overrides.clear()
+        if previous is _UNSET:
+            del app.state.access_filtering_service
+        else:
+            app.state.access_filtering_service = previous
 
 
 class TestDefinitionEndpoint:

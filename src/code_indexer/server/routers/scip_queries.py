@@ -16,13 +16,33 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.routers import repo_access_http
 from code_indexer.server.services.scip_query_service import SCIPQueryService
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/scip", tags=["SCIP Queries"])
+
+
+def _require_access_control(
+    request: Request, current_user: User = Depends(get_current_user)
+) -> None:
+    """Every SCIP route here filters results by the caller's group access,
+    so none may run without the access service: fails closed with 500
+    access_control_unavailable before any query work."""
+    repo_access_http.enforce_repo_access(
+        getattr(request.app.state, "access_filtering_service", None),
+        current_user.username,
+        None,
+    )
+
+
+router = APIRouter(
+    prefix="/scip",
+    tags=["SCIP Queries"],
+    dependencies=[Depends(_require_access_control)],
+)
 
 # Depth bounds for dependency/dependent traversal queries (Bug #1604 REST
 # audit). Used as the ge/le bounds on the depth Query parameters below, so

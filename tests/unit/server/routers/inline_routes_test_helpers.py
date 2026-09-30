@@ -113,6 +113,40 @@ def _patch_closure(handler, var_name: str, replacement):
         ctypes.cast(id(cell), ctypes.py_object).value.cell_contents = original
 
 
+_UNSET = object()
+
+
+@contextmanager
+def _access_service_granting(db_path, username: str, repos: List[str]):
+    """Wire a REAL access service on app.state granting *repos* to *username*.
+
+    Routes that name or list golden repositories require group access and
+    fail closed without the access service; the previous app.state value
+    is restored on exit.
+    """
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
+
+    gam = GroupAccessManager(db_path)
+    group = gam.create_group("route-test", "route test group")
+    gam.assign_user_to_group(username, group.id, assigned_by="test")
+    for repo in repos:
+        gam.grant_repo_access(repo, group.id, granted_by="test")
+    previous = getattr(app.state, "access_filtering_service", _UNSET)
+    app.state.access_filtering_service = AccessFilteringService(gam)
+    try:
+        yield
+    finally:
+        if previous is _UNSET:
+            del app.state.access_filtering_service
+        else:
+            app.state.access_filtering_service = previous
+
+
 # ---------------------------------------------------------------------------
 # Shared pytest fixtures
 # ---------------------------------------------------------------------------

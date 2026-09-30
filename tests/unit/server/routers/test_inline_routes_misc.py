@@ -11,6 +11,7 @@ Covers:
 from unittest.mock import Mock, patch
 
 from tests.unit.server.routers.inline_routes_test_helpers import (
+    _access_service_granting,
     _find_route_handler,
     _patch_closure,
     user_client,  # noqa: F401
@@ -108,7 +109,7 @@ class TestGetReposStatusSummary:
         response = anon_client.get("/api/repos/status")
         assert response.status_code == 401
 
-    def test_success_with_no_repos(self, user_client):
+    def test_success_with_no_repos(self, user_client, tmp_path):
         handler = _find_route_handler("/api/repos/status", "GET")
 
         mock_arm = Mock()
@@ -117,9 +118,10 @@ class TestGetReposStatusSummary:
         mock_grm = Mock()
         mock_grm.list_golden_repos.return_value = []
 
-        with _patch_closure(handler, "activated_repo_manager", mock_arm):
-            with _patch_closure(handler, "golden_repo_manager", mock_grm):
-                response = user_client.get("/api/repos/status")
+        with _access_service_granting(tmp_path / "groups.db", "testuser", []):
+            with _patch_closure(handler, "activated_repo_manager", mock_arm):
+                with _patch_closure(handler, "golden_repo_manager", mock_grm):
+                    response = user_client.get("/api/repos/status")
 
         assert response.status_code == 200
         data = response.json()
@@ -130,7 +132,7 @@ class TestGetReposStatusSummary:
         # With no repos, expect an "activate" recommendation
         assert any("activate" in r.lower() for r in data["recommendations"])
 
-    def test_success_counts_repo_sync_status(self, user_client):
+    def test_success_counts_repo_sync_status(self, user_client, tmp_path):
         handler = _find_route_handler("/api/repos/status", "GET")
 
         mock_arm = Mock()
@@ -156,9 +158,15 @@ class TestGetReposStatusSummary:
             {"alias": "infra-repo"},
         ]
 
-        with _patch_closure(handler, "activated_repo_manager", mock_arm):
-            with _patch_closure(handler, "golden_repo_manager", mock_grm):
-                response = user_client.get("/api/repos/status")
+        # The status counts cover only granted repositories: grant all three.
+        with _access_service_granting(
+            tmp_path / "groups.db",
+            "testuser",
+            ["backend-repo", "frontend-repo", "infra-repo"],
+        ):
+            with _patch_closure(handler, "activated_repo_manager", mock_arm):
+                with _patch_closure(handler, "golden_repo_manager", mock_grm):
+                    response = user_client.get("/api/repos/status")
 
         assert response.status_code == 200
         data = response.json()
