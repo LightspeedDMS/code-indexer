@@ -46,7 +46,10 @@ def seeded_query(
     pg_http_client: httpx.Client, pg_admin_token: str
 ) -> Iterator[Dict[str, Any]]:
     """Three group_create rows inside an explicit UTC window."""
-    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+    # No backward margin: the Phase 6 server runs on this host and stamps
+    # rows from the same clock after this instant, and a margin would admit
+    # the previous module's own group_create row (same admin) into the window.
+    start = datetime.now(timezone.utc)
     group_ids: List[int] = []
     try:
         for _ in range(_GROUPS):

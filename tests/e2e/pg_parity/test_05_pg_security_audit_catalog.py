@@ -18,7 +18,7 @@ import json
 import os
 import pathlib
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 import pytest
@@ -81,6 +81,44 @@ def _login(client: httpx.Client, username: str) -> str:
     return token
 
 
+def _clean_up_golden_repo(
+    client: httpx.Client,
+    token: str,
+    alias: str,
+    *,
+    add_accepted: bool,
+    created: bool,
+    removal_accepted: bool,
+    removal_job_id: Optional[str],
+    timeout: float,
+) -> None:
+    """Leave no golden repository behind without repeating an accepted DELETE.
+
+    An accepted DELETE runs as a background removal job, and a second DELETE
+    while that job runs is refused as a duplicate job.
+    """
+    if removal_job_id is not None:
+        final = wait_for_job(
+            client, removal_job_id, token=token, timeout=timeout, poll_interval=2.0
+        )
+        assert final["status"] == "completed", final
+        return
+    if removal_accepted:
+        # The removal was accepted but its job id was never read. No helper
+        # waits for an alias to disappear, and the registry row goes before
+        # the files do, so its absence would not prove the job finished;
+        # another DELETE would collide with the running job. Fail loudly.
+        raise AssertionError(
+            f"removal of {alias!r} was accepted but its job id was not read; "
+            "cannot wait for the removal job"
+        )
+    if not add_accepted:
+        return
+    cleanup = rest_call(client, "DELETE", f"/api/admin/golden-repos/{alias}", token)
+    allowed = {204} if created else {204, 404}
+    assert cleanup.status_code in allowed, cleanup.text[:300]
+
+
 def test_pg_admin_creation_and_golden_removal_name_the_caller(
     pg_http_client: httpx.Client, pg_admin_token: str
 ) -> None:
@@ -103,6 +141,9 @@ def test_pg_admin_creation_and_golden_removal_name_the_caller(
     )
     assert created.status_code == 201, created.text[:300]
     admin2 = _login(pg_http_client, second_admin)
+    job_timeout = float(os.environ.get("E2E_GOLDEN_REPO_JOB_TIMEOUT", "300.0"))
+    add_accepted = repo_created = removal_accepted = False
+    removal_job_id: Optional[str] = None
 
     try:
         # --- Admin-role user creation (formerly fail-closed) ---
@@ -128,14 +169,16 @@ def test_pg_admin_creation_and_golden_removal_name_the_caller(
             json={"repo_url": seed_repo, "alias": alias},
         )
         assert added.status_code == 202, added.text[:300]
+        add_accepted = True
         status = wait_for_job(
             pg_http_client,
             added.json()["job_id"],
             token=pg_admin_token,
-            timeout=float(os.environ.get("E2E_GOLDEN_REPO_JOB_TIMEOUT", "300.0")),
+            timeout=job_timeout,
             poll_interval=2.0,
         )
         assert status["status"] == "completed", status
+        repo_created = True
         row = _one_row(
             pg_http_client, pg_admin_token, "golden_repo_added", second_admin, alias
         )
@@ -145,10 +188,12 @@ def test_pg_admin_creation_and_golden_removal_name_the_caller(
             pg_http_client, "DELETE", f"/api/admin/golden-repos/{alias}", admin2
         )
         assert removed.status_code == 204, removed.text[:300]
+        removal_accepted = True
         row = _one_row(
             pg_http_client, pg_admin_token, "golden_repo_removed", second_admin, alias
         )
         assert (row["outcome"], row["source"]) == ("success", "rest")
+        removal_job_id = str(row["details"]["job_id"])
         seeded_admin_rows = _entries(
             pg_http_client, pg_admin_token, "golden_repo_removed", "admin"
         )
@@ -158,10 +203,22 @@ def test_pg_admin_creation_and_golden_removal_name_the_caller(
         )
         assert seed_repo not in every_entry and _PASSWORD not in every_entry
     finally:
-        rest_call(
-            pg_http_client, "DELETE", f"/api/admin/golden-repos/{alias}", pg_admin_token
-        )
-        for user in (promoted, second_admin):
-            rest_call(
-                pg_http_client, "DELETE", f"/api/admin/users/{user}", pg_admin_token
+        try:
+            _clean_up_golden_repo(
+                pg_http_client,
+                pg_admin_token,
+                alias,
+                add_accepted=add_accepted,
+                created=repo_created,
+                removal_accepted=removal_accepted,
+                removal_job_id=removal_job_id,
+                timeout=job_timeout,
             )
+        finally:
+            for user in (promoted, second_admin):
+                rest_call(
+                    pg_http_client,
+                    "DELETE",
+                    f"/api/admin/users/{user}",
+                    pg_admin_token,
+                )
