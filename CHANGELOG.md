@@ -5,10 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [12.77.0] - 2026-09-30
+
+### Security
+
+- Golden repository add, remove, refresh, branch change and index add require TOTP elevation on REST and MCP, as on the Web UI. MCP-credential and OAuth callers are elevated automatically, and the tool documentation lists the elevation requirement and its error codes.
+- Removing another user's activated repository over REST requires the caller's elevation window, as on the Web UI.
+- Deleting an API key over REST requires the caller's own elevation window, as the MCP `delete_api_key` tool does.
+- Admin-only MCP tools (user, group, global configuration, memory statistics, dependency analysis, SSH key, destructive git, and admin log and audit query tools) check the admin role inside the handler, before any elevation step, whatever tool grant admitted the call. This matches their REST and Web routes.
+- MCP `manage_provider_indexes`, `add_golden_repo_index` and `bulk_add_provider_index` require the admin role and TOTP elevation, checked in the handler, as their REST routes do. MCP `get_provider_health` requires the admin role, as the REST route does.
+- With elevation enforcement enabled, creating a personal API key requires TOTP to be set up and the caller's own elevation window, and the API Keys menu is shown only once MFA is set up. The self-service elevation check is shared with MCP credential self-service and recognises an elevation window opened with the caller's bearer token.
+- With elevation enforcement enabled, adding, updating or deleting your own git-forge credential requires your own elevation window on the Web routes and the MCP tools.
+- With elevation enforcement enabled, starting a new TOTP enrollment on an account that already has MFA requires the caller's own elevation window, opened with a current TOTP or recovery code. First-time enrollment, viewing the current setup and an admin resetting another user are unchanged.
+- REST `/auth/elevate`, the Web elevation form and AJAX endpoints and MCP `elevate_session` share one step-up routine and one failed-attempt limiter keyed on client address and username, so failed attempts on every door count toward one lockout. Each door reads the new elevation window back before clearing failed attempts. MCP `elevate_session` is registered in the tool registry with its tool documentation.
+- Server-spawned indexing resumes an interrupted run only from resume state sealed with a key kept in the server data directory; any other stored state is ignored and the run reconciles.
+- Server-spawned indexing, auto-watch, search, in-process git sync and server-side X-Ray keep files inside the resolved repository root. The marker that selects this is set at runtime only; configuration files cannot set or clear it.
+- Audit rows store only the detail fields the audit reader may show for their action type. Pull request URLs are kept only when they have a pull or merge request path, and are reported without credentials, query string or fragment; group create and update rows do not carry the free-text description.
 
 ### Added
 
+- Audit capture: every audit row records the acting user, request source, client address, correlation id, authentication method, outcome and a unique event id (additive schema changes on SQLite and PostgreSQL). Every writer goes through one capture path that never blocks the event loop and never fails the caller; write failures are logged and counted, and `/health` and MCP `check_health` report `audit.records_dropped_since_boot`. MCP `query_audit_logs` returns the new fields.
+- Audit rows on every mutating door (REST, MCP and Web), each naming the acting user or a system actor and recording one success or failure row:
+  - login outcomes: REST login and MFA verification, the Web login form (including the password-expired branch), the Web MFA challenge, the SSO callback, OAuth authorize and OAuth MFA verification, and MCP `authenticate`, one row per attempt; the attempt that starts a lockout writes one row, and refusals while rate limited or locked out write none;
+  - elevation granted or failed;
+  - MFA activation, disable, recovery-code regeneration and cross-user secret reset;
+  - user create, role change, password reset, email change and delete; API key and MCP credential creation and revocation; SSH key create, host assignment and delete; git credential configure and delete;
+  - group tool-access changes, adding a user to a group, and revoking a group's access to one repository (a bulk revoke records one row per revoked repository and one summary row for repositories that were not in the group);
+  - golden repository add, remove, refresh, branch change and index changes; provider-index add, recreate, remove and bulk add;
+  - every configuration write path, provider API keys, CI tokens and git settings (rows name the changed keys, never secret values);
+  - entering and leaving maintenance mode, an admin-requested restart (recorded before the restart runs), and an admin activating or removing another user's repository (the row names both users).
 - Audit Logs admin page (`/admin/audit-logs`, admin only, elevation required for data): a Security view (7-day default window) and an authentication-activity aggregate (24-hour default) with drill-down, filters for actor, action, target, outcome, source, IP address, correlation id and a UTC range, Newer/Older cursor paging, and a bounded CSV/JSON export of the filtered rows.
 - MCP `query_audit_logs` accepts `target_type`, `target_id`, `outcome`, `source`, `ip_address`, `correlation_id`, `tier` (default `all`), `cursor`, `direction`, `aggregate` and `all_time`, and returns `total_capped`, `next_cursor`, `prev_cursor` and `has_more`. Entries carry `pairing_state`, `submitted_only` and `actor_is_authenticated`.
 - REST `GET /api/v1/audit-logs` accepts the same filters plus `tier`, `cursor`, `direction`, `aggregate` and `all_time`, and returns the same additive fields.
@@ -20,10 +45,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REST `GET /api/v1/audit-logs` without `limit` now returns 100 rows and a `next_cursor` token instead of every row; a `limit` above 1000 is clamped to 1000. Callers that need everything follow `next_cursor` until it is null. `offset` still works and cannot be combined with `cursor`.
 - Audit-log `total` is exact up to 10,000; above that it reads 10,000 and `total_capped` is true.
 - Audit-log `details` on every door show only the fields allowed for that action type. The names of other stored fields are listed under `omitted_fields`, and stored content that is not a JSON object is reported as `omitted_fields: ["(unstructured)"]` instead of being echoed.
+- The local CLI again indexes and searches files reached through symlinks that point outside the repository. Resolved-root containment applies to server-spawned work (see Security); server-side X-Ray stays confined by default and only the local X-Ray CLI opts out.
+- Indexing runs report analysis and processing failures in their statistics and record every failed path.
+- A configuration change is published once its runtime row commits, and OIDC settings take effect only after a successful save.
+- MCP git read tools log a rejected argument as a warning without a stack trace, as the REST routes do. Responses are unchanged.
+
+### Fixed
+
+- Cluster mode: new users can activate repositories. New user directories are created group-writable with setgid and the server's primary group, whatever the umask. The installer and an auto-updater self-heal add the copy-on-write storage daemon account (resolved from its systemd unit and validated) to its configured service group, require that group to be the cidx service user's primary group, and restart the daemon only when its running process lacks the group.
+- Trigram index build files (`trigrams.*.db.building`) left behind by an interrupted build are removed before a refresh builds the trigram index and before a snapshot copies a base clone. Only regular files untouched for six hours are removed, so a live build is left alone, and files inside versioned snapshots are never modified.
+- Indexing retries the paths that failed on a previous run until they succeed.
+- Configuration saves no longer fail on an unchanged stored server host; the host is validated only when it changes, and every layer stores the stripped value. Hostnames with underscores or a single trailing dot are accepted again, and a value made only of numeric labels must be a canonical IPv4 address. The deployer applies the same validator before rewriting the service unit.
+- The repository health check and index status routes accept the caller's own activated composite repository when every component golden repository still exists and is accessible to the caller.
+- Stopping the audit writer counts every queued and in-flight row it cannot confirm as written, with one summary error, and stops only after the components that emit audit rows have shut down. Building and stopping the audit service and binding the password audit logger run off the event loop.
 
 ### Removed
 
 - The Audit Logs tab of the Group Management page and its `/admin/partials/groups-audit-logs` partial; audit reading lives on the Audit Logs page. `active_tab=audit` opens the Groups tab.
+
+### Tests
+
+- Audit catalog completeness, no-secret-in-rows and wiring checks cover every mutating route, including the non-production fault-injection router, and match each door to exactly the rows it writes.
+- The in-process server E2E phase restores the shared app wiring around tests that start their own app.
+- Resume seal tests assert a complete index; job sorting tests wait for jobs to reach a terminal status instead of sleeping; the API-model fresh-import check runs in a subprocess; lifespan and git sync tests no longer leak environment or patched modules into later tests.
 
 ## [12.76.0] - 2026-09-27
 
