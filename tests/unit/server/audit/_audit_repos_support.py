@@ -12,27 +12,13 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+
+from tests.unit.server.recording_job_manager import RecordingJobManager
+
+__all__ = ["RecordingJobManager"]
 
 EXAMPLE_ALIAS = "example-repo"
-
-
-class RecordingJobManager:
-    """Test double for the background job runner (records submissions)."""
-
-    def __init__(self) -> None:
-        self.submissions: List[Dict[str, Any]] = []
-
-    def submit_job(self, operation_type: str, func: Any, *args: Any, **kwargs: Any):
-        job_id = f"job-{len(self.submissions) + 1:04d}"
-        self.submissions.append(
-            {"operation_type": operation_type, "job_id": job_id, **kwargs}
-        )
-        return job_id
-
-    def get_jobs_by_operation_and_params(self, **_filters: Any) -> List[Any]:
-        """No job is ever running (nothing is executed)."""
-        return []
 
 
 def make_golden_repo_manager(tmp_path: Path, job_manager: RecordingJobManager):

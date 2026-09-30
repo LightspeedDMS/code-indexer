@@ -4,7 +4,8 @@ they name or count, and refuse with 500 access_control_unavailable when the
 access service is missing.
 
 Real services from repo_authz_test_env; nothing about the access decision
-is mocked. "No job submitted" is asserted on the real BackgroundJobManager.
+is mocked. "No job submitted" is asserted on the submissions recorded by
+the env's job runner (RecordingJobManager).
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ class TestBodySyncRequiresGroupAccess:
         jobs = env.submitted_jobs()
         assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
         assert jobs[0]["user"] == POWER_USERNAME
+        assert jobs[0]["operation_type"] == "sync_repository"
+        assert jobs[0]["repo_alias"] == GRANTED_REPO
 
     def test_admin_sync_is_submitted_without_group_grant(self, env):  # noqa: F811
         client = env.client(admin(), env.access_service)
@@ -64,6 +67,10 @@ class TestBodySyncRequiresGroupAccess:
 
         assert resp.status_code == 202, resp.text
         assert [j["user"] for j in env.submitted_jobs()] == [ADMIN_USERNAME]
+        jobs = env.submitted_jobs()
+        assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
+        assert jobs[0]["operation_type"] == "sync_repository"
+        assert jobs[0]["repo_alias"] == UNGRANTED_REPO
 
     @pytest.mark.parametrize("make_user", [power_user, admin])
     def test_unavailable_access_service_fails_closed_and_submits_no_job(

@@ -90,6 +90,8 @@ class TestV2SyncRequiresGroupAccess:
         jobs = env.submitted_jobs()
         assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
         assert jobs[0]["user"] == POWER_USERNAME
+        assert jobs[0]["operation_type"] == "sync_repository"
+        assert jobs[0]["repo_alias"] == GRANTED_REPO
 
     def test_admin_sync_is_submitted_without_group_grant(self, env):  # noqa: F811
         client = env.client(admin(), env.access_service)
@@ -98,6 +100,9 @@ class TestV2SyncRequiresGroupAccess:
         assert resp.status_code == 202, resp.text
         jobs = env.submitted_jobs()
         assert [j["user"] for j in jobs] == [ADMIN_USERNAME]
+        assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
+        assert jobs[0]["operation_type"] == "sync_repository"
+        assert jobs[0]["repo_alias"] == UNGRANTED_REPO
 
     @pytest.mark.parametrize("make_user", [power_user, admin])
     def test_unavailable_access_service_fails_closed_and_submits_no_job(

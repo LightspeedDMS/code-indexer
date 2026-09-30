@@ -8,8 +8,11 @@ is mocked.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
+from code_indexer.server.auth.user_manager import User, UserRole
 from tests.unit.server.routers.repo_authz_test_env import (
     GRANTED_REPO,
     UNGRANTED_REPO,
@@ -18,6 +21,9 @@ from tests.unit.server.routers.repo_authz_test_env import (
     power_user,
     repo_url,
 )
+
+# An ADMIN-role user who is deliberately NOT a member of the admins group.
+ROLE_ADMIN_USERNAME = "example_role_admin"
 
 
 def _discover(client, alias: str):
@@ -76,6 +82,34 @@ class TestGlobalReposListOnlyAccessibleRepos:
         assert sorted(r["repo_name"] for r in resp.json()["repos"]) == sorted(
             [GRANTED_REPO, UNGRANTED_REPO]
         )
+
+    def test_admin_role_outside_admins_group_sees_only_its_groups_repos(
+        self,
+        env,  # noqa: F811
+    ):
+        """Admin repository visibility follows membership of the admins group
+        (the access model's full-access group), not the user role.
+
+        A user with the ADMIN role who is NOT in the admins group, but is in
+        a group granted exactly one golden repository, lists only that one.
+        """
+        gam = env.access_service.group_manager
+        restricted = gam.get_group_by_name("restricted")
+        assert restricted is not None
+        gam.assign_user_to_group(ROLE_ADMIN_USERNAME, restricted.id, assigned_by="test")
+        assert not env.access_service.is_admin_user(ROLE_ADMIN_USERNAME)
+        role_admin = User(
+            username=ROLE_ADMIN_USERNAME,
+            password_hash="$2b$12$x",
+            role=UserRole.ADMIN,
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+
+        client = env.client(role_admin, env.access_service)
+        resp = client.get("/global/repos")
+
+        assert resp.status_code == 200, resp.text
+        assert [r["repo_name"] for r in resp.json()["repos"]] == [GRANTED_REPO]
 
     @pytest.mark.parametrize("make_user", [power_user, admin])
     def test_unavailable_access_service_fails_closed(self, env, make_user):  # noqa: F811

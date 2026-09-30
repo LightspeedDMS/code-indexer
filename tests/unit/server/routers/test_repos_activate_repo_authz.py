@@ -4,8 +4,8 @@ named in the request, checked before any activation job is submitted.
 
 Front door: a real FastAPI TestClient over the real routes, wired to the
 REAL services in repo_authz_test_env (nothing about the access decision is
-mocked). "No job submitted" is asserted on the real BackgroundJobManager's
-job table, not inferred from the status code.
+mocked). "No job submitted" is asserted on the submissions recorded by the
+env's job runner (RecordingJobManager), not inferred from the status code.
 """
 
 from __future__ import annotations
@@ -99,6 +99,7 @@ class TestActivationRequiresGroupAccess:
         assert [j["job_id"] for j in jobs] == [job_id]
         assert jobs[0]["operation_type"] == "activate_repository"
         assert jobs[0]["user"] == POWER_USERNAME
+        assert jobs[0]["repo_alias"] == GRANTED_REPO
 
     def test_admin_activation_is_submitted_without_group_grant(self, env):  # noqa: F811
         client = env.client(_admin(), env.access_service)
@@ -109,7 +110,9 @@ class TestActivationRequiresGroupAccess:
         assert resp.status_code == 202, resp.text
         jobs = env.submitted_jobs()
         assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
+        assert jobs[0]["operation_type"] == "activate_repository"
         assert jobs[0]["user"] == ADMIN_USERNAME
+        assert jobs[0]["repo_alias"] == UNGRANTED_REPO
 
     def test_admin_composite_activation_is_submitted(self, env):  # noqa: F811
         client = env.client(_admin(), env.access_service)
@@ -124,6 +127,13 @@ class TestActivationRequiresGroupAccess:
         assert resp.status_code == 202, resp.text
         jobs = env.submitted_jobs()
         assert [j["operation_type"] for j in jobs] == ["activate_composite_repository"]
+        assert [j["job_id"] for j in jobs] == [resp.json()["job_id"]]
+        assert jobs[0]["user"] == ADMIN_USERNAME
+        assert jobs[0]["repo_alias"] == "admin-composite"
+        assert env.job_manager.submissions[0]["golden_repo_aliases"] == [
+            GRANTED_REPO,
+            UNGRANTED_REPO,
+        ]
 
     @pytest.mark.parametrize("make_user", [_power_user, _admin])
     def test_unavailable_access_service_fails_closed_and_submits_no_job(
@@ -165,6 +175,7 @@ class TestActivationNotFoundListsOnlyAccessibleRepos:
         assert sorted(resp.json()["detail"]["available_repositories"]) == sorted(
             [GRANTED_REPO, UNGRANTED_REPO]
         )
+        assert env.submitted_jobs() == []
 
 
 GOLDEN_READ_ROUTES = [

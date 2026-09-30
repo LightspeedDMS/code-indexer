@@ -2,9 +2,15 @@
 
 Every service is real: AccessFilteringService over a GroupAccessManager
 (temp SQLite), GoldenRepoManager over its SQLite metadata backend with real
-one-commit git clones, ActivatedRepoManager submitting to a real
-BackgroundJobManager, and the golden repos registered as global repos in
-the real global registry. Nothing about the access decision is mocked.
+one-commit git clones, ActivatedRepoManager, and the golden repos registered
+as global repos in the real global registry. Nothing about the access
+decision is mocked.
+
+The one double is the background job runner (RecordingJobManager): it
+records every submission and runs nothing. The tests assert whether a job
+was submitted; running the real activation/sync work would only add time
+(a failed activation spends ~12 s in its orphan-cleanup grace loop) and
+side effects outside the access decision.
 
 Repository aliases, URLs and usernames are neutral placeholders.
 """
@@ -14,7 +20,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, cast
 
 import pytest
 from fastapi import FastAPI
@@ -39,6 +45,7 @@ from code_indexer.server.services.access_filtering_service import (
 )
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.storage.database_manager import DatabaseSchema
+from tests.unit.server.recording_job_manager import RecordingJobManager
 
 GRANTED_REPO = "example-repo"
 UNGRANTED_REPO = "other-repo"
@@ -121,13 +128,13 @@ class Env:
                 repo_url=repo_url(alias),
                 index_path=str(clone_path),
             )
-        self.job_manager = BackgroundJobManager(
-            storage_path=str(tmp_path / "jobs.json")
-        )
+        # Records every submission and runs nothing: these tests assert
+        # WHETHER a job was submitted, never what the clone/sync work does.
+        self.job_manager = RecordingJobManager()
         self.activated_repo_manager = ActivatedRepoManager(
             data_dir=str(tmp_path / "activated"),
             golden_repo_manager=self.golden_repo_manager,
-            background_job_manager=self.job_manager,
+            background_job_manager=cast(BackgroundJobManager, self.job_manager),
         )
         gam = GroupAccessManager(tmp_path / "groups.db")
         group = gam.create_group("restricted", "test group")
@@ -167,9 +174,15 @@ class Env:
         return TestClient(app, raise_server_exceptions=False)
 
     def submitted_jobs(self) -> List[Dict[str, Any]]:
+        """Every job submitted so far, in submission order."""
         return [
-            {"job_id": j.job_id, "operation_type": j.operation_type, "user": j.username}
-            for j in self.job_manager.jobs.values()
+            {
+                "job_id": s["job_id"],
+                "operation_type": s["operation_type"],
+                "user": s["submitter_username"],
+                "repo_alias": s["repo_alias"],
+            }
+            for s in self.job_manager.submissions
         ]
 
 
@@ -181,4 +194,3 @@ def env(tmp_path: Path) -> Iterator[Env]:
         yield e
     finally:
         global_routes._golden_repos_dir = None
-        e.job_manager.shutdown()
