@@ -3521,23 +3521,6 @@ class GoldenRepoManager:
             f"  2. Versioned path: {versioned_base}/v_*/"
         )
 
-    def user_can_access_golden_repo(self, alias: str, user: Any) -> bool:
-        """
-        Check if a user can access a golden repository.
-
-        For now, all authenticated users can access all golden repositories.
-        This method exists for future permission system expansion.
-
-        Args:
-            alias: Repository alias
-            user: User object (can be None for unauthenticated)
-
-        Returns:
-            True if user can access repository, False otherwise
-        """
-        # Golden repositories are accessible to all authenticated users
-        return user is not None
-
     def get_golden_repo_branches(self, alias: str) -> List["GoldenRepoBranchInfo"]:
         """
         Get branches for a golden repository.

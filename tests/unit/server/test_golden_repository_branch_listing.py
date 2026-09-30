@@ -13,6 +13,10 @@ from fastapi import status
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
+from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.models.golden_repo_branch_models import (
     GoldenRepoBranchInfo,
     GoldenRepositoryBranchesResponse,
@@ -23,9 +27,23 @@ from code_indexer.server.models.golden_repo_branch_models import (
 class TestGoldenRepositoryBranchListingEndpoint:
     """Test suite for the golden repository branch listing API endpoint."""
 
-    def setup_method(self):
-        """Set up test environment for each test."""
+    @pytest.fixture(autouse=True)
+    def _app(self, tmp_path):
+        """Build the app with a REAL access service wired on app.state.
+
+        Reading a golden repository requires group access, so the route
+        needs the access service: 'admin_user' is in the admins group and
+        'regular_user' is in a group granted only 'test-repo'.
+        """
         self.app = create_app()
+        gam = GroupAccessManager(tmp_path / "groups.db")
+        admins = gam.get_group_by_name("admins")
+        assert admins is not None, "bootstrap must create the 'admins' group"
+        gam.assign_user_to_group("admin_user", admins.id, assigned_by="test")
+        group = gam.create_group("restricted", "test group")
+        gam.assign_user_to_group("regular_user", group.id, assigned_by="test")
+        gam.grant_repo_access("test-repo", group.id, granted_by="test")
+        self.app.state.access_filtering_service = AccessFilteringService(gam)
 
     def _setup_authenticated_user(self, username="admin_user", role="admin"):
         """Setup authentication with a mock user."""
@@ -119,9 +137,6 @@ class TestGoldenRepositoryBranchListingEndpoint:
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
             return_value=True
         )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
-            return_value=True
-        )
 
         response = self.client.get("/api/repos/golden/test-repo/branches")
 
@@ -190,16 +205,14 @@ class TestGoldenRepositoryBranchListingEndpoint:
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
             return_value=True
         )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
-            return_value=True
-        )
 
         response = self.client.get("/api/repos/golden/test-repo/branches")
 
         assert response.status_code == status.HTTP_200_OK
 
     def test_list_branches_unauthorized_access(self):
-        """Test that users cannot access golden repositories they don't have permission for."""
+        """Users cannot read branches of a golden repository their group
+        has no access to."""
         # Setup authentication with regular user
         self._setup_authenticated_user("regular_user", "user")
 
@@ -209,16 +222,13 @@ class TestGoldenRepositoryBranchListingEndpoint:
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
             return_value=True
         )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
-            return_value=False
-        )
 
         response = self.client.get("/api/repos/golden/private-repo/branches")
 
         assert response.status_code == status.HTTP_403_FORBIDDEN
-        data = response.json()
-        assert "detail" in data
-        assert "permission" in data["detail"].lower()
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "access_denied"
+        assert "private-repo" in detail["detail"]
 
     def test_list_branches_empty_repository(self):
         """Test listing branches for repository with no branches returns empty list gracefully."""
@@ -232,9 +242,6 @@ class TestGoldenRepositoryBranchListingEndpoint:
             return_value=[]
         )
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
-            return_value=True
-        )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
             return_value=True
         )
 
@@ -265,9 +272,6 @@ class TestGoldenRepositoryBranchListingEndpoint:
             side_effect=GitOperationError("Git operation failed")
         )
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
-            return_value=True
-        )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
             return_value=True
         )
 
@@ -303,9 +307,6 @@ class TestGoldenRepositoryBranchListingEndpoint:
             return_value=many_branches
         )
         self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
-            return_value=True
-        )
-        self.app.state.golden_repo_manager.user_can_access_golden_repo = MagicMock(
             return_value=True
         )
 

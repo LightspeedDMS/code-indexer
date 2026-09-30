@@ -13,6 +13,7 @@ Covers:
 from unittest.mock import Mock, patch
 
 from tests.unit.server.routers.inline_routes_test_helpers import (
+    _access_service_granting,
     _find_route_handler,
     _patch_closure,
     admin_client,  # noqa: F401
@@ -302,7 +303,7 @@ class TestGeneralRepositorySync:
 
         assert response.status_code == 422
 
-    def test_repo_not_found_returns_404(self, user_client):
+    def test_repo_not_found_returns_404(self, user_client, tmp_path):
         handler = _find_route_handler("/api/repos/sync", "POST")
 
         mock_arm = Mock()
@@ -312,13 +313,20 @@ class TestGeneralRepositorySync:
         mock_rlm = Mock()
         mock_rlm.get_repository_details.side_effect = Exception("not found")
 
-        with _patch_closure(handler, "activated_repo_manager", mock_arm):
-            with _patch_closure(handler, "background_job_manager", mock_bgm):
-                with _patch_closure(handler, "repository_listing_manager", mock_rlm):
-                    response = user_client.post(
-                        "/api/repos/sync",
-                        json={"repository_alias": "missing-repo"},
-                    )
+        # The alias is granted, so the request passes the group-access check
+        # and reaches the not-found path.
+        with _access_service_granting(
+            tmp_path / "groups.db", "testuser", ["missing-repo"]
+        ):
+            with _patch_closure(handler, "activated_repo_manager", mock_arm):
+                with _patch_closure(handler, "background_job_manager", mock_bgm):
+                    with _patch_closure(
+                        handler, "repository_listing_manager", mock_rlm
+                    ):
+                        response = user_client.post(
+                            "/api/repos/sync",
+                            json={"repository_alias": "missing-repo"},
+                        )
 
         assert response.status_code == 404
 

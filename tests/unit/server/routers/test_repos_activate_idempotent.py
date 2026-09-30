@@ -14,15 +14,49 @@ job_id=<existing> is returned when a job is still running.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Iterator
 from unittest.mock import Mock
 
+import pytest
+
+from code_indexer.server.app import app
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoError
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
+from code_indexer.server.services.group_access_manager import GroupAccessManager
 from tests.unit.server.routers.inline_routes_test_helpers import (
     _find_route_handler,
     _patch_closure,
     admin_client,  # noqa: F401
 )
+
+_UNSET = object()
+
+
+@pytest.fixture(autouse=True)
+def _admin_access_service(tmp_path: Path) -> Iterator[None]:
+    """Wire a REAL access service on app.state with 'testadmin' in admins.
+
+    Activation requires group access checked by the access service and
+    fails closed without it, so these idempotency tests need it wired;
+    the admin bypass keeps them focused on idempotent behaviour.
+    """
+    gam = GroupAccessManager(tmp_path / "groups.db")
+    admins = gam.get_group_by_name("admins")
+    assert admins is not None, "bootstrap must create the 'admins' group"
+    gam.assign_user_to_group("testadmin", admins.id, assigned_by="test")
+    previous = getattr(app.state, "access_filtering_service", _UNSET)
+    app.state.access_filtering_service = AccessFilteringService(gam)
+    try:
+        yield
+    finally:
+        if previous is _UNSET:
+            del app.state.access_filtering_service
+        else:
+            app.state.access_filtering_service = previous
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ from ..models.branch_models import BranchListResponse
 from ..models.activated_repository import ActivatedRepository
 
 from ..auth import dependencies
+from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
@@ -82,6 +83,16 @@ def register_repos_v2_routes(
         repository_listing_manager: RepositoryListingManager instance
         background_job_manager: BackgroundJobManager instance
     """
+
+    def _enforce_golden_access(username: str, repo_id: str) -> None:
+        """A repo_id that is not one of the caller's own activations names a
+        golden repository, which requires group access to it (shared guard;
+        403 access_denied, 500 when the access service is unavailable;
+        admins bypass). Checked before the golden lookup, so an unknown and
+        an ungranted repository are refused alike."""
+        repo_access_http.enforce_repo_access(
+            getattr(app.state, "access_filtering_service", None), username, repo_id
+        )
 
     @app.get("/api/repositories/{repo_id}")
     def get_repository_details_v2(
@@ -298,6 +309,7 @@ def register_repos_v2_routes(
             pass
 
         # Strategy 2: Try to find repository among golden repositories
+        _enforce_golden_access(current_user.username, cleaned_repo_id)
         try:
             # Check if this is a golden repository that the user can access
             golden_repo_details = repository_listing_manager.get_repository_details(
@@ -495,12 +507,13 @@ def register_repos_v2_routes(
 
             if not repo_found:
                 # Also check golden repositories
+                _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
                     repo_details = repository_listing_manager.get_repository_details(
                         alias=cleaned_repo_id, username=current_user.username
                     )
                     repo_found = True
-                    repo_path = Path(repo_details["path"])
+                    repo_path = Path(repo_details["clone_path"])
                 except RepositoryListingError:
                     pass
 
@@ -534,6 +547,8 @@ def register_repos_v2_routes(
                     current_branch=current_branch_name,
                 )
 
+        except HTTPException:
+            raise
         except ValueError as e:
             # Handle git repository errors
             if "Not a git repository" in str(e):
@@ -608,6 +623,7 @@ def register_repos_v2_routes(
 
             if not repo_found:
                 # Also check golden repositories
+                _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
                     repository_listing_manager.get_repository_details(
                         alias=cleaned_repo_id, username=current_user.username
@@ -973,6 +989,9 @@ def register_repos_v2_routes(
         Executes semantic search using real vector embeddings and Filesystem
         following CLAUDE.md Foundation #1: No mocks.
         """
+        # repo_id names a global repository: searching it requires group
+        # access to it, checked before any search work.
+        _enforce_golden_access(current_user.username, repo_id)
         try:
             search_response = search_service.search_repository(repo_id, search_request)
             return search_response

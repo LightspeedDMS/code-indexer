@@ -43,6 +43,11 @@ from code_indexer.server.mcp.reranking import (
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    narrow_global_repos_to_accessible,
+)
+from .repo_access_http import access_control_unavailable_error
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     raise_memory_pressure_http_error,
@@ -557,6 +562,20 @@ def register_query_routes(
                 except Exception as e:
                     logger.warning(f"Failed to load global repos for FTS/hybrid: {e}")
 
+                # Query searches only repositories the caller can access: the
+                # FTS index selection below, the alias match and the
+                # repositories_searched count only consider accessible global
+                # repos (same helper and semantics as
+                # SemanticQueryManager.query_user_repositories). Without the
+                # access service a query that would include a global repo is
+                # refused (500 access_control_unavailable, every caller).
+                global_repos_list = narrow_global_repos_to_accessible(
+                    getattr(app.state, "access_filtering_service", None),
+                    current_user.username,
+                    global_repos_list,
+                    repository_alias=request.repository_alias,
+                )
+
                 # Merge user repos and global repos
                 activated_repos = activated_repos + global_repos_list
 
@@ -1058,6 +1077,11 @@ def register_query_routes(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Invalid query parameters", "message": str(e)},
             )
+
+        except AccessFilteringServiceUnavailableError as e:
+            # Query searches only repositories the caller can access; with
+            # access control unavailable that cannot be verified -- refuse.
+            raise access_control_unavailable_error(e)
 
         except SemanticQueryError as e:
             error_message = str(e)

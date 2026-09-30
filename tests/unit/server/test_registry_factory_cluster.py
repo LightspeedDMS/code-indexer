@@ -207,6 +207,30 @@ def _app_state_postgres_mode(
             _restore("golden_repos_dir", saved_golden_repos_dir)
 
 
+@contextlib.contextmanager
+def _admins_group_member(app: Any, username: str) -> Generator:
+    """Make *username* a member of the REAL 'admins' group for the block.
+
+    Uses the GroupAccessManager behind the lifespan-wired access service, so
+    repository routes grant admin visibility exactly as in production. The
+    user's previous membership is restored on exit.
+    """
+    access_service = getattr(app.state, "access_filtering_service", None)
+    assert access_service is not None, "lifespan must wire the access service"
+    gam = access_service.group_manager
+    admins = gam.get_group_by_name("admins")
+    assert admins is not None, "bootstrap must create the 'admins' group"
+    previous = gam.get_user_group(username)
+    gam.assign_user_to_group(username, admins.id, assigned_by="test")
+    try:
+        yield
+    finally:
+        if previous is None:
+            gam.remove_user_from_group(username, admins.id)
+        else:
+            gam.assign_user_to_group(username, previous.id, assigned_by="test")
+
+
 def _make_backend_with_one_repo(
     alias_name: str, repo_name: str
 ) -> FakeGlobalReposBackend:
@@ -319,8 +343,11 @@ def test_list_global_repos_endpoint_uses_backend_registry_in_postgres_mode(
     app.dependency_overrides[get_current_user] = lambda: mock_user
     try:
         with TestClient(app, raise_server_exceptions=True) as client:
-            with _app_state_postgres_mode(backend, golden_repos_dir):
-                response = client.get("/global/repos")
+            # GET /global/repos filters by group access; admin rights come
+            # from membership in the real 'admins' group, not User.role.
+            with _admins_group_member(app, mock_user.username):
+                with _app_state_postgres_mode(backend, golden_repos_dir):
+                    response = client.get("/global/repos")
 
             assert response.status_code == 200
             data = response.json()

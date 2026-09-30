@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.78.0] - 2026-09-30
+
+### Security
+
+- Every REST route that names or lists golden repositories checks the caller's group access before any lookup or work: activation (single, composite and with a branch), the golden repository details and branches routes, discovery, the available and status listings, the v2 repository details, branches, sync and search routes, the global repository list and status, and body-based sync. Listings show only accessible repositories, and an unknown repository and an ungranted one are refused alike. These routes and the SCIP query routes fail closed when the access service is unavailable.
+- A query searches only the repositories the caller can access. Repositories are narrowed to the caller's access before the search, so result rows, stored asynchronous query results, the searched-repository count and repository names in query metadata involve only accessible repositories, on REST (synchronous and asynchronous), MCP search and the wiki. When the access service is unavailable, a query that would involve any global repository is refused; a query scoped to the caller's own activated repository still runs.
+
+### Changed
+
+- A REST query that names a global repository the caller cannot access returns 404, the same as an unknown repository.
+- Administrator visibility of repositories on the repository routes, listings and queries follows membership of the admins group, not the user role. A user with the admin role who is not in the admins group sees and reaches only the repositories granted to their own group.
+
+### Fixed
+
+- The v2 branch listing (`GET /api/repositories/{repo_id}/branches`) returns the branches of a golden repository; it previously failed with a server error.
+- A query returns a full page of results, up to the requested limit, from the repositories the caller can access.
+
+### Tests
+
+- Repository access route tests record submitted activation and sync jobs instead of running them, and a test pins administrator repository visibility to membership of the admins group.
+
 ## [12.77.0] - 2026-09-30
 
 ### Security

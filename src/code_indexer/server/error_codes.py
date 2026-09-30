@@ -5273,6 +5273,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="Check the named repos' index health; results are incomplete",
     ),
+    "QUERY-MIGRATE-014": ErrorDefinition(
+        code="QUERY-MIGRATE-014",
+        description=(
+            "Query refused: repository access control is unavailable, so "
+            "global repository access cannot be verified"
+        ),
+        severity=Severity.ERROR,
+        action=(
+            "Check the startup log for the group access initialization "
+            "failure (APP-GENERAL-014) and restart the server once it is fixed"
+        ),
+    ),
     # Story #86: Migrated logger statements - REPO subsystem (repository management)
     "REPO-MIGRATE-001": ErrorDefinition(
         code="REPO-MIGRATE-001",
