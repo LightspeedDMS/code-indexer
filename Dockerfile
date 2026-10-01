@@ -184,7 +184,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # The xray-cli binary ONLY -- not cargo, not rustc, not ~/.cargo, not the
 # target/ directory (hundreds of MB of intermediate artifacts for a single
-# ~10MB executable). MUST come after the `COPY --from=builder /usr/local/bin`
+# 32MB executable; the image grows by 37.6MB, measured). MUST come after the `COPY --from=builder /usr/local/bin`
 # above, which replaces the whole directory and would otherwise delete it.
 COPY --from=xray-builder /xray/rust/target/release/xray-cli /usr/local/bin/xray-cli
 
@@ -205,9 +205,24 @@ ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
 # CompileError ("Failed to invoke rustc ... Is rustc installed and on PATH?").
 # That is a loud, correct, actionable failure rather than the silent
 # "scanned everything, found nothing" this image used to produce -- but it is
-# NOT yet a working xray. Closing it means either adding the pinned rustup
-# toolchain to this stage (image size cost) or moving evaluator compilation out
-# of the serving pod; that is a deployment decision, not a Dockerfile detail.
+# NOT yet a working xray.
+#
+# Closing it means one of two things, and the cost of the cheap-looking one was
+# measured rather than guessed:
+#   - add the toolchain to this stage: +1.02GiB as rustup+build-essential, and
+#     +987MB even after pruning it to rustc alone (no cargo/rustdoc/docs/src).
+#     The floor is inherent -- libLLVM 191MB, librustc_driver 144MB, std rlibs
+#     173MB, gcc+libc6-dev 267MB -- because the thing being shipped is a Rust
+#     compiler. Substituting the toolchain's bundled rust-lld for gcc does not
+#     link (it cannot find -lgcc_s/-lc/-lm without gcc's spec-file search
+#     paths) and would need a rustc wrapper script to pass linker flags, since
+#     evaluator_rustc_command does not.
+#   - move evaluator compilation out of the serving pod, behind a seam, the way
+#     git/clone/SCIP already delegate to git-mcp/workspace-mcp/sandbox-mcp.
+# Prebuilding evaluators here is NOT an option: an xray query IS Rust source
+# (assemble.rs::detect_evaluator_mode), compiled per query and cached under a
+# hash of that source, so there is no fixed set to build ahead of time.
+# This is a deployment decision, not a Dockerfile detail.
 
 # Non-root runtime. /data is the server data dir — the Deployment mounts a volume here.
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
