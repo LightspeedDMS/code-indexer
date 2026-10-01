@@ -65,15 +65,17 @@ def _guard(reason: str) -> None:
 
 
 def _xray_cli_path() -> Path:
-    """Return the expected path to the xray-cli release binary.
+    """Return the path the SERVER UNDER TEST will actually use for xray-cli.
 
-    The binary lives at rust/target/release/xray-cli relative to the repo root.
-    The repo root is two levels up from this file (tests/e2e/helpers.py ->
-    tests/e2e/ -> tests/ -> repo-root).
+    Delegates to the production resolver rather than re-deriving
+    rust/target/release/xray-cli from this file's location, so the gate and
+    the server can never disagree: when CIDX_XRAY_CLI_PATH points at a
+    prebuilt binary (a packaged/containerised install), these tests must RUN,
+    not skip because a source-tree build output happens to be absent.
     """
-    helpers_dir = Path(__file__).resolve().parent  # tests/e2e/
-    repo_root = helpers_dir.parent.parent  # repo root
-    return repo_root / "rust" / "target" / "release" / "xray-cli"
+    from code_indexer.xray.rust_backend import resolve_xray_cli_path
+
+    return resolve_xray_cli_path()
 
 
 def require_voyage_key() -> None:
@@ -116,8 +118,10 @@ def require_xray_cli() -> None:
     """Skip (or hard-fail in CI) when the xray-cli toolchain is absent.
 
     Two checks run in sequence:
-      1. rustc must be on PATH (the Rust toolchain must be installed).
-      2. rust/target/release/xray-cli must exist on disk (must have been built).
+      1. rustc must be on PATH -- not only to BUILD xray-cli, but because
+         xray-cli itself spawns rustc to compile each evaluator at query time.
+      2. The binary must exist at whatever path the backend resolves
+         (CIDX_XRAY_CLI_PATH, else rust/target/release/xray-cli).
 
     Raises:
         pytest.skip.Exception: Locally when either check fails.
@@ -143,7 +147,8 @@ def require_xray_cli() -> None:
     if not cli_path.exists():
         _guard(
             f"xray-cli binary not found at {cli_path} -- run "
-            "'cargo build --release' inside rust/ to build it."
+            "'cargo build --release -p xray-cli' inside rust/ to build it, "
+            "or set CIDX_XRAY_CLI_PATH to a prebuilt binary."
         )
 
 

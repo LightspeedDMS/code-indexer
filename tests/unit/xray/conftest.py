@@ -51,10 +51,28 @@ def require_xray_cli_binary() -> None:
     unavailable (a Rust-less environment). A build that IS attempted but
     FAILS raises loudly via pytest.fail, never a silent skip.
     """
-    from code_indexer.xray.rust_backend import _PROJECT_ROOT, _XRAY_CLI_DEFAULT
+    from code_indexer.xray.rust_backend import (
+        _PROJECT_ROOT,
+        _XRAY_CLI_PATH_ENV_VAR,
+        _XRAY_CLI_SOURCE_TREE_PATH,
+        resolve_xray_cli_path,
+    )
 
-    if _XRAY_CLI_DEFAULT.exists():
+    # Resolve the same way production does, so an override pointing at a
+    # prebuilt binary satisfies the requirement instead of triggering a build.
+    resolved = resolve_xray_cli_path()
+    if resolved.exists():
         return
+
+    # An override that is set but broken must NOT be papered over by building
+    # into the source tree: cargo writes to rust/target/release, which is a
+    # different path, so the build would "succeed" and the test would still
+    # find nothing. Fail on the real problem instead.
+    if resolved != _XRAY_CLI_SOURCE_TREE_PATH:
+        pytest.fail(
+            f"{_XRAY_CLI_PATH_ENV_VAR} points at {resolved}, which does not "
+            "exist. Fix the override or unset it to use the source-tree build."
+        )
 
     if shutil.which("cargo") is None:
         pytest.skip(
@@ -69,7 +87,7 @@ def require_xray_cli_binary() -> None:
         text=True,
         timeout=_XRAY_CLI_BUILD_TIMEOUT_SECONDS,
     )
-    if result.returncode != 0 or not _XRAY_CLI_DEFAULT.exists():
+    if result.returncode != 0 or not _XRAY_CLI_SOURCE_TREE_PATH.exists():
         pytest.fail(
             "xray-cli release binary is required for this test and the "
             f"automatic 'cargo build --release' failed (exit "

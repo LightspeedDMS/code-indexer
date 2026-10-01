@@ -15,12 +15,16 @@ Error contract:
 - Missing binary: all files get error tuples with error_type="BinaryNotFound"
 - JSON error field set: all files get error tuples with the error message
 - Subprocess non-zero exit + no parseable JSON: all files get error tuples
+
+Binary location: see resolve_xray_cli_path() -- $CIDX_XRAY_CLI_PATH first,
+then the source-tree build output.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -375,7 +379,69 @@ def _find_project_root() -> Path:
 
 
 _PROJECT_ROOT = _find_project_root()
-_XRAY_CLI_DEFAULT = _PROJECT_ROOT / "rust" / "target" / "release" / "xray-cli"
+
+# Environment variable that points cidx at a PREBUILT xray-cli binary.
+#
+# WHY THIS EXISTS: every xray-cli path in this module used to be derived
+# from `_find_project_root()`, i.e. from a `rust/` directory sitting above
+# `src/code_indexer/`. That holds for a source checkout and for the
+# auto-updater's in-place deploys, and it holds for NOTHING ELSE. In a
+# packaged/containerised install (`pip install code_indexer` into
+# `/usr/local/lib/python3.11/site-packages/`, which is what the EKS image
+# does) there is no `rust/` anywhere above the package, so the walk falls
+# through to its `parent^4` fallback and every xray scan targets a path
+# that cannot exist. The failure is silent at import time (one WARNING)
+# and only shows up as "BinaryNotFound" per file at query time.
+#
+# Deliberately an ENV VAR and not a config.json key: the binary's location
+# is a property of how the artifact was PACKAGED (Dockerfile, .deb, distro
+# package, Nix derivation...), not of how a given server instance is
+# configured, so it has to be settable by whoever built the image without
+# touching the runtime data dir -- the same reasoning that already makes
+# CIDX_SERVER_DATA_DIR an env var. Deliberately NOT named after any
+# particular deployment: this is upstream behaviour, useful to anyone who
+# packages cidx.
+_XRAY_CLI_PATH_ENV_VAR = "CIDX_XRAY_CLI_PATH"
+
+# Where a source checkout builds the binary -- `cd rust && cargo build --release`.
+_XRAY_CLI_SOURCE_TREE_PATH = _PROJECT_ROOT / "rust" / "target" / "release" / "xray-cli"
+
+
+def resolve_xray_cli_path() -> Path:
+    """Resolve the xray-cli binary path. Resolution order, highest first:
+
+    1. ``$CIDX_XRAY_CLI_PATH`` -- an explicit, absolute-or-relative path to a
+       prebuilt binary, set by whoever packaged this install (see the
+       Dockerfile's builder stage). ``~`` is expanded. Empty/whitespace-only
+       is treated as UNSET, so an env var that got cleared to "" behaves the
+       same as one that was never exported.
+    2. ``<project root>/rust/target/release/xray-cli`` -- the source-tree
+       build output, where ``<project root>`` is the nearest ancestor of this
+       file containing a ``rust/`` directory (``_find_project_root()``).
+
+    NO EXISTENCE CHECK and NO FALLBACK BETWEEN THE TWO. An override that
+    points at a missing or broken binary resolves to that path anyway, so the
+    resulting "xray-cli binary not found at <path>" error names the path the
+    OPERATOR configured. Silently falling back to the source-tree path would
+    turn a one-line "your CIDX_XRAY_CLI_PATH is wrong" diagnosis into
+    "BinaryNotFound at some path nobody configured", which is precisely the
+    class of misleading failure this change exists to remove.
+
+    Read on every call (not frozen at import): a process that sets the
+    variable after importing this module -- a test, an embedding host, a
+    wrapper script -- still gets the override.
+    """
+    override = os.environ.get(_XRAY_CLI_PATH_ENV_VAR, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _XRAY_CLI_SOURCE_TREE_PATH
+
+
+# Import-time snapshot, kept for the callers (and tests) that want "the path
+# cidx would use right now" without calling the resolver. Prefer
+# resolve_xray_cli_path() in new code -- this constant cannot see an env var
+# that was set after import.
+_XRAY_CLI_DEFAULT = resolve_xray_cli_path()
 
 
 def get_graph_extractor_extensions(
@@ -419,7 +485,7 @@ def get_graph_extractor_extensions(
     bare, lowercase, no leading dot -- e.g. `{"java": "Java", "kt":
     "Kotlin", "kts": "Kotlin"}`), or `(None, error_message)` on failure.
     """
-    path = xray_cli_path if xray_cli_path is not None else _XRAY_CLI_DEFAULT
+    path = xray_cli_path if xray_cli_path is not None else resolve_xray_cli_path()
     if not path.exists():
         return None, f"xray-cli binary not found at {path}."
     try:
@@ -654,7 +720,10 @@ class RustNativeBackend:
                 wherever a symlink points.
         """
         self._confine_to_repo_root = confine_to_repo_root
-        self._xray_cli_path: Path = _XRAY_CLI_DEFAULT
+        # Resolved per instance, not read from the import-time constant, so a
+        # CIDX_XRAY_CLI_PATH exported after this module was first imported
+        # still takes effect (see resolve_xray_cli_path for the full order).
+        self._xray_cli_path: Path = resolve_xray_cli_path()
         self._xray_cache: Optional[XrayCacheBackend] = xray_cache_backend
         # Side-channel populated by run_batch() — debug_log() messages from xray-cli JSON.
         # Read by XRaySearchEngine.run() to surface in result dict as debug_output[].
@@ -858,7 +927,8 @@ class RustNativeBackend:
         if not self._xray_cli_path.exists():
             msg = (
                 f"xray-cli binary not found at {self._xray_cli_path}. "
-                "Run: cd rust && cargo build --release"
+                "Build it with: cd rust && cargo build --release -p xray-cli, "
+                f"or point {_XRAY_CLI_PATH_ENV_VAR} at a prebuilt binary."
             )
             logger.error("RustNativeBackend: %s", msg)
             return _error_all(
@@ -1885,7 +1955,11 @@ class RustNativeBackend:
         if validation_error is not None:
             return _graph_error_result("ValidationError", validation_error)
         if not self._xray_cli_path.exists():
-            msg = f"xray-cli binary not found at {self._xray_cli_path}."
+            msg = (
+                f"xray-cli binary not found at {self._xray_cli_path}. "
+                f"Set {_XRAY_CLI_PATH_ENV_VAR} to a prebuilt binary, or build "
+                "it with: cd rust && cargo build --release -p xray-cli."
+            )
             logger.error("RustNativeBackend: %s", msg)
             return _graph_error_result("BinaryNotFound", msg)
 
