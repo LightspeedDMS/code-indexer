@@ -67,6 +67,8 @@ ALLOWED_READS = {
     ("server/routers/git.py", "rev-parse"),
     ("server/routers/git.py", "show"),
     ("server/routers/git.py", "blame"),
+    # annotated local: `cmd: list[str] = ["git", "log", "--follow", ...]`
+    ("server/routers/git.py", "log"),
     ("server/routers/inline_repos.py", "log"),
     # variable-argv reads (cmd = ["git", ...]; subprocess.run(cmd, ...)) -- only
     # visible since the guard resolves a Name to its assignment.
@@ -103,7 +105,10 @@ def _literal_elements(seq) -> List[Optional[str]]:
 
 
 def _resolve_name(
-    name: str, scope: ast.AST, before_line: int
+    name: str,
+    scope: ast.AST,
+    before_line: int,
+    module: Optional[ast.Module] = None,
 ) -> Tuple[bool, Optional[List[Optional[str]]], str]:
     """Resolve `name` to the argv it was last assigned above *before_line*.
 
@@ -124,20 +129,70 @@ def _resolve_name(
     builder = "<expression>"
     best_line = -1
     for n in ast.walk(scope):
-        if not isinstance(n, ast.Assign) or n.lineno >= before_line:
+        line = getattr(n, "lineno", None)
+        if line is None or line >= before_line:
             continue
-        for tgt in n.targets:
+        # `cmd = [...]` and the annotated `cmd: list[str] = [...]` bind a name the
+        # same way. This codebase is mypy-typed and annotates locals routinely, so
+        # reading only ast.Assign leaves the common shape invisible.
+        if isinstance(n, ast.Assign):
+            targets, value = n.targets, n.value
+        elif isinstance(n, ast.AnnAssign) and n.value is not None:
+            targets, value = [n.target], n.value
+        else:
+            continue
+        for tgt in targets:
             if not (isinstance(tgt, ast.Name) and tgt.id == name):
                 continue
             assigned = True
-            if n.lineno > best_line:
-                best_line = n.lineno
-                if isinstance(n.value, (ast.List, ast.Tuple)):
-                    best = _literal_elements(n.value)
+            if line > best_line:
+                best_line = line
+                if isinstance(value, (ast.List, ast.Tuple)):
+                    best = _literal_elements(value)
                 else:
                     best = None
-                    builder = _builder_name(n.value)
+                    builder = _builder_name(value)
+
+    # A literal whose FRONT is rewritten after assignment is no longer the argv
+    # that runs, and the verb read from it would belong to a command that never
+    # executes. `append`/`extend`/`+=` only add to the end, so the program and verb
+    # survive and the literal is still safe to classify; `insert` and item
+    # assignment can rewrite any position, so the argv becomes unreadable.
+    if best is not None and _prefix_rewritten_after(
+        name, scope, best_line, before_line
+    ):
+        return True, None, "<argv front rewritten after assignment>"
+
+    # Not a local: a module-level constant (`_PUSH = ["git", "push"]`) used inside a
+    # function is still a literal we can read, and treating it as a caller-supplied
+    # parameter would hide it.
+    if not assigned and module is not None and scope is not module:
+        return _resolve_name(name, module, before_line=10**9)
     return assigned, best, builder
+
+
+def _prefix_rewritten_after(name: str, scope: ast.AST, after: int, before: int) -> bool:
+    """True if *name*'s leading elements may change between *after* and *before*."""
+    for n in ast.walk(scope):
+        line = getattr(n, "lineno", None)
+        if line is None or not (after < line < before):
+            continue
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "insert"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+        ):
+            return True
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.ctx, ast.Store)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+        ):
+            return True
+    return False
 
 
 def _builder_name(node: ast.AST) -> str:
@@ -159,7 +214,7 @@ def _builder_name(node: ast.AST) -> str:
 
 
 def _git_argv(
-    node: ast.Call, kind: str, scope: ast.AST
+    node: ast.Call, kind: str, scope: ast.AST, module: Optional[ast.Module] = None
 ) -> Tuple[Optional[List[Optional[str]]], Optional[str]]:
     """argv of a spawn call on git, or None if it is not one.
 
@@ -175,7 +230,9 @@ def _git_argv(
         if isinstance(first, (ast.List, ast.Tuple)):
             argv = _literal_elements(first)
         elif isinstance(first, ast.Name):
-            assigned, resolved, builder = _resolve_name(first.id, scope, node.lineno)
+            assigned, resolved, builder = _resolve_name(
+                first.id, scope, node.lineno, module
+            )
             if not assigned:
                 return None, None  # generic runner: argv comes from its caller
             if resolved is None:
@@ -276,39 +333,51 @@ def _enclosing_scope(tree: ast.Module, spans, node: ast.AST) -> ast.AST:
 
 
 def _scan() -> Tuple[List[str], List[str]]:
-    """Return (violations, unknown_argv) as human-readable locations."""
+    """Return (violations, unknown_argv) across every governed file."""
     violations: List[str] = []
     unknown: List[str] = []
     for path in _governed_files():
         rel = path.relative_to(_SRC).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        aliases = _direct_import_aliases(tree)
-        spans = _scope_index(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            kind = _call_kind(node, aliases)
-            if kind is None:
-                continue
-            argv, builder = _git_argv(node, kind, _enclosing_scope(tree, spans, node))
-            if argv is None:
-                continue
-            if builder is not None and (rel, builder) in ALLOWED_UNREADABLE_ARGV:
-                continue
-            where = f"{rel}:{node.lineno}"
-            verb = _verb(argv)
-            if verb is None:
-                unknown.append(
-                    f"{where}  argv built by {builder!r}, not statically readable"
-                )
-                continue
-            # Keep positions: a dynamic element is a placeholder, never dropped,
-            # so a global flag cannot swallow the verb during classification.
-            concrete = [a if a is not None else "<dynamic>" for a in argv]
-            if is_mutating_git(concrete):
-                violations.append(f"{where}  MUTATING: git {verb}")
-            elif (rel, verb) not in ALLOWED_READS:
-                violations.append(f"{where}  unlisted read: git {verb}")
+        v, u = _scan_source(rel, path.read_text(encoding="utf-8"))
+        violations.extend(v)
+        unknown.extend(u)
+    return violations, unknown
+
+
+def _scan_source(rel: str, source: str) -> Tuple[List[str], List[str]]:
+    """Scan one module's source. Split out from :func:`_scan` so the guard's own
+    behaviour can be tested against synthetic sources rather than only against
+    whatever the tree happens to contain today."""
+    violations: List[str] = []
+    unknown: List[str] = []
+    tree = ast.parse(source)
+    aliases = _direct_import_aliases(tree)
+    spans = _scope_index(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        kind = _call_kind(node, aliases)
+        if kind is None:
+            continue
+        argv, builder = _git_argv(node, kind, _enclosing_scope(tree, spans, node), tree)
+        if argv is None:
+            continue
+        if builder is not None and (rel, builder) in ALLOWED_UNREADABLE_ARGV:
+            continue
+        where = f"{rel}:{node.lineno}"
+        verb = _verb(argv)
+        if verb is None:
+            unknown.append(
+                f"{where}  argv built by {builder!r}, not statically readable"
+            )
+            continue
+        # Keep positions: a dynamic element is a placeholder, never dropped,
+        # so a global flag cannot swallow the verb during classification.
+        concrete = [a if a is not None else "<dynamic>" for a in argv]
+        if is_mutating_git(concrete):
+            violations.append(f"{where}  MUTATING: git {verb}")
+        elif (rel, verb) not in ALLOWED_READS:
+            violations.append(f"{where}  unlisted read: git {verb}")
     return violations, unknown
 
 
@@ -354,7 +423,9 @@ def test_allowlist_has_no_stale_entries() -> None:
                 kind = _call_kind(node, aliases)
                 if kind is None:
                     continue
-                argv, _b = _git_argv(node, kind, _enclosing_scope(tree, spans, node))
+                argv, _b = _git_argv(
+                    node, kind, _enclosing_scope(tree, spans, node), tree
+                )
                 if argv is None:
                     continue
                 verb = _verb(argv)
@@ -365,3 +436,136 @@ def test_allowlist_has_no_stale_entries() -> None:
         "ALLOWED_READS entries no longer match any raw git call -- delete them:\n"
         + "\n".join(f"  - {s[0]}  git {s[1]}" for s in stale)
     )
+
+
+# ---------------------------------------------------------------------------
+# The guard's own behaviour.
+#
+# Everything above asserts something about the tree as it stands today, which
+# means a guard that silently sees nothing passes just as loudly as one that
+# works. These feed the scanner synthetic sources instead, so each shape it
+# claims to cover is actually proven to be reported -- and a regression in the
+# scanner fails here rather than going unnoticed until the next bypass ships.
+# ---------------------------------------------------------------------------
+
+_REL = "server/services/synthetic.py"
+
+
+def _violations(source: str) -> List[str]:
+    return _scan_source(_REL, source)[0]
+
+
+def _unknowns(source: str) -> List[str]:
+    return _scan_source(_REL, source)[1]
+
+
+class TestGuardSeesEveryCallShape:
+    def test_literal_argv(self) -> None:
+        src = 'import subprocess\ndef f():\n    subprocess.run(["git", "push", "origin", "main"])\n'
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_argv_in_a_plain_variable(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    cmd = ["git", "push", "origin", "main"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_argv_in_an_annotated_variable(self) -> None:
+        """The shape that slipped through the first version of this guard."""
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    cmd: list[str] = ["git", "push", "origin", "main"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_argv_from_a_module_level_constant(self) -> None:
+        src = (
+            "import subprocess\n"
+            '_PUSH = ["git", "push", "origin", "main"]\n'
+            "def f():\n"
+            "    subprocess.run(_PUSH)\n"
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_directly_imported_spawn_function(self) -> None:
+        src = (
+            "from subprocess import check_call as cc\n"
+            "def f():\n"
+            '    cc(["git", "reset", "--hard", "HEAD"])\n'
+        )
+        assert any("MUTATING: git reset" in v for v in _violations(src))
+
+    def test_asyncio_create_subprocess_exec_varargs(self) -> None:
+        src = (
+            "import asyncio\n"
+            "async def f():\n"
+            '    await asyncio.create_subprocess_exec("git", "push", "origin", "main")\n'
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_check_call_is_in_the_call_set(self) -> None:
+        src = 'import subprocess\ndef f():\n    subprocess.check_call(["git", "commit", "-m", "x"])\n'
+        assert any("MUTATING: git commit" in v for v in _violations(src))
+
+
+class TestGuardClassifiesCorrectly:
+    def test_unlisted_read_is_reported(self) -> None:
+        src = 'import subprocess\ndef f():\n    subprocess.run(["git", "status"])\n'
+        assert any("unlisted read: git status" in v for v in _violations(src))
+
+    def test_append_and_extend_keep_the_verb_readable(self) -> None:
+        """They add to the end, so the program and verb survive."""
+        src = (
+            "import subprocess\n"
+            "def f(path):\n"
+            '    cmd = ["git", "status"]\n'
+            "    cmd.append(path)\n"
+            '    cmd.extend(["--", path])\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("unlisted read: git status" in v for v in _violations(src))
+        assert not _unknowns(src)
+
+    def test_insert_rewrites_the_front_so_argv_becomes_unreadable(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    cmd = ["git", "status"]\n'
+            '    cmd.insert(1, "push")\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("front rewritten" in u for u in _unknowns(src))
+
+    def test_argv_built_by_a_helper_is_reported_not_skipped(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            "    cmd = build_it()\n"
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("build_it" in u for u in _unknowns(src))
+
+    def test_generic_runner_taking_argv_from_its_caller_is_skipped(self) -> None:
+        """Its caller is scanned on its own; flagging here would make every
+        subprocess helper a permanent violation while catching nothing."""
+        src = "import subprocess\ndef run_it(command):\n    subprocess.run(command)\n"
+        assert not _violations(src)
+        assert not _unknowns(src)
+
+    def test_non_git_commands_are_ignored(self) -> None:
+        src = 'import subprocess\ndef f():\n    subprocess.run(["cidx", "index", "--fts"])\n'
+        assert not _violations(src)
+        assert not _unknowns(src)
+
+    def test_global_flags_do_not_hide_the_verb(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(repo):\n"
+            '    subprocess.run(["git", "-C", repo, "push", "origin", "main"])\n'
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))

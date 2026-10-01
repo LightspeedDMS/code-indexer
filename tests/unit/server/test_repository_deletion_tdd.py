@@ -166,25 +166,16 @@ class TestRepositoryDeletionTDD:
 
         mock_manager.remove_golden_repo.return_value = "removal-job-id"
 
-        # Patch the REAL manager instances captured as closure parameters by
-        # Story #409's route extraction (see
-        # test_successful_repository_deletion_returns_204 above for
-        # golden_repo_manager).
+        # Patch the REAL manager instance captured as a closure parameter by
+        # Story #409's route extraction. GAP-5 moved job cancellation inside
+        # GoldenRepoManager.remove_golden_repo(), so the route no longer touches
+        # background_job_manager at all -- upstream's patches of
+        # get_jobs_by_operation_and_params/cancel_job are vestigial here.
         with (
             patch.object(
                 client.app.state.golden_repo_manager,
                 "remove_golden_repo",
                 mock_manager.remove_golden_repo,
-            ),
-            patch.object(
-                client.app.state.background_job_manager,
-                "get_jobs_by_operation_and_params",
-                mock_job_manager.get_jobs_by_operation_and_params,
-            ),
-            patch.object(
-                client.app.state.background_job_manager,
-                "cancel_job",
-                mock_job_manager.cancel_job,
             ),
         ):
             response = client.delete(
