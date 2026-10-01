@@ -538,8 +538,9 @@ class GitBackendFactory:
             if delegated_backend is None:
                 raise RuntimeError(
                     "git_backend='delegated' selected but no delegated backend was "
-                    "provided. The cidx_git_backend plugin (EVO-64678 Phase 3) must "
-                    "supply a GitMcpBackend via the code_indexer.git_backend seam."
+                    "provided. Install a package exposing a GitBackend factory on the "
+                    "'code_indexer.git_backend' entry-point group, or pass one "
+                    "explicitly to the factory."
                 )
             return delegated_backend
         raise ValueError(
