@@ -166,6 +166,7 @@ class TestAddGoldenRepoGhostChecks:
 
             with pytest.raises(GoldenRepoError, match="stale global registry"):
                 manager.add_golden_repo(
+                    submitter_username="admin",
                     repo_url="https://example.com/repo.git",
                     alias="test-repo",
                 )
@@ -190,6 +191,7 @@ class TestAddGoldenRepoGhostChecks:
             manager.background_job_manager.submit_job.return_value = "add-job-id"
 
             job_id = manager.add_golden_repo(
+                submitter_username="admin",
                 repo_url="https://example.com/repo.git",
                 alias="test-repo",
             )
@@ -214,6 +216,7 @@ class TestAddGoldenRepoGhostChecks:
 
             # Should NOT raise -- the check is non-fatal
             job_id = manager.add_golden_repo(
+                submitter_username="admin",
                 repo_url="https://example.com/repo.git",
                 alias="test-repo",
             )
@@ -246,6 +249,7 @@ class TestAddGoldenRepoGhostChecks:
             manager.background_job_manager.submit_job.return_value = "add-job-id"
 
             job_id = manager.add_golden_repo(
+                submitter_username="admin",
                 repo_url="https://example.com/repo.git",
                 alias="test-repo",
             )
@@ -285,6 +289,7 @@ class TestAddGoldenRepoGhostChecks:
             manager.background_job_manager.submit_job.return_value = "add-job-id"
 
             job_id = manager.add_golden_repo(
+                submitter_username="admin",
                 repo_url="local:///some/path",
                 alias="local-repo",
                 skip_pre_flight_git_validation=True,

@@ -187,6 +187,7 @@ class TestCaptureWiring:
         monkeypatch.setattr(ga, "GlobalActivator", _FakeActivator)
 
         result = manager.execute_add_golden_repo_work(
+            submitter_username="admin",
             repo_url="https://example.com/svc-cap.git",
             alias="svc-cap",
             default_branch="main",

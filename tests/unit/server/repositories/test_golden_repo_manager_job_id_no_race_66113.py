@@ -57,7 +57,11 @@ class TestAddGoldenRepoJobIdReachesExecuteWorkWithoutHolder:
         mutable holder populated after submit_job() returns."""
         m = _manager_for_add_golden_repo(tmp_path)
 
-        m.add_golden_repo(repo_url="https://example.com/repo.git", alias="race-fix-1")
+        m.add_golden_repo(
+            submitter_username="admin",
+            repo_url="https://example.com/repo.git",
+            alias="race-fix-1",
+        )
 
         assert len(m._captured_workers) == 1
         worker = m._captured_workers[0]
@@ -66,7 +70,11 @@ class TestAddGoldenRepoJobIdReachesExecuteWorkWithoutHolder:
     def test_closure_forwards_explicit_job_id_to_execute_work(self, tmp_path):
         m = _manager_for_add_golden_repo(tmp_path)
 
-        m.add_golden_repo(repo_url="https://example.com/repo.git", alias="race-fix-2")
+        m.add_golden_repo(
+            submitter_username="admin",
+            repo_url="https://example.com/repo.git",
+            alias="race-fix-2",
+        )
 
         worker = m._captured_workers[0]
         # Simulate BackgroundJobManager._execute_job's auto-injection: the
@@ -84,7 +92,11 @@ class TestAddGoldenRepoJobIdReachesExecuteWorkWithoutHolder:
         raise -- job_id stays optional."""
         m = _manager_for_add_golden_repo(tmp_path)
 
-        m.add_golden_repo(repo_url="https://example.com/repo.git", alias="race-fix-3")
+        m.add_golden_repo(
+            submitter_username="admin",
+            repo_url="https://example.com/repo.git",
+            alias="race-fix-3",
+        )
 
         worker = m._captured_workers[0]
         worker()
@@ -154,7 +166,9 @@ class TestAddIndexesToGoldenRepoJobIdReachesEmbedStatsEnvWithoutHolder:
     def test_closure_declares_job_id_directly_not_via_holder(self, tmp_path):
         manager, _ = _make_add_indexes_manager(tmp_path)
 
-        manager.add_indexes_to_golden_repo(alias="test-repo", index_types=["semantic"])
+        manager.add_indexes_to_golden_repo(
+            submitter_username="admin", alias="test-repo", index_types=["semantic"]
+        )
 
         assert len(manager._captured_workers) == 1
         worker = manager._captured_workers[0]
@@ -166,7 +180,9 @@ class TestAddIndexesToGoldenRepoJobIdReachesEmbedStatsEnvWithoutHolder:
         )
 
         manager, _ = _make_add_indexes_manager(tmp_path)
-        server_config = ServerConfig(server_dir="/opt/cidx-server", storage_mode="sqlite")
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server", storage_mode="sqlite"
+        )
 
         calls: list = []
 
@@ -190,7 +206,7 @@ class TestAddIndexesToGoldenRepoJobIdReachesEmbedStatsEnvWithoutHolder:
             mock_get_cfg_svc.return_value.get_config.return_value = server_config
 
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["semantic"]
+                submitter_username="admin", alias="test-repo", index_types=["semantic"]
             )
             assert len(manager._captured_workers) == 1
             # Simulate BackgroundJobManager._execute_job's auto-injection.

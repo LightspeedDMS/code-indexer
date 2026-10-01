@@ -41,7 +41,9 @@ class TestAddGoldenRepoSubmitPath:
     def test_job_metadata_and_probe_are_stripped_when_owning(self, tmp_path):
         m = _manager(tmp_path, owns_credentials=True)
 
-        m.add_golden_repo(repo_url=PAT_URL, alias="pat-strip")
+        m.add_golden_repo(
+            submitter_username="admin", repo_url=PAT_URL, alias="pat-strip"
+        )
 
         # The artifact pod-pull re-reads must be credential-free...
         assert _submitted_metadata_url(m) == CLEAN_URL
@@ -51,7 +53,9 @@ class TestAddGoldenRepoSubmitPath:
     def test_job_metadata_keeps_pat_in_local_mode(self, tmp_path):
         m = _manager(tmp_path, owns_credentials=False)
 
-        m.add_golden_repo(repo_url=PAT_URL, alias="pat-keep")
+        m.add_golden_repo(
+            submitter_username="admin", repo_url=PAT_URL, alias="pat-keep"
+        )
 
         assert _submitted_metadata_url(m) == PAT_URL
         m._validate_git_repository.assert_called_once_with(PAT_URL)
@@ -62,6 +66,7 @@ class TestAddGoldenRepoSubmitPath:
         m = _manager(tmp_path, owns_credentials=True)
 
         m.add_golden_repo(
+            submitter_username="admin",
             repo_url="HTTPS://oauth2:glpat-SECRET123@gitlab.com/org/repo.git",
             alias="pat-upper",
         )
@@ -72,7 +77,9 @@ class TestAddGoldenRepoSubmitPath:
     def test_credential_free_url_unchanged_when_owning(self, tmp_path):
         m = _manager(tmp_path, owns_credentials=True)
 
-        m.add_golden_repo(repo_url=CLEAN_URL, alias="already-clean")
+        m.add_golden_repo(
+            submitter_username="admin", repo_url=CLEAN_URL, alias="already-clean"
+        )
 
         assert _submitted_metadata_url(m) == CLEAN_URL
 
@@ -88,7 +95,9 @@ class TestExecutePersistenceBoundary:
             side_effect=RuntimeError("stop-after-strip")
         )
         with pytest.raises(Exception):
-            m.execute_add_golden_repo_work(repo_url=PAT_URL, alias="x")
+            m.execute_add_golden_repo_work(
+                submitter_username="admin", repo_url=PAT_URL, alias="x"
+            )
         return m._clone_repository.call_args[0][0]
 
     def test_clone_receives_clean_url_when_owning(self, tmp_path):

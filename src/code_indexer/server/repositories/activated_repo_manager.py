@@ -68,6 +68,7 @@ def _dict_row_factory() -> Any:
 # compatibility with tests/callers that patch the manager namespace.
 from .deactivation_helpers import (  # noqa: F401, E402 — re-export at original helper location for patch compat
     _fd_anchored_phase1_rename,
+    _fd_anchored_rmtree,
     _predeactivation_leak_scan_enabled,
     _safe_purge_trash_entry,
 )
