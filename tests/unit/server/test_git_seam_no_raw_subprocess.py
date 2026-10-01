@@ -125,10 +125,14 @@ def _resolve_name(
     reads literal call arguments cannot see it at all.
     """
     assigned = False
-    best: Optional[List[Optional[str]]] = None
     builder = "<expression>"
     best_line = -1
-    for n in ast.walk(scope):
+    candidates: List[Tuple[int, Optional[List[Optional[str]]]]] = []
+    # Only this scope's own statements. ast.walk() would descend into nested
+    # functions, so a helper's parameter would adopt a sibling function's
+    # assignment of the same name -- `cmd`, `command` and `args` are common enough
+    # that this reports a real-looking bypass at a location that has none.
+    for n in _statements_of(scope):
         line = getattr(n, "lineno", None)
         if line is None or line >= before_line:
             continue
@@ -145,13 +149,28 @@ def _resolve_name(
             if not (isinstance(tgt, ast.Name) and tgt.id == name):
                 continue
             assigned = True
-            if line > best_line:
-                best_line = line
-                if isinstance(value, (ast.List, ast.Tuple)):
-                    best = _literal_elements(value)
-                else:
-                    best = None
+            if isinstance(value, (ast.List, ast.Tuple)):
+                candidates.append((line, _literal_elements(value)))
+            else:
+                candidates.append((line, None))
+                if line > best_line:
                     builder = _builder_name(value)
+            best_line = max(best_line, line)
+
+    # Several assignments can reach one call -- `if force: cmd = ["git", "push"]`
+    # / `else: cmd = ["git", "status"]`. Taking the highest line number would read
+    # the else-branch and miss the push entirely, so fail closed: if ANY reachable
+    # literal mutates, report that one.
+    best: Optional[List[Optional[str]]] = None
+    if candidates:
+        mutating = [
+            argv
+            for _, argv in candidates
+            if argv
+            and argv[0] == "git"
+            and is_mutating_git([a or "<dyn>" for a in argv])
+        ]
+        best = mutating[0] if mutating else max(candidates, key=lambda c: c[0])[1]
 
     # A literal whose FRONT is rewritten after assignment is no longer the argv
     # that runs, and the verb read from it would belong to a command that never
@@ -169,6 +188,27 @@ def _resolve_name(
     if not assigned and module is not None and scope is not module:
         return _resolve_name(name, module, before_line=10**9)
     return assigned, best, builder
+
+
+def _statements_of(scope: ast.AST) -> List[ast.AST]:
+    """Statements belonging to *scope* itself, not to functions nested in it.
+
+    Control flow inside the scope (if/try/for/with) is followed, because an
+    assignment in a branch still reaches the call; a nested def is not, because
+    its body is a different scope with its own parameters.
+    """
+    out: List[ast.AST] = []
+    stack = list(getattr(scope, "body", []))
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            stack.extend(getattr(node, field, []) or [])
+        for handler in getattr(node, "handlers", []) or []:
+            stack.extend(handler.body)
+    return out
 
 
 def _prefix_rewritten_after(name: str, scope: ast.AST, after: int, before: int) -> bool:
@@ -567,5 +607,38 @@ class TestGuardClassifiesCorrectly:
             "import subprocess\n"
             "def f(repo):\n"
             '    subprocess.run(["git", "-C", repo, "push", "origin", "main"])\n'
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_sibling_function_assignment_does_not_leak_into_a_runner(self) -> None:
+        """A helper's parameter must not adopt another function's variable.
+
+        `cmd`, `command` and `args` are common names. Resolving the module with
+        ast.walk() reached into every function body, so a generic runner was
+        reported as a bypass at a line that has none -- and the only escape was an
+        allowlist entry for code that was never a bypass.
+        """
+        src = (
+            "import subprocess\n"
+            "def run_it(cmd):\n"
+            "    subprocess.run(cmd)\n"
+            "def other():\n"
+            '    cmd = ["git", "push", "origin", "main"]\n'
+            "    run_it(cmd)\n"
+        )
+        assert not _violations(src)
+        assert not _unknowns(src)
+
+    def test_mutation_hidden_in_one_branch_is_still_caught(self) -> None:
+        """Taking the last assignment by line number read the else-branch and
+        missed the push. Any reachable literal that mutates wins instead."""
+        src = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            '        cmd = ["git", "push", "origin", "main"]\n'
+            "    else:\n"
+            '        cmd = ["git", "status"]\n'
+            "    subprocess.run(cmd)\n"
         )
         assert any("MUTATING: git push" in v for v in _violations(src))
