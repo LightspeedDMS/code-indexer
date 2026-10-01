@@ -127,7 +127,11 @@ def _resolve_name(
     assigned = False
     builder = "<expression>"
     best_line = -1
-    candidates: List[Tuple[int, Optional[List[Optional[str]]]]] = []
+    # (line, argv-or-None, builder-label) per reaching assignment. The label
+    # travels with its candidate because ALLOWED_UNREADABLE_ARGV is keyed on it:
+    # labelling the chosen candidate with some other assignment's builder would
+    # make a justified allowlist entry silently fail to match.
+    candidates: List[Tuple[int, Optional[List[Optional[str]]], str]] = []
     # Only this scope's own statements. ast.walk() would descend into nested
     # functions, so a helper's parameter would adopt a sibling function's
     # assignment of the same name -- `cmd`, `command` and `args` are common enough
@@ -150,36 +154,47 @@ def _resolve_name(
                 continue
             assigned = True
             if isinstance(value, (ast.List, ast.Tuple)):
-                candidates.append((line, _literal_elements(value)))
+                candidates.append((line, _literal_elements(value), "<literal>"))
             else:
-                candidates.append((line, None))
-                if line > best_line:
-                    builder = _builder_name(value)
+                candidates.append((line, None, _builder_name(value)))
             best_line = max(best_line, line)
 
     # Several assignments can reach one call -- `if force: cmd = ["git", "push"]`
-    # / `else: cmd = ["git", "status"]`. Taking the highest line number would read
-    # the else-branch and miss the push entirely, so fail closed: if ANY reachable
-    # literal mutates, report that one.
+    # / `else: cmd = ["git", "status"]`. Picking by highest line number reads
+    # whichever branch happens to be written last, so the verdict would depend on
+    # source layout. Decide by severity instead, worst first:
+    #   1. a literal that mutates  -> report it; that path really does mutate.
+    #   2. any unreadable candidate -> unreadable, even if a literal read is also
+    #      reachable. A branch we cannot read could be a push, and letting a
+    #      sibling `["git", "status"]` speak for it is exactly the masking that
+    #      hides one.
+    #   3. otherwise the last literal read.
     best: Optional[List[Optional[str]]] = None
+    best_at = best_line
     if candidates:
         mutating = [
-            argv
-            for _, argv in candidates
-            if argv
-            and argv[0] == "git"
-            and is_mutating_git([a or "<dyn>" for a in argv])
+            c
+            for c in candidates
+            if c[1]
+            and c[1][0] == "git"
+            and is_mutating_git([a or "<dyn>" for a in c[1]])
         ]
-        best = mutating[0] if mutating else max(candidates, key=lambda c: c[0])[1]
+        unreadable = [c for c in candidates if c[1] is None]
+        if mutating:
+            best_at, best, builder = mutating[0]
+        elif unreadable:
+            best_at, best, builder = unreadable[0]
+        else:
+            best_at, best, builder = max(candidates, key=lambda c: c[0])
 
     # A literal whose FRONT is rewritten after assignment is no longer the argv
     # that runs, and the verb read from it would belong to a command that never
     # executes. `append`/`extend`/`+=` only add to the end, so the program and verb
     # survive and the literal is still safe to classify; `insert` and item
     # assignment can rewrite any position, so the argv becomes unreadable.
-    if best is not None and _prefix_rewritten_after(
-        name, scope, best_line, before_line
-    ):
+    # Measured from the CHOSEN assignment, not the last one: when a mutating
+    # candidate wins, a rewrite between it and a later sibling still applies to it.
+    if best is not None and _prefix_rewritten_after(name, scope, best_at, before_line):
         return True, None, "<argv front rewritten after assignment>"
 
     # Not a local: a module-level constant (`_PUSH = ["git", "push"]`) used inside a
@@ -639,6 +654,55 @@ class TestGuardClassifiesCorrectly:
             '        cmd = ["git", "push", "origin", "main"]\n'
             "    else:\n"
             '        cmd = ["git", "status"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_unreadable_branch_is_not_masked_by_a_literal_read(self) -> None:
+        """An unreadable branch outranks a readable read, whichever comes first.
+
+        Severity, not line order, picks the candidate. Taking the highest line
+        let a literal `git status` in the else-branch stand in for a builder the
+        guard cannot read, so whether a possible `git push` got reported came
+        down to which branch the author happened to write first.
+        """
+        unreadable_first = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            "        cmd = build_push_cmd()\n"
+            "    else:\n"
+            '        cmd = ["git", "status"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        unreadable_last = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            '        cmd = ["git", "status"]\n'
+            "    else:\n"
+            "        cmd = build_push_cmd()\n"
+            "    subprocess.run(cmd)\n"
+        )
+        for src in (unreadable_first, unreadable_last):
+            unknowns = _unknowns(src)
+            assert unknowns, f"unreadable branch masked in:\n{src}"
+            # Named by ITS OWN builder: ALLOWED_UNREADABLE_ARGV is keyed on the
+            # builder, so borrowing a different candidate's label would make a
+            # justified allowlist entry silently fail to match.
+            assert any("build_push_cmd" in u for u in unknowns), unknowns
+
+    def test_mutating_literal_outranks_an_unreadable_branch(self) -> None:
+        """Severity order is mutating > unreadable > last read: a command we can
+        prove mutates stays the violation it is, rather than being softened into
+        an unknown by an unreadable sibling branch."""
+        src = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            "        cmd = build_something()\n"
+            "    else:\n"
+            '        cmd = ["git", "push", "origin", "main"]\n'
             "    subprocess.run(cmd)\n"
         )
         assert any("MUTATING: git push" in v for v in _violations(src))

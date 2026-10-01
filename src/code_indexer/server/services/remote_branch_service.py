@@ -166,7 +166,7 @@ class BranchFetchResult:
 
 
 def filter_issue_tracker_branches(branches: List[str]) -> List[str]:
-    """
+    r"""
     Filter out branches that contain issue-tracker patterns.
 
     Issue tracker patterns match: [A-Za-z]+-\d+ (e.g., SCM-1234, A-1, AB-99)
