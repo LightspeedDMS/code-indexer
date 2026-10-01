@@ -68,8 +68,16 @@ def test_assertion_signed_by_another_key_is_invalid_grant(
 
 def test_wrong_audience_is_invalid_grant(sidecar: SidecarHandle) -> None:
     key = sidecar.read_key_file()
-    assertion = build_assertion(key, audience="https://oauth2.googleapis.com/token")
+    assertion = build_assertion(key, audience="https://token.example.com/token")
     _assert_invalid_grant(request_token(sidecar.coords, assertion))
+
+
+def test_google_auth_audience_is_accepted(sidecar: SidecarHandle) -> None:
+    """google-auth always signs aud=Google's token endpoint, whatever
+    token_uri it posts to; the sidecar must accept what the real client sends."""
+    key = sidecar.read_key_file()
+    assertion = build_assertion(key, audience="https://oauth2.googleapis.com/token")
+    assert request_token(sidecar.coords, assertion).status_code == 200
 
 
 def test_expired_assertion_is_invalid_grant(sidecar: SidecarHandle) -> None:

@@ -177,6 +177,7 @@ class TestAC1BootstrapKeysRemoved:
                 "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
                 "temporal_legacy_migration_config",  # Issue #1548 — runtime Web UI setting (legacy temporal shard relocation gates)
                 "indexing_watchdog_config",  # Bug #1530 — runtime Web UI setting (indexing watchdog thresholds)
+                "siem_delivery_config",  # runtime Web UI setting (SIEM delivery destination)
             }
         )
 

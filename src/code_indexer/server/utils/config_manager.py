@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Dict, List, Union
 
 from .host_validation import validate_server_host
+from .siem_delivery_config import SiemDeliveryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1739,6 +1740,8 @@ class ServerConfig:
 
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
+    # SIEM delivery (Google SecOps) runtime configuration
+    siem_delivery_config: Optional[SiemDeliveryConfig] = None
     # Issue #1530 - Indexing-subprocess activity watchdog configuration
     indexing_watchdog_config: Optional[IndexingWatchdogConfig] = None
 
@@ -2043,6 +2046,8 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        if self.siem_delivery_config is None:
+            self.siem_delivery_config = SiemDeliveryConfig()
         # Issue #1530 - Initialize indexing watchdog config
         if self.indexing_watchdog_config is None:
             self.indexing_watchdog_config = IndexingWatchdogConfig()
@@ -2761,6 +2766,20 @@ class ServerConfigManager:
                 HNSWOrphanRepairSweepConfig(
                     **{k: v for k, v in _hnsw_dict.items() if k in _hnsw_allowed}
                 )
+            )
+
+        # SIEM delivery section: same round-trip conversion (unknown keys
+        # filtered for rolling-upgrade safety).
+        if "siem_delivery_config" in config_dict and isinstance(
+            config_dict["siem_delivery_config"], dict
+        ):
+            _siem_allowed = {f.name for f in fields(SiemDeliveryConfig)}
+            config_dict["siem_delivery_config"] = SiemDeliveryConfig(
+                **{
+                    k: v
+                    for k, v in config_dict["siem_delivery_config"].items()
+                    if k in _siem_allowed
+                }
             )
 
         # Issue #1530: Convert indexing_watchdog_config dict to

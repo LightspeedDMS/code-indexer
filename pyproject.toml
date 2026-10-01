@@ -45,6 +45,10 @@ dependencies = [
     "python-multipart>=0.0.6",
     "psutil>=5.9.0,<6.0.0",
     "PyJWT>=2.8.0",
+    # SIEM delivery service-account credentials; imported lazily by
+    # services/siem_delivery/transport.py and sender.py only.  2.x supports
+    # Python 3.8+, so its sources parse under the mypy 3.9 target.
+    "google-auth>=2.40.0,<3",
     "numpy>=1.24.0",
     "tokenizers>=0.13.0",
     "GitPython>=3.1.0",

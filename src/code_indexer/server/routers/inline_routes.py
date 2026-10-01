@@ -61,6 +61,7 @@ from ..routers.activated_repos import router as activated_repos_router
 from ..routers.provider_indexes import router as provider_indexes_router
 from ..routers.admin_provider_health import router as admin_provider_health_router
 from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_router
+from ..routers.siem_delivery_admin import router as siem_delivery_admin_router
 from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
 from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
 from ..routers.llm_creds import router as llm_creds_router
@@ -277,6 +278,7 @@ def register_inline_routes(
     app.include_router(provider_indexes_router)
     app.include_router(admin_provider_health_router)
     app.include_router(hnsw_orphan_sweep_admin_router)  # Story #1360
+    app.include_router(siem_delivery_admin_router)
     app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
     app.include_router(dedup_warnings_admin_router)  # Story #1589
     app.include_router(debug_router)

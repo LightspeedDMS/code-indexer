@@ -57,6 +57,10 @@ class RestartableServer:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
     def start(self) -> None:
         env = {
             **os.environ,

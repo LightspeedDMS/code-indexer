@@ -12,7 +12,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional, Type
+from typing import Optional, Tuple, Type
 
 from .state import SidecarState
 
@@ -30,6 +30,8 @@ ALLOWED_TOKEN_SCOPES = frozenset(
         "https://www.googleapis.com/auth/cloud-platform",
     }
 )
+# The audience google-auth's service-account JWT-bearer grant always uses.
+GOOGLE_TOKEN_AUDIENCE = "https://oauth2.googleapis.com/token"
 logger = logging.getLogger("secops_sidecar")
 
 
@@ -54,8 +56,12 @@ class SidecarConfig:
         )
 
     @property
-    def token_audience(self) -> str:
-        return f"http://{LOOPBACK}:{self.ingest_port}/token"
+    def token_audience(self) -> Tuple[str, ...]:
+        """Accepted assertion audiences.  google-auth's service-account
+        grant always signs ``aud = GOOGLE_TOKEN_AUDIENCE`` (whatever
+        ``token_uri`` it posts to), which is what Google's token server
+        expects; the harness's own token URI is accepted too."""
+        return (GOOGLE_TOKEN_AUDIENCE, f"http://{LOOPBACK}:{self.ingest_port}/token")
 
 
 class _Listener(ThreadingHTTPServer):

@@ -490,6 +490,35 @@ class HealthCheckService:
         )
         return True, False, [reason]
 
+    def _collect_siem_delivery_failures(self) -> Tuple[bool, bool, List[str]]:
+        """SIEM delivery reasons: DEGRADED only, never an error.
+
+        A SecOps outage is fleet state; an error here would make /healthz
+        answer 503 and drain every node.  O(1): reads the scheduler's
+        in-memory view only.  A process that never reached the SIEM startup
+        block reports nothing (fail-open on this hot path).
+        """
+        try:
+            from ..app import app as app_module
+            from .siem_delivery.health import siem_health_reasons
+
+            state = app_module.state
+            if not hasattr(state, "siem_delivery_startup_error"):
+                return False, False, []
+            scheduler = getattr(state, "siem_delivery_scheduler", None)
+            reasons = siem_health_reasons(
+                scheduler.health_inputs() if scheduler is not None else None,
+                getattr(state, "siem_delivery_startup_error", None),
+            )
+        except Exception as exc:
+            logger.warning(
+                "SIEM delivery health collection failed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return False, False, []
+        return bool(reasons), False, reasons
+
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
         Read every golden_alias currently recorded with the PERMANENT
@@ -1425,6 +1454,11 @@ class HealthCheckService:
         has_warning = has_warning or hos_warn
         has_error = has_error or hos_err
         failure_reasons.extend(hos_reasons)
+
+        # SIEM delivery: DEGRADED only (err is always False by construction).
+        siem_warn, _siem_err, siem_reasons = self._collect_siem_delivery_failures()
+        has_warning = has_warning or siem_warn
+        failure_reasons.extend(siem_reasons)
 
         # Bug #1539's cidx-meta conflict-resolution quarantine escalation
         # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made

@@ -79,8 +79,12 @@ def record_outcome(
     target_id: object,
     outcome: str,
     details: Optional[Mapping[str, Any]] = None,
+    siem_destination: Any = audit_capture.NO_SIEM_DESTINATION,
 ) -> None:
-    """Record one outcome row (see module docstring); never raises."""
+    """Record one outcome row (see module docstring); never raises.
+
+    *siem_destination* is passed only by SIEM self-report emitters.
+    """
     safe_target = audit_target_id(target_type, target_id)
     if isinstance(actor, SystemComponent):
         audit_capture.capture_system(
@@ -90,6 +94,7 @@ def record_outcome(
             target_id=safe_target,
             outcome=outcome,
             details=details,
+            siem_destination=siem_destination,
         )
         return
     audit_capture.capture(
@@ -99,6 +104,7 @@ def record_outcome(
         target_id=safe_target,
         outcome=outcome,
         details=details,
+        siem_destination=siem_destination,
     )
 
 

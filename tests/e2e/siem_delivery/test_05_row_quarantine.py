@@ -1,11 +1,17 @@
-"""One poison row is quarantined without blocking the others (RED until delivery exists).
+"""One poison row is quarantined without blocking the others.
 
-The three logins are captured back-to-back while the sidecar refuses
-connections, so they are pending together when it recovers.  The sidecar then
-rejects (unindexed, no event index) every request that contains the middle
-row.  Delivery must isolate exactly that row by bisection under the
-signature guard, quarantine it, deliver the other two, and NOT halt.  Every
-assertion is scoped to this scenario's own uuids and requests.
+The three logins must be pending TOGETHER when delivery runs, so the first
+request carrying them is one batch.  A sidecar outage cannot guarantee that
+(the delivery loop claims a batch as soon as the first login is captured).
+The design guarantees it another way: NO batch is formed while delivery is
+halted, and a ``duplicate_response`` halt is never probed automatically.  So
+a sacrificial row is answered 409 (a duplicate-response halt), the three
+logins are captured while the halt holds, the poison rule is armed, and the
+admin acknowledge front door releases delivery.  The sidecar then rejects
+(unindexed, no event index) every request containing the middle row:
+delivery must isolate exactly that row by bisection under the quarantine
+cap, quarantine it, deliver the other two, and NOT halt.  Every assertion is
+scoped to this scenario's own uuids and requests.
 """
 
 from __future__ import annotations
@@ -34,20 +40,26 @@ def test_single_rejected_row_is_quarantined_without_blocking_others(
     delivery.arm()
     user = unique_name("siem-poison")
     door.create_user(user)
-    # Earlier rows (incl. user_created) drain first, so nothing else is
-    # pending when the outage starts and only this scenario's rows batch up.
-    arm_fault_after_drain(delivery, sidecar, "/_control/outage", {"mode": "refuse"})
+    # Hold delivery: the next batch (a sacrificial login) is answered 409.
+    arm_fault_after_drain(
+        delivery, sidecar, "/_control/faults", {"mode": "status", "code": 409}
+    )
+    door.rest_login_failure(user)
+    delivery.wait_stats(
+        lambda s: halt_class(s) == "duplicate_response",
+        DELIVERY_TIMEOUT,
+        "the holding duplicate-response halt",
+    )
     quarantined_before = fleet(delivery.stats(), "quarantined")
-    try:
-        uuids = [door.rest_login_success(user).event_uuid for _ in range(ROWS)]
-        poison = uuids[1]
-        sidecar_fault(
-            sidecar,
-            "/_control/faults",
-            {"mode": "reject_if_contains", "product_log_id": poison},
-        )
-    finally:
-        sidecar_fault(sidecar, "/_control/outage", {"mode": "end"})
+    uuids = [door.rest_login_success(user).event_uuid for _ in range(ROWS)]
+    poison = uuids[1]
+    sidecar_fault(
+        sidecar,
+        "/_control/faults",
+        {"mode": "reject_if_contains", "product_log_id": poison},
+    )
+    assert requests_carrying(sidecar, uuids) == [], "a batch formed while halted"
+    delivery.acknowledge_halted_batch()  # release delivery (admin front door)
     for good in (uuids[0], uuids[2]):
         assert len(wait_delivered(sidecar, good)) == 1
     delivery.wait_stats(

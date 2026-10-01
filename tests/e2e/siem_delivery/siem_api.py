@@ -1,28 +1,35 @@
-"""Client for the SIEM delivery front doors (the feature is absent today).
+"""Client for the SIEM delivery front doors.
 
-Surfaces, as the SIEM delivery design names them:
-  POST /admin/config/siem_delivery                      Web Config section (elevated form)
+Surfaces (routers/siem_delivery_admin.py; actions need TOTP elevation when
+elevation enforcement is on):
+  POST /admin/config/siem_delivery                      Web Config section (admin form)
   GET  /api/admin/siem-delivery/stats                   fleet / capture / halt / local_process
+  GET  /api/admin/siem-delivery/quarantine?limit=N      {"rows": [{"event_uuid", "action_type",
+                                                         "destination_key", "quarantine_reason",
+                                                         "quarantine_signature", "created_at"}]}
   POST /api/admin/siem-delivery/canary                  synthetic canary (one per mapping + fallback)
   POST /api/admin/siem-delivery/canary/confirm-visible  ids found via the sidecar's /_control/search
-  POST /api/admin/siem-delivery/resume                  admin action: clear a systemic halt
-  POST /api/admin/siem-delivery/batches/{id}/acknowledge  admin action: resolve a duplicate halt
+  POST /api/admin/siem-delivery/resume                  clear a systemic halt
+  POST /api/admin/siem-delivery/batches/{id}/acknowledge  resolve a duplicate halt (delivered)
+  POST /api/admin/siem-delivery/batches/{id}/rebatch    resolve a duplicate halt (re-send)
+  POST /api/admin/siem-delivery/quarantine/requeue      {"event_uuids": [...]}
+  POST /api/admin/siem-delivery/destinations/{key}/retarget | /abandon
 
-ASSUMED CONTRACT (not yet named by the design; the delivery story owns it and
-may rename it -- adjust here only):
-  GET  /api/admin/siem-delivery/quarantine?limit=N      {"rows": [{"event_uuid", "quarantine_reason",
-                                                         "quarantine_signature"}, ...]}
+Implemented response fields used here:
+  stats["capture"]["state"]   inactive | awaiting canary | canary rejected |
+                              awaiting visibility confirmation |
+                              awaiting process readiness | armed
+  stats["capture"]["status"]  human text ("canary accepted, N of M visible; not visible: ...")
+  stats["halt"]["class"]      None or the class that halted; ["batch_id"] the held batch
+  stats["fleet"]["pending"]   UNDELIVERED rows (status pending + batched), capped at 10,001;
+                              ["quarantined"], ["delivered_total"],
+                              ["resent_after_unknown_outcome"] (durable fleet counters)
+  canary response             {"canary_run_id", "expected_product_log_ids", "result", ...}
 
-Response-field ASSUMPTIONS (the design names the data but not every JSON
-key; adjust here, in one place, when the implementation fixes them):
-  stats["capture"]["state"]                  e.g. "awaiting canary" ... "armed"
-  stats["capture"]["status"]                 human text ("canary accepted, N of M visible")
-  stats["halt"]["class"]                     None or the response class that halted
-  stats["fleet"]["pending"|"quarantined"|"delivered_total"|"resent_after_unknown_outcome"]
-  stats["halt"]["batch_id"]                  the batch a duplicate_response halt holds
-  canary response {"canary_run_id", "expected_product_log_ids"}
-
-Every wait is a bounded poll.
+The Phase 7 server runs with the non-production fault-injection gate ON, so
+delivery uses its compressed HARNESS timing profile (1 s loop cycle, 10 s
+halt probe, 30 s lease, 10 s DEGRADED backlog age).  The waits below are
+upper bounds; every poll returns as soon as its condition holds.
 """
 
 from __future__ import annotations
@@ -39,13 +46,13 @@ from tests.e2e.siem_delivery.conftest import AttachedSidecar, SiemE2EConfig
 
 POLL_SECONDS = 2.0
 DELIVERY_TIMEOUT = float(os.environ.get("E2E_SIEM_DELIVERY_TIMEOUT", "180"))
-# Delivery constants a live server cannot shorten: ARMING_SETTLE 180 s, PROBE_INTERVAL
-# 15 min, backlog DEGRADED after 15 min.  These bounded waits cover them.
-ARMING_TIMEOUT = float(os.environ.get("E2E_SIEM_ARMING_TIMEOUT", "300"))
-DEGRADED_TIMEOUT = float(os.environ.get("E2E_SIEM_DEGRADED_TIMEOUT", "1080"))
-PROBE_TIMEOUT = float(os.environ.get("E2E_SIEM_PROBE_TIMEOUT", "1200"))
-# A crashed sender's batch lease (LEASE = 10 min) must expire before resend.
-LEASE_TIMEOUT = float(os.environ.get("E2E_SIEM_LEASE_TIMEOUT", "900"))
+# Harness profile: arming within a loop cycle, halt probe every 10 s, backlog
+# DEGRADED after 10 s.  These bounded waits leave ample margin.
+ARMING_TIMEOUT = float(os.environ.get("E2E_SIEM_ARMING_TIMEOUT", "120"))
+DEGRADED_TIMEOUT = float(os.environ.get("E2E_SIEM_DEGRADED_TIMEOUT", "180"))
+PROBE_TIMEOUT = float(os.environ.get("E2E_SIEM_PROBE_TIMEOUT", "180"))
+# A crashed sender's batch lease (harness LEASE = 30 s) must expire before resend.
+LEASE_TIMEOUT = float(os.environ.get("E2E_SIEM_LEASE_TIMEOUT", "240"))
 
 
 Stats = Dict[str, Any]

@@ -14,12 +14,15 @@ from tests.e2e.siem_delivery.siem_api import (
     ARMING_TIMEOUT,
     SiemDelivery,
     capture_state,
+    requests_carrying,
     search_sidecar,
     wait_delivered,
 )
 
-# Longer than ARMING_SETTLE (180 s): an unarmed gate must STAY unarmed.
-UNARMED_OBSERVE_SECONDS = float(os.environ.get("E2E_SIEM_UNARMED_OBSERVE", "200"))
+# Arming is ONE atomic statement evaluated every loop cycle (there is no
+# settle window), and the harness loop cycles every second: 30 s is dozens
+# of arming attempts, all of which must fail.
+UNARMED_OBSERVE_SECONDS = float(os.environ.get("E2E_SIEM_UNARMED_OBSERVE", "30"))
 OBSERVE_POLL_SECONDS = 5.0
 
 
@@ -53,7 +56,10 @@ def test_full_canary_confirmation_arms_capture(
 ) -> None:
     delivery.configure_harness_destination()
     run_id, expected = delivery.run_canary()
-    requests = sidecar.control.get("/_control/requests").json()["requests"]
+    # The config save above is itself a captured SIEM boundary event that is
+    # delivered on its own; the canary is exactly ONE request holding every
+    # canary event (no second canary send).
+    requests = requests_carrying(sidecar, expected)
     assert len(requests) == 1 and requests[0]["event_count"] == len(expected)
     for product_log_id in expected:
         found = search_sidecar(sidecar, product_log_id)

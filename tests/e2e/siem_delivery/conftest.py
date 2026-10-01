@@ -24,12 +24,13 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, List, Tuple
+from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Tuple
 
 import httpx
 import pytest
 
 from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.siem_delivery.log_allowlist import PHASE7_LOG_ALLOWLIST
 from tests.fixtures.secops_sidecar.harness import SidecarControl, SidecarCoordinates
 
 if TYPE_CHECKING:
@@ -124,17 +125,63 @@ def siem_admin(siem_config: SiemE2EConfig) -> AdminTokenProvider:
     )
 
 
+def _private_server_log_audit(
+    server: "RestartableServer", watermark: int
+) -> Optional[str]:
+    """The Phase 7 log-audit gate, applied to a server the test owns.
+
+    Its log store survives the SIGKILL/restart (same data dir), so one
+    watermark taken after the first boot covers the whole scenario,
+    including the restart.  Returns the failure message, or None.
+    """
+    from tests.e2e.log_audit_gate import (
+        poll_until_stable_count,
+        query_logs_via_mcp,
+        run_log_audit_gate,
+    )
+
+    if not server.running:
+        server.start()  # a failed scenario may leave it down: audit anyway
+    admin = admin_provider_for(server.url, server.admin_user, server.admin_pass)
+    with httpx.Client(base_url=server.url, timeout=HTTP_TIMEOUT_SECONDS) as http:
+        poll_until_stable_count(
+            count_fn=lambda: len(query_logs_via_mcp(http, admin.get_token())),
+            max_attempts=10,
+            sleep_seconds=0.3,
+        )
+        result = run_log_audit_gate(
+            http,
+            admin.get_token(),
+            watermark_id=watermark,
+            phase_name="Phase 7 (SIEM Delivery, restartable server)",
+            extra_allowlist=PHASE7_LOG_ALLOWLIST,
+        )
+    return None if result.passed else result.failure_message()
+
+
 @pytest.fixture()
 def restartable_server(siem_config: SiemE2EConfig) -> Iterator["RestartableServer"]:
-    """A started server this test owns (SIGKILL + restart); bounded close."""
+    """A started server this test owns (SIGKILL + restart); bounded close.
+
+    Brought under the same post-phase log audit as the shared Phase 7
+    server: new non-allowlisted ERROR/WARNING entries fail the fixture.
+    """
+    from tests.e2e.log_audit_gate import get_log_watermark
     from tests.e2e.siem_delivery.restartable_server import RestartableServer
 
     server = RestartableServer(siem_config.admin_user, siem_config.admin_pass)
+    audit_failure: Optional[str] = None
     try:
         server.start()
+        admin = admin_provider_for(server.url, server.admin_user, server.admin_pass)
+        with httpx.Client(base_url=server.url, timeout=HTTP_TIMEOUT_SECONDS) as http:
+            watermark = get_log_watermark(http, admin.get_token())
         yield server
+        audit_failure = _private_server_log_audit(server, watermark)
     finally:
         server.close()
+    if audit_failure is not None:
+        raise AssertionError(audit_failure)
 
 
 def _non_loopback_connect_hook(event: str, args: Tuple[Any, ...]) -> None:
@@ -242,6 +289,7 @@ def _phase7_log_audit_gate(
         siem_admin.get_token(),
         watermark_id=watermark,
         phase_name="Phase 7 (SIEM Delivery)",
+        extra_allowlist=PHASE7_LOG_ALLOWLIST,
     )
     if not result.passed:
         raise AssertionError(result.failure_message())
