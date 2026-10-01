@@ -2069,11 +2069,13 @@ class ActivatedRepoManager:
                 # Check if this is a network/access error or missing remote
                 if "not a git repository" in fetch_stderr.lower():
                     raise GitOperationError(
-                        f"Golden repository not accessible for sync: {fetch_stderr}"
+                        f"Golden repository not accessible for sync: "
+                        f"{format_called_process_error_diagnostic(e)}"
                     )
                 else:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {fetch_stderr}"
+                        f"Git fetch failed for repository '{user_alias}': "
+                        f"{format_called_process_error_diagnostic(e)}"
                     )
                     # Continue with local-only sync message
                     return {
@@ -2124,7 +2126,8 @@ class ActivatedRepoManager:
                     )
                 else:
                     raise GitOperationError(
-                        f"Sync failed for repository '{user_alias}': {merge_stderr}"
+                        f"Sync failed for repository '{user_alias}': "
+                        f"{format_called_process_error_diagnostic(e)}"
                     )
 
             # Step 4: Update metadata timestamp
@@ -2218,7 +2221,9 @@ class ActivatedRepoManager:
                     repo_dir, fmt="%(refname:short)", timeout=30
                 )
             except subprocess.CalledProcessError as e:
-                raise GitOperationError(f"Failed to list local branches: {format_called_process_error_diagnostic(e)}")
+                raise GitOperationError(
+                    f"Failed to list local branches: {format_called_process_error_diagnostic(e)}"
+                )
 
             # Get list of remote branches
             remote_branches = []
@@ -4171,7 +4176,8 @@ class ActivatedRepoManager:
                     )
             else:
                 raise ActivatedRepoError(
-                    f"Failed to add {remote_name} remote: {add_stderr}"
+                    f"Failed to add {remote_name} remote: "
+                    f"{format_called_process_error_diagnostic(add_error)}"
                 )
 
     def _configure_git_structure(self, source_path: str, dest_path: str) -> None:

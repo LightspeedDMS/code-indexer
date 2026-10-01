@@ -56,6 +56,41 @@ def updater(repo_path):
 # ---------------------------------------------------------------------------
 
 
+def _checked(side_effect):
+    """Wrap a side_effect so it mirrors real subprocess.run(check=True).
+
+    EVO-64678 routes git through the seam -> run_git_command(check=True), so a
+    fake that merely RETURNED a non-zero result would read as SUCCESS to the
+    production path and the failure under test would never surface. Raising here
+    keeps each test's canned returncode/stdout/stderr exactly as written.
+    """
+
+    def _run(cmd, *args, **kwargs):
+        result = side_effect(cmd, **kwargs)
+        if kwargs.get("check") and getattr(result, "returncode", 0) != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+        return result
+
+    return _run
+
+
+def _checked_seq(responses):
+    """Sequence form of :func:`_checked` for list-style side_effects."""
+    it = iter(responses)
+
+    def _run(cmd, *args, **kwargs):
+        result = next(it)
+        if kwargs.get("check") and getattr(result, "returncode", 0) != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+        return result
+
+    return _run
+
+
 def _proc(returncode=0, stdout="", stderr="", args=None):
     result = Mock(spec=subprocess.CompletedProcess)
     result.returncode = returncode
@@ -168,7 +203,7 @@ class TestFetchTimeoutClassification:
                 f"unexpected subprocess call after fetch timeout: {cmd}"
             )
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(GitFetchError) as exc_info:
                 updater.has_changes()
 
@@ -185,7 +220,7 @@ class TestFetchTimeoutClassification:
                 f"unexpected subprocess call after fetch timeout: {cmd}"
             )
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(GitFetchError) as exc_info:
                 updater.has_changes()
 
@@ -206,7 +241,7 @@ class TestNonFetchTimeoutsNotMisclassified:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(RuntimeError) as exc_info:
                 updater.has_changes()
 
@@ -223,7 +258,7 @@ class TestNonFetchTimeoutsNotMisclassified:
                 raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(RuntimeError) as exc_info:
                 updater.has_changes()
 
@@ -259,7 +294,7 @@ class TestStderrOnlyDiagnosticsFixedInHasChanges:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(RuntimeError) as exc_info:
                 updater.has_changes()
 
@@ -285,7 +320,7 @@ class TestStderrOnlyDiagnosticsFixedInFetchAndReset:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(RuntimeError) as exc_info:
                 updater._fetch_and_reset("main")
 
@@ -311,7 +346,7 @@ class TestStderrOnlyDiagnosticsFixedInFetchAndReset:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(RuntimeError) as exc_info:
                 updater._fetch_and_reset("main")
 
@@ -337,7 +372,9 @@ class TestStderrOnlyDiagnosticsFixedInUpdate:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [git_status_ok, git_pull_fail]
+            # EVO-64678: the seam reaches git via run_git_command(check=True),
+            # so the fake must raise on a non-zero result as real subprocess does.
+            mock_run.side_effect = _checked_seq([git_status_ok, git_pull_fail])
 
             with pytest.raises(RuntimeError) as exc_info:
                 updater.update()
@@ -372,7 +409,7 @@ class TestGitFetchErrorWidenedFieldsWiredAtNonTimeoutSite:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(GitFetchError) as exc_info:
                 updater.has_changes()
 
@@ -402,7 +439,7 @@ class TestGitFetchErrorWidenedFieldsWiredAtTimeoutSite:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(GitFetchError) as exc_info:
                 updater.has_changes()
 
@@ -428,7 +465,7 @@ class TestGitFetchErrorWidenedFieldsWiredAtTimeoutSite:
                 )
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
-        with patch("subprocess.run", side_effect=side_effect):
+        with patch("subprocess.run", side_effect=_checked(side_effect)):
             with pytest.raises(GitFetchError) as exc_info:
                 updater.has_changes()
 
