@@ -986,6 +986,7 @@ def _copy_metadata_scope_if_safe(
                 "back, not counted as a failure",
                 legacy_meta_path,
                 fixed_meta_path,
+                exc_info=True,
             )
             return False
         logger.exception(

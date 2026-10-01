@@ -1404,6 +1404,7 @@ class ActivatedRepoIndexManager:
                     "SVC-MIGRATE-006", "Failed to read FTS index status: {e}"
                 ),
                 extra=get_log_extra("SVC-MIGRATE-006"),
+                exc_info=True,
             )
             return {"status": "not_indexed"}
 
@@ -1563,6 +1564,7 @@ class ActivatedRepoIndexManager:
                     "SVC-MIGRATE-007", "Failed to read temporal index metadata: {e}"
                 ),
                 extra=get_log_extra("SVC-MIGRATE-007"),
+                exc_info=True,
             )
             return {"status": "not_indexed"}
 

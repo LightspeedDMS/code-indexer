@@ -185,7 +185,7 @@ class GitPullUpdater(UpdateStrategy):
             # GitFetchError shape the returncode check used to produce.
             try:
                 self._git_backend.fetch(str(self.repo_path), timeout=30)
-            
+
             except subprocess.TimeoutExpired as e:
                 # Bug #1830 AC1/AC4: a fetch that TIMES OUT must be classified
                 # exactly like a fetch that fails with a non-zero exit code --
@@ -222,7 +222,6 @@ class GitPullUpdater(UpdateStrategy):
                     cmd=e.cmd,
                 )
 
-            
             except subprocess.CalledProcessError as fetch_exc:
                 # Story #295: Raise instead of silently returning False so the
                 # refresh scheduler can classify the error and trigger re-clone

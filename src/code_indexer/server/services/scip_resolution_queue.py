@@ -589,7 +589,8 @@ class DelegatedScipBuildQueue:
                         f"'{getattr(build, 'alias', '?')}'; worker survives and "
                         "continues draining",
                         exc_info=True,
-                    )
+                    ),
+                    exc_info=True,
                 )
                 record_scip_metric("delegated_worker_loop_error")
             finally:

@@ -233,6 +233,7 @@ class RepositoryListingManager:
                     "REPO-MIGRATE-002", "Could not get statistics for {alias}: {e}"
                 ),
                 extra=get_log_extra("REPO-MIGRATE-002"),
+                exc_info=True,
             )
             details["file_count"] = 0
             details["index_size"] = 0
@@ -459,6 +460,7 @@ class RepositoryListingManager:
                     "REPO-MIGRATE-005", "Failed to count files in {repo_path}: {e}"
                 ),
                 extra=get_log_extra("REPO-MIGRATE-005"),
+                exc_info=True,
             )
 
         return file_count
@@ -489,6 +491,7 @@ class RepositoryListingManager:
                     "REPO-MIGRATE-006", "Failed to calculate size for {repo_path}: {e}"
                 ),
                 extra=get_log_extra("REPO-MIGRATE-006"),
+                exc_info=True,
             )
 
         return total_size
@@ -532,5 +535,6 @@ class RepositoryListingManager:
                     "Failed to get last modified time for {repo_path}: {e}",
                 ),
                 extra=get_log_extra("REPO-MIGRATE-007"),
+                exc_info=True,
             )
             return datetime.now(timezone.utc).isoformat()

@@ -55,7 +55,9 @@ class WikiService:
             )
             return {}, content
         except Exception:
-            logger.warning("Failed to parse front matter, treating as plain content")
+            logger.warning(
+                "Failed to parse front matter, treating as plain content", exc_info=True
+            )
             return {}, content
 
     def _strip_header_block(

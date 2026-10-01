@@ -4563,7 +4563,6 @@ class GoldenRepoManager:
                 )
                 return
 
-
             # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
             # postgres/cluster-mode signal, matching
             # FilesystemBackend.get_vector_store_client()'s existing

@@ -80,6 +80,7 @@ def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
             "Bug #1563: liveness probe for owning worker pid %s raised; "
             "treating as alive (conservative)",
             executing_pid,
+            exc_info=True,
         )
         return True
 

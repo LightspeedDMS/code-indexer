@@ -4415,7 +4415,8 @@ def make_lifespan(
                             except Exception:
                                 logging.getLogger(__name__).warning(
                                     "C6: could not inject shard ownership into the "
-                                    "multi-search singleton at startup"
+                                    "multi-search singleton at startup",
+                                    exc_info=True,
                                 )
                             # http_client_factory is set later in startup
                             # (_apply_fault_injection_state), after this cluster block,
@@ -4511,7 +4512,8 @@ def make_lifespan(
                                 _cluster_services.append(("shard_prewarm", _prewarm))
                             except Exception:
                                 logging.getLogger(__name__).warning(
-                                    "C6: could not start shard prewarm service"
+                                    "C6: could not start shard prewarm service",
+                                    exc_info=True,
                                 )
                         except Exception:
                             logging.getLogger(__name__).exception(

@@ -97,9 +97,9 @@ class GlobalReposLifecycleManager:
             check_interval=1.0,  # Check every second
             job_tracker=job_tracker,
             min_retention_age_getter=(
-                lambda: get_config_service()
-                .get_config()
-                .snapshot_min_retention_age_seconds
+                lambda: (
+                    get_config_service().get_config().snapshot_min_retention_age_seconds
+                )
             ),
         )
 
