@@ -1,6 +1,7 @@
 """Bootstrap cidx-meta git backup state."""
 
 from __future__ import annotations
+from code_indexer.utils.git_runner import run_git_command
 
 import subprocess
 from pathlib import Path
@@ -36,9 +37,14 @@ class CidxMetaBackupBootstrap:
         # an interactive editor in the non-interactive systemd job context
         # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
         env.setdefault("GIT_EDITOR", "true")
-        return subprocess.run(
+        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # cidx-meta with argv only known at runtime, so it goes through the seam
+        # chokepoint and lets is_mutating_git() classify each call rather than a
+        # static scan guessing. No invoker claims cidx-meta today, so behaviour is
+        # unchanged; the env below is merged on top of get_git_environment().
+        return run_git_command(
             ["git", *args],
-            cwd=cidx_meta_path,
+            cwd=Path(cidx_meta_path),
             capture_output=True,
             text=True,
             env=env,

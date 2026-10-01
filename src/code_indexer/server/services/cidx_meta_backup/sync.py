@@ -27,6 +27,8 @@ stuck on.
 """
 
 from __future__ import annotations
+from pathlib import Path
+from code_indexer.utils.git_runner import run_git_command
 
 import subprocess
 from dataclasses import dataclass
@@ -60,9 +62,14 @@ class CidxMetaBackupSync:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
-        return subprocess.run(
+        # EVO-64678: this helper runs arbitrary git (including commits) against
+        # cidx-meta with argv only known at runtime, so it goes through the seam
+        # chokepoint and lets is_mutating_git() classify each call rather than a
+        # static scan guessing. No invoker claims cidx-meta today, so behaviour is
+        # unchanged; the env below is merged on top of get_git_environment().
+        return run_git_command(
             ["git", *args],
-            cwd=self.cidx_meta_path,
+            cwd=Path(self.cidx_meta_path),
             capture_output=True,
             text=True,
             env=env,

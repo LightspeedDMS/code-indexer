@@ -38,6 +38,7 @@ ParameterDecl:
 """
 
 from __future__ import annotations
+from code_indexer.utils.git_runner import run_git_command
 
 import logging
 import subprocess
@@ -706,17 +707,22 @@ class XrayPatternService:
 
         try:
             relative_files = [str(f.relative_to(self._cidx_meta)) for f in files]
-            subprocess.run(
+            # EVO-64678: cidx-meta mutations go through the git seam chokepoint
+            # like every other server-side mutation. No invoker claims cidx-meta
+            # today so these still run locally, but they are now seam-visible and
+            # pick up get_git_environment()'s safe.directory handling (the
+            # GIT_AUTHOR_*/GIT_COMMITTER_* env above is merged on top of it).
+            run_git_command(
                 ["git", "add"] + relative_files,
-                cwd=str(self._cidx_meta),
+                cwd=Path(self._cidx_meta),
                 env=env,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
+            run_git_command(
                 ["git", "commit", "-m", message],
-                cwd=str(self._cidx_meta),
+                cwd=Path(self._cidx_meta),
                 env=env,
                 check=True,
                 capture_output=True,

@@ -25,6 +25,7 @@ from typing import Callable, Optional, List, Tuple
 from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -531,15 +532,19 @@ class ClaudeCliManager:
 
         try:
             commit_msg = f"Replace README fallbacks with generated descriptions: {', '.join(processed)}"
-            subprocess.run(
+            # EVO-64678: cidx-meta mutations go through the git seam chokepoint
+            # like every other server-side mutation. No invoker claims cidx-meta
+            # today so these still run locally, but they are now seam-visible and
+            # pick up get_git_environment()'s safe.directory handling.
+            run_git_command(
                 ["git", "add", "."],
-                cwd=str(self._meta_dir),
+                cwd=Path(self._meta_dir),
                 capture_output=True,
                 check=True,
             )
-            subprocess.run(
+            run_git_command(
                 ["git", "commit", "-m", commit_msg],
-                cwd=str(self._meta_dir),
+                cwd=Path(self._meta_dir),
                 capture_output=True,
                 check=False,
             )
