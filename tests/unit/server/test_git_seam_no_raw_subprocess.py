@@ -109,7 +109,7 @@ def _resolve_name(
     scope: ast.AST,
     before_line: int,
     module: Optional[ast.Module] = None,
-) -> Tuple[bool, Optional[List[Optional[str]]], str]:
+) -> Tuple[bool, Optional[List[Optional[str]]], List[str]]:
     """Resolve `name` to the argv it was last assigned above *before_line*.
 
     Returns ``(assigned_here, elements)``:
@@ -125,7 +125,7 @@ def _resolve_name(
     reads literal call arguments cannot see it at all.
     """
     assigned = False
-    builder = "<expression>"
+    builders = ["<expression>"]
     best_line = -1
     # (line, argv-or-None, builder-label) per reaching assignment. The label
     # travels with its candidate because ALLOWED_UNREADABLE_ARGV is keyed on it:
@@ -181,11 +181,22 @@ def _resolve_name(
         ]
         unreadable = [c for c in candidates if c[1] is None]
         if mutating:
-            best_at, best, builder = mutating[0]
+            best_at, best = mutating[0][0], mutating[0][1]
+            builders = [mutating[0][2]]
         elif unreadable:
-            best_at, best, builder = unreadable[0]
+            # EVERY distinct unreadable builder, not just one. Collapsing them
+            # let an allowlisted builder in one branch speak for a
+            # non-allowlisted one in its sibling: _scan_source checks the single
+            # label it got, finds it justified and skips the call. Sorted because
+            # _statements_of pops its stack, so "which one is first" is really
+            # "which was written last" -- the source-layout dependence the
+            # severity ordering above exists to remove.
+            best_at, best = min(c[0] for c in unreadable), None
+            builders = sorted({c[2] for c in unreadable})
         else:
-            best_at, best, builder = max(candidates, key=lambda c: c[0])
+            last = max(candidates, key=lambda c: c[0])
+            best_at, best = last[0], last[1]
+            builders = [last[2]]
 
     # A literal whose FRONT is rewritten after assignment is no longer the argv
     # that runs, and the verb read from it would belong to a command that never
@@ -195,14 +206,14 @@ def _resolve_name(
     # Measured from the CHOSEN assignment, not the last one: when a mutating
     # candidate wins, a rewrite between it and a later sibling still applies to it.
     if best is not None and _prefix_rewritten_after(name, scope, best_at, before_line):
-        return True, None, "<argv front rewritten after assignment>"
+        return True, None, ["<argv front rewritten after assignment>"]
 
     # Not a local: a module-level constant (`_PUSH = ["git", "push"]`) used inside a
     # function is still a literal we can read, and treating it as a caller-supplied
     # parameter would hide it.
     if not assigned and module is not None and scope is not module:
         return _resolve_name(name, module, before_line=10**9)
-    return assigned, best, builder
+    return assigned, best, builders
 
 
 def _statements_of(scope: ast.AST) -> List[ast.AST]:
@@ -274,7 +285,7 @@ def _builder_name(node: ast.AST) -> str:
 
 def _git_argv(
     node: ast.Call, kind: str, scope: ast.AST, module: Optional[ast.Module] = None
-) -> Tuple[Optional[List[Optional[str]]], Optional[str]]:
+) -> Tuple[Optional[List[Optional[str]]], Optional[List[str]]]:
     """argv of a spawn call on git, or None if it is not one.
 
     Returns a list whose unknowable elements are None. A caller that gets back a
@@ -289,7 +300,7 @@ def _git_argv(
         if isinstance(first, (ast.List, ast.Tuple)):
             argv = _literal_elements(first)
         elif isinstance(first, ast.Name):
-            assigned, resolved, builder = _resolve_name(
+            assigned, resolved, builders = _resolve_name(
                 first.id, scope, node.lineno, module
             )
             if not assigned:
@@ -297,7 +308,7 @@ def _git_argv(
             if resolved is None:
                 # built locally in a way we cannot read -- it could be git, and a
                 # future `cmd = build(["git", "push", ...])` must not slip through.
-                return [None], builder
+                return [None], builders
             argv = resolved
         else:
             return None, None
@@ -425,17 +436,27 @@ def _scan_source(rel: str, source: str) -> Tuple[List[str], List[str]]:
         kind = _call_kind(node, aliases)
         if kind is None:
             continue
-        argv, builder = _git_argv(node, kind, _enclosing_scope(tree, spans, node), tree)
+        argv, builders = _git_argv(
+            node, kind, _enclosing_scope(tree, spans, node), tree
+        )
         if argv is None:
             continue
-        if builder is not None and (rel, builder) in ALLOWED_UNREADABLE_ARGV:
-            continue
         where = f"{rel}:{node.lineno}"
+        if builders is not None:
+            # Justified only when EVERY reaching builder is justified. One
+            # allowlisted entry must not clear a call that another, unlisted
+            # builder also reaches.
+            unlisted = [b for b in builders if (rel, b) not in ALLOWED_UNREADABLE_ARGV]
+            if not unlisted:
+                continue
+            unknown.extend(
+                f"{where}  argv built by {b!r}, not statically readable"
+                for b in unlisted
+            )
+            continue
         verb = _verb(argv)
         if verb is None:
-            unknown.append(
-                f"{where}  argv built by {builder!r}, not statically readable"
-            )
+            unknown.append(f"{where}  argv not statically readable")
             continue
         # Keep positions: a dynamic element is a placeholder, never dropped,
         # so a global flag cannot swallow the verb during classification.
@@ -759,3 +780,58 @@ class TestGuardClassifiesCorrectly:
             "    subprocess.run(cmd)\n"
         )
         assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_allowlisted_builder_does_not_clear_an_unlisted_sibling(self) -> None:
+        """One justified builder must not speak for an unjustified one.
+
+        `claude_invoker.py` really does have `_build_claude_command` allowlisted.
+        Collapsing the reaching builders to a single label meant that whichever
+        one happened to be visited first decided the call: if the allowlisted one
+        won, the site was skipped and the unlisted builder -- which could be
+        building `git push` -- was never reported. Both orders are asserted
+        because _statements_of pops its stack, so "first" tracks source layout.
+        """
+        rel = "server/services/claude_invoker.py"
+        assert (rel, "_build_claude_command") in ALLOWED_UNREADABLE_ARGV
+        allowed_first = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            "        cmd = _build_claude_command()\n"
+            "    else:\n"
+            "        cmd = build_push_cmd()\n"
+            "    subprocess.run(cmd)\n"
+        )
+        allowed_last = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            "        cmd = build_push_cmd()\n"
+            "    else:\n"
+            "        cmd = _build_claude_command()\n"
+            "    subprocess.run(cmd)\n"
+        )
+        for src in (allowed_first, allowed_last):
+            _, unknown = _scan_source(rel, src)
+            assert any("build_push_cmd" in u for u in unknown), (
+                f"unlisted builder masked by the allowlisted sibling:\n{src}"
+            )
+            assert not any("_build_claude_command" in u for u in unknown), (
+                f"the allowlisted builder must stay justified: {unknown}"
+            )
+
+    def test_every_unlisted_builder_is_reported(self) -> None:
+        """Two unlisted builders reaching one call are two findings, not one --
+        silencing the pair takes two justifications, not whichever is reported."""
+        src = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            "        cmd = build_a()\n"
+            "    else:\n"
+            "        cmd = build_b()\n"
+            "    subprocess.run(cmd)\n"
+        )
+        unknown = _unknowns(src)
+        assert any("build_a" in u for u in unknown), unknown
+        assert any("build_b" in u for u in unknown), unknown
