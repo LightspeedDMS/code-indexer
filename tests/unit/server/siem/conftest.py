@@ -21,9 +21,38 @@ from code_indexer.server.services.siem_delivery.destination import (
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
 from tests.fixtures.secops_sidecar.harness import SidecarHandle, start_sidecar
 
+from . import _home_guard
 from .backends import _pg_session_pool, pg_pool, siem_backend  # noqa: F401
 
 _SCRATCH_ROOT = Path.home() / ".tmp" / "siem-delivery-unit"
+
+
+@pytest.fixture(autouse=True)
+def _launch_files_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ConfigService materialises launch.json at a module-level path under
+    the real ~/.cidx-server whatever its server_dir_path; keep it in tmp."""
+    from code_indexer.server.services import config_service
+
+    launch = tmp_path / "launch-files"
+    launch.mkdir()
+    monkeypatch.setattr(config_service, "LAUNCH_CONFIG_PATH", launch / "launch.json")
+    monkeypatch.setattr(
+        config_service, "APPLIED_LAUNCH_CONFIG_PATH", launch / "applied_launch.json"
+    )
+    monkeypatch.setattr(config_service, "RESTART_SIGNAL_PATH", launch / "restart")
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_server_home() -> Iterator[None]:
+    """Fail any SIEM test that opens a path under the real ~/.cidx-server."""
+    _home_guard.start()
+    try:
+        yield
+    finally:
+        hits = _home_guard.stop()
+    assert not hits, (
+        f"test touched the real {_home_guard.REAL_SERVER_HOME}:\n" + "\n".join(hits)
+    )
 
 
 def new_scratch_dir() -> Path:

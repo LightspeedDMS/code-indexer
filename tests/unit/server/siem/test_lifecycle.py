@@ -109,7 +109,9 @@ def test_startup_failure_degrades_and_is_recorded(wired: SimpleNamespace) -> Non
 
 
 def test_health_collection_failure_is_a_warning(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     """A SIEM health collection that raises is logged at WARNING (it stays
     fail-open: no reason, no error), never swallowed at DEBUG."""
@@ -122,9 +124,18 @@ def test_health_collection_failure_is_a_warning(
         def health_inputs(self) -> Any:
             raise RuntimeError("collector-broke")
 
-    state = app_mod.app.state
-    monkeypatch.setattr(state, "siem_delivery_startup_error", None, raising=False)
-    monkeypatch.setattr(state, "siem_delivery_scheduler", _Broken(), raising=False)
+    # The module's ``app`` is lazy (PEP 562): ANY attribute access builds the
+    # real application against the real ~/.cidx-server.  Plant a stand-in
+    # straight in the module dict instead (removed again on teardown).
+    state = SimpleNamespace(
+        siem_delivery_startup_error=None, siem_delivery_scheduler=_Broken()
+    )
+    monkeypatch.setitem(app_mod.__dict__, "app", SimpleNamespace(state=state))
+    # HealthCheckService() reads thresholds through the process-wide config
+    # service, which defaults to the real home: give it a tmp one.
+    svc = config_service_mod.ConfigService(server_dir_path=str(tmp_path))
+    svc.load_config()
+    monkeypatch.setattr(config_service_mod, "_config_service", svc)
     with caplog.at_level(logging.WARNING):
         result = HealthCheckService()._collect_siem_delivery_failures()
     assert result == (False, False, [])
