@@ -56,6 +56,70 @@ RUN pip install ./plugins/cidx_orchestrator_invoker
 COPY plugins/cidx_git_backend ./plugins/cidx_git_backend
 RUN pip install ./plugins/cidx_git_backend
 
+# ---- xray-cli build stage ----
+# WHY THIS STAGE EXISTS: xray_search / xray_explore / xray_search_batch /
+# xray_analyze_graph have NO Python fallback -- they shell out to the native
+# `xray-cli` binary unconditionally. Nothing ever built or shipped that binary
+# into this image, and `pip install` cannot: it is a Rust artifact, and
+# pyproject's `packages = ["src/code_indexer"]` would not carry it even if it
+# existed. The Python-side default location (`<project root>/rust/target/
+# release/xray-cli`, found by walking up from the installed package looking for
+# a `rust/` directory) cannot resolve under /usr/local/lib/python3.11/
+# site-packages either, because `rust/` is not there and never was. Result
+# before this stage: every xray call in the cluster failed to find a binary.
+#
+# `rust:slim-bookworm` deliberately, NOT a pinned `rust:<version>-slim` tag:
+# the authoritative pin is rust/rust-toolchain.toml (channel = "1.98.0"), and
+# rustup -- which the official rust images ship -- auto-detects that file for
+# any cargo invocation at or below its directory and auto-installs the pinned
+# toolchain. Naming a version in this Dockerfile too would be a second copy of
+# the pin that can silently drift from the first; that file's own header
+# already documents what drift costs (CI run 34135704952). The base tag only
+# supplies rustup + a cc/linker; which rustc actually compiles the binary is
+# decided by rust-toolchain.toml. `bookworm` matches both other stages so the
+# glibc the binary links against is the glibc it runs on.
+FROM rust:slim-bookworm AS xray-builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_TERM_COLOR=never
+
+# The tree-sitter crate (and the ~20 tree-sitter-<lang> grammar crates
+# xray-core depends on) compile C sources via a build script, so a C toolchain
+# is a hard build requirement, not a convenience. The rust base image already
+# ships gcc; installing build-essential makes the dependency explicit and
+# survives a base-image change that drops it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# The rust/ tree was previously not COPYed into ANY stage -- the build context
+# carried it, nothing consumed it. Copied whole (not member-by-member) because
+# the workspace manifest + lockfile + both member crates must agree, and
+# xray-core `include_str!`s rust-toolchain.toml to embed the pinned channel
+# into the binary (it passes RUSTUP_TOOLCHAIN=<channel> to the rustc it invokes
+# at query time) -- a partial copy would silently change the artifact.
+COPY rust/ /xray/rust/
+
+# cargo MUST run from inside the workspace: that is how it finds Cargo.toml,
+# and equally how rustup finds rust-toolchain.toml (its override mechanism
+# searches the cwd and its ancestors). Running from /xray would build with the
+# base image's default toolchain instead of the pinned one -- or, as it did on
+# the first attempt here, not build at all.
+WORKDIR /xray/rust
+
+# -p xray-cli, not a bare `cargo build --release`: the workspace also contains
+# xray-core's dev/bench targets, and only this one binary is shipped.
+#
+# The second command is a build-time smoke test: it fails the image here,
+# where the error is readable, rather than in a pod at query time, if the
+# binary did not link or cannot execute on this glibc. It must be a REAL flag
+# that exits non-zero when broken -- xray-cli treats an unrecognised argument
+# as a scan target and still exits 0, so `--help` would pass unconditionally.
+# `--print-graph-extractor-extensions` does no compilation and no repo walk,
+# so it is cheap as well as genuinely discriminating.
+RUN cargo build --release -p xray-cli \
+    && ./target/release/xray-cli --print-graph-extractor-extensions > /dev/null
+
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm
 
@@ -117,6 +181,33 @@ ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 # Bring over the installed site-packages + the `cidx` console script from the builder.
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+
+# The xray-cli binary ONLY -- not cargo, not rustc, not ~/.cargo, not the
+# target/ directory (hundreds of MB of intermediate artifacts for a single
+# ~10MB executable). MUST come after the `COPY --from=builder /usr/local/bin`
+# above, which replaces the whole directory and would otherwise delete it.
+COPY --from=xray-builder /xray/rust/target/release/xray-cli /usr/local/bin/xray-cli
+
+# Tell the Python side where the binary is. Without this the backend falls back
+# to looking for `<some ancestor of the installed package>/rust/target/release/
+# xray-cli`, which does not exist in a site-packages install -- see
+# code_indexer/xray/rust_backend.py::resolve_xray_cli_path for the full
+# resolution order. This is the deployment half of that override: the path is a
+# property of how THIS IMAGE was built, so it belongs next to the COPY that
+# decides it, not in a runtime config file.
+ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
+
+# KNOWN GAP (not fixed here, deliberately): xray-cli compiles each evaluator at
+# QUERY time by spawning `rustc` (rust/xray-core/src/compiler/rustc_driver.rs,
+# with RUSTUP_TOOLCHAIN pinned to the channel embedded from
+# rust/rust-toolchain.toml). This stage ships the binary but no rustc, so a
+# scan here reaches xray-cli and then fails with an Infrastructure-kind
+# CompileError ("Failed to invoke rustc ... Is rustc installed and on PATH?").
+# That is a loud, correct, actionable failure rather than the silent
+# "scanned everything, found nothing" this image used to produce -- but it is
+# NOT yet a working xray. Closing it means either adding the pinned rustup
+# toolchain to this stage (image size cost) or moving evaluator compilation out
+# of the serving pod; that is a deployment decision, not a Dockerfile detail.
 
 # Non-root runtime. /data is the server data dir — the Deployment mounts a volume here.
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
