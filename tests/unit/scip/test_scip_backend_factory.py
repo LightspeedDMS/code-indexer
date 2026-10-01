@@ -35,7 +35,7 @@ class TestLocalMap:
 class TestDelegatedMap:
     def test_delegated_map_all_languages_share_one_instance(self, tmp_path):
         m = ScipBackendFactory.create_indexer_map(
-            "delegated", repo_root=tmp_path, workspace_mcp_config=_wsm_config()
+            "delegated", repo_root=tmp_path, endpoint_config=_wsm_config()
         )
         assert set(m) == {"java", "kotlin", "typescript", "python", "csharp", "go"}
         instances = set(id(v) for v in m.values())
@@ -43,13 +43,13 @@ class TestDelegatedMap:
         assert all(isinstance(v, DelegatedIndexer) for v in m.values())
 
     def test_delegated_requires_config(self, tmp_path):
-        with pytest.raises(ValueError, match="workspace_mcp_config is required"):
+        with pytest.raises(ValueError, match="endpoint_config is required"):
             ScipBackendFactory.create_indexer_map("delegated", repo_root=tmp_path)
 
     def test_delegated_requires_repo_root(self):
         with pytest.raises(ValueError, match="repo_root is required"):
             ScipBackendFactory.create_indexer_map(
-                "delegated", workspace_mcp_config=_wsm_config()
+                "delegated", endpoint_config=_wsm_config()
             )
 
 

@@ -523,11 +523,14 @@ class TestDelegatedIndexerFailure:
         assert "EXACTLY ONE" in result.stderr
         fake.post.assert_not_called()
 
-    def test_no_endpoint_failure_names_scip_sandbox_endpoint(self, tmp_path):
-        """EVO-65365: the endpoint resolves from scip_sandbox (fallback
-        workspace_mcp), so the no-endpoint fail-soft message must reference
-        ``scip_sandbox`` — pointing an operator only at ``workspace_mcp.endpoint``
-        misdirects them to the correct-for-ITS-backend clone-delegation key."""
+    def test_no_endpoint_fails_soft_without_naming_a_config_key(self, tmp_path):
+        """An unconfigured endpoint fails soft, and says so generically.
+
+        The indexer takes an ``endpoint``/``api_key`` pair and does not know which
+        config key supplied it, so it cannot name one without guessing. Naming the
+        key is the startup wiring's job: ``validate_scip_backend_config`` fails loud
+        at boot and names ``scip_sandbox.endpoint`` (and the ``workspace_mcp.endpoint``
+        fallback), which is both earlier and more specific than this path."""
         fake = _fake_requests(
             post_return=_fake_response(payload=_rpc_result(exit_code=0))
         )
@@ -541,7 +544,8 @@ class TestDelegatedIndexerFailure:
             tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
         )
         assert result.status == IndexerStatus.FAILED
-        assert "scip_sandbox" in result.stderr
+        assert "no endpoint configured" in result.stderr
+        assert "scip_sandbox" not in result.stderr
         fake.post.assert_not_called()
 
     def test_missing_language_is_failure(self, tmp_path):

@@ -1,9 +1,19 @@
-"""Delegated SCIP indexer (EVO-65021).
+"""SCIP indexer that delegates the compile step to an MCP server.
 
-Mirrors the ``DelegatedCloneBackend`` seam (EVO-64616): instead of running a
-build toolchain inside the (toolchain-less) cidx indexing pod, the *compile*
-step is delegated to **sandbox-mcp**, which already builds repos with resolved
-dependencies. cidx stays the source of truth for *what* to build (project
+A SCIP index for a compiled language needs a working build toolchain and
+resolved dependencies. An indexing process that has neither can still produce
+one by handing the compile step to a service that does. This indexer is the
+generic half of that arrangement: it calls a named MCP tool over JSON-RPC and
+reads the index the tool writes into a shared workspace.
+
+Nothing here is specific to a particular server. The target is supplied as an
+``endpoint``/``api_key`` pair (see ``utils.remote_endpoint``), and the tool
+name, JSON-RPC path, health path and timeout are all constructor arguments.
+The defaults match the deployment this was written for -- a sandbox-mcp
+service exposing ``sandbox_scip`` -- but any MCP server offering an equivalent
+tool works without changing this module.
+
+Originally EVO-65021; mirrors the ``DelegatedCloneBackend`` seam (EVO-64616). cidx stays the source of truth for *what* to build (project
 discovery) and for the on-disk output path; the sandbox only runs the one
 indexer it is told and writes ``index.scip`` into the shared workspace.
 
@@ -30,30 +40,26 @@ Contract (FROZEN — ``EVO-65021 FROZEN-CONTRACT.md``):
   falls back to a local build — the pod has no toolchain and that is exactly the
   work this backend exists to move off cidx.
 
-Auth/transport (contract §5): a direct in-cluster JSON-RPC call reusing the same
-client-config surface cidx already uses for the delegated clone backend
-(``WorkspaceMcpConfig`` — endpoint + bearer api_key), pointed at the sandbox-mcp
-service. EVO-65365: the endpoint this indexer receives is resolved by
-``scip_backend_wiring._resolve_scip_sandbox_config`` from the ``scip_sandbox``
-config block (primary), falling back to ``workspace_mcp`` for backward
-compatibility — the DelegatedIndexer itself is source-agnostic and just consumes
-the resolved endpoint. No API-GW authorizer secret is distributed to cidx; the
+Auth/transport: a direct JSON-RPC call carrying a bearer ``api_key``, against the
+base ``endpoint`` -- the same two-field surface the delegated clone backend uses
+(``utils.remote_endpoint.RemoteServiceEndpoint``). Which config key supplies that
+pair, and any fallback between keys, is the startup wiring's business: this
+indexer is source-agnostic and simply consumes the resolved endpoint. No API-GW authorizer secret is distributed to cidx; the
 route is constrained by K8s NetworkPolicy + service account.
 """
 
 from __future__ import annotations
+from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
 
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
 from .base import IndexerResult, IndexerStatus, SCIPIndexer
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +112,7 @@ class DelegatedIndexer(SCIPIndexer):
 
     def __init__(
         self,
-        config: "WorkspaceMcpConfig",
+        config: RemoteServiceEndpoint,
         repo_root: Path,
         *,
         tool_name: str = _SCIP_TOOL_NAME,
@@ -117,12 +123,12 @@ class DelegatedIndexer(SCIPIndexer):
         """Initialize the delegated indexer.
 
         Args:
-            config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key),
-                resolved by ``_resolve_scip_sandbox_config`` from the
-                ``scip_sandbox`` block (primary) or ``workspace_mcp`` (fallback,
-                EVO-65365), whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
-                ``http://sandbox-mcp:8200``); the JSON-RPC front door and health
-                routes are appended per the sandbox contract (§5, seam #2).
+            config: Anything exposing ``endpoint`` and ``api_key``
+                (:class:`~code_indexer.utils.remote_endpoint.RemoteServiceEndpoint`).
+                ``endpoint`` is the MCP server's *base* URL (e.g.
+                ``http://sandbox-mcp:8200``); the JSON-RPC and health paths below
+                are appended to it. Which config key supplies this is resolved by
+                the startup wiring, not here.
             repo_root: Golden-repo root (== the sandbox ``/workspace`` mount).
                 Used to derive the workspace-relative ``project_path`` /
                 ``output_dir`` the sandbox expects.
@@ -293,9 +299,9 @@ class DelegatedIndexer(SCIPIndexer):
         if not self._endpoint:
             return self._failure(
                 start_time,
-                "DelegatedIndexer has no endpoint configured (set "
-                "scip_sandbox.endpoint, or workspace_mcp.endpoint as a fallback, "
-                "pointed at sandbox-mcp).",
+                "DelegatedIndexer has no endpoint configured. The startup "
+                "wiring resolves which config key supplies it and reports the "
+                "deployment-specific name; see scip_backend_wiring.",
             )
 
         try:

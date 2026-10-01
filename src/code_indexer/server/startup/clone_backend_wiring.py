@@ -449,7 +449,7 @@ def build_snapshot_manager(
         backend = CloneBackendFactory.create(
             clone_backend_type="delegated",
             versioned_base=versioned_base,
-            workspace_mcp_config=wsm_cfg,
+            endpoint_config=wsm_cfg,
         )
         logger.info(
             "VersionedSnapshotManager: using DelegatedCloneBackend (workspace-mcp=%s)",

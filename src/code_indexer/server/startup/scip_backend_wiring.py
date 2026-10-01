@@ -199,7 +199,7 @@ def build_scip_generator(
         indexer_map = ScipBackendFactory.create_indexer_map(
             "delegated",
             repo_root=Path(repo_root),
-            workspace_mcp_config=wsm_cfg,
+            endpoint_config=wsm_cfg,
         )
         logger.info(
             "SCIPGenerator: using DelegatedIndexer (sandbox-mcp=%s)",

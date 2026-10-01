@@ -11,6 +11,7 @@ Story #510 — CloneBackend Abstraction and CoW Daemon Integration.
 """
 
 from __future__ import annotations
+from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
 
 import errno
 import logging
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         CowDaemonConfig,
         OntapConfig,
-        WorkspaceMcpConfig,
     )  # pragma: no cover
     from code_indexer.server.storage.shared.ontap_flexclone_client import (
         OntapFlexCloneClient,
@@ -910,7 +910,7 @@ class DelegatedCloneBackend:
 
     def __init__(
         self,
-        config: "WorkspaceMcpConfig",
+        config: RemoteServiceEndpoint,
         versioned_base: str = "",
         visibility_waiter: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -1062,7 +1062,7 @@ class CloneBackendFactory:
         versioned_base: str = "",
         ontap_config: Optional["OntapConfig"] = None,
         cow_daemon_config: Optional["CowDaemonConfig"] = None,
-        workspace_mcp_config: Optional["WorkspaceMcpConfig"] = None,
+        endpoint_config: Optional[RemoteServiceEndpoint] = None,
     ) -> CloneBackend:
         """Instantiate and return the requested CloneBackend.
 
@@ -1078,9 +1078,10 @@ class CloneBackendFactory:
             OntapConfig instance, required when ``clone_backend_type="ontap"``.
         cow_daemon_config:
             CowDaemonConfig instance, required when ``clone_backend_type="cow-daemon"``.
-        workspace_mcp_config:
-            WorkspaceMcpConfig instance, required when
-            ``clone_backend_type="delegated"``.
+        endpoint_config:
+            Anything exposing ``endpoint`` and ``api_key`` for the service that
+            performs the clone (see ``utils.remote_endpoint``); required for
+            ``"delegated"``.
 
         Raises
         ------
@@ -1120,12 +1121,12 @@ class CloneBackendFactory:
             return CowDaemonBackend(config=cow_daemon_config)
 
         if clone_backend_type == "delegated":
-            if workspace_mcp_config is None:
+            if endpoint_config is None:
                 raise ValueError(
-                    "workspace_mcp_config is required when clone_backend_type='delegated'"
+                    "endpoint_config is required when clone_backend_type='delegated'"
                 )
             return DelegatedCloneBackend(
-                config=workspace_mcp_config, versioned_base=versioned_base
+                config=endpoint_config, versioned_base=versioned_base
             )
 
         raise ValueError(

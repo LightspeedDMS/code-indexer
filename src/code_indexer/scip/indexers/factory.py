@@ -8,7 +8,7 @@ injected into ``SCIPGenerator``.
   the canonical home of the local map (previously inlined in
   ``SCIPGenerator.__init__``), so ``local`` behaviour is unchanged.
 * ``"delegated"`` → a single :class:`DelegatedIndexer` shared across every
-  language (language is passed per call), addressed at the sandbox-mcp endpoint.
+  language (language is passed per call), addressed at the configured endpoint.
 
 The factory itself does NOT health-check or read ``ServerConfig`` — that is the
 startup wiring's job (``server/startup/scip_backend_wiring.py``,
@@ -19,18 +19,16 @@ startup wiring's job (``server/startup/scip_backend_wiring.py``,
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import Dict, Optional
 
 from .base import SCIPIndexer
 from .csharp import CSharpIndexer
+from code_indexer.utils.remote_endpoint import RemoteServiceEndpoint
 from .delegated import DelegatedIndexer
 from .go import GoIndexer
 from .java import JavaIndexer
 from .python import PythonIndexer
 from .typescript import TypeScriptIndexer
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
 
 class ScipBackendFactory:
@@ -73,7 +71,7 @@ class ScipBackendFactory:
         scip_backend_type: str,
         *,
         repo_root: Optional[Path] = None,
-        workspace_mcp_config: Optional["WorkspaceMcpConfig"] = None,
+        endpoint_config: Optional[RemoteServiceEndpoint] = None,
     ) -> Dict[str, SCIPIndexer]:
         """Build the indexer map for *scip_backend_type*.
 
@@ -84,9 +82,11 @@ class ScipBackendFactory:
         repo_root:
             Golden-repo root (== sandbox ``/workspace``). Required for
             ``"delegated"`` so the indexer can derive workspace-relative paths.
-        workspace_mcp_config:
-            ``WorkspaceMcpConfig`` (endpoint + api_key) pointed at sandbox-mcp;
-            required for ``"delegated"``.
+        endpoint_config:
+            Anything exposing ``endpoint`` and ``api_key`` for the service that
+            performs the build (see ``utils.remote_endpoint``); required for
+            ``"delegated"``. Which config key supplies it is the startup
+            wiring's concern, not this factory's.
 
         Raises
         ------
@@ -97,17 +97,16 @@ class ScipBackendFactory:
             return ScipBackendFactory.create_local_indexer_map()
 
         if scip_backend_type == "delegated":
-            if workspace_mcp_config is None:
+            if endpoint_config is None:
                 raise ValueError(
-                    "workspace_mcp_config is required when "
-                    "scip_backend_type='delegated'"
+                    "endpoint_config is required when scip_backend_type='delegated'"
                 )
             if repo_root is None:
                 raise ValueError(
                     "repo_root is required when scip_backend_type='delegated'"
                 )
             delegated = DelegatedIndexer(
-                config=workspace_mcp_config, repo_root=Path(repo_root)
+                config=endpoint_config, repo_root=Path(repo_root)
             )
             # Every language shares the one instance (language is passed per
             # call), mirroring the local map's java/kotlin sharing.

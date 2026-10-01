@@ -457,16 +457,16 @@ class TestCloneBackendFactory:
         backend = CloneBackendFactory.create(
             clone_backend_type="delegated",
             versioned_base="/tmp/versioned",
-            workspace_mcp_config=wsm_config,
+            endpoint_config=wsm_config,
         )
 
         assert isinstance(backend, DelegatedCloneBackend)
 
-    def test_delegated_backend_requires_workspace_mcp_config(self):
+    def test_delegated_backend_requires_endpoint_config(self):
         """Factory raises ValueError when delegated backend lacks its config."""
         from code_indexer.server.storage.shared.clone_backend import CloneBackendFactory
 
-        with pytest.raises(ValueError, match="workspace_mcp_config is required"):
+        with pytest.raises(ValueError, match="endpoint_config is required"):
             CloneBackendFactory.create(clone_backend_type="delegated")
 
     def test_invalid_backend_type_raises_value_error(self):
