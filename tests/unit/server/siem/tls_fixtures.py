@@ -155,7 +155,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 class _ConnectHandler(http.server.BaseHTTPRequestHandler):
     def do_CONNECT(self) -> None:  # noqa: N802 - http.server API
-        import select
         import socket
 
         host, _, port = self.path.rpartition(":")
@@ -163,17 +162,8 @@ class _ConnectHandler(http.server.BaseHTTPRequestHandler):
         upstream = socket.create_connection((host, int(port)), timeout=10)
         self.send_response(200, "Connection established")
         self.end_headers()
-        client = self.connection
         try:
-            for _ in range(10_000):  # bounded relay loop
-                readable, _, _ = select.select([client, upstream], [], [], 5)
-                if not readable:
-                    return
-                for sock in readable:
-                    data = sock.recv(65536)
-                    if not data:
-                        return
-                    (upstream if sock is client else client).sendall(data)
+            _relay(self.connection, upstream)
         finally:
             upstream.close()
 
@@ -215,26 +205,41 @@ class ConnectProxy:
             self._thread.join(timeout=10)
 
 
-def _relay(a: Any, b: Any) -> None:
-    import select
+def _pump(readable: List[Any], a: Any, b: Any) -> bool:
+    """Forward what each readable socket has: True to keep relaying, False
+    once a side closed or failed."""
+    for sock in readable:
+        try:
+            data = sock.recv(65536)
+            # a selector cannot see bytes already decrypted and buffered
+            # inside an SSL socket: drain them now, or the relay stalls
+            pending = getattr(sock, "pending", None)
+            while data and pending is not None and pending() > 0:
+                data += sock.recv(pending())
+        except (OSError, ssl.SSLError):
+            return False
+        if not data:
+            return False
+        (b if sock is a else a).sendall(data)
+    return True
 
-    for _ in range(100_000):  # bounded relay loop
-        readable, _, _ = select.select([a, b], [], [], 10)
-        if not readable:
-            return
-        for sock in readable:
-            try:
-                data = sock.recv(65536)
-                # select() cannot see bytes already decrypted and buffered
-                # inside an SSL socket: drain them now, or the relay stalls
-                pending = getattr(sock, "pending", None)
-                while data and pending is not None and pending() > 0:
-                    data += sock.recv(pending())
-            except (OSError, ssl.SSLError):
+
+def _relay(a: Any, b: Any) -> None:
+    """Pipe bytes both ways until a side closes or both idle for 10 s.
+
+    ``selectors`` (epoll/poll), never ``select.select``: a long-running test
+    process holds socket fds above FD_SETSIZE (1024), which select() rejects."""
+    import selectors
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(a, selectors.EVENT_READ)
+        selector.register(b, selectors.EVENT_READ)
+        for _ in range(100_000):  # bounded relay loop
+            events = selector.select(timeout=10)
+            if not events:
                 return
-            if not data:
+            if not _pump([key.fileobj for key, _mask in events], a, b):
                 return
-            (b if sock is a else a).sendall(data)
 
 
 class TlsTerminator:

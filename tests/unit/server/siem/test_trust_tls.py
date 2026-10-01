@@ -5,10 +5,15 @@ disabled (a hostname mismatch still fails with the CA trusted)."""
 
 from __future__ import annotations
 
+import http.server
 import json
+import os
+import ssl
+import threading
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Any, Iterator, List, Tuple
 
+import httpx
 import pytest
 
 from code_indexer.server.fault_injection.http_client_factory import HttpClientFactory
@@ -26,6 +31,7 @@ from .tls_fixtures import (
     ConnectProxy,
     IssuedCert,
     TlsEndpoint,
+    TlsTerminator,
     make_ca,
     make_leaf,
 )
@@ -134,6 +140,74 @@ def test_no_proxy_bypasses_the_proxy_with_a_trusted_ca(
         probe, import_class = _legs(endpoint, siem_sidecar, test_ca.pem)
         assert probe is ProbeResult.OK and import_class == "accepted"
         assert proxy.targets == []
+
+
+_FD_SETSIZE = 1024
+
+
+@pytest.fixture()
+def high_fds() -> Iterator[None]:
+    """Hold enough dummy fds that every socket opened next is numbered above
+    FD_SETSIZE, as in a long-running gate process (select() cannot)."""
+    held: List[int] = []
+    try:
+        while True:
+            fd = os.open(os.devnull, os.O_RDONLY)
+            held.append(fd)
+            if fd > _FD_SETSIZE + 64:
+                break
+        yield
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+def test_connect_proxy_relays_with_fds_above_fd_setsize(
+    high_fds: None,
+    siem_sidecar: SidecarHandle,
+    test_ca: IssuedCert,
+    scratch_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TlsEndpoint(make_leaf(test_ca), scratch_dir) as endpoint:
+        with ConnectProxy() as proxy:
+            _proxy_env(monkeypatch, proxy.url, "")
+            probe, import_class = _legs(endpoint, siem_sidecar, test_ca.pem)
+            assert probe is ProbeResult.OK and import_class == "accepted"
+            assert len(proxy.targets) == 2
+
+
+class _PlainUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = b"x" * 70_000  # several TLS records back through the relay
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: Any) -> None:
+        return
+
+
+def test_tls_front_relays_with_fds_above_fd_setsize(
+    high_fds: None, test_ca: IssuedCert, scratch_dir: Path
+) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _PlainUpstream)
+    worker = threading.Thread(target=upstream.serve_forever, daemon=True)
+    worker.start()
+    try:
+        port = int(upstream.server_address[1])
+        with TlsTerminator(make_leaf(test_ca), scratch_dir, port) as front:
+            context = ssl.create_default_context()
+            context.load_verify_locations(cadata=test_ca.pem)
+            with httpx.Client(verify=context, timeout=5.0) as client:
+                resp = client.post(front.origin + "/x", content=b"y" * 50_000)
+            assert resp.status_code == 200 and len(resp.content) == 70_000
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        worker.join(timeout=10)
 
 
 def test_no_siem_module_can_disable_verification() -> None:
