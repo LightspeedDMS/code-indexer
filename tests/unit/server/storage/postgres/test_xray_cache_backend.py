@@ -251,10 +251,28 @@ def test_store_swallows_pg_exception_does_not_raise() -> None:
     backend.store("any", "any", b"bytes", compile_ms=0)  # must not raise
 
 
-def test_ttl_constant_is_300() -> None:
-    """XRAY_CACHE_TTL_SECONDS must be 300 (5 minutes)."""
+def test_ttl_outlives_a_single_query_burst() -> None:
+    """The TTL must be long enough for the cache to be worth having.
+
+    This replaces an assertion that pinned the constant to 300. Pinning the
+    number tested that nobody edited the line, not that the cache works: at 300s
+    any evaluator not re-run within five minutes was recompiled from scratch on
+    the next query, on every node, which is the cost this table exists to
+    remove. The TTL cannot protect correctness -- source_hash is the composite
+    identity (source + ABI + rustc_version) and fetch() re-filters
+    rustc_version, so a key can only ever map to one correct .so and age cannot
+    make a row wrong -- so what is worth asserting is that it bounds capacity
+    without defeating reuse.
+    """
     from code_indexer.server.storage.postgres.xray_cache_backend import (
         XRAY_CACHE_TTL_SECONDS,
     )
 
-    assert XRAY_CACHE_TTL_SECONDS == 300
+    assert XRAY_CACHE_TTL_SECONDS >= 24 * 60 * 60, (
+        "a sub-day TTL recompiles evaluators that are merely infrequent, which "
+        "is the case the cluster cache is for"
+    )
+    assert XRAY_CACHE_TTL_SECONDS <= 30 * 24 * 60 * 60, (
+        "the TTL is the only thing reclaiming rows made unreachable by a "
+        "toolchain or ABI bump (_cleanup_expired is lazy, on store() only)"
+    )

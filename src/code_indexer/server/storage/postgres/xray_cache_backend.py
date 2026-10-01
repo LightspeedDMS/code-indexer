@@ -11,8 +11,10 @@ Table: xray_evaluator_cache
   compile_ms    BIGINT            — compilation time in milliseconds
 
 TTL is enforced ON READ ONLY: fetch() passes a cutoff timestamp in the WHERE
-clause so a stale row can never be SERVED, regardless of whether it has been
-physically deleted yet. Deletion itself is LAZY -- _cleanup_expired() is
+clause so an expired row can never be SERVED, regardless of whether it has been
+physically deleted yet. The TTL bounds CAPACITY, not correctness -- see the
+XRAY_CACHE_TTL_SECONDS comment for why a row can never go stale in the sense of
+becoming wrong. Deletion itself is LAZY -- _cleanup_expired() is
 called only as a side effect of store(), so an idle cluster (no new
 evaluator ever compiled) leaves expired rows sitting in the table
 indefinitely; nothing proactively sweeps them. This is a correctness/
@@ -51,7 +53,26 @@ from .connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
-XRAY_CACHE_TTL_SECONDS = 300  # 5 minutes
+# 7 days. This is a CAPACITY bound, not a correctness one, and the two want very
+# different numbers.
+#
+# `source_hash` is not a hash of the evaluator source alone -- it is the composite
+# identity sha256(assembled_source) + XRAY_ABI_VERSION + rustc_version (see the
+# module docstring), and fetch() filters on rustc_version a second time. So the
+# key fully determines the artifact: a given key can only ever map to one correct
+# .so, and no passage of time can make a stored row WRONG. A toolchain or ABI
+# change does not invalidate rows, it changes the key, which makes the old rows
+# unreachable rather than stale -- and unreachable rows are exactly what
+# _cleanup_expired() exists to reclaim.
+#
+# At 300s the TTL was doing the opposite of its job: it could not prevent a wrong
+# answer (nothing can produce one), while it guaranteed that any evaluator not
+# re-run within five minutes was recompiled from scratch on the next query, on
+# every node, forever. That is the cost this cache was built to remove -- and it
+# fell hardest on exactly the queries worth caching, the occasional expensive
+# ones rather than the hot loop. 7 days keeps the table bounded against toolchain
+# churn while letting a compiled evaluator actually be reused.
+XRAY_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 
 class XrayCachePostgresBackend:
