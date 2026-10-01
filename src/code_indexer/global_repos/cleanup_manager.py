@@ -382,7 +382,13 @@ class CleanupManager:
             if soft_limit <= 0:
                 return False
             return len(os.listdir(fd_dir)) / soft_limit >= self.FD_USAGE_THRESHOLD
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_is_fd_usage_high: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return False
 
     # ------------------------------------------------------------------

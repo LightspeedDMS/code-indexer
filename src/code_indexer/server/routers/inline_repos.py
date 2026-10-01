@@ -1709,7 +1709,13 @@ def register_repo_routes(
                         storage_info["index_size_mb"] = round(
                             index_size / (1024 * 1024), 2
                         )
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "get_repository_info: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     storage_info["disk_usage_mb"] = 0
                     storage_info["index_size_mb"] = 0
 
@@ -1739,7 +1745,13 @@ def register_repo_routes(
                         )
 
                     result["branches"] = formatted_branches
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "get_repository_info: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     result["branches"] = []
 
             if health:
@@ -1815,7 +1827,13 @@ def register_repo_routes(
                                             "timestamp": "unknown",
                                         }
                                     )
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "get_repository_info: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     pass  # Git history unavailable
 
                 # Add sync history from repository metadata

@@ -72,7 +72,13 @@ def _get_correlation_id() -> Optional[str]:
         return correlation_id
     except ImportError:
         return None
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "_get_correlation_id: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         return None
 
 

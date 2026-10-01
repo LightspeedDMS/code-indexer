@@ -1218,7 +1218,13 @@ def _get_available_repos(user: "User") -> List[str]:
             )
             return filtered
         return all_repos
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "_get_available_repos: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         return []
 
 
@@ -1319,7 +1325,13 @@ def _get_temporal_status(repo_aliases: List[str]) -> Dict[str, Any]:
             )
 
         return status
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "_get_temporal_status: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         return {}
 
 

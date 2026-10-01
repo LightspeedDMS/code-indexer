@@ -304,7 +304,13 @@ def register_repos_v2_routes(
 
                         return repository_data
 
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_repository_details_v2: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             # Continue to try golden repositories
             pass
 
@@ -865,7 +871,13 @@ def register_repos_v2_routes(
                             chunk.decode("utf-8")
                         except UnicodeDecodeError:
                             is_binary = True
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "list_repository_files: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 is_binary = True
 
             if is_binary:

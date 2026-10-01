@@ -3067,7 +3067,13 @@ def make_lifespan(
                         )
                     if not _this_node_id:
                         _this_node_id = _socket_sentinel.gethostname()
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "lifespan: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     _this_node_id = _socket_sentinel.gethostname()
 
                 for _stale_lock in _glob_sentinel.glob(
@@ -4307,7 +4313,13 @@ def make_lifespan(
                             _shard_replicas = max(
                                 1, int(_cluster_cfg.get("shard_replicas", 1))
                             )
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "lifespan: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     pass
 
                 if _pg_dsn:
@@ -4465,7 +4477,13 @@ def make_lifespan(
                                             )
                                             for r in grm.list_golden_repos()
                                         ]
-                                    except Exception:
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "_list_shardable_repos: swallowed %s: %s",
+                                            type(exc).__name__,
+                                            exc,
+                                            exc_info=True,
+                                        )
                                         return []
 
                                 def _warm_repo(alias: str) -> None:
@@ -5739,7 +5757,13 @@ def make_lifespan(
                 for _h in list(_root.handlers):
                     if isinstance(_h, IdentityQueueHandler):
                         _root.removeHandler(_h)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "lifespan: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 pass
 
         # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).

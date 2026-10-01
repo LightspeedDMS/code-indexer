@@ -40,6 +40,8 @@ from code_indexer.server.services.job_tracker import (
     is_restart_interruption_error,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         ServerResourceConfig,
@@ -1505,7 +1507,13 @@ class BackgroundJobManager:
                                 "Bug #584: Detected cross-node cancellation for job %s",
                                 job_id,
                             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_check_db_cancellation: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             pass  # Best-effort — don't break progress reporting
 
     def _close_thread_connections_on_all_managers(self, job_id: str) -> None:

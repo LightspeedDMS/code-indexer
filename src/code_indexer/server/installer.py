@@ -322,7 +322,13 @@ WantedBy=multi-user.target
                 }
             else:
                 return {"installed": True, "configured": False}
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_installation_info: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return {"installed": True, "configured": False, "error": "Invalid config"}
 
     def uninstall(self) -> bool:

@@ -613,7 +613,13 @@ class RefreshTokenManager:
                     "username": username,
                     "role": user_role,
                 }
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "validate_and_rotate_refresh_token: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 # Fallback if user lookup fails
                 user_data = {
                     "username": username,

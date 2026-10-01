@@ -1108,7 +1108,13 @@ class DeploymentExecutor:
                     return True
             return False
 
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_pip_supports_break_system_packages: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             # Swallow all errors — conservatively omit the flag
             return False
 
@@ -1551,7 +1557,13 @@ class DeploymentExecutor:
             if len(parts) < 2:
                 return None
             return parts[1]
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_get_hnswlib_submodule_commit: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return None
 
     def _get_last_built_hnswlib_commit(self) -> Optional[str]:
@@ -3749,7 +3761,13 @@ class DeploymentExecutor:
                     version = m.group(1)
                 else:
                     raise ValueError("no __version__ line found")
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "_write_status_file: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 # Fall back to cached import when file is missing or unparseable
                 try:
                     from code_indexer import __version__

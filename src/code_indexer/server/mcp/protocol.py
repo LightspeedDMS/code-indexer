@@ -1248,7 +1248,13 @@ async def mcp_endpoint(
                     logger.debug("Cookie token refresh skipped: %s", _refresh_err)
 
         body = await request.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "mcp_endpoint: swallowed %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         # Parse error - return JSON-RPC error
         return create_jsonrpc_error(-32700, "Parse error: Invalid JSON", None)
 

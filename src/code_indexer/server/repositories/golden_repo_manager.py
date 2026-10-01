@@ -5828,7 +5828,13 @@ class GoldenRepoManager:
                     conn.close()
                     if count > 0:
                         return True
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "_index_exists: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     # Database corruption or schema issue - treat as not existing
                     continue
 

@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Set, Dict, Optional
 from threading import Lock
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PasswordChangeSessionManager:
@@ -85,7 +88,13 @@ class PasswordChangeSessionManager:
                 self._password_change_timestamps = data.get(
                     "password_change_timestamps", {}
                 )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "_load_session_data: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             # If there's any error loading, start with empty data
             self._invalidated_sessions = {}
             self._password_change_timestamps = {}

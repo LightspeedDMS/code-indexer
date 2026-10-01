@@ -486,7 +486,13 @@ def register_auth_routes(
                         user_agent=user_agent,
                     )
                     return response
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "process_registration: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     # Even if creation fails, return generic success
                     response = auth_error_handler.create_registration_response(
                         email=registration_data.email,
@@ -550,7 +556,13 @@ def register_auth_routes(
                     user_agent=user_agent,
                 )
                 return response
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "process_password_reset: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 # Even if process fails, return generic success
                 response = auth_error_handler.create_password_reset_response(
                     email=reset_data.email,

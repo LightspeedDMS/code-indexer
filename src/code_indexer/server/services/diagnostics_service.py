@@ -34,6 +34,9 @@ from code_indexer.server.services.ci_token_manager import (
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+import logging
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import DiagnosticsBackend
@@ -1294,7 +1297,13 @@ class DiagnosticsService:
                             except (ValueError, IndexError):
                                 # Skip malformed version directories (e.g., v_, v_abc)
                                 continue
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "_validate_hnsw_indexes: swallowed %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     # If scanning fails, fall back to clone_path
                     pass
 

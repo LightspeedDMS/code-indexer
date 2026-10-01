@@ -452,7 +452,13 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
                 if body_client_id and body_client_secret:
                     client_id = body_client_id
                     client_secret = body_client_secret
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "get_mcp_user_from_credentials: swallowed %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             # Body not JSON, already consumed, or parse error - no client_secret_post present
             pass
 

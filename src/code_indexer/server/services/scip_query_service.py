@@ -302,7 +302,13 @@ class SCIPQueryService:
                     repo_entry_bare = backend_registry.global_repos.get_repo(
                         repo_name
                     )
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "_resolve_alias_scip_root: swallowed %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 pass
 
             # Prefer the -global alias (the form semantic resolves), then bare.
