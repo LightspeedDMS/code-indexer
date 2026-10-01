@@ -36,7 +36,9 @@ _SRC = Path(__file__).resolve().parents[3] / "src" / "code_indexer"
 _GOVERNED = ("server", "global_repos")
 _EXEMPT_DIRS = ("auto_update", "scripts")
 
-_SUBPROCESS_CALLS = {"run", "Popen", "check_output", "call"}
+_SUBPROCESS_CALLS = {"run", "Popen", "check_output", "check_call", "call"}
+# asyncio spawns take the program and its arguments as *varargs*, not a list.
+_ASYNC_EXEC = {"create_subprocess_exec"}
 
 # Read-only git that deliberately runs locally. is_mutating_git() returns False
 # for every entry; each is keyed by (path relative to src/code_indexer, git verb)
@@ -66,31 +68,126 @@ ALLOWED_READS = {
     ("server/routers/git.py", "show"),
     ("server/routers/git.py", "blame"),
     ("server/routers/inline_repos.py", "log"),
+    # variable-argv reads (cmd = ["git", ...]; subprocess.run(cmd, ...)) -- only
+    # visible since the guard resolves a Name to its assignment.
+    ("server/services/golden_repo_branch_service.py", "for-each-ref"),
+    ("server/services/golden_repo_branch_service.py", "symbolic-ref"),
+    ("server/services/golden_repo_branch_service.py", "branch"),
+    ("server/services/remote_branch_service.py", "ls-remote"),
+}
+
+# argv built by a helper we cannot read statically. Each entry asserts: this
+# builder does not produce a git command. Keyed on (file, builder) so it survives
+# edits and a NEW builder in the same file still fails until justified.
+ALLOWED_UNREADABLE_ARGV = {
+    # builds `cidx index ...` -- server layout flags appended to a cidx invocation
+    ("server/repositories/golden_repo_manager.py", "append_server_layout_args"),
+    # builds the `claude` CLI invocation
+    ("server/services/claude_invoker.py", "_build_claude_command"),
+    # `base_cmd + [...]` where base_cmd is the `claude` CLI invocation
+    ("server/services/research_assistant_service.py", "<concatenation>"),
 }
 
 _GLOBAL_FLAGS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 
 
-def _git_argv(node: ast.Call) -> Optional[List[Optional[str]]]:
-    """Literal argv of a subprocess call on git, or None if it is not one.
+def _literal_elements(seq) -> List[Optional[str]]:
+    """Elements of a List/Tuple node; a non-literal element becomes None."""
+    out: List[Optional[str]] = []
+    for el in seq.elts:
+        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+            out.append(el.value)
+        else:
+            out.append(None)  # Starred, Name, JoinedStr, ...
+    return out
 
-    A non-literal element (an f-string, a name, a splat) becomes None, which
-    marks the argv as not statically knowable.
+
+def _resolve_name(
+    name: str, scope: ast.AST, before_line: int
+) -> Tuple[bool, Optional[List[Optional[str]]], str]:
+    """Resolve `name` to the argv it was last assigned above *before_line*.
+
+    Returns ``(assigned_here, elements)``:
+      - ``(True, [...])``  a literal list/tuple -- classify it;
+      - ``(True, None)``   assigned from something we cannot read -- unclassifiable;
+      - ``(False, None)``  never assigned in this scope, so it is a parameter or a
+        closure value. That is a generic runner being handed argv by its caller,
+        and the caller is scanned on its own; flagging it here would make every
+        subprocess helper a permanent violation while catching nothing.
+
+    `cmd = ["git", "push", ...]` followed by `subprocess.run(cmd, ...)` is the
+    shape a reintroduced bypass is most likely to take, and a guard that only
+    reads literal call arguments cannot see it at all.
+    """
+    assigned = False
+    best: Optional[List[Optional[str]]] = None
+    builder = "<expression>"
+    best_line = -1
+    for n in ast.walk(scope):
+        if not isinstance(n, ast.Assign) or n.lineno >= before_line:
+            continue
+        for tgt in n.targets:
+            if not (isinstance(tgt, ast.Name) and tgt.id == name):
+                continue
+            assigned = True
+            if n.lineno > best_line:
+                best_line = n.lineno
+                if isinstance(n.value, (ast.List, ast.Tuple)):
+                    best = _literal_elements(n.value)
+                else:
+                    best = None
+                    builder = _builder_name(n.value)
+    return assigned, best, builder
+
+
+def _builder_name(node: ast.AST) -> str:
+    """A stable label for whatever produced an argv we cannot read.
+
+    Keying the allowlist on the builder rather than a line number means the entry
+    survives edits above it, and a NEW way of building argv in the same file is a
+    new key -- so it fails until someone justifies it.
+    """
+    if isinstance(node, ast.Call):
+        f = node.func
+        if isinstance(f, ast.Name):
+            return f.id
+        if isinstance(f, ast.Attribute):
+            return f.attr
+    if isinstance(node, ast.BinOp):
+        return "<concatenation>"
+    return "<expression>"
+
+
+def _git_argv(
+    node: ast.Call, kind: str, scope: ast.AST
+) -> Tuple[Optional[List[Optional[str]]], Optional[str]]:
+    """argv of a spawn call on git, or None if it is not one.
+
+    Returns a list whose unknowable elements are None. A caller that gets back a
+    list starting with something other than "git" is not our business.
     """
     if not node.args:
-        return None
-    first = node.args[0]
-    if not isinstance(first, (ast.List, ast.Tuple)):
-        return None
-    argv: List[Optional[str]] = []
-    for el in first.elts:
-        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-            argv.append(el.value)
+        return None, None
+    if kind == "varargs":
+        argv = _literal_elements(ast.List(elts=list(node.args), ctx=ast.Load()))
+    else:
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            argv = _literal_elements(first)
+        elif isinstance(first, ast.Name):
+            assigned, resolved, builder = _resolve_name(first.id, scope, node.lineno)
+            if not assigned:
+                return None, None  # generic runner: argv comes from its caller
+            if resolved is None:
+                # built locally in a way we cannot read -- it could be git, and a
+                # future `cmd = build(["git", "push", ...])` must not slip through.
+                return [None], builder
+            argv = resolved
         else:
-            argv.append(None)  # Starred, Name, JoinedStr, ...
+            return None, None
     if not argv or argv[0] != "git":
-        return None
-    return argv
+        return None, None
+    return argv, None
 
 
 def _verb(argv: List[Optional[str]]) -> Optional[str]:
@@ -110,14 +207,37 @@ def _verb(argv: List[Optional[str]]) -> Optional[str]:
     return None
 
 
-def _is_subprocess_call(node: ast.Call) -> bool:
+def _direct_import_aliases(tree: ast.Module) -> set:
+    """Names bound by `from subprocess import run [as r]` in this module.
+
+    Without this, a module that imports the spawn function directly is invisible
+    to the guard even though it reaches git the same way.
+    """
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module in ("subprocess", "asyncio"):
+            for al in n.names:
+                if al.name in _SUBPROCESS_CALLS or al.name in _ASYNC_EXEC:
+                    out.add(al.asname or al.name)
+    return out
+
+
+def _call_kind(node: ast.Call, aliases: set) -> Optional[str]:
+    """ "list" if argv arrives as one sequence, "varargs" if spread, else None."""
     fn = node.func
-    return (
-        isinstance(fn, ast.Attribute)
-        and fn.attr in _SUBPROCESS_CALLS
-        and isinstance(fn.value, ast.Name)
-        and fn.value.id == "subprocess"
-    )
+    if isinstance(fn, ast.Attribute):
+        if (
+            isinstance(fn.value, ast.Name)
+            and fn.value.id == "subprocess"
+            and fn.attr in _SUBPROCESS_CALLS
+        ):
+            return "list"
+        # asyncio.create_subprocess_exec(...) / loop.create_subprocess_exec(...)
+        if fn.attr in _ASYNC_EXEC:
+            return "varargs"
+    if isinstance(fn, ast.Name) and fn.id in aliases:
+        return "varargs" if fn.id in _ASYNC_EXEC else "list"
+    return None
 
 
 def _governed_files() -> List[Path]:
@@ -131,6 +251,30 @@ def _governed_files() -> List[Path]:
     return out
 
 
+def _scope_index(tree: ast.Module) -> List[Tuple[int, int, ast.AST]]:
+    """(start, end, node) for every function in *tree*, innermost-last.
+
+    Built once per file: resolving a variable argv needs the enclosing function,
+    and re-walking the tree for every call turns the guard quadratic.
+    """
+    spans: List[Tuple[int, int, ast.AST]] = []
+    for f in ast.walk(tree):
+        if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = max(getattr(x, "end_lineno", f.lineno) for x in ast.walk(f))
+            spans.append((f.lineno, end, f))
+    spans.sort(key=lambda t: t[0])
+    return spans
+
+
+def _enclosing_scope(tree: ast.Module, spans, node: ast.AST) -> ast.AST:
+    """Innermost function containing *node*, else the module."""
+    best: ast.AST = tree
+    for start, end, f in spans:
+        if start <= node.lineno <= end:
+            best = f
+    return best
+
+
 def _scan() -> Tuple[List[str], List[str]]:
     """Return (violations, unknown_argv) as human-readable locations."""
     violations: List[str] = []
@@ -138,16 +282,25 @@ def _scan() -> Tuple[List[str], List[str]]:
     for path in _governed_files():
         rel = path.relative_to(_SRC).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _direct_import_aliases(tree)
+        spans = _scope_index(tree)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not _is_subprocess_call(node):
+            if not isinstance(node, ast.Call):
                 continue
-            argv = _git_argv(node)
+            kind = _call_kind(node, aliases)
+            if kind is None:
+                continue
+            argv, builder = _git_argv(node, kind, _enclosing_scope(tree, spans, node))
             if argv is None:
+                continue
+            if builder is not None and (rel, builder) in ALLOWED_UNREADABLE_ARGV:
                 continue
             where = f"{rel}:{node.lineno}"
             verb = _verb(argv)
             if verb is None:
-                unknown.append(f"{where}  (git verb not statically knowable)")
+                unknown.append(
+                    f"{where}  argv built by {builder!r}, not statically readable"
+                )
                 continue
             # Keep positions: a dynamic element is a placeholder, never dropped,
             # so a global flag cannot swallow the verb during classification.
@@ -194,9 +347,14 @@ def test_allowlist_has_no_stale_entries() -> None:
     for path in _governed_files():
         rel = path.relative_to(_SRC).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _direct_import_aliases(tree)
+        spans = _scope_index(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _is_subprocess_call(node):
-                argv = _git_argv(node)
+            if isinstance(node, ast.Call):
+                kind = _call_kind(node, aliases)
+                if kind is None:
+                    continue
+                argv, _b = _git_argv(node, kind, _enclosing_scope(tree, spans, node))
                 if argv is None:
                     continue
                 verb = _verb(argv)

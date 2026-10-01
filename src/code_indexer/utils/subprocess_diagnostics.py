@@ -38,6 +38,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Sequence as _Sequence
 from typing import Optional, Sequence, Union
+import re
 
 # Bug #1832: dependency_map_analyzer.py:2813 already established a 1000-char
 # cap (`(result.stderr or "")[:1000]`) as the in-tree precedent -- reuse
@@ -58,16 +59,39 @@ def _cap(text: Optional[str], max_chars: int) -> str:
     return text[: max(0, max_chars)]
 
 
+# A URL of the form <scheme>://<userinfo>@<host>... -- the userinfo half is where a
+# token lands when a repo URL carries one (e.g. https://oauth2:glpat-xxx@gitlab.com/...).
+# The scp-like `git@host:path` form has no scheme and no secret, so it is left alone.
+_URL_USERINFO_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)(?P<userinfo>[^/@\s]+)@"
+)
+
+
+def redact_url_credentials(text: str) -> str:
+    """Replace the userinfo of any scheme://user:secret@host URL with ``***``.
+
+    A failing git command is reported with its full argv, and that argv can carry
+    a credentialed remote URL -- `git remote add origin https://oauth2:<PAT>@...`.
+    The resulting message travels into job errors, API responses and logs, so the
+    secret is stripped here, once, rather than at each call site.
+    """
+    return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
+
+
 def _format_cmd(cmd: Union[str, Sequence[str], None]) -> str:
     """cmd mirrors Popen's args and may be a str, a non-str/bytes
     sequence, or (for a genuinely unknown command) None. Only join real
     sequences -- joining a str's characters would corrupt it into
-    space-separated letters."""
+    space-separated letters.
+
+    Credentials embedded in a URL argument are redacted: the command text is
+    surfaced to callers and logs, and a repo URL may carry a PAT.
+    """
     if cmd is None:
         return "<unknown>"
     if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes)):
-        return " ".join(str(part) for part in cmd)
-    return str(cmd)
+        return redact_url_credentials(" ".join(str(part) for part in cmd))
+    return redact_url_credentials(str(cmd))
 
 
 def format_subprocess_failure_diagnostic(

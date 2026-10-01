@@ -132,3 +132,64 @@ class TestFormatCompletedProcessDiagnostic:
         result.stderr = ""
         diagnostic = format_completed_process_diagnostic(result)
         assert "diagnostic text" in diagnostic
+
+
+class TestCredentialRedactionInCommandText:
+    """A failing git command is reported with its full argv -- and a repo URL can
+    carry a PAT. The diagnostic travels into job errors, API responses and logs,
+    so the secret must not survive the formatting.
+    """
+
+    _PAT = "glpat-NOTAREALTOKEN123"
+
+    def test_pat_in_remote_url_is_redacted_from_called_process_error(self):
+        url = f"https://oauth2:{self._PAT}@gitlab.com/group/repo.git"
+        exc = subprocess.CalledProcessError(
+            1, ["git", "remote", "add", "origin", url], output="", stderr="fatal: lock"
+        )
+
+        message = format_called_process_error_diagnostic(exc)
+
+        assert self._PAT not in message
+        assert "oauth2" not in message
+        assert "https://***@gitlab.com/group/repo.git" in message
+        # the useful part of the diagnostic survives
+        assert "fatal: lock" in message
+
+    def test_pat_is_redacted_from_completed_process_diagnostic_too(self):
+        url = f"https://oauth2:{self._PAT}@gitlab.com/group/repo.git"
+        result = subprocess.CompletedProcess(
+            args=["git", "fetch", url], returncode=1, stdout="", stderr=""
+        )
+
+        message = format_completed_process_diagnostic(result)
+
+        assert self._PAT not in message
+        assert "https://***@gitlab.com/group/repo.git" in message
+
+    def test_scp_style_remote_is_left_alone(self):
+        """`git@github.com:org/repo.git` has no scheme and carries no secret;
+        redacting it would destroy a useful diagnostic for no gain."""
+        exc = subprocess.CalledProcessError(
+            1,
+            ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+            output="",
+            stderr="",
+        )
+
+        assert "git@github.com:org/repo.git" in format_called_process_error_diagnostic(
+            exc
+        )
+
+    def test_non_credentialed_url_is_unchanged(self):
+        exc = subprocess.CalledProcessError(
+            1,
+            ["git", "clone", "https://gitlab.com/group/repo.git"],
+            output="",
+            stderr="",
+        )
+
+        assert (
+            "https://gitlab.com/group/repo.git"
+            in format_called_process_error_diagnostic(exc)
+        )
