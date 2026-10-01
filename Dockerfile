@@ -120,6 +120,32 @@ WORKDIR /xray/rust
 RUN cargo build --release -p xray-cli \
     && ./target/release/xray-cli --print-graph-extractor-extensions > /dev/null
 
+# Capture the toolchain that just built xray-cli, to ship to the runtime stage.
+#
+# This is not "a rustc 1.98.0", it is THAT rustc. xray-core/build.rs bakes the
+# build compiler's full `rustc --version` string into the binary as
+# CIDX_HOST_RUSTC_VERSION, and dynlib.rs::verify_rustc_version_match compares it
+# BYTE-FOR-BYTE against the version embedded in each evaluator .so, refusing to
+# dlopen on any difference ("Recompile the evaluator with the host toolchain").
+# A separately-installed 1.98.0 that differs only by build hash would make 100%
+# of evaluator loads fail -- after compiling successfully, so the failure would
+# surface at load time, not build time. Copying the sysroot out of this stage
+# makes the runtime compiler the same compiler by construction; the runtime
+# stage then re-asserts it rather than trusting this comment.
+#
+# Pruned to what compiling an evaluator at query time actually needs. Measured:
+# the full rustup install costs +1.02GiB, this costs ~510MB of toolchain. The
+# remainder is irreducible -- libLLVM (191MB) is rustc's codegen backend,
+# librustc_driver (144MB) is rustc, and the std rlibs (173MB) are what a cdylib
+# links against. Dropped: cargo (never used at query time -- xray-cli invokes
+# rustc directly), rustdoc, clippy, the docs, and the std SOURCE tree.
+RUN set -eux; \
+    rustc --version > /xray-rustc-version.txt; \
+    cp -a "$(rustc --print sysroot)" /xray-toolchain; \
+    rm -rf /xray-toolchain/share /xray-toolchain/lib/rustlib/src /xray-toolchain/etc; \
+    find /xray-toolchain/bin -type f ! -name rustc -delete; \
+    cat /xray-rustc-version.txt
+
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm
 
@@ -197,32 +223,70 @@ COPY --from=xray-builder /xray/rust/target/release/xray-cli /usr/local/bin/xray-
 # decides it, not in a runtime config file.
 ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
 
-# KNOWN GAP (not fixed here, deliberately): xray-cli compiles each evaluator at
-# QUERY time by spawning `rustc` (rust/xray-core/src/compiler/rustc_driver.rs,
-# with RUSTUP_TOOLCHAIN pinned to the channel embedded from
-# rust/rust-toolchain.toml). This stage ships the binary but no rustc, so a
-# scan here reaches xray-cli and then fails with an Infrastructure-kind
-# CompileError ("Failed to invoke rustc ... Is rustc installed and on PATH?").
-# That is a loud, correct, actionable failure rather than the silent
-# "scanned everything, found nothing" this image used to produce -- but it is
-# NOT yet a working xray.
+# ---- query-time Rust toolchain ----
+# WHY A COMPILER IS IN THE RUNTIME IMAGE: xray-cli compiles each evaluator at
+# QUERY time (rust/xray-core/src/compiler/rustc_driver.rs spawns `rustc`), so
+# shipping only the binary gives a loud "Is rustc installed and on PATH?" on
+# every xray_search -- better than the silent empty scan it replaced, but still
+# not a working xray.
 #
-# Closing it means one of two things, and the cost of the cheap-looking one was
-# measured rather than guessed:
-#   - add the toolchain to this stage: +1.02GiB as rustup+build-essential, and
-#     +987MB even after pruning it to rustc alone (no cargo/rustdoc/docs/src).
-#     The floor is inherent -- libLLVM 191MB, librustc_driver 144MB, std rlibs
-#     173MB, gcc+libc6-dev 267MB -- because the thing being shipped is a Rust
-#     compiler. Substituting the toolchain's bundled rust-lld for gcc does not
-#     link (it cannot find -lgcc_s/-lc/-lm without gcc's spec-file search
-#     paths) and would need a rustc wrapper script to pass linker flags, since
-#     evaluator_rustc_command does not.
-#   - move evaluator compilation out of the serving pod, behind a seam, the way
-#     git/clone/SCIP already delegate to git-mcp/workspace-mcp/sandbox-mcp.
-# Prebuilding evaluators here is NOT an option: an xray query IS Rust source
-# (assemble.rs::detect_evaluator_mode), compiled per query and cached under a
-# hash of that source, so there is no fixed set to build ahead of time.
-# This is a deployment decision, not a Dockerfile detail.
+# Prebuilding the evaluators instead is NOT possible: an xray query IS Rust
+# source (assemble.rs::detect_evaluator_mode -- both Legacy and Graph modes
+# compile to a .so, there is no interpreted path), compiled per query and cached
+# under a hash of that source, so there is no fixed set to build ahead of time.
+# The compile cache cannot paper over it either: cache::probe_rustc_version()
+# degrades to the literal string "unknown" without rustc, so a rustc-less pod
+# computes a different identity and misses every entry a seeder wrote.
+#
+# COST, measured rather than estimated: +987MB, on nodes whose root volumes are
+# 50GiB (tools-* Karpenter general-purpose) -- the image moves from ~5% to ~7%
+# of node disk. The alternative, moving compilation behind a seam into its own
+# service, buys back that space at the price of a version-locked second
+# deployable (see the byte-equality check below), a network hop in the cold
+# path, a fleet-wide outage mode, and a wider trust boundary: evaluator source
+# is user-supplied Rust, and the validator (validator.rs) is a syn AST
+# whitelist, not a sandbox. That trade was judged not worth it at this fleet
+# size; the reasoning is in scratchpad/XRAY_SIDECAR_SCOPE.md.
+#
+# gcc + libc6-dev, not build-essential: rustc shells out to a C linker (`cc`)
+# and needs the crt objects and libc.so that libc6-dev provides. The toolchain's
+# own bundled rust-lld is NOT a substitute -- it cannot resolve -lgcc_s/-lc/-lm
+# without gcc's spec-file search paths, and wiring those up would need a rustc
+# wrapper script, since evaluator_rustc_command passes no linker flags.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=xray-builder /xray-toolchain /opt/rust
+COPY --from=xray-builder /xray-rustc-version.txt /opt/rust/.rustc-version
+
+# /opt/rust/bin/rustc is the real compiler, not a rustup shim, so it ignores
+# RUSTUP_TOOLCHAIN (which xray-cli sets from the embedded channel) and resolves
+# its sysroot relative to its own path. That makes the compiler used at query
+# time deterministic: it is the one copied above, whatever the environment says.
+ENV PATH=/opt/rust/bin:$PATH
+
+# Fail the BUILD on the mismatch that would otherwise fail every dlopen at
+# query time, long after deploy. Also links a real cdylib, because a toolchain
+# that is present and version-correct can still be unable to produce the one
+# artifact xray needs -- that is a missing linker or crt object, and this is the
+# cheapest place to find out.
+RUN set -eux; \
+    want="$(cat /opt/rust/.rustc-version)"; \
+    got="$(rustc --version)"; \
+    if [ "$want" != "$got" ]; then \
+        echo "FATAL: runtime rustc does not match the one that built xray-cli."; \
+        echo "  xray-cli embeds: $want"; \
+        echo "  runtime rustc:   $got"; \
+        echo "dynlib.rs compares these byte-for-byte; every evaluator would"; \
+        echo "compile and then fail to load."; \
+        exit 1; \
+    fi; \
+    printf '#[no_mangle] pub extern "C" fn evaluate_node() -> i32 { 42 }\n' > /tmp/abi_probe.rs; \
+    rustc --crate-type cdylib -O /tmp/abi_probe.rs -o /tmp/abi_probe.so; \
+    test -s /tmp/abi_probe.so; \
+    rm -f /tmp/abi_probe.rs /tmp/abi_probe.so; \
+    echo "query-time toolchain OK: $got"
 
 # Non-root runtime. /data is the server data dir — the Deployment mounts a volume here.
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
