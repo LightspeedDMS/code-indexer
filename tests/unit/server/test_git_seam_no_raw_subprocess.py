@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from code_indexer.utils.git_invoker import is_mutating_git
 
@@ -223,6 +223,10 @@ def _statements_of(scope: ast.AST) -> List[ast.AST]:
             stack.extend(getattr(node, field, []) or [])
         for handler in getattr(node, "handlers", []) or []:
             stack.extend(handler.body)
+        # match/case arms are branches of this scope exactly like if/else; the
+        # generic field loop above misses them because they hang off `cases`.
+        for case in getattr(node, "cases", []) or []:
+            stack.extend(case.body)
     return out
 
 
@@ -319,22 +323,29 @@ def _verb(argv: List[Optional[str]]) -> Optional[str]:
     return None
 
 
-def _direct_import_aliases(tree: ast.Module) -> set:
-    """Names bound by `from subprocess import run [as r]` in this module.
+def _direct_import_aliases(tree: ast.Module) -> Dict[str, str]:
+    """Local name -> calling convention, for `from subprocess import run [as r]`.
 
     Without this, a module that imports the spawn function directly is invisible
     to the guard even though it reaches git the same way.
+
+    The convention is decided from the IMPORTED name, never the local one: with
+    `from asyncio import create_subprocess_exec as cse`, keying off `cse` finds
+    nothing in _ASYNC_EXEC and reads a varargs spawn as list-style, so argv[0]
+    is taken to be the whole command and `cse("git", "push")` scans as clean.
     """
-    out = set()
+    out: Dict[str, str] = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom) and n.module in ("subprocess", "asyncio"):
             for al in n.names:
-                if al.name in _SUBPROCESS_CALLS or al.name in _ASYNC_EXEC:
-                    out.add(al.asname or al.name)
+                if al.name in _ASYNC_EXEC:
+                    out[al.asname or al.name] = "varargs"
+                elif al.name in _SUBPROCESS_CALLS:
+                    out[al.asname or al.name] = "list"
     return out
 
 
-def _call_kind(node: ast.Call, aliases: set) -> Optional[str]:
+def _call_kind(node: ast.Call, aliases: Dict[str, str]) -> Optional[str]:
     """ "list" if argv arrives as one sequence, "varargs" if spread, else None."""
     fn = node.func
     if isinstance(fn, ast.Attribute):
@@ -347,8 +358,8 @@ def _call_kind(node: ast.Call, aliases: set) -> Optional[str]:
         # asyncio.create_subprocess_exec(...) / loop.create_subprocess_exec(...)
         if fn.attr in _ASYNC_EXEC:
             return "varargs"
-    if isinstance(fn, ast.Name) and fn.id in aliases:
-        return "varargs" if fn.id in _ASYNC_EXEC else "list"
+    if isinstance(fn, ast.Name):
+        return aliases.get(fn.id)
     return None
 
 
@@ -703,6 +714,48 @@ class TestGuardClassifiesCorrectly:
             "        cmd = build_something()\n"
             "    else:\n"
             '        cmd = ["git", "push", "origin", "main"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_aliased_varargs_import_is_not_read_as_list_style(self) -> None:
+        """`from asyncio import create_subprocess_exec as cse` is still varargs.
+
+        Deciding the convention from the LOCAL name made `cse` unknown to
+        _ASYNC_EXEC, so the call was read as list-style: argv[0] became the whole
+        command and a varargs `git push` scanned as clean.
+        """
+        src = (
+            "from asyncio import create_subprocess_exec as cse\n"
+            "async def f():\n"
+            '    await cse("git", "push", "origin", "main")\n'
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_aliased_list_style_import_still_resolves(self) -> None:
+        """The same mapping must not mis-file `from subprocess import run as r`
+        as varargs -- that would take argv[0] as the verb and miss everything."""
+        src = (
+            "from subprocess import run as r\n"
+            "def f():\n"
+            '    r(["git", "push", "origin", "main"])\n'
+        )
+        assert any("MUTATING: git push" in v for v in _violations(src))
+
+    def test_assignment_inside_a_match_case_reaches_the_call(self) -> None:
+        """match/case arms are branches of the scope like if/else.
+
+        They hang off `cases` rather than `body`/`orelse`, so the generic field
+        walk dropped them and an argv built in a case arm was invisible.
+        """
+        src = (
+            "import subprocess\n"
+            "def f(mode):\n"
+            "    match mode:\n"
+            '        case "sync":\n'
+            '            cmd = ["git", "push", "origin", "main"]\n'
+            "        case _:\n"
+            '            cmd = ["git", "status"]\n'
             "    subprocess.run(cmd)\n"
         )
         assert any("MUTATING: git push" in v for v in _violations(src))
