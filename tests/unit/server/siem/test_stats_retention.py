@@ -7,7 +7,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -32,22 +32,38 @@ def _row(
     boundary: Optional[str] = None,
     dest: str = DEST,
 ) -> None:
+    _rows(b, [(status, created, delivered, boundary, dest)])
+
+
+_ROW_SQL = (
+    "INSERT INTO siem_delivery_queue (event_uuid, destination_key, occurred_at, "
+    "action_type, event_payload, status, attempts, next_attempt_at, mapping_version, "
+    "boundary_kind, created_at, delivered_at) VALUES (?, ?, 'x', 'user_created', '{}', "
+    "?, 0, ?, 1, ?, ?, ?)"
+)
+
+
+def _rows(b: SiemBackendHarness, specs: List[Tuple[Any, ...]]) -> None:
+    """Insert (status, created, delivered, boundary, dest) rows in ONE
+    transaction (one commit, however many rows)."""
     ts = b.db.dialect.ts
-    b.raw(
-        "INSERT INTO siem_delivery_queue (event_uuid, destination_key, occurred_at, "
-        "action_type, event_payload, status, attempts, next_attempt_at, mapping_version, "
-        "boundary_kind, created_at, delivered_at) VALUES (?, ?, 'x', 'user_created', '{}', "
-        "?, 0, ?, 1, ?, ?, ?)",
-        (
-            str(uuid.uuid4()),
-            dest,
-            status,
-            ts(created),
-            boundary,
-            ts(created),
-            ts(delivered) if delivered else None,
-        ),
-    )
+
+    def _do(tx: Any) -> None:
+        for status, created, delivered, boundary, dest in specs:
+            tx.execute(
+                _ROW_SQL,
+                (
+                    str(uuid.uuid4()),
+                    dest,
+                    status,
+                    ts(created),
+                    boundary,
+                    ts(created),
+                    ts(delivered) if delivered else None,
+                ),
+            )
+
+    b.db.write(_do)
 
 
 def test_pending_counts_undelivered_rows_and_caps(
@@ -193,17 +209,19 @@ def _counts(b: SiemBackendHarness) -> List[Any]:
 
 
 def test_retention_prunes_only_terminal_rows_in_paced_transactions(
-    siem_backend: SiemBackendHarness,
+    siem_backend: SiemBackendHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A small per-transaction cap keeps the data small while still forcing
+    # several paced rounds (10 + 10 + 5) through the real statements.
+    monkeypatch.setattr(retention, "PRUNE_ROWS_PER_TX", 10)
+    monkeypatch.setattr(retention, "PRUNE_YIELD_SECONDS", 0.0)
     now = _now(siem_backend)
     old = now - timedelta(days=60)
-    for _ in range(1200):
-        _row(siem_backend, "delivered", old, delivered=old)
-    _row(siem_backend, "delivered", now, delivered=now)
-    for status in ("pending", "batched", "quarantined"):
-        _row(siem_backend, status, old)
-    _row(siem_backend, "abandoned", old)
-    _row(siem_backend, "unrecoverable", old)
+    specs: List[Tuple[Any, ...]] = [("delivered", old, old, None, DEST)] * 25
+    specs.append(("delivered", now, now, None, DEST))
+    for status in ("pending", "batched", "quarantined", "abandoned", "unrecoverable"):
+        specs.append((status, old, None, None, DEST))
+    _rows(siem_backend, specs)
     target = retention._targets(24 * 30)[0]
     first_round = retention._delete_round(siem_backend.db, target)
     assert first_round == retention.PRUNE_ROWS_PER_TX
@@ -245,6 +263,51 @@ def test_retention_fails_loudly_without_the_siem_store(
         assert failed == ["siem_delivery"]
         assert "SIEM delivery store" in errors["siem_delivery"]
         assert not (tmp_path / "groups.db").exists()
+
+
+def test_sqlite_retention_without_siem_tables_is_a_no_op(tmp_path: Path) -> None:
+    """SQLite mode without a registry cleans each table in its own file, and
+    a table that does not exist there has nothing to clean (as for every
+    other table).  It must neither fail the cycle nor create groups.db."""
+    import sqlite3
+    from types import SimpleNamespace
+
+    from code_indexer.server.services.audit_log_service import AuditLogService
+    from code_indexer.server.services.data_retention_scheduler import (
+        DataRetentionScheduler,
+    )
+
+    groups = tmp_path / "groups.db"
+
+    def _prune() -> Tuple[int, List[str]]:
+        scheduler = DataRetentionScheduler(
+            log_db_path=tmp_path / "logs.db",
+            main_db_path=tmp_path / "main.db",
+            groups_db_path=groups,
+            config_service=None,
+        )
+        failed: List[str] = []
+        cfg = SimpleNamespace(audit_logs_retention_hours=720)
+        return scheduler._safe_prune_siem(cfg, failed, {}), failed
+
+    assert _prune() == (0, [])
+    assert not groups.exists()  # never created by the prune
+    sqlite3.connect(str(groups)).close()  # a groups.db without SIEM tables
+    assert _prune() == (0, [])
+    AuditLogService(groups)  # creates the SIEM tables beside audit_logs
+    conn = sqlite3.connect(str(groups))
+    try:
+        conn.execute(
+            "INSERT INTO siem_delivery_queue (event_uuid, destination_key, "
+            "occurred_at, action_type, status, attempts, next_attempt_at, "
+            "mapping_version, created_at, delivered_at) VALUES ('u', 'd', 'x', "
+            "'a', 'delivered', 0, '2000-01-01T00:00:00.000Z', 1, "
+            "'2000-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert _prune() == (1, [])
 
 
 _PLANS = (

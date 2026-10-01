@@ -85,8 +85,20 @@ def _scan_template_config_sections() -> set:
     'api_limits', 'error_handling', 'git_timeouts', 'web_security').
     """
     content = _CONFIG_SECTION_TEMPLATE.read_text()
-    matches = re.findall(r"config\.([a-z_]+)", content)
-    return set(matches)
+    # Follow included partials: their config.<section> dereferences render
+    # inside this template and need the same keys.
+    templates_dir = _CONFIG_SECTION_TEMPLATE.parent.parent
+    for partial in re.findall(r'{%\s*include\s+"(partials/[^"]+)"', content):
+        content += (templates_dir / partial).read_text()
+    # Only a real dereference: "config." not preceded by a word char or dot
+    # (an include filename such as "siem_delivery_config.html" is not one).
+    matches = set(re.findall(r"(?<![\w.])config\.([a-z_]+)", content))
+    return matches - _PAGE_BUILDER_KEYS
+
+
+# Keys the config page builders add to the dict AFTER _get_current_config()
+# (they need request.app.state); asserted by the render test below.
+_PAGE_BUILDER_KEYS = frozenset({"siem_delivery_status"})
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +305,23 @@ class TestConfigSectionTemplateRender:
             f"Expected at least {_MIN_RENDERED_CONFIG_HTML_CHARS} chars for a "
             "full config section render."
         )
+
+    def test_siem_delivery_section_renders(self, tmp_path) -> None:
+        """The SIEM delivery section renders from _get_current_config() plus
+        the status block the page builders inject."""
+        from code_indexer.server.services.siem_delivery.config_view import (
+            status_block,
+        )
+        from code_indexer.server.web import routes
+
+        svc = _make_service(str(tmp_path))
+        config = _call_get_current_config(svc)
+        assert "siem_delivery" in _scan_template_config_sections()
+        config["siem_delivery_status"] = status_block(None, None)
+        template = routes.templates.env.get_template("partials/config_section.html")
+        html = template.render(**_build_render_context(config))
+        assert "SIEM Delivery (Google SecOps)" in html
+        assert 'name="max_batch_events"' in html
 
     def test_render_without_search_event_log_raises_undefined_error(
         self, tmp_path
