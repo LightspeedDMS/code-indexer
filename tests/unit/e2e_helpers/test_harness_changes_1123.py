@@ -150,13 +150,13 @@ class TestPhantomSkipRemoved:
 
 
 class TestReadmePhaseCount:
-    def test_readme_mentions_6_phases_not_5(self):
-        """tests/e2e/README.md must reflect the actual 6-phase suite."""
+    def test_readme_mentions_7_phases(self):
+        """tests/e2e/README.md must reflect the actual 7-phase suite."""
         content = E2E_README.read_text()
-        # Should say "6 phases" somewhere in the architecture/overview section
-        assert "6 phases" in content or "six phases" in content.lower(), (
-            "tests/e2e/README.md must say '6 phases' (not 5) to reflect the "
-            "current suite: Phase 6 (PostgreSQL parity) was added but README was not updated."
+        # Should say "7 phases" somewhere in the architecture/overview section
+        assert "7 phases" in content or "seven phases" in content.lower(), (
+            "tests/e2e/README.md must say '7 phases' to reflect the current "
+            "suite: Phase 7 (SIEM delivery) was added."
         )
 
     def test_readme_does_not_say_5_phases_in_architecture_heading(self):

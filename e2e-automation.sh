@@ -14,6 +14,11 @@
 #   Phase 4: CLI remote      (tests/e2e/cli_remote/) against live uvicorn subprocess
 #   Phase 5: Resiliency      (tests/e2e/phase5_resiliency/) against fault-injection server
 #   Phase 6: PG Parity       (tests/e2e/pg_parity/) against ephemeral PostgreSQL cluster
+#   Phase 7: SIEM Delivery   (tests/e2e/siem_delivery/) against a live server with the
+#            non-production fault-injection gate ON, plus the mock Google SecOps
+#            receiver sidecar (tests/fixtures/secops_sidecar/) on loopback ports
+#            8902 (ingest) / 8903 (control).  Per-run sidecar key material is
+#            generated into $E2E_SECOPS_SIDECAR_DIR and wiped on exit.
 #
 # Phase 6 requires PostgreSQL server utilities (initdb, pg_ctl) to be installed.
 # If they are absent the phase is LOUD-SKIPPED with a clear message.
@@ -25,7 +30,7 @@
 #
 # Usage:
 #   ./e2e-automation.sh             # Run all phases
-#   ./e2e-automation.sh --phase 1   # Run single phase (1-6)
+#   ./e2e-automation.sh --phase 1   # Run single phase (1-7)
 #
 # Configuration:
 #   Copy .e2e-automation.template to .e2e-automation and fill in values.
@@ -86,6 +91,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${E2E_PG_DB_NAME:=cidx_e2e}"
 : "${E2E_PG_SERVER_READINESS_TIMEOUT:=60}"
 
+# Phase 7 (SIEM delivery) defaults and helpers live in their own file.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/tests/e2e/siem_delivery/phase7_helpers.sh"
+
 # ---------------------------------------------------------------------------
 # Source .e2e-automation if present (provides credentials and optional overrides)
 # ---------------------------------------------------------------------------
@@ -120,12 +129,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --phase)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --phase requires a value (1, 2, 3, 4, 5, or 6)" >&2
+                echo "ERROR: --phase requires a value (1, 2, 3, 4, 5, 6, or 7)" >&2
                 exit 1
             fi
             ONLY_PHASE="$2"
-            if [[ ! "$ONLY_PHASE" =~ ^[1-6]$ ]]; then
-                echo "ERROR: --phase value must be 1, 2, 3, 4, 5, or 6 (got: '$ONLY_PHASE')" >&2
+            if [[ ! "$ONLY_PHASE" =~ ^[1-7]$ ]]; then
+                echo "ERROR: --phase value must be 1, 2, 3, 4, 5, 6, or 7 (got: '$ONLY_PHASE')" >&2
                 exit 1
             fi
             shift 2
@@ -136,7 +145,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
-            echo "Usage: $0 [--phase 1|2|3|4|5|6] [--help]" >&2
+            echo "Usage: $0 [--phase 1|2|3|4|5|6|7] [--help]" >&2
             exit 1
             ;;
     esac
@@ -159,6 +168,7 @@ PG_SERVER_PID=""       # Phase 6 uvicorn (PG-backed)
 PG_CLUSTER_STARTED=""  # Set to "yes" when pg_ctl cluster is running
 
 cleanup_all_servers() {
+    cleanup_phase7_servers  # bounded stop + key wipe (phase7_helpers.sh)
     # Stop Phase 4 server if running
     if [[ -n "${SERVER_PID:-}" ]]; then
         _yellow "Stopping Phase 4 server subprocess (PID $SERVER_PID)..."
@@ -845,6 +855,7 @@ PHASE_DEFS=(
     "4|CLI Remote (live server)|tests/e2e/cli_remote"
     "5|Resiliency|tests/e2e/phase5_resiliency"
     "6|PostgreSQL Parity|tests/e2e/pg_parity"
+    "7|SIEM Delivery (SecOps sidecar)|tests/e2e/siem_delivery"
 )
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1058,8 @@ for phase_def in "${PHASE_DEFS[@]}"; do
 
         cleanup_all_servers
         handle_phase_result "$phase_num" "$phase6_exit"
+    elif [[ "$phase_num" == "7" ]]; then
+        run_phase7 "$phase_num" "$phase_label" "$phase_dir"  # phase7_helpers.sh
     else
         phase_exit=0
         run_phase "$phase_num" "$phase_label" "$phase_dir" || phase_exit=$?
