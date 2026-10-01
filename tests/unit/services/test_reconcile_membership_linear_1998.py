@@ -23,9 +23,9 @@ from typing import Any, Dict, List, Tuple
 from code_indexer.services.progressive_metadata import ProgressiveMetadata
 from tests.unit.services.test_reconcile_batch_content_id_1505 import (
     FakeVectorStoreClient,
-    _blob_hash_at_head,
     _filter_matches,
     _commit_all,
+    _git,
     _init_repo,
     _make_indexer,
     _run_reconcile,
@@ -43,10 +43,17 @@ def _build_repo(root: Path, n_files: int) -> Tuple[FakeVectorStoreClient, List[s
         (root / rel_path).write_text(f"# {rel_path}\n")
     _commit_all(root, "init")
 
+    # One `git ls-tree` for every blob hash: a `git rev-parse` per file made
+    # repository setup (not the measured reconcile) dominate this test.
+    blob_at_head: Dict[str, str] = {}
+    for line in _git(root, "ls-tree", "-r", "HEAD").splitlines():
+        meta, path = line.split("\t", 1)
+        blob_at_head[path] = meta.split()[2]
+
     store = FakeVectorStoreClient()
     indexed = rel_paths[::2]
     for rel_path in indexed:
-        store.add_committed_point(rel_path, _blob_hash_at_head(root, rel_path))
+        store.add_committed_point(rel_path, blob_at_head[rel_path])
     missing = sorted(set(rel_paths) - set(indexed))
     return store, missing
 

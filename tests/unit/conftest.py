@@ -212,6 +212,50 @@ def _guard_no_leaked_non_daemon_threads_1800():
         )
 
 
+_DAEMON_CACHE_MODULE = "code_indexer.daemon.cache"
+_TTL_THREAD_JOIN_TIMEOUT_S = 5.0
+
+
+@pytest.fixture(autouse=True)
+def _stop_leaked_daemon_ttl_eviction_threads():
+    """Stop and join every daemon TTLEvictionThread a test started.
+
+    Every CIDXDaemonService() starts a TTLEvictionThread that loops on a
+    check_interval wait for the rest of the process unless stop() is called,
+    and most daemon unit tests construct a service without shutting it down.
+    Left running, those threads land inside UNRELATED tests: when such a
+    test patches time.sleep process-wide and counts the calls, the leaked
+    loops show up in its counts (seen as thousands of foreign 60s "sleeps"
+    in a Cohere retry test).
+
+    The thread owns its stop(), so this self-heals; it fails loudly only if
+    a thread does not exit after stop().
+    """
+    pre_existing_ids = {id(t) for t in threading.enumerate()}
+    yield
+    cache_module = sys.modules.get(_DAEMON_CACHE_MODULE)
+    if cache_module is None:
+        return
+    leaked = [
+        t
+        for t in threading.enumerate()
+        if isinstance(t, cache_module.TTLEvictionThread)
+        and id(t) not in pre_existing_ids
+    ]
+    for thread in leaked:
+        thread.stop()
+    survivors = []
+    for thread in leaked:
+        thread.join(timeout=_TTL_THREAD_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            survivors.append(thread.name)
+    if survivors:
+        raise AssertionError(
+            f"daemon TTLEvictionThread(s) {survivors} did not exit within "
+            f"{_TTL_THREAD_JOIN_TIMEOUT_S}s of stop()"
+        )
+
+
 def _leaked_temporal_watch_polling_threads(pre_existing_ids: set) -> list:
     """Return alive threads matching TemporalWatchHandler's polling-thread
     name that were NOT already running before the test.
