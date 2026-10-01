@@ -16,7 +16,7 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 logger = logging.getLogger(__name__)
 
-MAPPING_VERSION = 1
+MAPPING_VERSION = 2
 FALLBACK_EVENT_TYPE = "GENERIC_EVENT"
 BYTE_BUDGET = 2_000_000
 HARD_CEILING = 4_000_000
@@ -60,6 +60,7 @@ UDM_MAPPING: Dict[str, str] = {
     "siem_batch_rebatched": "STATUS_UPDATE",
     "siem_destination_retargeted": "STATUS_UPDATE",
     "siem_destination_abandoned": "STATUS_UPDATE",
+    "siem_credential_changed": "SETTING_MODIFICATION",
 }
 VALIDATED_EVENT_TYPES: FrozenSet[str] = frozenset(UDM_MAPPING.values()) | {
     FALLBACK_EVENT_TYPE

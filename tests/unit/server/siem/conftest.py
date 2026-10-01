@@ -9,15 +9,22 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 import pytest
 
 from code_indexer.server.fault_injection.http_client_factory import HttpClientFactory
+from code_indexer.server.services.siem_delivery.credential import (
+    SiemCredentialStore,
+    StoredCredential,
+)
+from code_indexer.server.services.siem_delivery.db import SiemDb
 from code_indexer.server.services.siem_delivery.destination import (
     Destination,
     resolve_destination,
 )
+from code_indexer.server.services.siem_delivery.sender import CredentialProvider
+from code_indexer.server.services.token_encryption import derive_key_from_salt
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
 from tests.fixtures.secops_sidecar.harness import SidecarHandle, start_sidecar
 
@@ -95,7 +102,6 @@ def harness_section(sidecar: SidecarHandle, **overrides: object) -> SiemDelivery
         project_id=coords.project,
         location=coords.location,
         instance_id=coords.instance,
-        service_account_key_path=str(sidecar.key_material.key_file_path),
         source_instance_label="example-label",
     )
     values.update(overrides)
@@ -113,3 +119,28 @@ def harness_destination(sidecar: SidecarHandle, **overrides: object) -> Destinat
 @pytest.fixture()
 def http_factory() -> HttpClientFactory:
     return HttpClientFactory(fault_injection_service=None)
+
+
+# The server derives this key from .encryption_key_salt; tests use a salt.
+TEST_ENCRYPTION_KEY = derive_key_from_salt("siem-unit-test-salt")
+
+
+def sidecar_loader(
+    sidecar: SidecarHandle, **overrides: Any
+) -> Callable[[], StoredCredential]:
+    """A credential loader serving the sidecar's key (as the store would)."""
+    info = {**sidecar.read_key_file(), **overrides}
+    return lambda: StoredCredential("test-credential", dict(info))
+
+
+def seeded_store(db: SiemDb, sidecar: SidecarHandle) -> SiemCredentialStore:
+    """The real encrypted store holding the sidecar's key."""
+    store = SiemCredentialStore(db, TEST_ENCRYPTION_KEY)
+    store.set(dict(sidecar.read_key_file()), actor="example-admin")
+    return store
+
+
+def sidecar_provider(
+    http: HttpClientFactory, sidecar: SidecarHandle, token_timeout: float = 5.0
+) -> CredentialProvider:
+    return CredentialProvider(http, sidecar_loader(sidecar), token_timeout)

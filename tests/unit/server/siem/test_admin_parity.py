@@ -25,7 +25,15 @@ from code_indexer.server.services.siem_delivery.timings import HARNESS_TIMINGS
 from tests.fixtures.secops_sidecar.harness import SidecarHandle
 
 from .backends import SiemBackendHarness
-from .conftest import harness_destination, harness_section
+from code_indexer.server.services.siem_delivery.credential import SiemCredentialStore
+
+from .conftest import (
+    TEST_ENCRYPTION_KEY,
+    harness_destination,
+    harness_section,
+    seeded_store,
+    sidecar_loader,
+)
 
 MARKER = "S3CR3T-PARITY-MARKER-4d2"
 
@@ -57,6 +65,7 @@ def _scheduler(
         http_client_factory=HttpClientFactory(fault_injection_service=None),
         harness_active=True,
         node_id=None,
+        credential_store=SiemCredentialStore(b.db, TEST_ENCRYPTION_KEY),
         timings=HARNESS_TIMINGS,
     )
 
@@ -69,6 +78,7 @@ def wired(
     audit_capture.mark_server_process()
     audit_capture.bind_audit_service(siem_backend.audit, node_id=None)
     config = _CommittedConfig(dataclasses.asdict(harness_section(siem_sidecar)))
+    seeded_store(siem_backend.db, siem_sidecar)
     try:
         yield siem_backend, config, siem_sidecar
     finally:
@@ -243,7 +253,7 @@ def test_token_echo_marker_never_reaches_results_or_logs(
     sidecar.control.post("/_control/token-faults", {"mode": "echo", "marker": MARKER})
     factory = HttpClientFactory(fault_injection_service=None)
     with caplog.at_level(logging.DEBUG):
-        result = CredentialProvider(factory, token_timeout=5.0).probe(
+        result = CredentialProvider(factory, sidecar_loader(sidecar), 5.0).probe(
             harness_destination(sidecar)
         )
     assert result is ProbeResult.TOKEN_REJECTED

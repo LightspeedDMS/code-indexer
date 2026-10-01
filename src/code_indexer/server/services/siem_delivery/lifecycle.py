@@ -9,6 +9,7 @@ kills boot.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -37,14 +38,63 @@ def construct_scheduler(
     if factory is None:
         raise RuntimeError("http_client_factory is not available")
     harness_active = getattr(app.state, "fault_injection_service", None) is not None
+    config_service = get_config_service()
     return SiemDeliveryScheduler(
         db=backend_registry.siem_delivery,
-        config_service=get_config_service(),
+        config_service=config_service,
         background_job_manager=background_job_manager,
         http_client_factory=factory,
         harness_active=harness_active,
         node_id=audit_node_id(),
+        credential_store=_credential_store(
+            backend_registry.siem_delivery, config_service
+        ),
     )
+
+
+# Domain separation: the SIEM credential key never equals another feature's
+# key derived from the same cluster secret.
+_SIEM_CLUSTER_KEY_SALT = hashlib.sha256(b"cidx-siem-credential-cluster-salt").digest()
+
+
+def _credential_store(db: Any, config_service: Any) -> Any:
+    """The encrypted credential store.
+
+    Cluster (PostgreSQL): the key derives from the SHARED JWT secret row in
+    ``cluster_secrets`` (the helper LLM lease state uses), so every node
+    decrypts the one stored row.  Solo (SQLite): the node-local
+    ``.encryption_key_salt`` derivation of the CI-token and git-credential
+    managers."""
+    from pathlib import Path
+
+    from code_indexer.server.services.encryption_key_salt import (
+        ensure_encryption_key_salt,
+    )
+    from code_indexer.server.services.siem_delivery.credential import (
+        SiemCredentialStore,
+    )
+    from code_indexer.server.services.token_encryption import derive_encryption_key
+
+    # Derived LAZILY on first use (a scheduler or worker thread): this
+    # constructor runs on the async startup path, where no DB query or key
+    # file read may happen.
+    if db.dialect.name == "postgres":
+        from code_indexer.server.config.llm_lease_state import (
+            derive_cluster_encryption_key,
+        )
+
+        return SiemCredentialStore.lazy(
+            db, lambda: derive_cluster_encryption_key(db.pool, _SIEM_CLUSTER_KEY_SALT)
+        )
+
+    def _solo_key() -> bytes:
+        server_dir = Path(config_service.config_manager.server_dir)
+        ensure_encryption_key_salt(server_dir, config_service.get_config().storage_mode)
+        return derive_encryption_key(
+            server_dir_for_salt=server_dir, cluster_secret=None
+        )
+
+    return SiemCredentialStore.lazy(db, _solo_key)
 
 
 def record_startup_failure(app: Any, error: BaseException) -> None:

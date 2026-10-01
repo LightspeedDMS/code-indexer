@@ -1,8 +1,10 @@
 """Runtime configuration of SIEM delivery (Web UI Config section ``siem_delivery``).
 
-Holds references only: a SecOps region, path segments, and the PATH of a
-service-account key file -- never key material or a token.  Validation lives
-in ``services/siem_delivery/destination.py``.
+Holds references only: a SecOps region and path segments -- never key
+material or a token.  The service-account key is configured separately in
+the same Web UI section and stored encrypted in the database
+(``services/siem_delivery/credential.py``); there is no key-file path.
+Validation lives in ``services/siem_delivery/destination.py``.
 """
 
 from __future__ import annotations
@@ -23,10 +25,15 @@ class SiemDeliveryConfig:
     project_id: str = ""
     location: str = ""
     instance_id: str = ""
-    # Absolute path of a service-account key file present on every node.
-    service_account_key_path: str = ""
     max_batch_events: int = DEFAULT_MAX_BATCH_EVENTS
     source_instance_label: str = ""
     # Loopback test receiver origin; accepted ONLY in a process whose
     # non-production fault-injection harness passed its startup gate.
     harness_endpoint: str = ""
+    # Optional additional trusted CA certificates (PEM, public) ADDED to the
+    # default trust of both outbound legs; set, replaced and removed only
+    # through the elevated CA form (services/siem_delivery/trust.py), never
+    # the generic section form.  The fingerprint (SHA-256 over the DER of
+    # every certificate) is what the config-change audit records.
+    trusted_ca_pem: str = ""
+    trusted_ca_fingerprint: str = ""

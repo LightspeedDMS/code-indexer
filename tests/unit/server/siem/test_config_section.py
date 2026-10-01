@@ -50,6 +50,35 @@ def test_updates_are_typed(server_dir: Path) -> None:
     assert section.project_id == "example-project"
 
 
+def test_removed_key_path_setting_is_rejected(server_dir: Path) -> None:
+    """There is exactly one way to configure the key (the Web UI credential)."""
+    svc = _service(server_dir)
+    with pytest.raises(ValueError):
+        svc.update_settings_atomic(
+            [("siem_delivery", "service_account_key_path", "/keys/sa.json")]
+        )
+    assert "service_account_key_path" not in svc.get_all_settings()["siem_delivery"]
+
+
+def test_credential_form_accepts_exactly_one_of_paste_or_upload() -> None:
+    from code_indexer.server.services.siem_delivery.config_view import (
+        credential_text_from_inputs,
+    )
+
+    assert credential_text_from_inputs('  {"a": 1}\n', None) == '{"a": 1}'
+    assert credential_text_from_inputs("", b'{"b": 2}') == '{"b": 2}'
+    assert credential_text_from_inputs("   ", b'{"b": 2}') == '{"b": 2}'
+    for pasted, uploaded in (
+        ("", None),
+        ("  ", b""),
+        ('{"a": 1}', b'{"b": 2}'),
+        ("", b"\xff\xfe"),
+        ("", b"x" * (64 * 1024 + 1)),
+    ):
+        with pytest.raises(ValueError):
+            credential_text_from_inputs(pasted, uploaded)
+
+
 def test_unknown_key_is_rejected(server_dir: Path) -> None:
     with pytest.raises(ValueError):
         _service(server_dir).update_settings_atomic([("siem_delivery", "nope", "1")])

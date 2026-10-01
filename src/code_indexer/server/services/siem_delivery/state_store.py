@@ -21,7 +21,8 @@ State-first (checked): claim (``claim._phase1``, ``claim._phase4``,
 ``completion.dissolve_batch``); probes (``probe._clear`` / ``_defer``, and
 their sends go through claim/completion); the mapping-version requeue rounds;
 admin resume / acknowledge / rebatch / quarantine requeue / retarget and
-abandon (batch close and row moves).  State row only: arming and the fence,
+abandon (batch close and row moves, each re-reading the committed
+destination and bounded by an id snapshot taken when the action started).  State row only: arming and the fence,
 canary record/confirm, stats refresh.  Exempt (one row, or rows no other
 path writes): send start / release (one batch row each), retention (deletes
 terminal rows only), and the capture INSERT inside the audit transaction

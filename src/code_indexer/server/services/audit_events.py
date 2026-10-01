@@ -478,6 +478,15 @@ AUDIT_ACTION_CATALOG.update(
         "siem_destination_abandoned": _spec(
             "config", {"destination_key": OPAQUE_ID, "count": INT}
         ),
+        # The service-account key: its non-secret identity only, never the key.
+        "siem_credential_changed": _spec(
+            "config",
+            {
+                "change": _enum("set", "replaced", "removed"),
+                "client_email": USERNAME,
+                "private_key_id": OPAQUE_ID,
+            },
+        ),
     }
 )
 

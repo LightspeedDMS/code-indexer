@@ -49,14 +49,92 @@ followed by at-least-once delivery attempts for what was captured.
 | `region` | One of the SecOps regions documented in Google's [Migrate to Chronicle API](https://docs.cloud.google.com/chronicle/docs/soar/admin-tasks/advanced/api-migration-guide) guide: `us`, `eu`, `africa-south1`, `asia-northeast1`, `asia-south1`, `asia-southeast1`, `asia-southeast2`, `australia-southeast1`, `europe-west2`, `europe-west3`, `europe-west6`, `europe-west9`, `europe-west12`, `me-central1`, `me-central2`, `me-west1`, `northamerica-northeast2`, `southamerica-east1`. The endpoint is derived as `https://chronicle.<region>.rep.googleapis.com`; there is no free URL field. |
 | `api_version` | `v1`, `v1beta` or `v1alpha`. |
 | `project_id`, `location`, `instance_id` | Single path segments (`[A-Za-z0-9][A-Za-z0-9_-]*`). |
-| `service_account_key_path` | Absolute path of a service-account key file present on every node. Its `token_uri` must be Google's token endpoint. The key itself is never stored, shown or logged. |
 | `max_batch_events` | 1 to 1000. |
 | `source_instance_label` | Carried as `additional.cidx_instance`. |
-| `harness_endpoint` | Test receiver only: accepted ONLY in a process whose non-production fault-injection gate is active (loopback origin; the key file `token_uri` must then be `<harness_endpoint>/token`). |
+| `harness_endpoint` | Test receiver only: accepted ONLY in a process whose non-production fault-injection gate is active (loopback origin; the key's `token_uri` must then be `<harness_endpoint>/token`). |
 
 Every SIEM loop cycle reads the COMMITTED configuration from the database,
 not the process's cached config, so a save made through any worker or node
 takes effect everywhere on the next cycle.
+
+### Service-account credential (Web UI only)
+
+The SecOps service-account JSON key is pasted or uploaded in the same Web UI
+section ("Set / Replace Credential"); there is no key-file path and no other
+way to configure it. Setting, replacing and removing it need TOTP elevation,
+like every other admin secret change.
+
+- Validation on save: the JSON parses; `type` is `service_account`;
+  `client_email`, `private_key`, `private_key_id` and `token_uri` are present;
+  the private key loads; `token_uri` is Google's token endpoint (behind the
+  fault-injection gate, a loopback `<harness origin>/token` is also accepted).
+  A rejected key changes nothing.
+- Storage: one row of table `siem_delivery_credential` (SQLite `groups.db`
+  solo, PostgreSQL cluster, migration `055`), so every node uses it. The key is
+  AES-256 encrypted (`services/token_encryption.py`). The encryption key is:
+  - cluster (PostgreSQL): derived from the SHARED JWT secret row in
+    `cluster_secrets` (the same helper LLM lease state uses, with a SIEM-only
+    salt), so every node derives the same key whatever its local files;
+  - solo (SQLite): derived from the node's `.encryption_key_salt`, as for CI
+    tokens and git credentials.
+
+  The key is derived on first use (by the delivery loop or an admin action,
+  off the startup path) and cached for the process.
+
+  Only `client_email`, `private_key_id`, who set it and when, and a key-check
+  value (HMAC of the encryption key) are stored in clear. When a process's
+  key does not match the stored key-check (a rotated cluster JWT secret, or a
+  changed solo salt) it probes `credential_key_mismatch`, logs one WARNING
+  naming the cause, and the key must be re-uploaded; this is never reported
+  as an invalid key.
+- Only RSA service-account keys are accepted (google-auth signs RS256).
+- The forms read at most 512 KiB of request body (larger: HTTP 413, refused
+  before parsing), one file and two fields; the key JSON itself is capped at
+  64 KiB.
+- Write-only: no page, API or log returns the key. The status table and
+  `GET /api/admin/siem-delivery/stats` (`credential`) show the identity only.
+- Audit: `siem_credential_changed` with `change` (`set`, `replaced`,
+  `removed`), `client_email` and `private_key_id` only. It is a SIEM
+  self-report, delivered to the configured destination.
+- Delivery reads the stored key on every token request, so a Replace or Remove
+  made on any node applies at the next request everywhere. Without a usable
+  credential a process probes `credential_missing` or `credential_invalid`
+  and capture does not arm.
+- A `service_account_key_path` value saved by 12.79.0 is IGNORED: each process
+  logs one WARNING, never reads that file, and the destination counts as
+  "credential missing" until a key is uploaded. The next save of the section
+  drops the field.
+
+### Additional trusted CA (optional)
+
+For a TLS-inspecting proxy, or a test emulator that presents Google's
+hostnames with a test-CA certificate, CA certificates (PEM, one or more) can
+be pasted or uploaded in the same section ("Set / Replace Trusted CA"). They
+are public, so they are stored in the `siem_delivery` config section
+(`trusted_ca_pem`, plus `trusted_ca_fingerprint`, the SHA-256 over the DER of
+every certificate).
+
+- They are ADDED to the default trust the clients use (httpx's default
+  context: certifi, or `SSL_CERT_FILE`) for BOTH outbound legs, the OAuth
+  token exchange and `events:import`. Certificate and hostname verification
+  are always on; nothing can skip verification.
+- The environment proxy is still honoured (`HTTPS_PROXY` / `HTTP_PROXY` /
+  `ALL_PROXY`, bypassed per `NO_PROXY`), so a TLS-inspecting proxy works.
+- The CA bundle is capped at 256 KiB (512 KiB request body, HTTP 413 above).
+- Rolling upgrade: a 12.79.0 node that saves the SIEM section during the
+  upgrade drops the CA fields (it does not know them). Set the CA again once
+  every node runs this release.
+- Test harness only: behind the fault-injection gate the harness endpoint
+  may be `https://<loopback>:<port>`, so Phase 7 drives delivery through a
+  loopback TLS front with a test CA.
+- Validation on save: one or more X.509 certificates, certificates only, each
+  a CA (basicConstraints CA=true) and not expired.
+- Setting, replacing and removing need TOTP elevation and are recorded as a
+  `config_changed` row whose values carry the fingerprint before and after.
+- The UI shows each certificate's subject, issuer, SHA-256 fingerprint and
+  expiry. A change does not change the destination key (no disarm); the
+  combined trust is built once per bundle and picked up through the
+  committed-configuration read on the next cycle.
 
 ## Arming
 
@@ -123,6 +201,33 @@ admin calls `POST /api/admin/siem-delivery/destinations/{key}/retarget` or
 `/abandon`. Both refuse the currently configured destination (409). All admin
 actions are audited.
 
+- `abandon` works for any destination key that is not the configured one,
+  including when NOTHING is configured (decommissioning). It resolves every
+  undelivered row of that key: pending, batched AND quarantined. Abandon is
+  the path for a quarantined row on a removed destination; the quarantine
+  requeue action would only return it to pending on the dead destination.
+- Both snapshot the key's highest queue id when they start and only ever
+  touch rows at or below it (rows captured afterwards, e.g. after the key is
+  configured again, are never moved). In every transaction, under the SIEM
+  state-row lock, they re-read the COMMITTED destination from the database
+  (never a process's cached view) and stop with 409 once the abandoned key
+  is configured (retarget: once its target is no longer the configured
+  destination). Configuration saves take no SIEM lock, so a save that
+  commits inside one round's (millisecond) window is not serialised with
+  that round: a known, documented limitation.
+- Both refuse with 409 "a send to this destination is in flight; retry
+  shortly" while any open batch of the key holds an unexpired sender lease
+  (claims take their lease under the same state-row lock, so the check is
+  race-free). A lease left by a crashed node blocks them only until it
+  expires (`lease_seconds`: 10 minutes; 30 s in the test harness profile).
+- `retarget` needs a configured destination to move the rows to; with none it
+  answers 409 "no SIEM destination is configured to retarget to; configure the
+  new destination first, or abandon the rows instead".
+
+Decommissioning: disable delivery and clear the destination fields, then
+abandon the old key (the clearing save itself captures one row for the removed
+destination). Once those rows are abandoned, every SIEM health reason clears.
+
 ## Retention
 
 `DataRetentionScheduler` prunes only terminal SIEM rows. These are delivered
@@ -144,7 +249,8 @@ compressed.
 Before enabling against a real tenant:
 
 1. Grant a dedicated identity only the events-import permission.
-2. Configure the region, project, location, instance and key path.
+2. Configure the region, project, location and instance, and upload the
+   service-account key in the Web UI.
 3. Run the canary.
 4. Search each canary `productLogId` in SecOps and submit the confirmation.
 5. Record the real 400 body shape and any duplicate response.

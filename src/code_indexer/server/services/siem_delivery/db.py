@@ -156,6 +156,11 @@ class SiemDb:
     def postgres(cls, pool: Any) -> "SiemDb":
         return cls(POSTGRES, pool=pool)
 
+    @property
+    def pool(self) -> Any:
+        """The PostgreSQL pool (None on SQLite)."""
+        return self._pool
+
     def write(self, fn: Callable[[SiemTx], T], *, phase: str = "write") -> T:
         """Run *fn* in ONE short write transaction (rolled back on error)."""
         started = time.monotonic()
@@ -283,6 +288,16 @@ SQLITE_SCHEMA: Sequence[str] = (
     """CREATE TABLE IF NOT EXISTS siem_backlog_samples (
         sampled_at TEXT PRIMARY KEY,
         backlog_rows_estimate INTEGER NOT NULL)""",
+    # The SecOps service-account key, encrypted (PostgreSQL: migration 055).
+    """CREATE TABLE IF NOT EXISTS siem_delivery_credential (
+        id INTEGER PRIMARY KEY,
+        credential_id TEXT NOT NULL,
+        encrypted_key TEXT NOT NULL,
+        key_check TEXT NOT NULL,
+        client_email TEXT NOT NULL,
+        private_key_id TEXT NOT NULL,
+        set_by TEXT NOT NULL,
+        set_at TEXT NOT NULL)""",
 )
 
 # (index name, table, columns) -- identical on both backends.

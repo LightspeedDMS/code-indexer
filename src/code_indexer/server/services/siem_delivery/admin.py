@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from code_indexer.server.services.audit_events import SystemComponent
 from code_indexer.server.services.audit_outcome import record_outcome
@@ -56,9 +56,19 @@ def _dest_target(scheduler: Any) -> Optional[SiemTarget]:
     return SiemTarget(ctx.destination.key, None) if ctx is not None else None
 
 
+_RESOLVE = object()  # sentinel: read the destination now
+
+
 def _audit(
-    scheduler: Any, actor: Any, action_type: str, details: Mapping[str, Any]
+    scheduler: Any,
+    actor: Any,
+    action_type: str,
+    details: Mapping[str, Any],
+    target: Any = _RESOLVE,
 ) -> None:
+    """Record one self-report row (``record_outcome`` never raises).  A
+    caller that already resolved the destination passes it as *target*, so
+    nothing can fail between its own write and this row."""
     record_outcome(
         actor=actor,
         action_type=action_type,
@@ -66,7 +76,7 @@ def _audit(
         target_id="siem_delivery",
         outcome="success",
         details=dict(details),
-        siem_destination=_dest_target(scheduler),
+        siem_destination=_dest_target(scheduler) if target is _RESOLVE else target,
     )
 
 
@@ -363,16 +373,39 @@ def requeue_quarantined(
     return {"requeued": count}
 
 
-def _move_rows(scheduler: Any, key: str, sql: str, params_head: Sequence[Any]) -> int:
+RoundCheck = Callable[[], None]
+
+
+def _snapshot_max_id(scheduler: Any, key: str) -> int:
+    """The key's highest queue id when the action starts: rows captured
+    after this (e.g. after the key is configured again) are never moved."""
+    row = scheduler.db.read(
+        lambda tx: tx.one(
+            "SELECT MAX(id) AS m FROM siem_delivery_queue WHERE destination_key = ?",
+            (key,),
+        )
+    )
+    return int(row["m"]) if row and row["m"] is not None else 0
+
+
+def _move_rows(
+    scheduler: Any,
+    key: str,
+    sql: str,
+    params_head: Sequence[Any],
+    check: RoundCheck,
+    max_id: int,
+) -> int:
     total = 0
     for _ in range(_MAX_ROUNDS):
 
         def _round(tx: SiemTx) -> int:
             state_store.state_in(tx, lock=True)  # lock order: state row first
+            check()  # the COMMITTED destination (a fresh read), every round
             rows = tx.query(
                 "SELECT id FROM siem_delivery_queue WHERE destination_key = ? AND status IN "
-                "('pending', 'batched', 'quarantined') ORDER BY id LIMIT ?",
-                (key, RETARGET_ROWS_PER_TX),
+                "('pending', 'batched', 'quarantined') AND id <= ? ORDER BY id LIMIT ?",
+                (key, max_id, RETARGET_ROWS_PER_TX),
             )
             for row in rows:
                 tx.execute(sql, list(params_head) + [tx.ts(tx.now()), row["id"]])
@@ -385,9 +418,33 @@ def _move_rows(scheduler: Any, key: str, sql: str, params_head: Sequence[Any]) -
     return total
 
 
-def _close_batches(scheduler: Any, key: str) -> None:
+def _close_batches(scheduler: Any, key: str, check: RoundCheck, max_id: int) -> None:
     def _do(tx: SiemTx) -> None:
         state_store.state_in(tx, lock=True)  # lock order: state row first
+        check()
+        # Claims lease under this same state-row lock, so this check is
+        # race-free: a batch leased now is in flight and must not be closed
+        # under its sender (its completion would be lost).  A crashed
+        # sender's lease blocks only until it expires (lease_seconds).
+        in_flight = tx.one(
+            "SELECT batch_id FROM siem_delivery_batches WHERE destination_key = ? "
+            "AND state = 'pending_send' AND lease_expires_at IS NOT NULL "
+            "AND lease_expires_at >= ? LIMIT 1",
+            (key, tx.ts(tx.now())),
+        )
+        if in_flight is not None:
+            raise SiemAdminError(
+                409, "a send to this destination is in flight; retry shortly"
+            )
+        # rows newer than the snapshot inside a batch being closed go back to
+        # pending (they are not this action's to move, and never stranded)
+        tx.execute(
+            "UPDATE siem_delivery_queue SET status = 'pending', batch_id = NULL, "
+            "batch_ordinal = NULL WHERE status = 'batched' AND id > ? AND batch_id IN "
+            "(SELECT batch_id FROM siem_delivery_batches WHERE destination_key = ? "
+            "AND state = 'pending_send')",
+            (max_id, key),
+        )
         tx.execute(
             "UPDATE siem_delivery_batches SET state = 'retargeted', body = NULL, "
             "lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL "
@@ -399,33 +456,74 @@ def _close_batches(scheduler: Any, key: str) -> None:
 
 
 def _close_and_move(
-    scheduler: Any, key: str, sql: str, params_head: Sequence[Any]
+    scheduler: Any,
+    key: str,
+    sql: str,
+    params_head: Sequence[Any],
+    check: RoundCheck,
+    max_id: int,
 ) -> int:
     """Close the key's open batches, move its rows, then close and move once
-    more: a stale tick may have formed a batch while the rows were moving."""
+    more: a stale tick may have formed a batch while the rows were moving.
+
+    Safe by construction against a concurrent configuration change: only
+    rows with ``id <= max_id`` (snapshotted when the action started) are ever
+    touched, and *check* re-reads the COMMITTED destination (never this
+    process's cached view) in every transaction, stopping with 409."""
     total = 0
     for _ in range(2):
-        _close_batches(scheduler, key)
-        total += _move_rows(scheduler, key, sql, params_head)
+        _close_batches(scheduler, key, check, max_id)
+        total += _move_rows(scheduler, key, sql, params_head, check, max_id)
     return total
 
 
-def _refuse_configured(scheduler: Any, key: str) -> Any:
-    ctx = _require_ctx(scheduler)
-    if key == ctx.destination.key:
-        raise SiemAdminError(409, "rows already target the configured destination")
-    return ctx
+_CONFIGURED_KEY_REFUSAL = "rows already target the configured destination"
+
+
+def _configured_key(scheduler: Any) -> Optional[str]:
+    """The committed destination key, or None when nothing is configured
+    (an invalid stored configuration is refused: its key is unknown here)."""
+    from code_indexer.server.services.siem_delivery.destination import (
+        SiemConfigInvalid,
+    )
+
+    try:
+        ctx = scheduler.committed_context()
+    except SiemConfigInvalid as exc:
+        raise SiemAdminError(
+            409, f"SIEM configuration invalid here: {exc.field}"
+        ) from None
+    return str(ctx.destination.key) if ctx is not None else None
 
 
 def retarget_destination(scheduler: Any, actor: str, key: str) -> Dict[str, Any]:
-    ctx = _refuse_configured(scheduler, key)
+    max_id = _snapshot_max_id(scheduler, key)  # before any check
+    if _configured_key(scheduler) is None:
+        raise SiemAdminError(
+            409,
+            "no SIEM destination is configured to retarget to; configure the "
+            "new destination first, or abandon the rows instead",
+        )
+    ctx = _require_ctx(scheduler)
+    target = str(ctx.destination.key)
+    if key == target:
+        raise SiemAdminError(409, _CONFIGURED_KEY_REFUSAL)
+
+    def _still_the_target() -> None:
+        if _configured_key(scheduler) != target:
+            raise SiemAdminError(
+                409, "the configured destination changed during the retarget"
+            )
+
     count = _close_and_move(
         scheduler,
         key,
         "UPDATE siem_delivery_queue SET destination_key = ?, status = 'pending', "
         "batch_id = NULL, batch_ordinal = NULL, quarantine_reason = NULL, "
         "quarantine_signature = NULL, next_attempt_at = ? WHERE id = ?",
-        [ctx.destination.key],
+        [target],
+        _still_the_target,
+        max_id,
     )
     _audit(
         scheduler,
@@ -437,13 +535,24 @@ def retarget_destination(scheduler: Any, actor: str, key: str) -> Dict[str, Any]
 
 
 def abandon_destination(scheduler: Any, actor: str, key: str) -> Dict[str, Any]:
-    _refuse_configured(scheduler, key)
+    """Abandon every undelivered row (pending, batched AND quarantined) of a
+    destination that is not the configured one -- including when nothing is
+    configured at all (decommissioning)."""
+
+    def _not_configured() -> None:
+        if key == _configured_key(scheduler):
+            raise SiemAdminError(409, _CONFIGURED_KEY_REFUSAL)
+
+    max_id = _snapshot_max_id(scheduler, key)  # before any check
+    _not_configured()
     count = _close_and_move(
         scheduler,
         key,
         "UPDATE siem_delivery_queue SET status = 'abandoned', batch_id = NULL, "
         "batch_ordinal = NULL, next_attempt_at = ? WHERE id = ?",
         [],
+        _not_configured,
+        max_id,
     )
     _audit(
         scheduler,
@@ -452,6 +561,71 @@ def abandon_destination(scheduler: Any, actor: str, key: str) -> Dict[str, Any]:
         {"destination_key": key, "count": count},
     )
     return {"abandoned": count}
+
+
+# --- service-account credential (write-only) ------------------------------------------
+
+
+def _audit_credential(
+    scheduler: Any,
+    actor: str,
+    change: str,
+    identity: Mapping[str, Any],
+    target: Optional[SiemTarget],
+) -> None:
+    """Identity only: never the key, never the JSON."""
+    _audit(
+        scheduler,
+        actor,
+        "siem_credential_changed",
+        {
+            "change": change,
+            "client_email": identity["client_email"],
+            "private_key_id": identity["private_key_id"],
+        },
+        target=target,
+    )
+
+
+def _resolved_target(scheduler: Any) -> Optional[SiemTarget]:
+    """The self-report destination, resolved BEFORE a credential write (409
+    on a configuration this process cannot use), so the write and its audit
+    row cannot be separated by a later configuration read."""
+    key = _configured_key(scheduler)
+    return SiemTarget(key, None) if key is not None else None
+
+
+def set_credential(scheduler: Any, actor: str, key_json: str) -> Dict[str, Any]:
+    """Validate and store (set or replace) the service-account key; the
+    response carries the non-secret identity only."""
+    from code_indexer.server.services.siem_delivery.credential import (
+        SiemCredentialInvalid,
+        validate_service_account_json,
+    )
+
+    try:
+        info = validate_service_account_json(
+            key_json, harness_active=scheduler.harness_active
+        )
+    except SiemCredentialInvalid as exc:
+        raise SiemAdminError(400, str(exc)) from None
+    target = _resolved_target(scheduler)
+    change, identity = scheduler.credential_store.set(info, actor=actor)
+    scheduler.credentials.invalidate_all()
+    scheduler.note_credential_identity(identity)
+    _audit_credential(scheduler, actor, change, identity, target)
+    return {"change": change, "credential": identity}
+
+
+def remove_credential(scheduler: Any, actor: str) -> Dict[str, Any]:
+    target = _resolved_target(scheduler)
+    removed = scheduler.credential_store.remove(actor=actor)
+    if removed is None:
+        raise SiemAdminError(404, "no SIEM service-account credential is stored")
+    scheduler.credentials.invalidate_all()
+    scheduler.note_credential_identity(None)
+    _audit_credential(scheduler, actor, "removed", removed, target)
+    return {"change": "removed", "credential": removed}
 
 
 # --- stats document ----------------------------------------------------------------
@@ -539,6 +713,8 @@ def stats_document(scheduler: Any) -> Dict[str, Any]:
     status = capture_status(scheduler, state)
     return {
         "fleet": fleet,
+        # non-secret identity of the stored key (None: no credential)
+        "credential": scheduler.credential_store.identity(),
         "capture": {
             **status,
             "configured_destination_key": dest_key,

@@ -27,7 +27,7 @@ from code_indexer.server.services.siem_delivery.udm import UDM_MAPPING
 from tests.fixtures.secops_sidecar.harness import SidecarHandle
 
 from .backends import SiemBackendHarness
-from .conftest import harness_destination
+from .conftest import harness_destination, sidecar_loader
 
 _PAST = "2000-01-01T00:00:00.000Z"
 FAST = dataclasses.replace(
@@ -50,7 +50,7 @@ def engine(
         db=siem_backend.db,
         timings=FAST,
         http_factory=factory,
-        credentials=CredentialProvider(factory, token_timeout=5.0),
+        credentials=CredentialProvider(factory, sidecar_loader(siem_sidecar), 5.0),
         process_id="solo:1:test",
         destination=dest,
         max_batch_events=1000,
@@ -304,7 +304,10 @@ def test_local_probe_never_reopens_a_full_quarantine_window(
     # the original cause is fixed, but the sample holds ANOTHER failure: the
     # full window cannot absorb it, so the halt and the window both stay
     _insert_projection_error_row(
-        siem_backend, "22222222-2222-2222-2222-222222222222", engine.destination.key
+        siem_backend,
+        "22222222-2222-2222-2222-222222222222",
+        engine.destination.key,
+        mapping_version=engine.mapping_version,  # fails under the CURRENT code
     )
     assert run_tick(engine) == {"probe": "still_failing"}
     assert _state(engine)["halted_class"] == "local_validation_burst"
@@ -377,15 +380,17 @@ def test_k5_row_changed_between_read_and_claim_rolls_back(
 
 
 def _insert_projection_error_row(
-    b: SiemBackendHarness, event_uuid: str, dest: str
+    b: SiemBackendHarness, event_uuid: str, dest: str, mapping_version: int = 1
 ) -> None:
+    """A row whose projection failed under *mapping_version* (default: an
+    OLD version, so a newer engine re-projects it)."""
     now = "2026-01-01T00:00:00.000Z" if b.name == "sqlite" else "2026-01-01T00:00:00Z"
     b.raw(
         "INSERT INTO siem_delivery_queue (event_uuid, destination_key, occurred_at, "
         "action_type, event_payload, projection_error, status, attempts, next_attempt_at, "
         "mapping_version, created_at) VALUES (?, ?, ?, 'authentication_success', NULL, "
-        "'details.method', 'pending', 0, ?, 1, ?)",
-        (event_uuid, dest, "2026-01-01T00:00:00.000000Z", now, now),
+        "'details.method', 'pending', 0, ?, ?, ?)",
+        (event_uuid, dest, "2026-01-01T00:00:00.000000Z", now, mapping_version, now),
     )
 
 

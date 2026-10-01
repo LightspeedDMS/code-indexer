@@ -86,12 +86,15 @@ NON_SECRET_SCALAR_CONFIG_KEYS: FrozenSet[str] = frozenset(
         "indexing_config.temporal_all_branches_enabled",
         # LLM credential mode (never the provider URL or key)
         "claude_integration_config.claude_auth_mode",
-        # SIEM delivery (project, location, instance, key path and harness
-        # endpoint are recorded by NAME only)
+        # SIEM delivery (project, location, instance and harness endpoint are
+        # recorded by NAME only; the service-account key is not part of the
+        # section: it has its own siem_credential_changed row)
         "siem_delivery_config.enabled",
         "siem_delivery_config.api_version",
         "siem_delivery_config.max_batch_events",
         "siem_delivery_config.region",
+        # the trusted CA bundle's SHA-256 (never the PEM text itself)
+        "siem_delivery_config.trusted_ca_fingerprint",
     }
 )
 

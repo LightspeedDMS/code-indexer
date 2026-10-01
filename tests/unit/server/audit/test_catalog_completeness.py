@@ -123,6 +123,9 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
             "update_totp_elevation_audited",
             "reset_to_defaults_audited",
             "set_config",
+            # SIEM trusted CA (one apply_audited_change each)
+            "set_trusted_ca",
+            "remove_trusted_ca",
         },
         "git_settings_changed": {"apply_git_settings_change"},
         "provider_api_key_set": {"apply_audited_change"},
@@ -143,6 +146,7 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "siem_batch_rebatched": {"rebatch_batch"},
         "siem_destination_retargeted": {"retarget_destination"},
         "siem_destination_abandoned": {"abandon_destination"},
+        "siem_credential_changed": {"set_credential", "remove_credential"},
         # Legacy types whose rows now come from one audited entry point.
         "user_group_change": {"assign_user_to_group_audited"},
         "repo_access_revoke": {
@@ -370,6 +374,10 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/config/reset": _CONFIG,
     "POST /admin/config/langfuse_pull": _CONFIG,
     "POST /admin/config/cidx_meta_backup": _CONFIG,
+    "POST /admin/config/siem_delivery/trusted_ca": _CONFIG,
+    "POST /admin/config/siem_delivery/trusted_ca/remove": _CONFIG,
+    "POST /admin/config/siem_delivery/credential": ("siem_credential_changed",),
+    "POST /admin/config/siem_delivery/credential/remove": ("siem_credential_changed",),
     "POST /admin/self-monitoring": _CONFIG,
     "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
     "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),

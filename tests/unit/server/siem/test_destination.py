@@ -16,8 +16,6 @@ from code_indexer.server.services.siem_delivery.destination import (
 )
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
 
-KEY_PATH = "/var/lib/example/sa-key.json"
-
 
 def _deployed(**overrides: object) -> SiemDeliveryConfig:
     base = SiemDeliveryConfig(
@@ -26,7 +24,6 @@ def _deployed(**overrides: object) -> SiemDeliveryConfig:
         project_id="example-project",
         location="us",
         instance_id="00000000-0000-0000-0000-000000000000",
-        service_account_key_path=KEY_PATH,
         source_instance_label="example-label",
     )
     return dataclasses.replace(base, **overrides)  # type: ignore[arg-type]
@@ -39,6 +36,30 @@ def _harness(**overrides: object) -> SiemDeliveryConfig:
 
 def _field(exc: pytest.ExceptionInfo) -> str:
     return str(exc.value.field)
+
+
+def test_section_has_no_key_path_and_destination_completes_without_it() -> None:
+    """The key is configured only through the Web UI credential (stored
+    encrypted); the section has no key-file path at all."""
+    names = {f.name for f in dataclasses.fields(SiemDeliveryConfig)}
+    assert not any("key_path" in n for n in names)
+    dest = resolve_destination(_deployed(), harness_active=False)
+    assert dest is not None
+    assert not any("key_path" in f.name for f in dataclasses.fields(dest))
+
+
+def test_stored_trusted_ca_reaches_the_destination_and_must_be_cas() -> None:
+    from .tls_fixtures import make_ca, make_leaf
+
+    ca = make_ca()
+    dest = resolve_destination(_deployed(trusted_ca_pem=ca.pem), harness_active=False)
+    assert dest is not None and dest.trusted_ca_pem == ca.pem
+    assert dest.key == destination_key(_deployed())  # not part of the identity
+    with pytest.raises(SiemConfigInvalid) as exc:
+        validate_section(
+            _deployed(trusted_ca_pem=make_leaf(ca).pem), harness_active=False
+        )
+    assert _field(exc) == "trusted_ca_pem"
 
 
 def test_default_section_is_valid_and_has_no_destination() -> None:
@@ -86,10 +107,8 @@ def test_api_version_does_not_change_the_destination_key() -> None:
         ({"api_version": "v2"}, "api_version"),
         ({"max_batch_events": 0}, "max_batch_events"),
         ({"max_batch_events": 1001}, "max_batch_events"),
-        ({"service_account_key_path": "relative/key.json"}, "service_account_key_path"),
         ({"source_instance_label": "bad label"}, "source_instance_label"),
         ({"project_id": ""}, "project_id"),
-        ({"service_account_key_path": ""}, "service_account_key_path"),
     ],
 )
 def test_deployed_inputs_are_rejected_by_field(overrides: dict, field: str) -> None:
@@ -110,7 +129,8 @@ def test_harness_endpoint_requires_the_gate() -> None:
     [
         "http://10.0.0.5:8902",
         "http://u:p@127.0.0.1:8902",
-        "https://127.0.0.1:8902",
+        "ftp://127.0.0.1:8902",
+        "https://10.0.0.5:8902",
         "http://127.0.0.1",
         "http://127.0.0.1:8902/path",
         "http://127.0.0.1:8902?x=1",
@@ -130,6 +150,18 @@ def test_harness_endpoint_must_be_a_bare_loopback_origin(endpoint: str) -> None:
 def test_accepted_loopback_spellings(endpoint: str) -> None:
     dest = resolve_destination(_harness(harness_endpoint=endpoint), harness_active=True)
     assert dest is not None and dest.token_uri == endpoint + "/token"
+
+
+def test_https_loopback_harness_endpoint_is_accepted_behind_the_gate() -> None:
+    """The harness may front the receiver with TLS (a test CA), so the
+    trusted-CA path is exercised end to end; only behind the gate."""
+    cfg = _harness(harness_endpoint="https://127.0.0.1:8904")
+    dest = resolve_destination(cfg, harness_active=True)
+    assert dest is not None
+    assert dest.origin == "https://127.0.0.1:8904"
+    assert dest.token_uri == "https://127.0.0.1:8904/token"
+    with pytest.raises(SiemConfigInvalid):
+        validate_section(cfg, harness_active=False)
 
 
 def test_disabled_section_may_be_incomplete() -> None:

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from code_indexer.server.services.siem_delivery import capture, state_store, stats
 from code_indexer.server.services.siem_delivery.capture import CaptureSnapshot
 from code_indexer.server.services.siem_delivery.claim import EngineContext
+from code_indexer.server.services.siem_delivery.credential import SiemCredentialStore
 from code_indexer.server.services.siem_delivery.db import SiemDb
 from code_indexer.server.services.siem_delivery.destination import (
     Destination,
@@ -90,6 +91,12 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value is not None else None
 
 
+# A key-file path field saved by an earlier release.  It is IGNORED: the key
+# is configured only through the Web UI credential (stored encrypted); the
+# file it names is never read.
+LEGACY_KEY_PATH_FIELD = "service_account_key_path"
+
+
 def section_from_raw(raw: Mapping[str, Any]) -> SiemDeliveryConfig:
     allowed = {f.name for f in fields(SiemDeliveryConfig)}
     return SiemDeliveryConfig(**{k: v for k, v in raw.items() if k in allowed})
@@ -108,6 +115,7 @@ class SiemDeliveryScheduler:
         http_client_factory: Any,
         harness_active: bool,
         node_id: Optional[str],
+        credential_store: SiemCredentialStore,
         timings: Optional[SiemTimings] = None,
         mapping: Optional[Mapping[str, str]] = None,
         mapping_version: int = MAPPING_VERSION,
@@ -122,9 +130,16 @@ class SiemDeliveryScheduler:
         self.timings = timings or timings_for(harness_active)
         self.mapping = dict(mapping or UDM_MAPPING)
         self.mapping_version = mapping_version
+        self.credential_store = credential_store
         self.credentials = CredentialProvider(
-            http_client_factory, token_timeout=self.timings.token_timeout_seconds
+            http_client_factory,
+            credential_store.load,
+            token_timeout=self.timings.token_timeout_seconds,
         )
+        # Non-secret identity of the stored key, as of this process's last
+        # cycle (or its own last change): the config page reads it, no I/O.
+        self._credential_identity: Optional[Dict[str, Any]] = None
+        self._legacy_key_path_warned = False
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -213,10 +228,28 @@ class SiemDeliveryScheduler:
             )
             self._stop_event.wait(timeout=wait)
 
+    def _warn_legacy_key_path(self, raw: Mapping[str, Any]) -> None:
+        """One WARNING per process when the committed section still carries
+        the removed key-file path (its value is never logged or read)."""
+        if not raw.get(LEGACY_KEY_PATH_FIELD) or self._legacy_key_path_warned:
+            return
+        self._legacy_key_path_warned = True
+        logger.warning(
+            "SIEM delivery: the stored siem_delivery.%s setting is IGNORED (the "
+            "key file is never read); upload the service-account key in the "
+            "Web UI SIEM Delivery section. Until then the destination has no "
+            "credential.",
+            LEGACY_KEY_PATH_FIELD,
+        )
+
+    def _committed_view_parts(self) -> Any:
+        version, raw = self._config_service.read_committed_section(SECTION_ATTR)
+        self._warn_legacy_key_path(raw)
+        return version, section_from_raw(raw)
+
     def _read_cycle_config(self) -> Optional[CycleView]:
         try:
-            version, raw = self._config_service.read_committed_section(SECTION_ATTR)
-            section = section_from_raw(raw)
+            version, section = self._committed_view_parts()
             destination = resolve_destination(
                 section, harness_active=self.harness_active
             )
@@ -267,6 +300,7 @@ class SiemDeliveryScheduler:
             CaptureSnapshot(True, active, dest.key if dest else None, started)
         )
         self._refresh_registration()
+        self.note_credential_identity(self.credential_store.identity())
         self._maybe_probe_credentials(dest)
         stats.maybe_refresh_stats(
             self.db,
@@ -328,8 +362,7 @@ class SiemDeliveryScheduler:
         """An engine context from the committed configuration read NOW
         (admin actions must see a destination saved a moment ago, not wait
         for the loop's next cycle).  Raises on an unreadable/invalid config."""
-        version, raw = self._config_service.read_committed_section(SECTION_ATTR)
-        section = section_from_raw(raw)
+        version, section = self._committed_view_parts()
         destination = resolve_destination(section, harness_active=self.harness_active)
         return self.engine_context(CycleView(version, section, destination))
 
@@ -402,6 +435,17 @@ class SiemDeliveryScheduler:
     @property
     def view(self) -> Optional[CycleView]:
         return self._view
+
+    def note_credential_identity(self, identity: Optional[Dict[str, Any]]) -> None:
+        with self._lock:
+            self._credential_identity = dict(identity) if identity else None
+
+    @property
+    def credential_identity(self) -> Optional[Dict[str, Any]]:
+        """The stored key's non-secret identity as this process last saw it."""
+        with self._lock:
+            ident = self._credential_identity
+            return dict(ident) if ident else None
 
     def health_inputs(self) -> Dict[str, Any]:
         with self._lock:

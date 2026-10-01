@@ -27,7 +27,7 @@ from code_indexer.server.services.siem_delivery.timings import HARNESS_TIMINGS
 from code_indexer.server.storage.database_manager import DatabaseSchema
 from tests.fixtures.secops_sidecar.harness import SidecarHandle
 
-from .conftest import harness_section
+from .conftest import harness_section, seeded_store
 
 
 class _NoJobs:
@@ -74,7 +74,6 @@ def _harness_fields(sidecar: SidecarHandle, **overrides: Any) -> Dict[str, Any]:
         "project_id": section.project_id,
         "location": section.location,
         "instance_id": section.instance_id,
-        "service_account_key_path": section.service_account_key_path,
         "source_instance_label": section.source_instance_label,
     }
 
@@ -90,13 +89,15 @@ def env(tmp_path: Path, siem_sidecar: SidecarHandle) -> Iterator[Tuple[Any, ...]
     audit_capture.mark_server_process()
     audit_capture.bind_audit_service(audit, node_id=None)
     jobs = _NoJobs()
+    db = SiemDb.sqlite(str(groups))
     scheduler = SiemDeliveryScheduler(
-        db=SiemDb.sqlite(str(groups)),
+        db=db,
         config_service=svc,
         background_job_manager=jobs,
         http_client_factory=HttpClientFactory(fault_injection_service=None),
         harness_active=True,
         node_id=None,
+        credential_store=seeded_store(db, siem_sidecar),
         timings=HARNESS_TIMINGS,
     )
     try:
@@ -345,6 +346,7 @@ def test_stored_harness_endpoint_is_inert_without_the_gate(
         http_client_factory=HttpClientFactory(fault_injection_service=None),
         harness_active=False,
         node_id=None,
+        credential_store=scheduler.credential_store,
         timings=HARNESS_TIMINGS,
     )
     gateless.register_process()
