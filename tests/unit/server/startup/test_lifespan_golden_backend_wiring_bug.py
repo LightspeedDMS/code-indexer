@@ -176,9 +176,9 @@ class TestGoldenRepoMetadataBackendContract:
             GoldenRepoMetadataPostgresBackend,
         )
 
-        # Construct a minimal 8-column row matching the list_repos SELECT:
+        # Construct a minimal 9-column row matching the list_repos SELECT:
         # alias, repo_url, default_branch, clone_path, created_at,
-        # enable_temporal, temporal_options, wiki_enabled
+        # enable_temporal, temporal_options, wiki_enabled, workspace_id
         sample_row = (
             "my-repo",  # alias
             "https://example.com/repo.git",  # repo_url
@@ -188,6 +188,7 @@ class TestGoldenRepoMetadataBackendContract:
             True,  # enable_temporal
             None,  # temporal_options
             False,  # wiki_enabled
+            None,  # workspace_id (EVO-65021)
         )
 
         result = GoldenRepoMetadataPostgresBackend._row_to_dict_basic(sample_row)
@@ -221,23 +222,12 @@ class TestGoldenRepoMetadataBackendContract:
         db_path = str(tmp_path / "test.db")
 
         # Create the table and insert a row directly
+        # EVO-65021 added golden_repos_metadata.workspace_id. Build the schema
+        # through the backend's own ensure_table_exists() rather than a
+        # hand-rolled CREATE TABLE, so this fixture cannot drift out of sync
+        # with production the next time a column is added.
+        GoldenRepoMetadataSqliteBackend(db_path).ensure_table_exists()
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            """
-            CREATE TABLE golden_repos_metadata (
-                alias TEXT PRIMARY KEY NOT NULL,
-                repo_url TEXT NOT NULL,
-                default_branch TEXT NOT NULL,
-                clone_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                enable_temporal INTEGER NOT NULL DEFAULT 0,
-                temporal_options TEXT,
-                category_id INTEGER,
-                category_auto_assigned INTEGER DEFAULT 0,
-                wiki_enabled INTEGER DEFAULT 0
-            )
-            """
-        )
         conn.execute(
             "INSERT INTO golden_repos_metadata "
             "(alias, repo_url, default_branch, clone_path, created_at, enable_temporal) "
@@ -287,23 +277,12 @@ class TestGoldenRepoMetadataBackendContract:
 
         # SQLite side: real backend with in-memory DB
         db_path = str(tmp_path / "parity.db")
+        # EVO-65021 added golden_repos_metadata.workspace_id. Build the schema
+        # through the backend's own ensure_table_exists() rather than a
+        # hand-rolled CREATE TABLE, so this fixture cannot drift out of sync
+        # with production the next time a column is added.
+        GoldenRepoMetadataSqliteBackend(db_path).ensure_table_exists()
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            """
-            CREATE TABLE golden_repos_metadata (
-                alias TEXT PRIMARY KEY NOT NULL,
-                repo_url TEXT NOT NULL,
-                default_branch TEXT NOT NULL,
-                clone_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                enable_temporal INTEGER NOT NULL DEFAULT 0,
-                temporal_options TEXT,
-                category_id INTEGER,
-                category_auto_assigned INTEGER DEFAULT 0,
-                wiki_enabled INTEGER DEFAULT 0
-            )
-            """
-        )
         conn.execute(
             "INSERT INTO golden_repos_metadata "
             "(alias, repo_url, default_branch, clone_path, created_at, enable_temporal) "
@@ -334,6 +313,7 @@ class TestGoldenRepoMetadataBackendContract:
             False,
             None,
             False,
+            None,  # workspace_id (EVO-65021)
         )
         pg_dict = GoldenRepoMetadataPostgresBackend._row_to_dict_basic(sample_row)
         pg_keys = set(pg_dict.keys())

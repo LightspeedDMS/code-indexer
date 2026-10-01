@@ -17,6 +17,7 @@ already exists (written by BGM), the INSERT succeeds, and the job enters _active
 
 import shutil
 import tempfile
+import threading
 import time
 import unittest.mock
 from pathlib import Path
@@ -709,23 +710,34 @@ class TestBGMTrackerInMemoryState:
         constraint violation prevents the job from entering tracker._active_jobs.
         """
 
-        def quick_task():
+        # The worker must still be RUNNING while we look: complete_job() pops the
+        # job out of _active_jobs, so a task that returns immediately would be
+        # gone before the assertion -- the bug this test guards (a silent UNIQUE
+        # violation keeping the job OUT of _active_jobs) is indistinguishable
+        # from normal completion unless the job is held open.
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_task():
+            started.set()
+            release.wait(timeout=5)
             return {"status": "success"}
 
         job_id = bgm.submit_job(
             "test_op",
-            quick_task,
+            blocking_task,
             submitter_username="admin",
         )
 
-        # The tracker.register_job() call happens synchronously before the thread
-        # is spawned, so no sleep is needed. A tiny margin guards against any race.
-        time.sleep(0.05)
+        assert started.wait(timeout=5), "worker thread never started"
 
         # Critical assertion: job must be IN MEMORY, not just in SQLite.
         # Before the fix, _active_jobs is empty because INSERT failed silently.
-        with tracker._lock:
-            in_memory = job_id in tracker._active_jobs
+        try:
+            with tracker._lock:
+                in_memory = job_id in tracker._active_jobs
+        finally:
+            release.set()
 
         assert in_memory, (
             f"job_id {job_id!r} must be in tracker._active_jobs after BGM submit_job(). "
