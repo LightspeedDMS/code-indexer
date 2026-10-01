@@ -52,6 +52,19 @@ from code_indexer.server.services.audit_log_query import (
     build_page_sql,
     build_terminal_rows_sql,
 )
+from code_indexer.server.services.siem_delivery.capture import (
+    SiemDestinations,
+    prepare_captures,
+    record_transaction_failure,
+    write_captures,
+)
+from code_indexer.server.services.siem_delivery.capture import (
+    retried_attempt as siem_retried_attempt,
+)
+from code_indexer.server.services.siem_delivery.db import (
+    SQLITE,
+    ensure_sqlite_schema,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 # Issue #1241 P1.3: async-batched audit writer constants.
@@ -312,7 +325,13 @@ class AuditLogService:
         if not batch:
             return
         try:
-            self.insert_events(batch)
+            if len(batch) == 1:
+                self.insert_events(batch)
+            else:
+                # retried row by row below: only a row that still fails is
+                # a SIEM capture gap
+                with siem_retried_attempt():
+                    self.insert_events(batch)
             return
         except Exception as exc:
             if len(batch) == 1:
@@ -429,6 +448,9 @@ class AuditLogService:
                 conn.execute(
                     f"CREATE INDEX IF NOT EXISTS {index_name} ON audit_logs({columns})"
                 )
+            # SIEM delivery tables live in the SAME file, so the queue insert
+            # can join the audit transaction.
+            ensure_sqlite_schema(conn)
 
         self._conn_manager.execute_atomic(_do_schema)
 
@@ -436,7 +458,12 @@ class AuditLogService:
     # Write
     # ------------------------------------------------------------------
 
-    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+    def insert_events(
+        self,
+        events: Sequence[AuditEvent],
+        *,
+        siem_destinations: Optional[SiemDestinations] = None,
+    ) -> None:
         """Write *events* in ONE transaction on the calling thread.
 
         This is the single write function: every audit row reaches the
@@ -444,13 +471,31 @@ class AuditLogService:
         injected backend is itself an unstarted AuditLogService on the same
         file) it delegates to the backend's ``insert_events``.  Raises on
         failure; callers decide how a failure is counted.
+
+        SIEM capture joins the same transaction: projection runs before it
+        starts, and each queue row is a savepointed, fail-open INSERT after
+        the audit rows.  *siem_destinations* (explicit destinations of
+        SIEM self-report rows) is supplied only by those emitters.
         """
         if not events:
             return
         if self._backend is not None:
-            self._backend.insert_events(events)
+            if siem_destinations is None:
+                self._backend.insert_events(events)
+            else:
+                self._backend.insert_events(events, siem_destinations=siem_destinations)
             return
-        self._conn_manager.execute_atomic(lambda conn: _insert_event_rows(conn, events))
+        prepared = prepare_captures(events, siem_destinations)
+
+        def _write(conn: sqlite3.Connection) -> None:
+            _insert_event_rows(conn, events)
+            write_captures(conn, prepared, SQLITE)
+
+        try:
+            self._conn_manager.execute_atomic(_write)
+        except Exception as exc:
+            record_transaction_failure(prepared, exc)
+            raise
 
     def enqueue_event(self, event: AuditEvent) -> None:
         """Hand *event* to the writer thread (QUEUED delivery).

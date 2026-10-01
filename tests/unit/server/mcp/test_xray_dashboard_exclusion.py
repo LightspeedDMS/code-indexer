@@ -259,9 +259,9 @@ def test_dashboard_passes_exclusion_to_job_tracker():
         # Story #1400 Phase 9: async-hybrid temporal query jobs are also
         # dashboard-hidden, sharing this same exclusion list.
         "temporal_query",
-    }, (
-        f"Expected xray_search, xray_explore, and xray_search_batch in exclusion list, got: {exclude}"
-    )
+        # SIEM delivery's per-cycle tick jobs are hidden the same way.
+        "siem_delivery_tick",
+    }, f"Unexpected dashboard exclusion list: {exclude}"
 
 
 # ---------------------------------------------------------------------------

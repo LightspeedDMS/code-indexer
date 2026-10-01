@@ -16,6 +16,7 @@ from typing import Iterator, List, Optional, Sequence, Tuple
 from code_indexer.server.services import audit_capture
 from code_indexer.server.services.audit_events import AuditEvent
 from code_indexer.server.services.audit_log_service import AuditLogService
+from code_indexer.server.services.siem_delivery.capture import SiemDestinations
 
 
 class ThreadRecordingAuditLogService(AuditLogService):
@@ -25,9 +26,14 @@ class ThreadRecordingAuditLogService(AuditLogService):
         self.insert_threads: List[int] = []
         super().__init__(db_path, **kwargs)
 
-    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+    def insert_events(
+        self,
+        events: Sequence[AuditEvent],
+        *,
+        siem_destinations: Optional[SiemDestinations] = None,
+    ) -> None:
         self.insert_threads.append(threading.get_ident())
-        super().insert_events(events)
+        super().insert_events(events, siem_destinations=siem_destinations)
 
 
 def bind_service(

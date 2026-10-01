@@ -32,7 +32,7 @@ The following are explicitly excluded from this E2E suite:
 
 ## Architecture
 
-The suite is organized into 6 phases that mirror increasing integration depth:
+The suite is organized into 7 phases that mirror increasing integration depth:
 
 ```
 tests/e2e/
@@ -45,6 +45,7 @@ tests/e2e/
     cli_remote/                # Phase 4: CLI against live uvicorn subprocess
     phase5_resiliency/         # Phase 5: fault-injection resiliency tests
     pg_parity/                 # Phase 6: PostgreSQL/cluster parity (ephemeral initdb)
+    siem_delivery/             # Phase 7: SIEM delivery against the mock SecOps sidecar
 ```
 
 ### Phase descriptions
@@ -61,9 +62,11 @@ tests/e2e/
 
 **Phase 6 — PostgreSQL Parity** (`pg_parity/`): Provisions an ephemeral PostgreSQL cluster via `initdb` + `pg_ctl` over a UNIX socket, points a fresh `config.json` at it (`storage_mode=postgres`, psycopg v3), and runs the server functional subset (login, golden add, activate, query, refresh, deactivate, delete) against a live PG-backed uvicorn. The server boot proves migrations apply (fail-fast). LOUD-skips if `initdb`/`pg_ctl` is absent. Requires `VOYAGE_API_KEY`.
 
+**Phase 7 — SIEM Delivery** (`siem_delivery/`): Generates per-run key material, starts the mock Google SecOps receiver sidecar (`tests/fixtures/secops_sidecar/`, loopback ports `E2E_SECOPS_SIDECAR_PORT` 8902 for the Chronicle API and token endpoint, `E2E_SECOPS_SIDECAR_CONTROL_PORT` 8903 for its control API), then a live uvicorn on `E2E_SIEM_SERVER_PORT` (8904) with the non-production fault-injection gate ON (the only way a server may target a loopback SIEM destination). `test_00_*` proves the harness and every front-door driver work; the remaining scenarios are the executable spec for SIEM delivery and stay RED until that capability exists. Every SIEM test is guarded against connecting to any non-loopback address. The sidecar's own fidelity self-tests live in `tests/unit/fixtures/secops_sidecar/` (fast-automation).
+
 ### Orchestration script
 
-`e2e-automation.sh` at the repository root runs all 6 phases sequentially:
+`e2e-automation.sh` at the repository root runs all 7 phases sequentially:
 
 1. Clones seed repositories to a persistent cache (`~/.tmp/cidx-e2e-seed-repos/`)
 2. Copies fresh working copies for this run (`~/.tmp/cidx-e2e-work/`)
@@ -125,7 +128,7 @@ cp .e2e-automation.template .e2e-automation
 
 ## Running Tests
 
-### Full suite (all 6 phases)
+### Full suite (all 7 phases)
 
 ```bash
 ./e2e-automation.sh
@@ -140,6 +143,7 @@ cp .e2e-automation.template .e2e-automation
 ./e2e-automation.sh --phase 4   # CLI remote (starts/stops live server)
 ./e2e-automation.sh --phase 5   # Resiliency (fault-injection server, requires CO_API_KEY)
 ./e2e-automation.sh --phase 6   # PostgreSQL parity (ephemeral initdb cluster, requires initdb/pg_ctl)
+./e2e-automation.sh --phase 7   # SIEM delivery (mock SecOps sidecar + fault-injection-gated server)
 ```
 
 ### Manual pytest run (development)

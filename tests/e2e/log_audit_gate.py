@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, cast
+from typing import Any, Callable, List, Sequence, cast
 
 # ---------------------------------------------------------------------------
 # Allowlist: known-benign WARNING/ERROR patterns (minimal, explicitly reviewed)
@@ -274,6 +274,8 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # codes, but only this test lowers the caps to provoke it in the E2E harness.
     "[MCP-GENERAL-032] Wildcard expansion cap exceeded",
     "[MCP-GENERAL-033] Total repo count cap exceeded",
+    # Phase-specific entries (e.g. Phase 7's scripted SIEM halts) are NOT
+    # listed here: such a phase passes them as ``extra_allowlist``.
     # Story #1139 (test_16_remaining_surface_1139.py) teardown: the test creates a
     # composite + extra golden/activated repos and DEACTIVATES them in cleanup.
     # ActivatedRepoManager logs this administrative WARNING on every deactivation
@@ -423,7 +425,7 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
 ]
 
 
-def is_allowlisted(entry: dict[str, Any]) -> bool:
+def is_allowlisted(entry: dict[str, Any], extra_allowlist: Sequence[str] = ()) -> bool:
     """Return True if the log entry's message matches any allowlist pattern.
 
     Matching is case-insensitive substring search so minor message variations
@@ -431,12 +433,15 @@ def is_allowlisted(entry: dict[str, Any]) -> bool:
 
     Args:
         entry: Log entry dict from admin_logs_query response (must have 'message' key).
+        extra_allowlist: Patterns allowed for THIS caller only (a phase's own
+            scripted, asserted warnings), never added to the global list.
 
     Returns:
         True if the entry is known-benign (allowlisted), False otherwise.
     """
     message = (entry.get("message") or "").lower()
-    return any(pattern.lower() in message for pattern in LOG_AUDIT_ALLOWLIST)
+    patterns = list(LOG_AUDIT_ALLOWLIST) + list(extra_allowlist)
+    return any(pattern.lower() in message for pattern in patterns)
 
 
 def filter_new_entries(
@@ -720,8 +725,11 @@ def run_log_audit_gate(
     token: str,
     watermark_id: int,
     phase_name: str,
+    extra_allowlist: Sequence[str] = (),
 ) -> AuditGateResult:
     """Run the full log-audit gate and return the result.
+
+    *extra_allowlist* holds patterns allowed for this caller only.
 
     For in-process (Phase 3) callers: flush the SQLiteLogHandler BEFORE
     calling this function (via app.state.sqlite_log_handler.flush()).
@@ -739,7 +747,7 @@ def run_log_audit_gate(
     """
     entries = query_logs_via_mcp(client, token)
     new_entries = filter_new_entries(entries, watermark_id=watermark_id)
-    violations = [e for e in new_entries if not is_allowlisted(e)]
+    violations = [e for e in new_entries if not is_allowlisted(e, extra_allowlist)]
     passed = len(violations) == 0
     return AuditGateResult(passed=passed, violations=violations, phase_name=phase_name)
 

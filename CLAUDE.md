@@ -348,6 +348,16 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 -> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | #description-refresh | docs/cidx-meta-backup.md
 
+### SIEM Delivery (Google SecOps)
+
+- **Capture is a hook inside BOTH `insert_events`** (`services/audit_log_service.py`, `storage/postgres/audit_log_backend.py`): `prepare_captures` (projection) runs BEFORE the audit transaction; `write_captures` is a per-row savepointed INSERT inside it and is fail-open (counted, never raised). Never add reads, locks or UDM work inside the audit transaction. SQLite SIEM tables live in `groups.db` (created by `AuditLogService._ensure_schema`); PG migration `054`.
+- **Self-report rows carry an explicit destination** (`siem_destination=` through `record_outcome` -> `audit_capture.capture` -> `insert_events(siem_destinations=)`); `record_config_outcome` computes it from the committed before/after config (`siem_delivery/boundary.py`).
+- **The loop reads the COMMITTED config** via `ConfigService.read_committed_section()` every cycle (SQLite workers never reload `get_config()`); arming is ONE conditional UPDATE (`state_store._arm`). Admin actions read the committed config too (`scheduler.committed_context()`), never the loop's last view.
+- **Health is DEGRADED only** (`siem_delivery/health.py`). The fault-injection gate selects a compressed HARNESS timing profile (`siem_delivery/timings.py`) used by e2e Phase 7; production values never change.
+- `submit_job` raises `repositories.background_jobs.DuplicateJobError` (not the job_tracker one). google-auth's service-account grant always signs `aud=https://oauth2.googleapis.com/token`.
+
+-> Detail: docs/siem-delivery.md
+
 ### Global Repo Alias Fallback (Story #1039)
 
 31 read-only MCP handlers promote a bare alias to its `-global` form when the user lacks it and the golden repo is globally active -- via `try_global_fallback()` (`_global_fallback.py`), pre-check pattern, activated-repo takes precedence. All write/mutation handlers MUST stay strict: `_global_fallback.py` MUST NEVER be imported from them.

@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE = 1000
 
 
+def _sqlite_table_exists(db_path: Path, table_name: str) -> bool:
+    """Read-only check (never creates the file)."""
+    if not db_path.exists():
+        return False
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
 class DataRetentionScheduler:
     """
     Daemon scheduler that periodically purges old records from five tables.
@@ -33,6 +48,8 @@ class DataRetentionScheduler:
       - sync_jobs        (cidx_server.db)    completed_at col, status IN ('completed','failed')
       - dependency_map_tracking (cidx_server.db) last_run col, no status filter
       - background_jobs  (cidx_server.db)    completed_at col, status IN ('completed','failed','cancelled')
+      - siem_delivery_*  (groups.db / PG)    TERMINAL rows only, via the SIEM
+        backend's paced prune_terminal() (never pending/batched/quarantined)
 
     Config is re-read from config_service on every cleanup cycle so that
     changes take effect without a server restart.
@@ -273,6 +290,10 @@ class DataRetentionScheduler:
             failed_table_errors=failed_table_errors,
         )
 
+        siem_delivery_deleted = self._safe_prune_siem(
+            cfg, failed_tables, failed_table_errors
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -282,6 +303,7 @@ class DataRetentionScheduler:
             "token_blacklist_deleted": token_blacklist_deleted,
             "elevated_sessions_deleted": elevated_sessions_deleted,
             "oidc_state_deleted": oidc_state_deleted,
+            "siem_delivery_deleted": siem_delivery_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -291,6 +313,7 @@ class DataRetentionScheduler:
                 + token_blacklist_deleted
                 + elevated_sessions_deleted
                 + oidc_state_deleted
+                + siem_delivery_deleted
             ),
             "failed_tables": failed_tables,
             "failed_table_errors": failed_table_errors,
@@ -386,6 +409,10 @@ class DataRetentionScheduler:
             failed_table_errors=failed_table_errors,
         )
 
+        siem_delivery_deleted = self._safe_prune_siem(
+            cfg, failed_tables, failed_table_errors
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -395,6 +422,7 @@ class DataRetentionScheduler:
             "token_blacklist_deleted": token_blacklist_deleted,
             "elevated_sessions_deleted": elevated_sessions_deleted,
             "oidc_state_deleted": oidc_state_deleted,
+            "siem_delivery_deleted": siem_delivery_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -404,10 +432,64 @@ class DataRetentionScheduler:
                 + token_blacklist_deleted
                 + elevated_sessions_deleted
                 + oidc_state_deleted
+                + siem_delivery_deleted
             ),
             "failed_tables": failed_tables,
             "failed_table_errors": failed_table_errors,
         }
+
+    def _safe_prune_siem(
+        self,
+        cfg: Any,
+        failed_tables: List[str],
+        failed_table_errors: Dict[str, str],
+    ) -> int:
+        """Paced pruning of terminal SIEM delivery rows (both storage modes)."""
+        from code_indexer.server.services.siem_delivery.db import SiemDb
+        from code_indexer.server.services.siem_delivery.retention import (
+            prune_terminal,
+        )
+
+        def _prune() -> int:
+            if self._backend_registry is not None:
+                db = getattr(self._backend_registry, "siem_delivery", None)
+                if db is None:
+                    raise RuntimeError(
+                        "backend registry has no SIEM delivery store "
+                        "(BackendRegistry.siem_delivery is not wired)"
+                    )
+            elif self._storage_mode == "sqlite":
+                # SQLite mode without a registry cleans every table directly
+                # in its file; the SIEM tables live in groups.db (created by
+                # AuditLogService).  As for every other table here, a table
+                # that does not exist in its file has nothing to clean -- and
+                # the prune must not create groups.db as a side effect.
+                if not _sqlite_table_exists(
+                    Path(self._groups_db_path), "siem_delivery_queue"
+                ):
+                    logger.debug(
+                        "DataRetentionScheduler: no SIEM tables in %s, skipping",
+                        self._groups_db_path,
+                    )
+                    return 0
+                db = SiemDb.sqlite(str(self._groups_db_path))
+            else:
+                raise RuntimeError(
+                    "no SIEM delivery store: PostgreSQL mode needs the backend registry"
+                )
+            counts = prune_terminal(
+                db,
+                self._stop_event,
+                audit_retention_hours=cfg.audit_logs_retention_hours,
+            )
+            return sum(counts.values())
+
+        return self._safe_pg_call(
+            "siem_delivery",
+            _prune,
+            failed_tables=failed_tables,
+            failed_table_errors=failed_table_errors,
+        )
 
     def _cleanup_dep_map_history(self, cfg: Any) -> int:
         """

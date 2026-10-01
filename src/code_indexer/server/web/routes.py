@@ -455,6 +455,8 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # SIEM delivery (Google SecOps)
+    "siem_delivery",
     # Issue #1530 - Indexing-subprocess activity watchdog configuration
     "indexing_watchdog",
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
@@ -6762,6 +6764,7 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        SiemDeliveryConfig,
         IndexingWatchdogConfig,
         # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
         FleetMigrationConfig,
@@ -6997,6 +7000,7 @@ def _get_current_config() -> dict:
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
         ),
+        "siem_delivery": settings.get("siem_delivery", asdict(SiemDeliveryConfig())),
         # Issue #1530: Indexing-subprocess activity watchdog configuration
         "indexing_watchdog": settings.get(
             "indexing_watchdog", asdict(IndexingWatchdogConfig())
@@ -8329,6 +8333,13 @@ def _create_config_page_response(
     """
     csrf_token = generate_csrf_token()
     config = _get_current_config()
+    # SIEM delivery read-only status: this process's in-memory view (no I/O).
+    from ..services.siem_delivery.config_view import status_block as _siem_status
+
+    config["siem_delivery_status"] = _siem_status(
+        getattr(request.app.state, "siem_delivery_scheduler", None),
+        getattr(request.app.state, "siem_delivery_startup_error", None),
+    )
 
     # Load API keys status
     token_manager = _get_token_manager()
@@ -9611,6 +9622,19 @@ async def update_config_section(
 
     # Validate configuration
     error = _validate_config_section(section, data, persisted_host=_persisted_host)
+    if error is None and section == "siem_delivery":
+        # The destination allowlist depends on THIS process's fault-injection
+        # gate (a loopback harness endpoint is accepted only behind it).
+        from ..services.siem_delivery.config_view import validate_form as _siem_validate
+
+        _siem_current = get_config_service().get_config().siem_delivery_config
+        assert _siem_current is not None  # ServerConfig.__post_init__
+        error = _siem_validate(
+            _siem_current,
+            data,
+            harness_active=getattr(request.app.state, "fault_injection_service", None)
+            is not None,
+        )
     if error:
         return _create_config_page_response(
             request,
@@ -9820,6 +9844,13 @@ def config_section_partial(
         # Fallback: generate new token if cookie missing/invalid
         csrf_token = generate_csrf_token()
     config = _get_current_config()
+    # SIEM delivery read-only status: this process's in-memory view (no I/O).
+    from ..services.siem_delivery.config_view import status_block as _siem_status
+
+    config["siem_delivery_status"] = _siem_status(
+        getattr(request.app.state, "siem_delivery_scheduler", None),
+        getattr(request.app.state, "siem_delivery_startup_error", None),
+    )
 
     # Load API keys status
     token_manager = _get_token_manager()

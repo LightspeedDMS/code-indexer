@@ -42,6 +42,8 @@ from ..auto_update.deployment_executor import (
     read_execstart_flags,
 )
 from .db_outage_throttle import DbOutageThrottle
+from .siem_delivery.config_view import apply_siem_setting as _apply_siem_setting
+from .siem_delivery.config_view import siem_settings as _siem_settings
 
 logger = logging.getLogger(__name__)
 
@@ -921,6 +923,7 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            "siem_delivery": _siem_settings(config),
             # Issue #1530 - Indexing-subprocess activity watchdog configuration
             "indexing_watchdog": _indexing_watchdog_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
@@ -1167,6 +1170,9 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        elif category == "siem_delivery":
+            assert config.siem_delivery_config is not None  # __post_init__
+            _apply_siem_setting(config.siem_delivery_config, key, value)
         # Issue #1530 - Indexing-subprocess activity watchdog configuration
         elif category == "indexing_watchdog":
             self._update_indexing_watchdog_setting(config, key, value)
@@ -3320,6 +3326,61 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
             return None
+
+    def read_committed_section(self, section: str) -> Tuple[int, Dict[str, Any]]:
+        """ONE read of the committed runtime row: ``(version, section dict)``.
+
+        Reads the database (PG or SQLite) directly, so a save made by ANY
+        worker or node is visible -- unlike ``get_config()``, which in SQLite
+        solo mode never reloads another worker's save.  It does NOT republish
+        the process-wide config.  A section absent from the row is ``{}``
+        (dataclass defaults).
+
+        Raises:
+            RuntimeError: no runtime database is attached, or no row exists.
+        """
+        if self._pool is not None:
+            from psycopg.rows import dict_row
+
+            with self._pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    row = cur.execute(
+                        "SELECT config_json, version FROM server_config "
+                        "WHERE config_key = %s",
+                        (CONFIG_KEY_RUNTIME,),
+                    ).fetchone()
+            if row is None:
+                raise RuntimeError("no committed runtime configuration row")
+            raw, version = row["config_json"], row["version"]
+        elif self._sqlite_db_path is not None:
+            import sqlite3
+
+            conn = sqlite3.connect(self._sqlite_db_path)
+            try:
+                found = conn.execute(
+                    "SELECT config_json, version FROM server_config "
+                    "WHERE config_key = ?",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if found is None:
+                raise RuntimeError("no committed runtime configuration row")
+            raw, version = found
+        else:
+            raise RuntimeError("no runtime configuration database attached")
+        from code_indexer.server.storage.json_column import parse_json_column
+
+        # JSONB on PostgreSQL (already a dict), TEXT on SQLite
+        runtime = parse_json_column(raw, dict, "server_config.config_json")
+        if runtime is None:
+            raise RuntimeError("committed runtime configuration is not a JSON object")
+        value = runtime.get(section)
+        if value is None:
+            return int(version), {}
+        if not isinstance(value, dict):
+            raise RuntimeError(f"committed section {section!r} is not a JSON object")
+        return int(version), dict(value)
 
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).

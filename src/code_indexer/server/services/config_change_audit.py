@@ -86,6 +86,12 @@ NON_SECRET_SCALAR_CONFIG_KEYS: FrozenSet[str] = frozenset(
         "indexing_config.temporal_all_branches_enabled",
         # LLM credential mode (never the provider URL or key)
         "claude_integration_config.claude_auth_mode",
+        # SIEM delivery (project, location, instance, key path and harness
+        # endpoint are recorded by NAME only)
+        "siem_delivery_config.enabled",
+        "siem_delivery_config.api_version",
+        "siem_delivery_config.max_batch_events",
+        "siem_delivery_config.region",
     }
 )
 
@@ -175,21 +181,44 @@ def record_config_outcome(
     outcome: str,
     provider: Optional[str] = None,
 ) -> None:
-    """Record one configuration row (never raises)."""
+    """Record one configuration row (never raises).
+
+    A SIEM delivery configuration change is captured for SIEM delivery from
+    the COMMITTED before/after configuration (an explicit destination and
+    boundary kind), whatever the scheduler's snapshot says.
+    """
+    details = config_details(
+        action_type,
+        change_kind=change_kind,
+        before=before,
+        after=after,
+        outcome=outcome,
+        provider=provider,
+    )
+    kwargs: Dict[str, Any] = {}
+    if action_type == CONFIG_CHANGED:
+        from code_indexer.server.services.siem_delivery.boundary import (
+            siem_boundary_target,
+        )
+
+        is_siem, target = siem_boundary_target(
+            before,
+            after,
+            target_id=target_id,
+            change_kind=change_kind,
+            details=details,
+            outcome=outcome,
+        )
+        if is_siem:
+            kwargs["siem_destination"] = target
     record_outcome(
         actor=actor,
         action_type=action_type,
         target_type="config",
         target_id=target_id,
         outcome=outcome,
-        details=config_details(
-            action_type,
-            change_kind=change_kind,
-            before=before,
-            after=after,
-            outcome=outcome,
-            provider=provider,
-        ),
+        details=details,
+        **kwargs,
     )
 
 
