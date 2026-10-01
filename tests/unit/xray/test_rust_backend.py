@@ -115,14 +115,24 @@ def test_run_batch_empty_file_specs_returns_empty_list():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Missing binary returns one error tuple per file spec
-# Tests the binary-not-found path: valid evaluator passes validation,
-# then the binary check fails because the path does not exist.
+# Test 3: Missing binary is a BATCH-LEVEL failure, not a per-file one
+#
+# CONTRACT CHANGE (deliberate). This test previously asserted
+# `len(results) == 3` -- one error tuple per file spec, each carrying that
+# file's real path. That assertion encoded the bug, not the contract: the
+# per-file paths made XRaySearchEngine.run() count all three specs toward
+# files_processed (its batch-level discriminator is `file_path == ""`), so a
+# scan performed with NO xray-cli binary at all reported
+# files_processed == files_total with matches: [] and no partial flag --
+# byte-identical to a healthy scan that genuinely found nothing. The old
+# assertion is therefore not weakened here but inverted: a missing binary is
+# a whole-batch failure (zero files evaluated), which this module already
+# represents as ONE deduplicated tuple with file_path == "".
 # ---------------------------------------------------------------------------
 
 
-def test_missing_binary_returns_one_error_tuple_per_spec():
-    """When xray-cli binary is missing, each file spec gets exactly one error tuple."""
+def test_missing_binary_returns_single_batch_level_error_tuple():
+    """A missing xray-cli binary yields ONE dedup tuple with file_path==''."""
     from code_indexer.xray.rust_backend import RustNativeBackend
 
     backend = RustNativeBackend()
@@ -138,17 +148,30 @@ def test_missing_binary_returns_one_error_tuple_per_spec():
             file_specs=specs,
         )
 
-    assert len(results) == 3
-    for matches, errors, meta in results:
-        assert matches == []
-        assert len(errors) == 1
-        err = errors[0]
-        assert err["error_type"] in (
-            "BinaryNotFound",
-            "SubprocessError",
-            "XRayCliError",
-        )
-        assert meta is None
+    assert len(results) == 1, (
+        "A missing binary evaluates zero files, so it must deduplicate to a "
+        f"single batch-level tuple (like a compile error), got {len(results)}"
+    )
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert meta is None
+    assert len(errors) == 1
+    err = errors[0]
+    assert err["error_type"] in (
+        "BinaryNotFound",
+        "SubprocessError",
+        "XRayCliError",
+    )
+    assert err["file_path"] == "", (
+        "file_path must be '' -- the batch-level discriminator "
+        "XRaySearchEngine.run() uses to keep files_processed honest; a real "
+        "file path here makes an unscanned file look scanned"
+    )
+    # No file spec's path may appear anywhere in the returned errors: that is
+    # exactly the claim ("we looked at this file") the binary never earned.
+    assert not any(
+        e["file_path"] == spec["file_path"] for spec in specs for e in errors
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -12,9 +12,20 @@ Pipeline:
 
 Error contract:
 - ValidationError: all files get error tuples with error_type="ValidationError"
-- Missing binary: all files get error tuples with error_type="BinaryNotFound"
-- JSON error field set: all files get error tuples with the error message
-- Subprocess non-zero exit + no parseable JSON: all files get error tuples
+  (validation is per-file-set but the evaluator never ran, so each spec is
+  answered individually)
+- Missing binary: ONE deduplicated error tuple with error_type="BinaryNotFound"
+  and file_path=="" -- the batch-level convention below, because no file was
+  evaluated
+- JSON error field set: ONE deduplicated error tuple with file_path==""
+- Subprocess non-zero exit + no parseable JSON: ONE deduplicated error tuple
+  with file_path==""
+
+Batch-level failure convention: an error tuple whose file_path is the empty
+string means "this failure applies to the whole batch; zero files were
+evaluated". XRaySearchEngine.run() reads exactly that to decide whether a
+batch item may be counted in files_processed, so any new whole-batch failure
+path MUST use it -- otherwise the job reports a complete, empty scan.
 
 Binary location: see resolve_xray_cli_path() -- $CIDX_XRAY_CLI_PATH first,
 then the source-tree build output.
@@ -931,9 +942,26 @@ class RustNativeBackend:
                 f"or point {_XRAY_CLI_PATH_ENV_VAR} at a prebuilt binary."
             )
             logger.error("RustNativeBackend: %s", msg)
-            return _error_all(
-                file_specs, "BinaryNotFound", _sanitize_error_message(msg)
-            )
+            # ONE deduplicated tuple carrying file_path=="", NOT one tuple per
+            # file spec. A missing binary is a whole-batch failure in exactly
+            # the same sense as a compile error or an unparseable xray-cli
+            # response: not a single file was opened, parsed or evaluated.
+            # file_path=="" is this module's established structural
+            # discriminator for that (see the invoke_error / parse_error /
+            # cli_error branches below, and the Bug #1827 M-2 comment in
+            # search_engine.py which reads it to decide whether a batch item
+            # counts as a processed file).
+            #
+            # Emitting the real per-file paths -- what this branch used to do
+            # -- made XRaySearchEngine.run() count every one of them as
+            # successfully processed, so a scan with no binary at all
+            # reported files_processed == files_total, matches: [], no
+            # partial and no timeout: indistinguishable from "scanned
+            # everything, found nothing". That is the single most dangerous
+            # shape this API can return, because the caller's natural
+            # conclusion ("the pattern has no hits in this repo") is the
+            # exact opposite of the truth ("nothing was scanned").
+            return [_error_tuple("", "BinaryNotFound", _sanitize_error_message(msg))]
 
         base = Path(repo_path) if repo_path else Path.cwd()
         abs_paths = [str(base / spec.get("file_path", "")) for spec in file_specs]
