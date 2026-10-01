@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.79.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery to Google SecOps. Pilot audit events (logins on the REST, MCP and Web doors, MFA changes, group and permission changes, and admin actions) are captured into a durable delivery queue in the same transaction as their audit row and delivered to a configured Google SecOps instance as UDM events. Capture never fails an audit write: a capture problem is counted and reported, not raised.
+- Delivery is single-flight across the fleet with fenced leases, persists every request body and resends it byte for byte after an unknown outcome, isolates a rejected row by bisection under a fleet-wide hourly quarantine cap, halts on credential failures and duplicate responses, and recovers through automatic probes. Events whose mapping failed are re-projected automatically when the mapping changes.
+- Delivery is armed only after a canary event per mapping is accepted and searchable, through a single atomic arming step. Disabling or changing the destination is enforced within a bounded window and any capture after that boundary is counted.
+- A "SIEM Delivery" section in the Web UI configuration page (runtime setting, stored in the database). Destinations are limited to the documented regional Google SecOps endpoints; credentials are service-account key files referenced by path.
+- Admin API under `/api/admin/siem-delivery`: stats, quarantine listing, canary, resume, acknowledge, rebatch, retarget, abandon and quarantine requeue. Write actions require TOTP elevation.
+- A delivery backlog or halt reports DEGRADED on `/health`, the Web status block and OTEL gauges. Terminal delivery rows are pruned by data retention in paced transactions.
+- New dependency: `google-auth`, loaded only when delivery requests a token.
+- Operator guide: `docs/siem-delivery.md`.
+
+### Tests
+
+- End-to-end Phase 7 drives the delivery scenarios through the REST, MCP and Web front doors against a loopback mock of the SecOps ingestion API with fault modes, which runs only behind the non-production fault-injection gate.
+- SIEM delivery unit tests run against SQLite and PostgreSQL and fail if a test touches the real server data directory.
+
 ## [12.78.0] - 2026-09-30
 
 ### Security
