@@ -35,19 +35,30 @@ _EXPECTED_KEYS = {"content", "path", "size", "rev"}
 
 @contextmanager
 def _arm_repo(repo_path: Path):
-    """Patch git router's activated_repo_manager to return repo_path."""
-    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
+    """Patch git router's _get_activated_repo_manager() to return a manager
+    resolving repo_path (Bug #1702: resolution is now a function call
+    against app.state, not a bare module-level attribute)."""
+    with patch(
+        "code_indexer.server.routers.git._get_activated_repo_manager"
+    ) as mock_getter:
+        mock_arm = Mock()
         mock_arm.get_activated_repo_path.return_value = str(repo_path)
+        mock_getter.return_value = mock_arm
         yield mock_arm
 
 
 @contextmanager
 def _arm_not_found():
-    """Patch git router's activated_repo_manager to simulate alias not activated."""
-    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
+    """Patch git router's _get_activated_repo_manager() to simulate alias
+    not activated."""
+    with patch(
+        "code_indexer.server.routers.git._get_activated_repo_manager"
+    ) as mock_getter:
+        mock_arm = Mock()
         mock_arm.get_activated_repo_path.side_effect = FileNotFoundError(
             "not activated"
         )
+        mock_getter.return_value = mock_arm
         yield mock_arm
 
 

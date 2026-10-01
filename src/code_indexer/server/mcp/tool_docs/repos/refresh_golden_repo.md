@@ -2,8 +2,8 @@
 name: refresh_golden_repo
 category: repos
 required_permission: manage_golden_repos
-tl_dr: Update global repo by pulling latest changes from git remote and re-indexing.
-slim_description: "Force an immediate git pull from remote origin and re-indexing of a global repository identified by alias."
+tl_dr: '[ADMIN ONLY] Update global repo by pulling latest changes from git remote and re-indexing. Requires MCP elevation when enforcement is on.'
+slim_description: "[ADMIN ONLY] Force an immediate git pull from remote origin and re-indexing of a global repository identified by alias. Requires MCP elevation (TOTP step-up) when enforcement is on."
 inputSchema:
   type: object
   properties:
@@ -34,3 +34,9 @@ outputSchema:
 ---
 
 TL;DR: Update global repository by pulling latest changes from git remote and re-indexing. Synchronizes global repo with upstream repository. ADMIN ONLY (requires manage_golden_repos permission). QUICK START: refresh_golden_repo('backend-global') pulls latest and re-indexes. WHAT IT DOES: (1) Git pull from remote origin, (2) Re-index all new/changed files, (3) Update search indexes with latest code. BACKGROUND JOB: Returns job_id for async operation - refresh can take minutes for large repos. Use get_job_details to monitor. AUTOMATIC REFRESH: Global repos also have auto-refresh configured via get_global_config/set_global_config (minimum 60s interval). This tool triggers manual on-demand refresh. USE CASES: (1) Get latest code changes immediately without waiting for auto-refresh, (2) Refresh after known upstream changes, (3) Force re-index after issues. VERIFICATION: Check repository_status after job completes - last_refreshed timestamp should update. RELATED TOOLS: repository_status (check last refresh time), get_job_details (monitor refresh job), set_global_config (configure auto-refresh interval).
+
+ELEVATION: Matches the REST (POST /api/admin/golden-repos/{alias}/refresh) and Web twins: requires the admin role and, when elevation enforcement is on, an active elevation window (call `elevate_session` first; MCP-credential and OAuth callers are elevated automatically).
+
+ERRORS:
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)

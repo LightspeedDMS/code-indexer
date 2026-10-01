@@ -13,11 +13,13 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
     GoldenRepoError,
 )
-from src.code_indexer.server.repositories.background_jobs import BackgroundJobManager
+from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+
+_ACTOR = "example-admin"
 
 
 @pytest.mark.e2e
@@ -53,7 +55,7 @@ class TestGoldenRepoAsyncOperations:
         os.makedirs(clone_path, exist_ok=True)
 
         # Add repo to manager
-        from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
         from datetime import datetime, timezone
 
         golden_repo = GoldenRepo(
@@ -89,6 +91,7 @@ class TestGoldenRepoAsyncOperations:
             result = golden_repo_manager.add_golden_repo(
                 repo_url="https://github.com/test/new-repo.git",
                 alias="new-repo",
+                submitter_username=_ACTOR,
             )
 
             # Should return job_id string, not Dict
@@ -105,6 +108,7 @@ class TestGoldenRepoAsyncOperations:
             golden_repo_manager.add_golden_repo(
                 repo_url="https://github.com/test/new-repo.git",
                 alias="new-repo",
+                submitter_username=_ACTOR,
             )
 
             # Verify job was submitted
@@ -113,13 +117,13 @@ class TestGoldenRepoAsyncOperations:
             # Verify job parameters
             call_args = golden_repo_manager.background_job_manager.submit_job.call_args
             assert call_args[1]["operation_type"] == "add_golden_repo"
-            assert call_args[1]["submitter_username"] == "admin"
+            assert call_args[1]["submitter_username"] == _ACTOR
             assert call_args[1]["is_admin"] is True
 
     def test_add_golden_repo_validates_before_job_submission(self, golden_repo_manager):
         """Test that add_golden_repo validates limits/duplicates before submitting job."""
         # Manually add a repo to test duplicate alias validation
-        from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
         from datetime import datetime, timezone
 
         golden_repo = GoldenRepo(
@@ -146,6 +150,7 @@ class TestGoldenRepoAsyncOperations:
                 golden_repo_manager.add_golden_repo(
                     repo_url="https://github.com/test/repo2.git",
                     alias="duplicate",
+                    submitter_username=_ACTOR,
                 )
 
             # Job should NOT have been submitted
@@ -154,7 +159,9 @@ class TestGoldenRepoAsyncOperations:
     # Test remove_golden_repo
     def test_remove_golden_repo_returns_job_id(self, manager_with_existing_repo):
         """Test that remove_golden_repo returns a job_id string."""
-        result = manager_with_existing_repo.remove_golden_repo("test-repo")
+        result = manager_with_existing_repo.remove_golden_repo(
+            "test-repo", submitter_username=_ACTOR
+        )
 
         # Should return job_id string, not Dict
         assert isinstance(result, str)
@@ -164,7 +171,9 @@ class TestGoldenRepoAsyncOperations:
         self, manager_with_existing_repo
     ):
         """Test that remove_golden_repo submits job to BackgroundJobManager."""
-        manager_with_existing_repo.remove_golden_repo("test-repo")
+        manager_with_existing_repo.remove_golden_repo(
+            "test-repo", submitter_username=_ACTOR
+        )
 
         # Verify job was submitted
         manager_with_existing_repo.background_job_manager.submit_job.assert_called_once()
@@ -174,7 +183,7 @@ class TestGoldenRepoAsyncOperations:
             manager_with_existing_repo.background_job_manager.submit_job.call_args
         )
         assert call_args[1]["operation_type"] == "remove_golden_repo"
-        assert call_args[1]["submitter_username"] == "admin"
+        assert call_args[1]["submitter_username"] == _ACTOR
         assert call_args[1]["is_admin"] is True
 
     def test_remove_golden_repo_validates_before_job_submission(
@@ -184,7 +193,9 @@ class TestGoldenRepoAsyncOperations:
         with pytest.raises(
             GoldenRepoError, match="Golden repository 'nonexistent' not found"
         ):
-            golden_repo_manager.remove_golden_repo("nonexistent")
+            golden_repo_manager.remove_golden_repo(
+                "nonexistent", submitter_username=_ACTOR
+            )
 
         # Job should NOT have been submitted
         golden_repo_manager.background_job_manager.submit_job.assert_not_called()
@@ -200,6 +211,7 @@ class TestGoldenRepoAsyncOperations:
             golden_repo_manager.add_golden_repo(
                 repo_url="https://github.com/test/new-repo.git",
                 alias="new-repo",
+                submitter_username=_ACTOR,
             )
 
             # Get the func argument passed to submit_job
@@ -224,7 +236,9 @@ class TestGoldenRepoAsyncOperations:
         self, manager_with_existing_repo
     ):
         """Test that remove_golden_repo submits a callable with no args."""
-        manager_with_existing_repo.remove_golden_repo("test-repo")
+        manager_with_existing_repo.remove_golden_repo(
+            "test-repo", submitter_username=_ACTOR
+        )
 
         # Get the func argument passed to submit_job
         call_args = (
@@ -261,14 +275,16 @@ class TestGoldenRepoAsyncOperations:
             mock_cleanup.return_value = False  # Cleanup failed
 
             # Get the background worker function
-            manager_with_existing_repo.remove_golden_repo("test-repo")
+            manager_with_existing_repo.remove_golden_repo(
+                "test-repo", submitter_username=_ACTOR
+            )
             call_args = (
                 manager_with_existing_repo.background_job_manager.submit_job.call_args
             )
             background_worker = call_args[1]["func"]
 
             # Execute background worker - should raise GitOperationError when cleanup fails
-            from src.code_indexer.server.repositories.golden_repo_manager import (
+            from code_indexer.server.repositories.golden_repo_manager import (
                 GitOperationError,
             )
 
@@ -288,7 +304,9 @@ class TestGoldenRepoAsyncOperations:
             mock_cleanup.return_value = True  # Cleanup succeeded
 
             # Get the background worker function
-            manager_with_existing_repo.remove_golden_repo("test-repo")
+            manager_with_existing_repo.remove_golden_repo(
+                "test-repo", submitter_username=_ACTOR
+            )
             call_args = (
                 manager_with_existing_repo.background_job_manager.submit_job.call_args
             )
@@ -339,36 +357,28 @@ class TestGoldenRepoAsyncOperations:
         assert call_kwargs["submitter_username"] == "bob"
         assert call_kwargs["is_admin"] is True
 
-    def test_add_golden_repo_default_username_is_admin(self, golden_repo_manager):
-        """Verify default username is 'admin' when not specified."""
+    def test_add_golden_repo_has_no_default_username(self, golden_repo_manager):
+        """The submitter is required: there is no default (never "admin")."""
         with patch.object(
             golden_repo_manager, "_validate_git_repository"
         ) as mock_validate:
             mock_validate.return_value = True
 
-            # Call without submitter_username parameter
-            golden_repo_manager.add_golden_repo(
-                repo_url="https://github.com/test/repo.git", alias="test-repo"
-            )
+            with pytest.raises(TypeError):
+                golden_repo_manager.add_golden_repo(  # type: ignore[call-arg]
+                    repo_url="https://github.com/test/repo.git", alias="test-repo"
+                )
 
-            # Verify default username is "admin"
-            call_kwargs = (
-                golden_repo_manager.background_job_manager.submit_job.call_args[1]
-            )
-            assert call_kwargs["submitter_username"] == "admin"
+            golden_repo_manager.background_job_manager.submit_job.assert_not_called()
 
-    def test_remove_golden_repo_default_username_is_admin(
+    def test_remove_golden_repo_has_no_default_username(
         self, manager_with_existing_repo
     ):
-        """Verify default username is 'admin' when not specified."""
-        # Call without submitter_username parameter
-        manager_with_existing_repo.remove_golden_repo("test-repo")
+        """The submitter is required: there is no default (never "admin")."""
+        with pytest.raises(TypeError):
+            manager_with_existing_repo.remove_golden_repo("test-repo")  # type: ignore[call-arg]
 
-        # Verify default username is "admin"
-        call_kwargs = (
-            manager_with_existing_repo.background_job_manager.submit_job.call_args[1]
-        )
-        assert call_kwargs["submitter_username"] == "admin"
+        manager_with_existing_repo.background_job_manager.submit_job.assert_not_called()
 
     # Bug #1086 regression: cascade must delete global_repos and activated_repos rows
     def test_remove_golden_repo_cascade_deletes_global_and_activated_rows(
@@ -387,14 +397,14 @@ class TestGoldenRepoAsyncOperations:
         import json
         import sqlite3
 
-        from src.code_indexer.server.repositories.golden_repo_manager import (
+        from code_indexer.server.repositories.golden_repo_manager import (
             GoldenRepo,
             GoldenRepoManager,
         )
-        from src.code_indexer.server.repositories.activated_repo_manager import (
+        from code_indexer.server.repositories.activated_repo_manager import (
             ActivatedRepoManager,
         )
-        from src.code_indexer.server.storage.sqlite_backends import (
+        from code_indexer.server.storage.sqlite_backends import (
             GlobalReposSqliteBackend,
         )
 
@@ -448,7 +458,7 @@ class TestGoldenRepoAsyncOperations:
         # --- Register in global_repos table (same db_path) ---
         db_path = os.path.join(temp_data_dir, "cidx_server.db")
         # Initialize the full DB schema so global_repos table exists
-        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.database_manager import DatabaseSchema
 
         DatabaseSchema(db_path).initialize_database()
         global_backend = GlobalReposSqliteBackend(db_path)
@@ -509,7 +519,7 @@ class TestGoldenRepoAsyncOperations:
             json.dump({"alias_name": global_alias, "target_path": clone_path}, f)
 
         # --- Call remove_golden_repo (captures background worker) ---
-        grm.remove_golden_repo(alias)
+        grm.remove_golden_repo(alias, submitter_username=_ACTOR)
         assert len(captured_funcs) == 1, "Expected exactly one background worker"
 
         # --- Execute the background worker synchronously ---

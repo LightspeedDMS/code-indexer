@@ -9,7 +9,7 @@ from ...conftest import local_temporary_directory
 from pathlib import Path
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 def test_rag_first_approach_now_works():

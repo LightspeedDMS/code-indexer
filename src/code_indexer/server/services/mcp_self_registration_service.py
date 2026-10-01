@@ -12,6 +12,8 @@ import subprocess
 import threading
 from typing import Dict, Optional
 
+from code_indexer.server.services.audit_events import SystemComponent
+
 logger = logging.getLogger(__name__)
 
 
@@ -185,8 +187,10 @@ class MCPSelfRegistrationService:
 
         # Generate new credential
         try:
-            cred = self._mcp_credential_manager.generate_credential(
-                user_id="admin", name="cidx-local-auto"
+            cred = self._mcp_credential_manager.generate_credential_audited(
+                "admin",
+                "cidx-local-auto",
+                actor=SystemComponent.MCP_SELF_REGISTRATION,
             )
 
             # Store in config (Story #203 Finding 1: update dataclass fields)

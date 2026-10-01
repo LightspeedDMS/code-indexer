@@ -271,28 +271,29 @@ class TestAuditLoggerIntegrationFix:
 
     def test_password_audit_logger_exists_in_app_module(self):
         """
-        Verify that password_audit_logger is correctly imported in app module.
+        Verify that password_audit_logger is correctly importable.
 
         This test documents the correct import name for future test writers.
+        As of Story #409's routes extraction, the shared singleton lives on
+        code_indexer.server.auth.audit_logger (routes import it directly
+        from there via `from ..auth.audit_logger import password_audit_
+        logger`) -- code_indexer.server.app never defines this attribute.
         """
-        import code_indexer.server.app as app_module
+        import code_indexer.server.auth.audit_logger as audit_module
 
         # The correct attribute name
-        assert hasattr(app_module, "password_audit_logger")
-
-        # The incorrect attribute name that tests were trying to use
-        assert not hasattr(app_module, "audit_logger")
+        assert hasattr(audit_module, "password_audit_logger")
 
         # Verify it's the right type
         from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
 
-        assert isinstance(app_module.password_audit_logger, PasswordChangeAuditLogger)
+        assert isinstance(audit_module.password_audit_logger, PasswordChangeAuditLogger)
 
     def test_audit_logging_methods_available(self):
         """Verify audit logger has expected methods."""
-        import code_indexer.server.app as app_module
+        import code_indexer.server.auth.audit_logger as audit_module
 
-        audit_logger = app_module.password_audit_logger
+        audit_logger = audit_module.password_audit_logger
 
         # Check expected methods exist
         assert hasattr(audit_logger, "log_password_change_success")

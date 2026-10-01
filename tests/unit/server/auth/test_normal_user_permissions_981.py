@@ -59,11 +59,6 @@ class TestNormalUserPermissions:
         user = _make_user(UserRole.NORMAL_USER)
         assert not user.has_permission("repository:admin")
 
-    def test_normal_user_lacks_delegate_open(self):
-        """Normal user cannot use open-ended delegation."""
-        user = _make_user(UserRole.NORMAL_USER)
-        assert not user.has_permission("delegate_open")
-
 
 class TestPowerUserPermissionsUnchanged:
     """AC7: POWER_USER permissions must not regress after Story #981."""
@@ -75,10 +70,6 @@ class TestPowerUserPermissionsUnchanged:
     def test_power_user_has_repository_write(self):
         user = _make_user(UserRole.POWER_USER)
         assert user.has_permission("repository:write")
-
-    def test_power_user_has_delegate_open(self):
-        user = _make_user(UserRole.POWER_USER)
-        assert user.has_permission("delegate_open")
 
     def test_power_user_inherits_query_repos(self):
         """POWER_USER inherits NORMAL_USER permissions."""

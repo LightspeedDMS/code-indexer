@@ -1,0 +1,1267 @@
+//! Whole-repository indexing orchestrator (Story #1787, S2, AC10):
+//! "indexing scope vs finding scope".
+//!
+//! **Indexing covers the WHOLE repository; findings are restricted to
+//! driver-regex-matched files.** `build_repo_graph` below is the ONE place
+//! that decides which files feed extraction+bind (`crate::graph::bind`) --
+//! it always processes every file `repo_relative_paths` names, never a
+//! subset pre-filtered down to whatever a driver regex matched for
+//! reporting purposes. Restricting an already-bound graph's REFERENCES to a
+//! matched subset is a separate, later concern -- conflating the two
+//! (indexing only what will be reported) is exactly the bug this module
+//! exists to prevent: a regex matching a call site but not the file
+//! declaring its target would silently produce an empty candidate set,
+//! misreporting a real in-repo symbol as "external to the repo".
+//!
+//! `fact_graph_complete` is `false` whenever ANY repo-level indexing gap
+//! degraded this build: `max_files` truncation, a parsed file whose tree
+//! carried a real syntax error (`has_error`, surfaced via
+//! `crate::graph::fused::FusedFileResult::has_syntax_error` -- measured
+//! SEPARATELY from files that could not be read/parsed at all), an
+//! extractor panic, an unreadable source file with a RECOGNIZED extension
+//! (`files_with_read_errors`, distinct from a genuinely unsupported
+//! extension), or an index-budget trip (the bound graph's
+//! `AnalysisCompleteness` being anything other than `Complete`). Files
+//! with a genuinely unsupported/no extension, or a path that escapes
+//! `repo_root`, are counted too (`unreadable_or_unsupported_files`), but do
+//! NOT by themselves flip `fact_graph_complete`: a `.txt` file in an
+//! otherwise fully-indexed, in-budget repo is not a degraded build (dual-
+//! review defect D5's secondary point -- that distinction is exactly why
+//! `files_with_read_errors` exists as a SEPARATE counter). A collector
+//! (fact-collection) panic is tracked separately still
+//! (`files_with_collector_panics`) and does NOT flip `fact_graph_complete`:
+//! it affects only the auxiliary `facts` FactIndex, never the reference
+//! graph's own completeness.
+//!
+//! `index_is_complete` (dual-review defect D3) is the STRICTER subset of
+//! these triggers that actually matters to the binder's `RepoNameIndex`:
+//! whether every file's DECLARATIONS made it into the name index at all.
+//! Files with a parse error (`has_error`) still get "extraction ran on
+//! whatever it could parse" and are variantly present in the index. Only
+//! truncation, extractor panics, and I/O read errors (files with a
+//! recognized extension) can HIDE declarations entirely, so `bind_with_
+//! budget_and_completeness` is fed exactly this narrower set -- see the
+//! computation at the end of `build_repo_graph`.
+
+use super::bind::{finish_bind, prepare_bind, enclosing_symbol, FileForBind};
+use super::budget::{AnalysisCompleteness, IndexBudget};
+use super::csr::CodeGraph;
+use super::fused::{process_file_fused, CollectFactsStatus, ExtractionStatus, FusedFileResult};
+use super::identity::{file_id, FileIdCollisionError, FileIdRegistry};
+use super::user_facts::{FactCollector, FactIndex, FactKey};
+use std::path::Path;
+
+/// Configuration for one `build_repo_graph` call.
+pub struct RepoIndexOptions {
+    pub budget: IndexBudget,
+    /// `None` means unlimited (no truncation possible).
+    pub max_files: Option<usize>,
+}
+
+/// Outcome of indexing a whole repository (AC10).
+pub struct RepoIndexResult {
+    pub graph: CodeGraph,
+    /// False whenever any repo-level indexing gap or an index-budget trip
+    /// degraded this build. See module docs.
+    pub fact_graph_complete: bool,
+    /// Files that parsed but whose tree carried a syntax error
+    /// (`has_error`) -- measured SEPARATELY from
+    /// `unreadable_or_unsupported_files`.
+    pub files_with_parse_errors: usize,
+    /// Files that could not be read or parsed at all because their
+    /// extension is genuinely unsupported (or absent), OR a path that
+    /// escapes `repo_root` (see `path_is_contained`). Never flips
+    /// `fact_graph_complete` -- a `.txt` file was never source this repo
+    /// claims to index.
+    pub unreadable_or_unsupported_files: usize,
+    /// Dual-review defect D5: files with a RECOGNIZED source-language
+    /// extension that still could not be read/parsed (I/O error, total
+    /// tree-sitter failure) -- a real source file this build silently
+    /// dropped. DOES flip `fact_graph_complete`, unlike the merely-
+    /// unsupported-extension case above.
+    pub files_with_read_errors: usize,
+    /// Dual-review defect D5: files whose extraction PANICKED
+    /// (`ExtractionStatus::Panicked`) -- contributes zero declarations to
+    /// this build. DOES flip `fact_graph_complete`.
+    pub files_with_extractor_panics: usize,
+    /// Dual-review defects D1/H2: files whose `collect_facts` PANICKED
+    /// (`CollectFactsStatus::Panicked`). Tracked for observability but
+    /// deliberately does NOT flip `fact_graph_complete` -- facts feed the
+    /// separate `facts` FactIndex, never the reference graph itself.
+    pub files_with_collector_panics: usize,
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812): files whose
+    /// `ExtractionStatus` came back `LanguageNotSupported` -- a recognized
+    /// source-language extension (distinct from
+    /// `unreadable_or_unsupported_files`) for which the engine simply has
+    /// no `LanguageExtractor` implemented yet (Java is currently the only
+    /// language with one; see `extract::extractor_for_language`). The
+    /// file's declarations are as invisible to the graph as an extractor
+    /// panic's would be, so this DOES flip `fact_graph_complete` -- see
+    /// `index_is_complete` below. Without this counter, an analysis over a
+    /// non-Java repo silently reported `fact_graph_complete: true` with
+    /// zero degradation signals: a false "verified clean" reading.
+    pub files_with_unsupported_language: usize,
+    pub truncated_by_max_files: bool,
+    /// Dual-review defect H2: every `UserFact` collected across the whole
+    /// repository, keyed by the fact's enclosing declaration
+    /// (`bind::enclosing_symbol`) so a real `analyze_graph` evaluator can
+    /// look facts up via `FactsHandle::for_symbol` -- never discarded.
+    pub facts: FactIndex,
+    /// #1898 round 4 (epic #1906, mandate item 3): how many references
+    /// across this whole repository had a non-empty bare-name pool (a
+    /// real same-named declaration exists somewhere in the repo) but were
+    /// narrowed all the way down to ZERO final candidates by the binder --
+    /// see `bind::resolve_all_references`'s own doc comment for the full
+    /// rationale. Sibling story #1897 wires this into `analyze_graph`'s
+    /// completeness reporting; this field is only where the number lives.
+    pub narrowed_to_zero_count: usize,
+    /// #1910 round 6 (finding 5, round4-findings.md's own remediation item
+    /// 5): how many references across this whole repository had a
+    /// non-empty bare-name pool but were narrowed to a non-empty STRICT
+    /// SUBSET of it -- the mis-narrow shape `narrowed_to_zero_count` is
+    /// structurally blind to (both round-6 findings destroyed a real edge
+    /// while keeping the final candidate count non-zero). See `bind::
+    /// resolve_all_references`'s own doc comment for the full rationale.
+    pub narrowed_to_nonempty_strict_subset_count: usize,
+    /// Bug #1897 (P1 fix, round 2): every completeness condition that
+    /// actually held about this build, captured losslessly. Two collapse
+    /// points would otherwise destroy this: `CodeGraph::downgrade_
+    /// completeness` is first-write-wins, so `graph.completeness()` alone
+    /// can only ever report ONE reason; and, one layer BELOW that,
+    /// `bind::finish_bind`'s own `if exceeded { .. } else if
+    /// family_truncated { .. }` chain already collapses `IndexBudgetExceeded`
+    /// and `ResolutionAmbiguous` into a single `AnalysisCompleteness` value
+    /// BEFORE `graph.completeness()` ever has anything to read. Reading
+    /// `graph.completeness()` here (even at the earliest possible moment)
+    /// is therefore NOT lossless -- it can only ever recover whichever ONE
+    /// of the two bind-time causes `finish_bind`'s chain happened to check
+    /// first. This field is instead built from `bind::BindTimeFacts`'s two
+    /// INDEPENDENT booleans (`index_budget_exceeded`, `family_truncated`),
+    /// returned directly by `finish_bind` alongside the graph -- see
+    /// `build_repo_graph`'s own use of them below. Empty iff
+    /// `fact_graph_complete` is true.
+    pub completeness_reasons: Vec<AnalysisCompleteness>,
+    /// Bug #1897: the raw candidate total `finish_bind`'s budget ladder
+    /// measured against -- `bind::PreBindStats::candidate_edge_count`,
+    /// surfaced verbatim (never re-derived) so a caller can report the
+    /// observed count against the configured budget limit.
+    pub candidate_count: usize,
+}
+
+/// Reuses the exact same containment technique
+/// `identity::repo_snapshot_identity` already established (Rule 4,
+/// anti-duplication): canonicalize (resolving `..` and symlinks) and check
+/// `starts_with` against the canonicalized root. A `relative_path` that
+/// cannot be canonicalized (does not exist, dangling symlink, etc.) is
+/// treated as not contained -- the caller folds that into "unreadable",
+/// which is accurate: this function could not safely read it either way.
+fn path_is_contained(canonical_repo_root: &Path, repo_root: &Path, relative_path: &str) -> bool {
+    match repo_root.join(relative_path).canonicalize() {
+        Ok(canonical_candidate) => canonical_candidate.starts_with(canonical_repo_root),
+        Err(_) => false,
+    }
+}
+
+/// Dual-review defect D5: distinguishes "genuinely unsupported/no
+/// extension" from "a recognized source-language extension that merely
+/// failed to read/parse" -- the two cases `unreadable_or_unsupported_files`
+/// and `files_with_read_errors` must never be conflated.
+fn extension_is_recognized(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).and_then(crate::languages::language_for_extension).is_some()
+}
+
+/// Per-repository mutable state threaded through `process_one_file`. Kept
+/// as one struct (rather than five separate `&mut usize` parameters) so
+/// adding a future counter never grows any function's parameter list.
+#[derive(Default)]
+struct IndexAccumulator {
+    files_for_bind: Vec<FileForBind>,
+    facts: FactIndex,
+    files_with_parse_errors: usize,
+    unreadable_or_unsupported_files: usize,
+    files_with_read_errors: usize,
+    files_with_extractor_panics: usize,
+    files_with_collector_panics: usize,
+    files_with_unsupported_language: usize,
+    /// Bug #1900 (epic #1906 P5): `file_id -> repo-relative path`, captured
+    /// at the SAME site `file_id_val` is already computed in
+    /// `record_fused_result` -- `FileForBind` itself carries only the
+    /// one-way-hashed `file_id`, never the real path string, so this is
+    /// the one place in the whole binder pipeline that still has both.
+    /// Threaded into `finish_bind` so `location_for` can report a real
+    /// declaration's file path for a graph built through this front door.
+    file_paths: std::collections::HashMap<u32, String>,
+}
+
+/// Handles one `Some(fused_result)` outcome from `process_file_fused`:
+/// updates every counter D1/D5 need, aggregates collected facts into
+/// `acc.facts` (H2), and pushes a `FileForBind` when extraction produced a
+/// usable `LocalIndex` -- exactly the pre-existing behavior, plus the
+/// panic/fact bookkeeping the dual review found missing.
+fn record_fused_result(full_path: &Path, relative_path: &str, fused_result: FusedFileResult, acc: &mut IndexAccumulator) {
+    if fused_result.has_syntax_error {
+        acc.files_with_parse_errors += 1;
+    }
+    if fused_result.extraction_status == ExtractionStatus::Panicked {
+        acc.files_with_extractor_panics += 1;
+    }
+    if fused_result.collect_facts_status == CollectFactsStatus::Panicked {
+        acc.files_with_collector_panics += 1;
+    }
+    if fused_result.extraction_status == ExtractionStatus::LanguageNotSupported {
+        acc.files_with_unsupported_language += 1;
+    }
+    if let Some(index) = fused_result.index {
+        let file_id_val = file_id(relative_path);
+        acc.file_paths.insert(file_id_val, relative_path.to_string());
+        for fact in &fused_result.facts {
+            // Story #1785 / ADR-001: a fact naming a `custom_key` is a
+            // genuinely non-symbol value (config key, event topic,
+            // structural hash) and is attributed to that custom key ONLY --
+            // never ALSO to `enclosing_symbol`, which would reintroduce the
+            // exact false identity ADR-001's closed `FactKey::Symbol(
+            // SymbolId) | FactKey::Custom(InternedStr)` sum type exists to
+            // prevent. A fact with no `custom_key` keeps the pre-#1785
+            // behavior unchanged.
+            match &fact.custom_key {
+                Some(name) => acc.facts.insert_custom(name, fact.clone()),
+                None => {
+                    let symbol = enclosing_symbol(&index, file_id_val, fact.line);
+                    acc.facts.insert(FactKey::Symbol(symbol), fact.clone());
+                }
+            }
+        }
+        let language = full_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
+        acc.files_for_bind.push(FileForBind { file_id: file_id_val, language, index });
+    }
+}
+
+/// Processes exactly one candidate path: containment check, then fused
+/// extract+collect, updating `acc` throughout. Factored out of
+/// `build_repo_graph`'s loop body to keep that function under the
+/// project's per-function line budget.
+fn process_one_file(
+    canonical_repo_root: &Path,
+    repo_root: &Path,
+    relative_path: &str,
+    fact_collector: &dyn FactCollector,
+    acc: &mut IndexAccumulator,
+) {
+    if !path_is_contained(canonical_repo_root, repo_root, relative_path) {
+        acc.unreadable_or_unsupported_files += 1;
+        return;
+    }
+    let full_path = repo_root.join(relative_path);
+    match process_file_fused(&full_path, relative_path, fact_collector) {
+        None => {
+            if extension_is_recognized(&full_path) {
+                acc.files_with_read_errors += 1;
+            } else {
+                acc.unreadable_or_unsupported_files += 1;
+            }
+        }
+        Some(fused_result) => record_fused_result(&full_path, relative_path, fused_result, acc),
+    }
+}
+
+/// Bounded loop: iterates at most `repo_relative_paths.len()` times (finite,
+/// fixed at call time), further capped by `options.max_files` via
+/// `Iterator::take` -- terminates the moment the shorter of the two limits
+/// is reached (Rule 14, anti-unbounded-loop).
+///
+/// Builds a `FileForBind` for EVERY file that parses (indexing scope is the
+/// WHOLE repository, per this module's docs) and binds them ALL TOGETHER --
+/// there is no filtering by "will this file's references be reported" here.
+///
+/// Dual-review defect D4: every considered path is registered in a
+/// run-scoped `FileIdRegistry` BEFORE it is processed -- a real `file_id`
+/// collision between two distinct paths fails the WHOLE build loudly
+/// (`Err`) rather than silently merging their symbol namespaces.
+pub fn build_repo_graph(
+    repo_root: &Path,
+    repo_relative_paths: &[String],
+    options: &RepoIndexOptions,
+    fact_collector: &dyn FactCollector,
+) -> Result<RepoIndexResult, FileIdCollisionError> {
+    let canonical_repo_root =
+        repo_root.canonicalize().expect("repo_root must exist and be canonicalizable");
+    let limit = options.max_files.unwrap_or(usize::MAX);
+    let truncated_by_max_files = repo_relative_paths.len() > limit;
+
+    let mut registry = FileIdRegistry::new();
+    let mut acc = IndexAccumulator::default();
+    for relative_path in repo_relative_paths.iter().take(limit) {
+        registry.assign(relative_path)?;
+        process_one_file(&canonical_repo_root, repo_root, relative_path, fact_collector, &mut acc);
+    }
+
+    // Dual-review defect D3: only truncation/extractor-panics/read-errors
+    // can HIDE a file's declarations from the name index entirely -- a
+    // parse error still extracts whatever it could parse (see module docs).
+    let index_is_complete = !truncated_by_max_files
+        && acc.files_with_extractor_panics == 0
+        && acc.files_with_read_errors == 0
+        && acc.files_with_unsupported_language == 0;
+
+    // #1898 round 4 (epic #1906, mandate item 3): calls the exact same
+    // two steps `bind_with_budget_and_completeness` performs internally,
+    // rather than that black-box entry point, so `PreBindStats.narrowed_
+    // to_zero_count` is reachable here for `RepoIndexResult` below.
+    let (prepared, stats) = prepare_bind(acc.files_for_bind, index_is_complete);
+    let narrowed_to_zero_count = stats.narrowed_to_zero_count;
+    let narrowed_to_nonempty_strict_subset_count = stats.narrowed_to_nonempty_strict_subset_count;
+    // Bug #1897 P1 fix: `finish_bind` returns `BindTimeFacts` -- the two
+    // INDEPENDENT booleans (`index_budget_exceeded`, `family_truncated`)
+    // it computes internally, BEFORE its own `if exceeded { .. } else if
+    // family_truncated { .. }` chain collapses them into the single
+    // `AnalysisCompleteness` value it also records onto `graph`. Reading
+    // `graph.completeness()` after the fact -- even immediately, before any
+    // `downgrade_completeness` call below -- can only ever recover ONE of
+    // the two causes: that collapse already happened one layer down, inside
+    // `finish_bind` itself. `bind_time_facts` is the lossless source these
+    // two `completeness_reasons` entries below must come from instead.
+    let (mut graph, bind_time_facts) = finish_bind(prepared, &options.budget, &acc.file_paths);
+
+    // Dual-review defect D1: propagate EVERY repo-level incompleteness
+    // trigger onto the graph itself, not just onto `fact_graph_complete`
+    // below -- a caller that queries `graph.is_definitely_dead_code(..)`
+    // directly must see the same suppression `fact_graph_complete` would
+    // have told it to apply.
+    let repo_level_incomplete =
+        !index_is_complete || acc.files_with_parse_errors > 0;
+    if repo_level_incomplete {
+        graph.downgrade_completeness(AnalysisCompleteness::RepoIndexIncomplete);
+    }
+
+    // Bug #1897 P1 fix: a build can be BOTH bind-time-degraded (index
+    // budget exceeded AND/OR family resolution ambiguous -- these two are
+    // themselves independent, per `BindTimeFacts`) AND repo-level-incomplete
+    // at once. Each of the (up to) three conditions is pushed from its OWN
+    // independent boolean source -- never by reading a single collapsed
+    // `AnalysisCompleteness` value back out after more than one may have
+    // applied -- so all three can appear together, never silently dropping
+    // one on the floor (the production symptom this bug was filed for:
+    // `fact_graph_complete: false` with every degradation counter at zero
+    // because the true cause was discarded before it ever reached this
+    // struct).
+    let mut completeness_reasons: Vec<AnalysisCompleteness> = Vec::new();
+    if bind_time_facts.index_budget_exceeded {
+        completeness_reasons.push(AnalysisCompleteness::IndexBudgetExceeded);
+    }
+    if bind_time_facts.family_truncated {
+        completeness_reasons.push(AnalysisCompleteness::ResolutionAmbiguous);
+    }
+    if repo_level_incomplete {
+        completeness_reasons.push(AnalysisCompleteness::RepoIndexIncomplete);
+    }
+    let fact_graph_complete = completeness_reasons.is_empty();
+
+    Ok(RepoIndexResult {
+        graph,
+        fact_graph_complete,
+        files_with_parse_errors: acc.files_with_parse_errors,
+        unreadable_or_unsupported_files: acc.unreadable_or_unsupported_files,
+        files_with_read_errors: acc.files_with_read_errors,
+        files_with_extractor_panics: acc.files_with_extractor_panics,
+        files_with_collector_panics: acc.files_with_collector_panics,
+        files_with_unsupported_language: acc.files_with_unsupported_language,
+        truncated_by_max_files,
+        facts: acc.facts,
+        narrowed_to_zero_count,
+        narrowed_to_nonempty_strict_subset_count,
+        completeness_reasons,
+        candidate_count: stats.candidate_edge_count,
+    })
+}
+
+/// AC10 "finding scope": restricts which references are surfaced as
+/// findings to those whose call/reference SITE lives in one of
+/// `matched_file_ids` -- the driver-regex-matched file set -- while the
+/// graph itself (built by `build_repo_graph` over the WHOLE repo) still
+/// carries candidates resolved against declarations in every indexed file,
+/// matched or not. `Reference` is `Copy`, so this returns owned values, not
+/// borrows into `graph`.
+///
+/// Bounded loop: iterates exactly `graph.references().len()` times (finite,
+/// fixed by the already-built graph) -- Rule 14, anti-unbounded-loop.
+pub fn references_in_matched_files(
+    graph: &CodeGraph,
+    matched_file_ids: &std::collections::HashSet<u32>,
+) -> Vec<super::csr::Reference> {
+    graph.references().iter().filter(|r| matched_file_ids.contains(&r.file)).copied().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{record_fused_result, IndexAccumulator};
+    use crate::graph::bind::bind_with_budget_and_completeness;
+    use crate::graph::budget::{AnalysisCompleteness, IndexBudget};
+    use crate::graph::extract::local_index::LocalIndex;
+    use crate::graph::identity::{COLLIDING_PATH_A, COLLIDING_PATH_B};
+    use crate::graph::repo_index::{build_repo_graph, RepoIndexOptions};
+    use crate::graph::user_facts::{FactCollector, FactKey, UserFact};
+    use crate::owned_node::OwnedNode;
+
+    struct NoOpCollector;
+    impl FactCollector for NoOpCollector {
+        fn collect_facts(&self, _root: &OwnedNode, _file: &str, _index: &LocalIndex) -> Vec<UserFact> {
+            Vec::new()
+        }
+    }
+
+    fn write_java(dir: &tempfile::TempDir, name: &str, source: &str) {
+        std::fs::write(dir.path().join(name), source).unwrap();
+    }
+
+    /// Happy path: two well-formed files, no `max_files` cap, an unlimited
+    /// budget -- `fact_graph_complete` must be true and both parse-error /
+    /// unreadable counters must be zero.
+    #[test]
+    fn build_repo_graph_reports_complete_when_within_budget_and_untruncated_and_error_free() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A { void run() { helper(); } }\n");
+        write_java(&dir, "B.java", "class B { void helper() {} }\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "B.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert!(result.fact_graph_complete);
+        assert_eq!(result.files_with_parse_errors, 0);
+        assert_eq!(result.unreadable_or_unsupported_files, 0);
+        assert_eq!(result.files_with_read_errors, 0);
+        assert_eq!(result.files_with_extractor_panics, 0);
+        assert_eq!(result.files_with_collector_panics, 0);
+        assert!(!result.truncated_by_max_files);
+        assert_eq!(result.graph.completeness(), AnalysisCompleteness::Complete);
+    }
+
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812): Java is the
+    /// ONLY language with a graph extractor (`extract::extractor_for_
+    /// language`) -- every other engine-supported language (e.g. Python)
+    /// produces `ExtractionStatus::LanguageNotSupported`. A `.py` file that
+    /// parses perfectly fine (recognized extension, no syntax error) must
+    /// still count as a repo-level indexing gap distinct from BOTH
+    /// `unreadable_or_unsupported_files` (genuinely unsupported/no
+    /// extension) and `files_with_read_errors` (I/O failure) -- and must
+    /// flip `fact_graph_complete` to `false`, exactly like an extractor
+    /// panic or read error would, because the file's declarations are
+    /// entirely invisible to the graph either way. Before the fix, NO
+    /// counter tracks this case at all and `fact_graph_complete` stays
+    /// `true` -- a confident, false "verified clean" reading for any
+    /// non-Java repo.
+    #[test]
+    fn unsupported_language_file_flips_fact_graph_complete_and_counts_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A { void run() {} }\n");
+        std::fs::write(dir.path().join("script.py"), "def totally_unused():\n    pass\n").unwrap();
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "script.py".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.files_with_unsupported_language, 1,
+            "the .py file (recognized extension, no graph extractor) must be counted"
+        );
+        assert_eq!(
+            result.unreadable_or_unsupported_files, 0,
+            "an unsupported-LANGUAGE file (recognized extension) must never be conflated \
+             with a genuinely unsupported/no-extension file"
+        );
+        assert_eq!(result.files_with_read_errors, 0);
+        assert_eq!(result.files_with_parse_errors, 0);
+        assert!(
+            !result.fact_graph_complete,
+            "a file whose language has no graph extractor must flip fact_graph_complete to \
+             false -- its declarations are as invisible to the graph as a read error's"
+        );
+        assert_ne!(
+            result.graph.completeness(),
+            AnalysisCompleteness::Complete,
+            "the missing-extractor gap must also downgrade the GRAPH's own completeness(), \
+             mirroring the D1 propagation every other repo-level gap already gets"
+        );
+    }
+
+    /// AC10: `max_files` truncation must set BOTH `truncated_by_max_files`
+    /// and `fact_graph_complete = false`, even when every processed file is
+    /// perfectly well-formed and the index budget is unlimited.
+    #[test]
+    fn max_files_truncation_sets_truncated_flag_and_fact_graph_complete_false() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A {}\n");
+        write_java(&dir, "B.java", "class B {}\n");
+        write_java(&dir, "C.java", "class C {}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: Some(2) };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "B.java".to_string(), "C.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert!(result.truncated_by_max_files);
+        assert!(!result.fact_graph_complete, "max_files truncation must flip fact_graph_complete to false");
+        assert_ne!(
+            result.graph.completeness(),
+            AnalysisCompleteness::Complete,
+            "dual-review defect D1: max_files truncation must also downgrade the GRAPH's own completeness()"
+        );
+    }
+
+    /// AC10: "parse errors (root.has_error), measured SEPARATELY from
+    /// unreadable files". One file has a genuine tree-sitter syntax error
+    /// (parses, has_error=true); a second is unreadable (unsupported
+    /// extension, never even attempted to parse). The two counters must
+    /// disagree -- a wrong implementation that conflated them into one
+    /// counter would fail this test's exact-value assertions.
+    #[test]
+    fn parse_errors_are_counted_separately_from_unreadable_or_unsupported_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "Malformed.java", "class Broken { void run( {\n");
+        std::fs::write(dir.path().join("notes.txt"), "not code").unwrap();
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["Malformed.java".to_string(), "notes.txt".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(result.files_with_parse_errors, 1, "the malformed Java file must count as a parse error");
+        assert_eq!(result.unreadable_or_unsupported_files, 1, "the unsupported .txt file must count separately");
+        assert!(!result.fact_graph_complete, "a real parse error must flip fact_graph_complete to false");
+        assert_ne!(
+            result.graph.completeness(),
+            AnalysisCompleteness::Complete,
+            "dual-review defect D1: a real parse error must also downgrade the GRAPH's own completeness()"
+        );
+    }
+
+    /// AC10: a tripped index budget must ALSO set `fact_graph_complete =
+    /// false`, on top of AC6's own `AnalysisCompleteness::IndexBudgetExceeded`.
+    #[test]
+    fn index_budget_trip_sets_fact_graph_complete_false() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three same-named ambiguous declarations plus one caller: pushes
+        // the repo-wide raw candidate total past a deliberately tight
+        // ceiling, exactly as `bind::budget_bind`'s own fixture does.
+        write_java(&dir, "R1.java", "class R1 { void run() {} }\n");
+        write_java(&dir, "R2.java", "class R2 { void run() {} }\n");
+        write_java(&dir, "R3.java", "class R3 { void run() {} }\n");
+        write_java(&dir, "Caller.java", "class Caller { void go() { run(); } }\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["R1.java".to_string(), "R2.java".to_string(), "R3.java".to_string(), "Caller.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(result.graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+        assert!(!result.fact_graph_complete, "a tripped index budget must flip fact_graph_complete to false");
+    }
+
+    /// Bug #1897, THE central discriminating test: a build that is BOTH
+    /// bind-time-degraded (index budget exceeded, `IndexBudget::new(0, 1)`
+    /// -- reuses `index_budget_trip_sets_fact_graph_complete_false`'s exact
+    /// three-same-named-`run()`-declarations-plus-caller fixture) AND
+    /// repo-index-incomplete (an unreadable `.java` file with its read
+    /// permission revoked -- reuses `an_unreadable_source_file_with_a_
+    /// recognized_extension_...`'s exact technique) must report BOTH
+    /// reasons in `completeness_reasons`, never collapse to just one.
+    ///
+    /// Before this fix, `graph.completeness()` alone (first-write-wins)
+    /// could only ever report the budget reason -- `RepoIndexIncomplete`
+    /// was silently dropped on the floor even though the read error
+    /// genuinely happened. This test's assertion is structured so it would
+    /// still fail meaningfully (both-reasons-present) if someone regressed
+    /// `completeness_reasons.push(...)` back to a single value, not merely
+    /// because the field doesn't exist.
+    #[test]
+    fn a_build_that_is_both_bind_time_degraded_and_repo_index_incomplete_reports_both_completeness_reasons(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "R1.java", "class R1 { void run() {} }\n");
+        write_java(&dir, "R2.java", "class R2 { void run() {} }\n");
+        write_java(&dir, "R3.java", "class R3 { void run() {} }\n");
+        write_java(&dir, "Caller.java", "class Caller { void go() { run(); } }\n");
+        write_java(&dir, "Unreadable.java", "class Unreadable {}\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path().join("Unreadable.java"), std::fs::Permissions::from_mode(0o000))
+                .expect("revoke read permission for the fixture");
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &[
+                "R1.java".to_string(),
+                "R2.java".to_string(),
+                "R3.java".to_string(),
+                "Caller.java".to_string(),
+                "Unreadable.java".to_string(),
+            ],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "the bind-time budget trip must be one of the recorded reasons, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::RepoIndexIncomplete),
+            "the repo-level read error must ALSO be one of the recorded reasons, never dropped \
+             on the floor by downgrade_completeness's first-write-wins collapse, got {:?}",
+            result.completeness_reasons
+        );
+        assert_eq!(
+            result.completeness_reasons.len(),
+            2,
+            "exactly these two reasons, never a collapsed single value, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
+    }
+
+    /// Bug #1897: the ResolutionAmbiguous counterpart, showing the two
+    /// causes are distinguishable from `RepoIndexResult` alone (never just
+    /// from internal `graph.completeness()`). Real on-disk Java source
+    /// mirroring `bind::admission`'s own hand-built `family_truncation_
+    /// reports_resolution_ambiguous_completeness_even_under_an_unlimited_
+    /// budget` fixture: a common interface `Repo.save()` implemented by
+    /// strictly more than `MAX_FAMILY_SIZE` classes, each in its OWN
+    /// distinct package so import-context narrowing collapses to just the
+    /// interface's own candidate BEFORE family expansion re-adds every
+    /// implementor up to (and truncating past) the cap -- and an unlimited
+    /// `IndexBudget` that never trips the ladder on its own, isolating
+    /// `ResolutionAmbiguous` as the ONLY reason recorded.
+    #[test]
+    fn a_build_that_only_trips_resolution_ambiguous_reports_exactly_that_one_reason() {
+        // `bind::families::MAX_FAMILY_SIZE` (currently 64) is declared in a
+        // PRIVATE `mod families;` (`bind/mod.rs`, out of this story's
+        // granted edit scope) and is not reachable from this module --
+        // `use crate::graph::bind::families::MAX_FAMILY_SIZE;` fails to
+        // compile with "module `families` is private" (verified). This
+        // local constant mirrors that same value with generous headroom
+        // (30 past it, not merely 5) so the test still trips truncation
+        // even if the real constant moves somewhat without this file being
+        // updated in lockstep.
+        const KNOWN_MAX_FAMILY_SIZE: usize = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Repo.java",
+            "package pkg.a;\npublic interface Repo {\n    void save();\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package pkg.a;\nclass Caller {\n    void run() {\n        save();\n    }\n}\n",
+        );
+
+        let implementor_count = KNOWN_MAX_FAMILY_SIZE + 30;
+        let mut paths = vec!["Repo.java".to_string(), "Caller.java".to_string()];
+        for i in 0..implementor_count {
+            let file_name = format!("Impl{i}.java");
+            let source = format!(
+                "package pkg.impl{i};\npublic class Impl{i} implements Repo {{\n    public void save() {{}}\n}}\n"
+            );
+            write_java(&dir, &file_name, &source);
+            paths.push(file_name);
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(dir.path(), &paths, &options, &NoOpCollector)
+            .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.completeness_reasons,
+            vec![AnalysisCompleteness::ResolutionAmbiguous],
+            "an unlimited budget plus a truncated inheritance family must record EXACTLY \
+             ResolutionAmbiguous, never RepoIndexIncomplete or an empty list, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
+    }
+
+    /// Bug #1897 P1 (dual-review reject), THE central discriminating test
+    /// for the EXACT reported scenario: a SINGLE `build_repo_graph` call
+    /// whose bind is BOTH index-budget-exceeded AND resolution-ambiguous at
+    /// once -- reuses `a_build_that_only_trips_resolution_ambiguous_reports_
+    /// exactly_that_one_reason`'s own family-truncation fixture verbatim,
+    /// swapping only `IndexBudget::unlimited()` for `IndexBudget::new(0,
+    /// 1)` (a zero-ceiling budget any non-empty candidate resolution trips,
+    /// mirroring `index_budget_trip_sets_fact_graph_complete_false`'s own
+    /// technique) -- so this ONE build trips both bind-time causes
+    /// simultaneously, exactly the production repro on `repo-B` (#1897's
+    /// own repro): `fact_graph_complete: false` with the true second cause
+    /// silently discarded.
+    ///
+    /// Before the fix (`bind_time_completeness = graph.completeness()`,
+    /// read after `finish_bind`'s internal `if exceeded { .. } else if
+    /// family_truncated { .. }` chain had already collapsed both facts into
+    /// ONE `AnalysisCompleteness` value), this assertion fails: `completeness_
+    /// reasons` contains only `IndexBudgetExceeded`, never `ResolutionAmbiguous`,
+    /// because the chain checks `exceeded` first and `family_truncated` is
+    /// discarded whenever it does. The fix reads `BindTimeFacts`'s two
+    /// independent booleans directly, so both survive.
+    #[test]
+    fn a_build_that_trips_both_index_budget_and_resolution_ambiguous_reports_both_reasons_never_collapsed(
+    ) {
+        const KNOWN_MAX_FAMILY_SIZE: usize = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Repo.java",
+            "package pkg.a;\npublic interface Repo {\n    void save();\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package pkg.a;\nclass Caller {\n    void run() {\n        save();\n    }\n}\n",
+        );
+
+        let implementor_count = KNOWN_MAX_FAMILY_SIZE + 30;
+        let mut paths = vec!["Repo.java".to_string(), "Caller.java".to_string()];
+        for i in 0..implementor_count {
+            let file_name = format!("Impl{i}.java");
+            let source = format!(
+                "package pkg.impl{i};\npublic class Impl{i} implements Repo {{\n    public void save() {{}}\n}}\n"
+            );
+            write_java(&dir, &file_name, &source);
+            paths.push(file_name);
+        }
+
+        // A zero-ceiling total-candidate budget: ANY non-empty candidate
+        // resolution trips `IndexBudget::is_exceeded_by`, guaranteeing the
+        // budget ladder engages on top of the (budget-independent) family
+        // truncation this fixture already trips on its own.
+        let options = RepoIndexOptions { budget: IndexBudget::new(0, 1), max_files: None };
+        let result = build_repo_graph(dir.path(), &paths, &options, &NoOpCollector)
+            .expect("no file_id collision in this fixture");
+
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::IndexBudgetExceeded),
+            "fixture sanity: the zero-ceiling budget must have tripped, got {:?}",
+            result.completeness_reasons
+        );
+        assert!(
+            result.completeness_reasons.contains(&AnalysisCompleteness::ResolutionAmbiguous),
+            "THE #1897 defect: the family truncation must ALSO be reported even though the \
+             budget ALSO tripped in the SAME build -- before the fix this was silently dropped \
+             on the floor by finish_bind's own internal if/else-if collapse, got {:?}",
+            result.completeness_reasons
+        );
+        assert_eq!(
+            result.completeness_reasons.len(),
+            2,
+            "exactly these two reasons, never collapsed to one nor padded with RepoIndexIncomplete \
+             (this fixture has no repo-level indexing gap), got {:?}",
+            result.completeness_reasons
+        );
+        assert!(!result.fact_graph_complete);
+    }
+
+    /// THE central AC10 discriminating test, named explicitly in the story:
+    /// "a driver regex matching ONE file still resolves a call into a
+    /// declaration in an UNMATCHED file". `A.java` (matched) calls
+    /// `helper()`; only `B.java` (deliberately NOT matched) declares it.
+    /// Indexing must cover BOTH files regardless of the matched set, so the
+    /// call in `A.java` still resolves into `B.java`'s declaration once
+    /// `references_in_matched_files` restricts REPORTING (not indexing) to
+    /// the matched set.
+    ///
+    /// A wrong implementation that indexed only the matched files (excluding
+    /// `B.java` from extraction+bind entirely) would leave the candidate set
+    /// for this call EMPTY -- the `RepoNameIndex` would never have seen
+    /// `helper` declared anywhere -- which is exactly the failure this test
+    /// exists to catch.
+    #[test]
+    fn a_driver_regex_matching_one_file_still_resolves_a_call_into_a_declaration_in_an_unmatched_file() {
+        use crate::graph::identity::file_id as fid;
+        use std::collections::HashSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A { void run() { helper(); } }\n");
+        write_java(&dir, "B.java", "class B { void helper() {} }\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "B.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+        assert!(result.fact_graph_complete);
+
+        // Finding scope: the driver regex matched ONLY A.java.
+        let matched_file_ids: HashSet<u32> = [fid("A.java")].into_iter().collect();
+        let matched_references =
+            crate::graph::repo_index::references_in_matched_files(&result.graph, &matched_file_ids);
+
+        let call_site = matched_references
+            .iter()
+            .find(|r| !r.is_unresolved())
+            .expect("the call in A.java must be reported and must have resolved to something");
+        assert_eq!(call_site.file, fid("A.java"), "a matched reference must come from the matched file");
+
+        let candidates = result.graph.candidates_for(call_site);
+        assert!(!candidates.is_empty(), "indexing must not have been restricted to the matched file set");
+        let resolved_file_ids: Vec<u32> =
+            candidates.iter().map(|c| (result.graph.resolve_symbol(c.symbol()) >> 32) as u32).collect();
+        assert!(
+            resolved_file_ids.contains(&fid("B.java")),
+            "the call site's candidate must resolve into B.java, an INDEXED but UNMATCHED file"
+        );
+    }
+
+    /// #1898 round 4 (epic #1906, mandate item 3): `narrowed_to_zero_count`
+    /// must count a reference whose bare-name pool was genuinely non-empty
+    /// (a real in-repo declaration shares the name) but whose candidates
+    /// were correctly narrowed all the way to zero -- but must NOT count
+    /// an ordinary out-of-repo bare-name reference (`neverDeclaredAnywhere()`,
+    /// a name this fixture repo declares nowhere at all), which is a
+    /// DIFFERENT, pre-existing "zero" outcome this counter is deliberately
+    /// scoped to exclude.
+    ///
+    /// #1898 SCOPE SPLIT (epic #1906, round-4 review, `.analysis/
+    /// 1898-review-rounds/round4-findings.md`): the ORIGINAL fixture here
+    /// used a receiver-type-only narrow-to-zero (`connection.commit()`, an
+    /// external `Connection` receiver, vs. an unrelated in-repo
+    /// `Bookkeeper.commit()` of the identical arity -- mirroring `bug_1898_
+    /// round4_narrowing_regressions.rs`'s own since-renamed `external_
+    /// receiver_with_matching_arity_...` test). `apply_receiver_type_
+    /// narrowing` is now TAG-ONLY and never empties a candidate set, so
+    /// that shape no longer narrows to zero at all. The fixture below uses
+    /// an ARITY mismatch instead (`connection.close()`, 0 args, vs. an
+    /// unrelated in-repo `Something.close(int code)`, 1 param) --
+    /// `apply_arity_narrowing` was never implicated in any of the four
+    /// review rounds and still hard-empties on a known mismatch, so this
+    /// counter still has a real narrow-to-zero case to count.
+    #[test]
+    fn narrowed_to_zero_count_counts_a_genuine_narrowing_not_an_ordinary_out_of_repo_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Something.java",
+            "package m;\npublic class Something {\n    void close(int code) {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package m;\nclass Caller {\n    void run(Connection connection) {\n        connection.close();\n        neverDeclaredAnywhere();\n    }\n}\n",
+        );
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["Something.java".to_string(), "Caller.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.narrowed_to_zero_count, 1,
+            "exactly ONE reference (connection.close(), 0 args, vs. Something.close(int), 1 \
+             param) was genuinely narrowed to zero by arity -- neverDeclaredAnywhere() is an \
+             ordinary out-of-repo reference and must not be counted, got {}",
+            result.narrowed_to_zero_count
+        );
+    }
+
+    /// #1910 round 6, finding 5 (round4-findings.md's own remediation item
+    /// 5, never built until now): `narrowed_to_zero_count` only ever
+    /// increments when a reference's candidate set becomes EMPTY -- it is
+    /// BLIND to a narrowing pass excluding the real target while KEEPING a
+    /// wrong, non-empty subset (exactly the mechanism behind both round-6
+    /// findings: a real edge deleted, a fabricated edge kept, with the
+    /// candidate count staying non-zero throughout). This fixture trips a
+    /// genuine non-empty-strict-subset narrowing purely via ARITY (never
+    /// implicated in any round, so this isolates the counter itself from
+    /// any receiver-type/same-class narrowing behaviour): two unrelated
+    /// `helper` declarations of DIFFERENT arity share a bare name, and an
+    /// UNRESOLVABLE receiver (`something`, never declared anywhere, so its
+    /// evidence is `ReceiverEvidence::None` -- neither receiver-type nor
+    /// same-class-or-super narrowing ever engages) calls `helper(5)` with
+    /// exactly one argument. Arity narrowing alone excludes the 0-param
+    /// declaration, leaving exactly the 1-param one -- pool size 2, final
+    /// candidate count 1: a genuine non-empty STRICT SUBSET, never counted
+    /// by `narrowed_to_zero_count` (final count is not zero) but exactly
+    /// what the new counter must count.
+    #[test]
+    fn narrowed_to_nonempty_strict_subset_count_counts_a_wrong_subset_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(
+            &dir,
+            "Helper1.java",
+            "package m;\npublic class Helper1 {\n    void helper() {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Helper2.java",
+            "package m;\npublic class Helper2 {\n    void helper(int x) {}\n}\n",
+        );
+        write_java(
+            &dir,
+            "Caller.java",
+            "package m;\nclass Caller {\n    void run() {\n        something.helper(5);\n    }\n}\n",
+        );
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &[
+                "Helper1.java".to_string(),
+                "Helper2.java".to_string(),
+                "Caller.java".to_string(),
+            ],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.narrowed_to_nonempty_strict_subset_count, 1,
+            "exactly ONE reference (something.helper(5), pool size 2, narrowed by arity to \
+             exactly Helper2.helper) is a genuine non-empty strict-subset narrowing, got {}",
+            result.narrowed_to_nonempty_strict_subset_count
+        );
+        assert_eq!(
+            result.narrowed_to_zero_count, 0,
+            "this reference's final candidate count is 1, never 0 -- it must NOT also be \
+             counted by narrowed_to_zero_count, got {}",
+            result.narrowed_to_zero_count
+        );
+    }
+
+    /// Dual-review defect D4 (High): `FileIdRegistry` (built specifically to
+    /// detect `file_id` collisions and fail loud) had zero callers before
+    /// this fix. Reuses the exact real-collision fixture `identity.rs`'s own
+    /// `FileIdRegistry` test already established (Rule 4, anti-duplication).
+    /// Neither path needs to exist on disk: the collision is detected by
+    /// `FileIdRegistry::assign` BEFORE any filesystem access, so this fails
+    /// loud even for two files that were never actually read.
+    #[test]
+    fn two_paths_that_collide_on_file_id_fail_the_build_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+
+        let result = build_repo_graph(
+            dir.path(),
+            &[COLLIDING_PATH_A.to_string(), COLLIDING_PATH_B.to_string()],
+            &options,
+            &NoOpCollector,
+        );
+
+        match result {
+            Err(collision) => {
+                assert_eq!(collision.existing_path, COLLIDING_PATH_A);
+                assert_eq!(collision.new_path, COLLIDING_PATH_B);
+            }
+            Ok(_) => panic!(
+                "a real file_id collision between two distinct repo paths must fail the whole build \
+                 loudly, never silently merge their symbol namespaces"
+            ),
+        }
+    }
+
+    /// Dual-review defects D5 + D1: an I/O failure on a file with a
+    /// RECOGNIZED source-language extension (here: a `.java` path that is
+    /// never actually written to disk) must count under
+    /// `files_with_read_errors` -- NEVER `unreadable_or_unsupported_files`,
+    /// which is reserved for a genuinely unsupported/no extension -- and
+    /// must flip `fact_graph_complete` AND downgrade `graph.completeness()`
+    /// away from `Complete`, which in turn suppresses `is_definitely_dead_
+    /// code` for a genuinely-dead symbol declared in an UNRELATED,
+    /// successfully-indexed file.
+    #[test]
+    fn an_unreadable_source_file_with_a_recognized_extension_flips_fact_graph_complete_and_suppresses_dead_code() {
+        use crate::graph::identity::make_symbol_id;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "NeverCalled.java", "class NeverCalled { void deadMethod() {} }\n");
+        // "Unreadable.java" exists (so it PASSES the containment check --
+        // `canonicalize()` needs a real path) but has its read permission
+        // revoked, so `std::fs::read` genuinely fails even though its
+        // extension IS a recognized language.
+        write_java(&dir, "Unreadable.java", "class Unreadable {}\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path().join("Unreadable.java"), std::fs::Permissions::from_mode(0o000))
+                .expect("revoke read permission for the fixture");
+        }
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["NeverCalled.java".to_string(), "Unreadable.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.files_with_read_errors, 1,
+            "a recognized-extension file that fails to read must count as a read error"
+        );
+        assert_eq!(
+            result.unreadable_or_unsupported_files, 0,
+            "a read error on a RECOGNIZED extension must never be folded into the unsupported-extension counter"
+        );
+        assert!(!result.fact_graph_complete, "a real read error must flip fact_graph_complete to false");
+        assert_ne!(
+            result.graph.completeness(),
+            AnalysisCompleteness::Complete,
+            "a real read error must also downgrade the GRAPH's own completeness()"
+        );
+
+        let dead_symbol = result
+            .graph
+            .dense_id_for(make_symbol_id(crate::graph::identity::file_id("NeverCalled.java"), 0))
+            .expect("NeverCalled's declaration must still be interned despite the sibling read error");
+        assert_eq!(
+            result.graph.is_definitely_dead_code(dead_symbol),
+            None,
+            "a genuinely unreferenced symbol must be suppressed (None), never a confident Some(true), \
+             once a sibling file's read error left this build incomplete"
+        );
+    }
+
+    /// Builds a real `FusedFileResult` -- the exact shape `fused.rs`'s own
+    /// fused pipeline produces for `extraction_status`. `facts`/
+    /// `collect_facts_status`/`has_syntax_error` take the values a
+    /// successful-but-uneventful (or panicked, per `process_parsed_file`'s
+    /// own `None => (Vec::new(), SkippedNoIndex)` branch) real run would
+    /// have -- never a stub of behavior under test, just the parts of the
+    /// struct these tests don't vary.
+    fn fused_result_fixture(
+        file: &str,
+        index: Option<LocalIndex>,
+        extraction_status: crate::graph::fused::ExtractionStatus,
+    ) -> crate::graph::fused::FusedFileResult {
+        crate::graph::fused::FusedFileResult {
+            file: file.to_string(),
+            index,
+            extraction_status,
+            facts: Vec::new(),
+            collect_facts_status: crate::graph::fused::CollectFactsStatus::SkippedNoIndex,
+            has_syntax_error: false,
+        }
+    }
+
+    /// Dual-review defect D5 (Critical): an extractor panic is a DISTINCT,
+    /// explicit `ExtractionStatus::Panicked` outcome (proven for real by
+    /// `fused.rs`'s own `run_extraction`/`catch_unwind` machinery). This
+    /// test feeds the EXACT shape that machinery produces through
+    /// `record_fused_result`, `repo_index`'s own reaction logic, proving
+    /// it is counted -- never silently folded into an empty success -- and
+    /// that carrying it through the SAME completeness pipeline
+    /// `build_repo_graph` runs suppresses `is_definitely_dead_code` for an
+    /// unrelated, genuinely dead symbol.
+    #[test]
+    fn an_extractor_panic_is_counted_and_suppresses_is_definitely_dead_code() {
+        use crate::graph::extract::local_index::{Declaration, DeclarationKind};
+        use crate::graph::fused::ExtractionStatus;
+        use crate::graph::identity::make_symbol_id;
+
+        let alive_file_id = crate::graph::identity::file_id("Alive.java");
+        let repo_root = std::env::temp_dir().canonicalize().unwrap();
+        let mut acc = IndexAccumulator::default();
+
+        let mut alive_index = LocalIndex::new();
+        alive_index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: "deadMethod".to_string(),
+            line: 1,
+            symbol: make_symbol_id(alive_file_id, 0),
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+            vararg_index: None,
+        });
+        let alive = fused_result_fixture("Alive.java", Some(alive_index), ExtractionStatus::Completed);
+        record_fused_result(&repo_root.join("Alive.java"), "Alive.java", alive, &mut acc);
+
+        let panicked = fused_result_fixture("Crashes.java", None, ExtractionStatus::Panicked);
+        record_fused_result(&repo_root.join("Crashes.java"), "Crashes.java", panicked, &mut acc);
+
+        assert_eq!(acc.files_with_extractor_panics, 1, "an extractor panic must be counted, never discarded");
+        assert!(acc.files_for_bind.iter().any(|f| f.file_id == alive_file_id), "the alive file must still be bound");
+        assert!(
+            !acc.files_for_bind.iter().any(|f| f.file_id == crate::graph::identity::file_id("Crashes.java")),
+            "a panicked extraction must contribute zero declarations"
+        );
+
+        // Run the SAME completeness pipeline `build_repo_graph` runs.
+        let index_is_complete = acc.files_with_extractor_panics == 0 && acc.files_with_read_errors == 0;
+        let mut graph =
+            bind_with_budget_and_completeness(acc.files_for_bind, &IndexBudget::unlimited(), index_is_complete);
+        if !index_is_complete || acc.files_with_parse_errors > 0 {
+            graph.downgrade_completeness(AnalysisCompleteness::RepoIndexIncomplete);
+        }
+
+        let dead_symbol = graph.dense_id_for(make_symbol_id(alive_file_id, 0)).expect("alive declaration interned");
+        assert_eq!(
+            graph.is_definitely_dead_code(dead_symbol),
+            None,
+            "an extractor panic ELSEWHERE in the repo must suppress a confident dead-code verdict here"
+        );
+    }
+
+    /// Dual-review defect H2: `build_repo_graph` pays for `collect_facts`
+    /// on every file via `fact_collector` but must never discard the
+    /// result -- every collected `UserFact` must reach `RepoIndexResult
+    /// .facts`, keyed by the fact's enclosing declaration
+    /// (`bind::enclosing_symbol`), so a real `analyze_graph` evaluator can
+    /// retrieve it via `FactsHandle::for_symbol`.
+    #[test]
+    fn facts_collected_during_indexing_are_aggregated_into_the_repo_index_result() {
+        use crate::graph::identity::make_symbol_id;
+
+        struct DeprecatedAnnotationCollector;
+        impl FactCollector for DeprecatedAnnotationCollector {
+            fn collect_facts(&self, _root: &OwnedNode, file: &str, _index: &LocalIndex) -> Vec<UserFact> {
+                vec![UserFact { kind: "deprecated".to_string(), line: 1, message: format!("{file}: old API"), custom_key: None }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "Legacy.java", "class Legacy {\n    void run() {}\n}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result =
+            build_repo_graph(dir.path(), &["Legacy.java".to_string()], &options, &DeprecatedAnnotationCollector)
+                .expect("no file_id collision in this fixture");
+
+        // The fact is reported at line 1 (the class line); `run()` is
+        // declared on line 2, strictly AFTER it, so `enclosing_symbol`'s
+        // `d.line <= line` filter unambiguously resolves to `Legacy`'s own
+        // class declaration (the file's first, local index 0) regardless
+        // of the extractor's internal traversal/tie-break order.
+        let legacy_file_id = crate::graph::identity::file_id("Legacy.java");
+        let enclosing = FactKey::Symbol(make_symbol_id(legacy_file_id, 0));
+        let facts = result.facts.get(&enclosing);
+        assert!(
+            !facts.is_empty(),
+            "the fact collected during indexing must have reached RepoIndexResult.facts, never been discarded"
+        );
+        assert_eq!(facts[0].message, "Legacy.java: old API");
+    }
+
+    /// Story #1785 / ADR-001: a `UserFact` naming a `custom_key` (config
+    /// key, event topic, structural hash) must be attributed to that
+    /// custom key ONLY -- never ALSO to whichever symbol happens to
+    /// enclose its reported line. Attributing it to both would reintroduce
+    /// the exact false identity ADR-001's closed `FactKey::Symbol(SymbolId)
+    /// | FactKey::Custom(InternedStr)` sum type exists to prevent: a config
+    /// key has no real `SymbolId`, so `enclosing_symbol`'s "whichever
+    /// declaration happens to precede this line" answer is meaningless for
+    /// it and must never be recorded as if it were.
+    #[test]
+    fn a_fact_naming_a_custom_key_is_attributed_only_to_that_custom_key_never_also_to_its_enclosing_symbol() {
+        use crate::graph::identity::make_symbol_id;
+
+        struct ConfigKeyCollector;
+        impl FactCollector for ConfigKeyCollector {
+            fn collect_facts(&self, _root: &OwnedNode, _file: &str, _index: &LocalIndex) -> Vec<UserFact> {
+                vec![UserFact {
+                    kind: "config_key".to_string(),
+                    line: 1,
+                    message: "db.host".to_string(),
+                    custom_key: Some("db.host".to_string()),
+                }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "Legacy.java", "class Legacy {\n    void run() {}\n}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(dir.path(), &["Legacy.java".to_string()], &options, &ConfigKeyCollector)
+            .expect("no file_id collision in this fixture");
+
+        let custom_facts = result.facts.get_custom("db.host");
+        assert_eq!(custom_facts.len(), 1, "the custom-keyed fact must be reachable via get_custom");
+        assert_eq!(custom_facts[0].message, "db.host");
+
+        // Line 1 is Legacy's own class declaration (local index 0) -- the
+        // SAME symbol `enclosing_symbol` would have attributed this fact
+        // to had it been treated as symbol-shaped. It must be EMPTY.
+        let legacy_file_id = crate::graph::identity::file_id("Legacy.java");
+        let would_be_enclosing = FactKey::Symbol(make_symbol_id(legacy_file_id, 0));
+        assert!(
+            result.facts.get(&would_be_enclosing).is_empty(),
+            "a custom-keyed fact must NEVER also be attributed to its enclosing symbol -- \
+             that would reintroduce the false identity ADR-001's closed sum type exists to prevent"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P5): the CENTRAL discriminating test for
+    /// `location_for` driven through the REAL production path
+    /// (`build_repo_graph`), not a hand-built `CodeGraphBuilder` fixture.
+    /// `A.java` (the caller) invokes `helper()`, which is DECLARED in
+    /// `B.java` on a DIFFERENT line than the call site. `location_for` on
+    /// `helper`'s dense id must report `B.java` and `helper`'s own
+    /// declaration line -- never `A.java`/the call-site line, which is the
+    /// exact trap `Reference.file`/`.line` (a one-way hashed call-site
+    /// coordinate) would otherwise set. `RED against unmodified code`: the
+    /// production binder does not yet thread real file paths into
+    /// `add_location`, so `location_for` returns `None` for every symbol.
+    #[test]
+    fn location_for_reports_the_declarations_own_file_and_line_not_the_call_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A {\n    void run() {\n        helper();\n    }\n}\n");
+        write_java(&dir, "B.java", "class B {\n    void helper() {}\n}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "B.java".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        // Local index 0 is `B`'s own TYPE declaration (extracted before its
+        // members, line 1); `helper()`'s METHOD declaration is local index
+        // 1 -- the real java extractor's declaration order, distinct from
+        // the hand-built LocalIndex fixtures elsewhere in this crate that
+        // assign a method local index 0 directly.
+        let helper_file_id = crate::graph::identity::file_id("B.java");
+        let helper_symbol = crate::graph::identity::make_symbol_id(helper_file_id, 1);
+        let helper_dense = result.graph.dense_id_for(helper_symbol).expect("helper() must be interned");
+
+        assert_eq!(
+            result.graph.location_for(helper_dense),
+            Some(("B.java", 2)),
+            "location_for must report helper()'s OWN declaration file+line (B.java:2), \
+             never the caller's file or the call-site line (A.java:3)"
+        );
+    }
+}

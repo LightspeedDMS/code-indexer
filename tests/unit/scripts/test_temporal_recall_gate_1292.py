@@ -45,21 +45,21 @@ _SAMPLE_CLI_OUTPUT = """\
 1. unknown
    Score: 0.465
    Commit: bc1cafa (2016-09-12)
-   Author: jsbattig <jsbattig@gmail.com>
+   Author: opuser <opuser@example.com>
    Message: Merge pull request #12
 
 
 2. unknown
    Score: 0.364
    Commit: cf12fc0 (2016-09-12)
-   Author: jsbattig <jsbattig@gmail.com>
+   Author: opuser <opuser@example.com>
    Message: Merge pull request #24
 
 
 3. unknown
    Score: 0.143
    Commit: dde672c (2023-05-27)
-   Author: jsbattig <jsbattig@gmail.com>
+   Author: opuser <opuser@example.com>
    Message: Small fix to allow for working in Delphi 11
 """
 

@@ -7,16 +7,68 @@ and git diff-index for change detection.
 
 import logging
 import subprocess
+from collections.abc import Sequence as _Sequence
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from .git_error_classifier import GitFetchError
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.utils.subprocess_diagnostics import (
+    DEFAULT_DIAGNOSTIC_MAX_CHARS,
+    format_called_process_error_diagnostic as _format_called_process_diagnostic,
+    format_completed_process_diagnostic as _format_subprocess_failure_diagnostic,
+)
 from .update_strategy import UpdateStrategy
 
 
 logger = logging.getLogger(__name__)
+
+
+def _stream_to_str(value: Optional[Union[str, bytes]]) -> str:
+    """Bug #1832 follow-up: normalize a subprocess stream (str, bytes, or
+    None) to a plain str WITHOUT length-capping -- used where the RAW value
+    must be preserved (GitFetchError.stderr/.stdout), matching the
+    non-timeout GitFetchError raise site's established uncapped convention.
+    Distinct from the capped formatting `format_completed_process_diagnostic`
+    (imported above) and `_format_timeout_diagnostic` (below) apply at
+    DISPLAY/LOG time -- this is for the raw VALUE stored on the exception.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _format_timeout_diagnostic(e: subprocess.TimeoutExpired) -> str:
+    """Bug #1830 AC2: build a diagnostic identifying WHICH command timed
+    out, after how long, and any partial output captured before the
+    process was killed -- preserving TimeoutExpired.cmd/.timeout/.stdout/
+    .stderr instead of discarding them into one generic message.
+
+    TimeoutExpired has no formatter in the shared
+    code_indexer.utils.subprocess_diagnostics module (Bug #1832 AC3) -- that
+    module covers the two non-timeout subprocess-failure shapes (a raised
+    CalledProcessError, and a non-raising CompletedProcess inspected via
+    `.returncode != 0`). A process killed by a timeout never completes at
+    all -- it has no exit code -- which is a third, distinct shape that is
+    Bug #1830's own concern, not #1832's, so this stays local. It reuses
+    DEFAULT_DIAGNOSTIC_MAX_CHARS so both cap to the same length.
+    """
+    cmd = e.cmd
+    cmd_display = (
+        " ".join(str(part) for part in cmd)
+        if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes))
+        else str(cmd)
+    )
+    stdout_text = _stream_to_str(e.stdout)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
+    stderr_text = _stream_to_str(e.stderr)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
+    return (
+        f"command='{cmd_display}' timeout={e.timeout}s "
+        f"stdout={stdout_text!r} stderr={stderr_text!r}"
+    )
+
 
 # Known cidx artifacts that may be created in a repo by `cidx init` and must
 # never block `git pull` or `git reset --hard` (Bug #1013).
@@ -133,21 +185,66 @@ class GitPullUpdater(UpdateStrategy):
             # GitFetchError shape the returncode check used to produce.
             try:
                 self._git_backend.fetch(str(self.repo_path), timeout=30)
+            
+            except subprocess.TimeoutExpired as e:
+                # Bug #1830 AC1/AC4: a fetch that TIMES OUT must be classified
+                # exactly like a fetch that fails with a non-zero exit code --
+                # via the SAME classify_fetch_error() Story #295 uses -- so it
+                # participates in the repeated-transient-failure -> re-clone
+                # escalation. Previously this fell into the generic
+                # `except subprocess.TimeoutExpired` below and escaped
+                # classification entirely.
+                from .git_error_classifier import classify_fetch_error
+
+                # Bug #1832 follow-up: GitFetchError.stderr/.stdout keep the
+                # RAW, uncapped stream text (matching the non-timeout raise
+                # site below) -- only the logged/raised MESSAGE is capped via
+                # _format_timeout_diagnostic(). An earlier version of this
+                # fix stored the CAPPED text on the exception itself, which
+                # would have silently truncated data a downstream consumer
+                # (refresh_scheduler.py) reads directly.
+                stderr_raw = _stream_to_str(e.stderr)
+                stdout_raw = _stream_to_str(e.stdout)
+                diagnostic = _format_timeout_diagnostic(e)
+                category = classify_fetch_error(stderr_raw)
+                logger.warning(
+                    f"Git fetch timed out for {self.repo_path} "
+                    f"(category={category}): {diagnostic}"
+                )
+                raise GitFetchError(
+                    f"Git fetch timed out for {self.repo_path}: {diagnostic}",
+                    category=category,
+                    stderr=stderr_raw,
+                    stdout=stdout_raw,
+                    # No exit code: the process was killed by the timeout,
+                    # it never completed with a (non-)zero return code.
+                    returncode=None,
+                    cmd=e.cmd,
+                )
+
+            
             except subprocess.CalledProcessError as fetch_exc:
                 # Story #295: Raise instead of silently returning False so the
                 # refresh scheduler can classify the error and trigger re-clone
                 # for corruption or after repeated transient failures.
                 from .git_error_classifier import classify_fetch_error
 
+                # Bug #1832: classification keeps the raw, uncapped stderr; only the
+                # logged/raised MESSAGE is upgraded to the full diagnostic. EVO-64678:
+                # sourced from the seam's CalledProcessError rather than a CompletedProcess.
                 category = classify_fetch_error(fetch_exc.stderr)
+                diagnostic = _format_called_process_diagnostic(fetch_exc)
                 logger.warning(
                     f"Git fetch failed for {self.repo_path} "
-                    f"(category={category}): {fetch_exc.stderr}"
+                    f"(category={category}): {diagnostic}"
                 )
                 raise GitFetchError(
-                    f"Git fetch failed for {self.repo_path}",
+                    f"Git fetch failed for {self.repo_path}: {diagnostic}",
                     category=category,
                     stderr=fetch_exc.stderr,
+                    stdout=fetch_exc.stdout,
+                    returncode=fetch_exc.returncode,
+                    cmd=getattr(fetch_exc, "cmd", None),
                 )
 
             # Detect detached HEAD (e.g. repo pinned to a tag or specific commit).
@@ -187,8 +284,10 @@ class GitPullUpdater(UpdateStrategy):
             )
 
             if log_result.returncode != 0:
+                # Bug #1832: name exit code + both streams, not stderr alone.
                 raise RuntimeError(
-                    f"Git log command failed for {self.repo_path}: {log_result.stderr}"
+                    f"Git log command failed for {self.repo_path}: "
+                    f"{_format_subprocess_failure_diagnostic(log_result)}"
                 )
 
             # If there's any output, there are remote commits to pull
@@ -202,9 +301,9 @@ class GitPullUpdater(UpdateStrategy):
 
             return has_remote_changes
 
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"Git command timed out for {self.repo_path}")
         except GitFetchError:
+            raise
+        except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"Failed to check for remote changes: {e}")
@@ -270,7 +369,7 @@ class GitPullUpdater(UpdateStrategy):
         except subprocess.CalledProcessError as fetch_exc:
             raise RuntimeError(
                 f"Git fetch failed for {self.repo_path} during reset to "
-                f"origin/{branch}: {fetch_exc.stderr}"
+                f"origin/{branch}: {_format_called_process_diagnostic(fetch_exc)}"
             )
 
         try:
@@ -303,15 +402,16 @@ class GitPullUpdater(UpdateStrategy):
                 except subprocess.CalledProcessError as retry_exc:
                     raise RuntimeError(
                         f"Git reset --hard origin/{branch} failed after untracked-file "
-                        f"cleanup for {self.repo_path}: {retry_exc.stderr}"
+                        f"cleanup for {self.repo_path}: {_format_called_process_diagnostic(retry_exc)}"
                     )
                 logger.info(
                     f"Successfully reset {self.repo_path} to origin/{branch} after cleanup"
                 )
                 return
+            # Bug #1832: name exit code + both streams, not stderr alone.
             raise RuntimeError(
                 f"Git reset --hard origin/{branch} failed for {self.repo_path}: "
-                f"{reset_stderr}"
+                f"{_format_called_process_diagnostic(reset_exc)}"
             )
 
         logger.info(f"Successfully reset {self.repo_path} to origin/{branch}")
@@ -380,7 +480,7 @@ class GitPullUpdater(UpdateStrategy):
                     )
                 except subprocess.CalledProcessError as reset_exc:
                     logger.warning(
-                        f"Git reset failed for {self.repo_path}: {reset_exc.stderr}. "
+                        f"Git reset failed for {self.repo_path}: {_format_called_process_diagnostic(reset_exc)}. "
                         "Proceeding with pull anyway."
                     )
                 else:
@@ -460,7 +560,11 @@ class GitPullUpdater(UpdateStrategy):
                     return
 
                 # AC2: Non-divergence errors are not intercepted
-                raise RuntimeError(f"Git pull failed for {self.repo_path}: {stderr}")
+                # Bug #1832: name exit code + both streams, not stderr alone.
+                raise RuntimeError(
+                    f"Git pull failed for {self.repo_path}: "
+                    f"{_format_called_process_diagnostic(pull_exc)}"
+                )
 
             logger.info("Git pull successful")
 

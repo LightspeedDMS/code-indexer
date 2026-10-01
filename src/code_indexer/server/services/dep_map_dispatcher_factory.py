@@ -36,6 +36,7 @@ def build_dep_map_dispatcher(
     config,
     analysis_model: str = "opus",
     claude_soft_timeout_seconds: Optional[int] = None,
+    log_db_path: Optional[str] = None,
 ) -> CliDispatcher:
     """
     Build a CliDispatcher for dep-map LLM invocations from *config*.
@@ -62,6 +63,12 @@ def build_dep_map_dispatcher(
                 ``config.dependency_map_pass_timeout_seconds`` if available;
                 otherwise ClaudeInvoker's own default applies. Must be a
                 positive int when provided directly (ClaudeInvoker enforces this).
+        log_db_path: Forwarded unchanged to ClaudeInvoker's constructor.
+                Only self_monitoring_scan's caller (LogScanner._invoke_
+                claude_cli) passes a real value; every other caller omits
+                it (defaults to None) and is unaffected. CodexInvoker does
+                not take this parameter -- self_monitoring_scan is routed
+                to Claude only, so Codex never needs it.
 
     Returns:
         A fully initialised CliDispatcher.
@@ -78,6 +85,7 @@ def build_dep_map_dispatcher(
         claude_invoker = ClaudeInvoker(
             analysis_model=analysis_model,
             soft_timeout_seconds=claude_soft_timeout_seconds,
+            log_db_path=log_db_path,
         )
     else:
         config_timeout = (
@@ -94,9 +102,12 @@ def build_dep_map_dispatcher(
             claude_invoker = ClaudeInvoker(
                 analysis_model=analysis_model,
                 soft_timeout_seconds=config_timeout,
+                log_db_path=log_db_path,
             )
         else:
-            claude_invoker = ClaudeInvoker(analysis_model=analysis_model)
+            claude_invoker = ClaudeInvoker(
+                analysis_model=analysis_model, log_db_path=log_db_path
+            )
 
     # A deployment may replace the primary invoker with its own -- e.g. one that
     # runs the prompt in a sandboxed agent runner instead of a local `claude`

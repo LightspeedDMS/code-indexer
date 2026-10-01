@@ -443,8 +443,17 @@ async function loadActivatedRepoHealthDetails(userAlias, forceRefresh = false, o
         console.error(`Failed to load health data for ${userAlias}:`, error);
         detailsContainer.innerHTML = `
             <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
-            <button class="outline small" onclick="loadActivatedRepoHealthDetails('${escapeHtml(userAlias)}', false, ${owner ? `'${escapeHtml(owner)}'` : 'null'})">Retry</button>
         `;
+        // userAlias/owner are captured as real closure variables here --
+        // never serialized into an HTML/JS-string attribute at all, so no
+        // escaping question arises regardless of their content.
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'outline small';
+        retryBtn.textContent = 'Retry';
+        retryBtn.addEventListener('click', () => {
+            loadActivatedRepoHealthDetails(userAlias, false, owner || null);
+        });
+        detailsContainer.appendChild(retryBtn);
         _finishActivatedRepoHealthLoad(userAlias, refreshBtn);
     };
 

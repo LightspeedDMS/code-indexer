@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from src.code_indexer.cli import admin_jobs_group
+from code_indexer.cli import admin_jobs_group
 
 
 class TestAdminJobsCleanupImplementation:

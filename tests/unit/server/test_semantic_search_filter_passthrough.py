@@ -15,7 +15,7 @@ Production file: src/code_indexer/server/services/search_service.py
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.code_indexer.server.models.api_models import (
+from code_indexer.server.models.api_models import (
     SemanticSearchRequest,
     SemanticSearchResponse,
 )
@@ -28,7 +28,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_path_filter_to_perform_search(self, tmp_path):
         """AC1: path_filter is forwarded from search_repository_path to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -51,7 +51,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_language_to_perform_search(self, tmp_path):
         """AC2: language is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -74,7 +74,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_exclude_language_to_perform_search(self, tmp_path):
         """AC2: exclude_language is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -97,7 +97,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_exclude_path_to_perform_search(self, tmp_path):
         """AC3: exclude_path is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -120,7 +120,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_accuracy_to_perform_search(self, tmp_path):
         """AC4: accuracy is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -143,7 +143,7 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_no_filters_produces_valid_response(self, tmp_path):
         """Backward compat: no filter fields still returns valid SemanticSearchResponse."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
@@ -175,12 +175,12 @@ class TestPerformSemanticSearchFilterConditions:
         reads app.state.http_client_factory. Set a NullFaultFactory on the real
         app state so the call succeeds without requiring a full server startup.
 
-        Import via src.code_indexer.server.app to match the module loaded by
+        Import via code_indexer.server.app to match the module loaded by
         tests that use the src. prefix, ensuring we set the factory on the same
         State object the production code reads.
         """
         from code_indexer.server.fault_injection.null_factory import NullFaultFactory
-        import src.code_indexer.server.app as app_module
+        import code_indexer.server.app as app_module
 
         had_factory = hasattr(app_module.app.state, "http_client_factory")
         original_factory = getattr(app_module.app.state, "http_client_factory", None)
@@ -193,24 +193,24 @@ class TestPerformSemanticSearchFilterConditions:
 
     def _make_search_service_with_mocks(self, mock_vector_store, tmp_path):
         """Helper to set up SemanticSearchService with mocked backend."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
 
         service = SemanticSearchService()
         return service
 
-    @patch("src.code_indexer.server.services.search_service.ConfigManager")
-    @patch("src.code_indexer.server.services.search_service.BackendFactory")
-    @patch("src.code_indexer.server.services.search_service.EmbeddingProviderFactory")
+    @patch("code_indexer.server.services.search_service.ConfigManager")
+    @patch("code_indexer.server.services.search_service.BackendFactory")
+    @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     def test_path_filter_becomes_filter_condition_for_vector_store(
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """AC1: path_filter produces filter_conditions passed to vector store search."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -226,7 +226,7 @@ class TestPerformSemanticSearchFilterConditions:
 
         service = SemanticSearchService()
 
-        with patch("src.code_indexer.server.app._server_hnsw_cache", None):
+        with patch("code_indexer.server.app._server_hnsw_cache", None):
             service._perform_semantic_search(
                 repo_path=str(tmp_path),
                 query="test",
@@ -248,17 +248,17 @@ class TestPerformSemanticSearchFilterConditions:
             keys = [c.get("key") for c in must]
             assert "path" in keys
 
-    @patch("src.code_indexer.server.services.search_service.ConfigManager")
-    @patch("src.code_indexer.server.services.search_service.BackendFactory")
-    @patch("src.code_indexer.server.services.search_service.EmbeddingProviderFactory")
+    @patch("code_indexer.server.services.search_service.ConfigManager")
+    @patch("code_indexer.server.services.search_service.BackendFactory")
+    @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     def test_language_filter_becomes_filter_condition_for_vector_store(
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """AC2: language filter produces filter_conditions passed to vector store."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -274,7 +274,7 @@ class TestPerformSemanticSearchFilterConditions:
 
         service = SemanticSearchService()
 
-        with patch("src.code_indexer.server.app._server_hnsw_cache", None):
+        with patch("code_indexer.server.app._server_hnsw_cache", None):
             service._perform_semantic_search(
                 repo_path=str(tmp_path),
                 query="test",
@@ -292,17 +292,17 @@ class TestPerformSemanticSearchFilterConditions:
             f"Expected 'language' in filter_conditions: {filter_conditions}"
         )
 
-    @patch("src.code_indexer.server.services.search_service.ConfigManager")
-    @patch("src.code_indexer.server.services.search_service.BackendFactory")
-    @patch("src.code_indexer.server.services.search_service.EmbeddingProviderFactory")
+    @patch("code_indexer.server.services.search_service.ConfigManager")
+    @patch("code_indexer.server.services.search_service.BackendFactory")
+    @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     def test_no_filters_passes_none_or_empty_filter_conditions(
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """Backward compat: no filters passes None or empty filter_conditions."""
-        from src.code_indexer.server.services.search_service import (
+        from code_indexer.server.services.search_service import (
             SemanticSearchService,
         )
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -318,7 +318,7 @@ class TestPerformSemanticSearchFilterConditions:
 
         service = SemanticSearchService()
 
-        with patch("src.code_indexer.server.app._server_hnsw_cache", None):
+        with patch("code_indexer.server.app._server_hnsw_cache", None):
             service._perform_semantic_search(
                 repo_path=str(tmp_path),
                 query="test",

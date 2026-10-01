@@ -328,7 +328,6 @@ class RemoteBranchService:
                     format_error_log(
                         "GIT-GENERAL-052",
                         f"git ls-remote failed for {clone_url}: {error_msg}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return BranchFetchResult(
@@ -362,7 +361,6 @@ class RemoteBranchService:
                 format_error_log(
                     "GIT-GENERAL-053",
                     f"git ls-remote timeout for {clone_url}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return BranchFetchResult(
@@ -379,7 +377,6 @@ class RemoteBranchService:
                 format_error_log(
                     "GIT-GENERAL-054",
                     f"Error fetching branches for {clone_url}: {error_msg}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return BranchFetchResult(

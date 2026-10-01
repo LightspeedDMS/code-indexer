@@ -132,7 +132,7 @@ Both deployment modes MUST be validated by manipulating the watermark knobs agai
    - RED: `GOV-002` per shard, RSS bounded to ≈ one shard, zero cross-query hits.
 4. Balloon-push: raise real `used_pct` with a bounded balloon toward `red`; confirm band flips to RED BEFORE any swap-in (`pswpin` delta == 0; `GOV-005` only if swap is ever touched). Capture the `used_pct`/RSS/band curve.
 
-**Cluster (staging `linner.ddns.net`, PostgreSQL, `uvicorn --workers N` × 3 nodes behind HAProxy):**
+**Cluster (the clustered staging environment: PostgreSQL, `uvicorn --workers N` × 3 nodes behind HAProxy):**
 1. Use the largest temporal/golden repos present.
 2. Set watermarks via the Web UI (config persists in shared PG → all nodes pick it up live); confirm the knob change propagates cluster-wide.
 3. Drive queries through HAProxy (round-robin → multiple nodes/workers) and observe:
@@ -146,7 +146,7 @@ Note: cluster validation runs on **staging** (allowed), never production without
 
 ### E2E feasibility (Step 7) — no blocker
 - Build/run: `PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --port 8000` (already running locally).
-- Creds: local admin `admin/admin`; `E2E_VOYAGE_API_KEY` in `.local-testing` (for building the temporal index).
+- Creds: the local server's admin account, plus an embedding-provider API key (for building the temporal index). Both come from the operator's gitignored local configuration -- never from this document.
 - Dependencies: none external beyond VoyageAI; psutil present; cgroup test needs a memory-limited container (optional, gated).
 - Only setup cost: build a small temporal index locally. Feasible.
 

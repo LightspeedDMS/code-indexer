@@ -63,7 +63,7 @@ def admin_user():
 def app(admin_user):
     _app = FastAPI()
     _app.include_router(elevation_router)
-    _app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user
+    _app.dependency_overrides[_deps.get_current_user_hybrid] = lambda: admin_user
     return _app
 
 

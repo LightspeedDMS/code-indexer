@@ -88,7 +88,7 @@ class TestHandleListGlobalReposAdminBypass:
         Reproduces the reported bug: 8 repos in DB, admin user sees only 1
         because is_admin_user() (group-based) returned False.
         """
-        admin_user = _make_user("Seba.Battig@lightspeeddms.com", UserRole.ADMIN)
+        admin_user = _make_user("Jane.Doe@example.com", UserRole.ADMIN)
 
         # Access service reports this user is NOT in the admins group
         # (the group-based check is independent of user.role)

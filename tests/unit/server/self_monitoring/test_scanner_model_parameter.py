@@ -118,13 +118,24 @@ class TestLogScannerModelParameter:
         # Should default to opus
         assert scanner.model == "opus"
 
-    def test_invoke_claude_cli_includes_dangerously_skip_permissions(self):
-        """Claude CLI must skip permission prompts so Bash (sqlite3) runs unattended.
-
-        The old --allowedTools Bash flag was removed when the scanner was refactored
-        to route through the CliDispatcher. The equivalent grant is now provided via
-        --dangerously-skip-permissions which allows all tools including Bash.
+    def test_invoke_claude_cli_uses_restricted_allowed_tools_not_skip_permissions(
+        self,
+    ):
+        """Claude CLI must NOT skip all permission checks over the log
+        database's access, since log rows can carry request-supplied text.
+        Instead it gets a narrow --allowedTools rule pinned to the
+        server-owned log-query entry point (not a raw sqlite3 invocation),
+        a --settings entry that fences reads to the working directory in
+        every mode, a "dontAsk" --permission-mode (auto-denies anything
+        else), and --strict-mcp-config (zero MCP servers). The log
+        database path itself never appears in the command text -- it
+        reaches the entry point only via the CIDX_LOG_QUERY_DB_PATH
+        environment variable.
         """
+        import sys
+
+        from code_indexer.server.self_monitoring import log_query
+
         scanner = LogScanner(
             db_path="/fake/db.db",
             scan_id="scan-123",
@@ -141,8 +152,21 @@ class TestLogScannerModelParameter:
 
             scanner._invoke_claude_cli("test prompt")
 
-            # Command is wrapped: ['script', '-q', '-c', "timeout N claude ... --dangerously-skip-permissions", '/dev/null']
+            # Command is wrapped: ['script', '-q', '-c', "timeout N claude ... --allowedTools '...' --strict-mcp-config", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
             shell_cmd = call_args[4]  # inner shell command string
-            assert "--dangerously-skip-permissions" in shell_cmd
+            assert "--dangerously-skip-permissions" not in shell_cmd
+            assert "--allowedTools" in shell_cmd
+            assert "code_indexer.server.self_monitoring.log_query" in shell_cmd
+            assert sys.executable in shell_cmd
+            assert "/fake/logs.db" not in shell_cmd
+            assert "--disallowedTools" not in shell_cmd
+            assert "--settings" in shell_cmd
+            assert "blockReadsOutsideWorkingDirectories" in shell_cmd
+            assert "--permission-mode" in shell_cmd
+            assert "dontAsk" in shell_cmd
+
+            env = mock_run.call_args[1].get("env")
+            assert env.get(log_query.ENV_VAR_DB_PATH) == "/fake/logs.db"
+            assert "--strict-mcp-config" in shell_cmd

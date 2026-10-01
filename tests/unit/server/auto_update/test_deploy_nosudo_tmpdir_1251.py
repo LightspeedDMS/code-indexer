@@ -138,6 +138,13 @@ _NOOP_EXECUTE_STEPS: dict = {
     "_ensure_daemon_storage_path": True,
     "_ensure_systemd_claude_path": True,
     "_ensure_rust_toolchain": True,
+    # Bug #1726: _ensure_cli_dependencies_synced was only incidentally safe
+    # in this file via the blanket `patch("subprocess.run", side_effect=
+    # dispatch)` below (dispatch's actual purpose is capturing the REAL
+    # pip_install()/build_custom_hnswlib() calls under test, not guarding
+    # this unrelated step). Noop it explicitly like every other step not
+    # under test in this dict.
+    "_ensure_cli_dependencies_synced": True,
 }
 
 

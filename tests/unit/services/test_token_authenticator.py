@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.code_indexer.server.services.ci_token_manager import CITokenManager
-from src.code_indexer.server.services.git_state_manager import TokenAuthenticator
-from src.code_indexer.server.storage.database_manager import (
+from code_indexer.server.services.ci_token_manager import CITokenManager
+from code_indexer.server.services.git_state_manager import TokenAuthenticator
+from code_indexer.server.storage.database_manager import (
     DatabaseConnectionManager,
     DatabaseSchema,
 )

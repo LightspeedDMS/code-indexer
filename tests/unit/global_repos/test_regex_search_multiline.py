@@ -56,6 +56,7 @@ def _make_capture_ripgrep():
         multiline=False,
         pcre2=False,
         candidate_files=None,
+        deadline=None,
     ):
         captured["multiline"] = multiline
         captured["pcre2"] = pcre2
@@ -109,14 +110,31 @@ def service_grep(test_repo):
 
 
 @pytest.fixture
-def ripgrep_executor_fixture(tmp_path):
-    """Patch SubprocessExecutor to capture commands sent to ripgrep.
+def ripgrep_executor_fixture():
+    """Patch ONLY the module-scoped SubprocessExecutor to capture the ripgrep
+    command; let ``_search_ripgrep`` use the REAL tempfile/os machinery.
+
+    Determinism fix (flaky under fast-automation parallel load): the previous
+    version additionally patched the *process-global* ``tempfile.mkstemp``
+    (to a fixed ``(0, temp_path)`` sentinel) plus global ``os.close`` /
+    ``os.path.exists`` / ``os.remove``. Under the full suite, an unrelated
+    background daemon thread that also calls ``tempfile.mkstemp`` (e.g. the
+    lazy trigram-index build in regex_search itself) receives OUR fixed
+    sentinel path and — in the narrow window where ``mkstemp`` is patched but
+    ``os.remove`` is real (patch start/stop is sequential) — deletes the
+    output file with the real ``os.remove``, so ``_search_ripgrep``'s later
+    ``open(temp_path)`` raises FileNotFoundError. Reproduced deterministically
+    with a background ``tempfile.mkstemp`` caller.
+
+    The global patches are unnecessary: ``_search_ripgrep`` already creates a
+    UNIQUE real temp file per call. With the executor mocked (so no real
+    ripgrep runs and nothing writes to the file), that file is simply read
+    empty and cleaned up by the real ``os.remove`` — fully isolated per call
+    and per worker, with zero global-builtin patching to leak across threads.
 
     Yields a list; each element is the command list passed to execute_with_limits.
     """
     captured_commands = []
-    temp_path = str(tmp_path / "rg_output.txt")
-    open(temp_path, "w").close()
 
     mock_result = MagicMock()
     mock_result.timed_out = False
@@ -131,24 +149,11 @@ def ripgrep_executor_fixture(tmp_path):
     mock_executor.execute_with_limits = AsyncMock(side_effect=capture_and_return)
     mock_executor.shutdown = MagicMock()
 
-    patches = [
-        patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
-            return_value=mock_executor,
-        ),
-        patch("tempfile.mkstemp", return_value=(0, temp_path)),
-        patch("os.close"),
-        patch("os.path.exists", return_value=True),
-        patch("os.remove"),
-    ]
-
-    for p in patches:
-        p.start()
-
-    yield captured_commands
-
-    for p in patches:
-        p.stop()
+    with patch(
+        "code_indexer.global_repos.regex_search.SubprocessExecutor",
+        return_value=mock_executor,
+    ):
+        yield captured_commands
 
 
 # ============================================================================
@@ -157,7 +162,22 @@ def ripgrep_executor_fixture(tmp_path):
 
 
 class TestDetectPcre2Support:
-    """Test _detect_pcre2_support() method."""
+    """Test _detect_pcre2_support() method.
+
+    Story #1491 AC2 moved the probe cache from per-instance to PROCESS-WIDE
+    (a fresh RegexSearchService is built per request, so a per-instance cache
+    re-forked `rg --pcre2-version` on every pcre2 request). These tests each
+    need a clean probe state, so the class-level cache is reset around every
+    one of them -- without this the first test's cached answer would leak into
+    the rest, which is exactly the caching behaviour under test.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_process_wide_pcre2_cache(self):
+        original = RegexSearchService._pcre2_supported_global
+        RegexSearchService._pcre2_supported_global = None
+        yield
+        RegexSearchService._pcre2_supported_global = original
 
     def test_detect_pcre2_support_returns_true_when_available(self, service_ripgrep):
         """Should return True when rg --pcre2-version exits with return code 0."""

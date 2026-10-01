@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Dict, Any
 from unittest.mock import patch, MagicMock
 
-from src.code_indexer.api_clients.system_client import SystemAPIClient
-from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+from code_indexer.api_clients.system_client import SystemAPIClient
+from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
 
 
 class TestSystemAPIClientHealthMonitoring:
@@ -244,7 +244,7 @@ class TestSystemAPIClientHealthMonitoring:
 
     def test_system_client_inheritance(self, system_client: SystemAPIClient):
         """Test that SystemAPIClient properly inherits from CIDXRemoteAPIClient."""
-        from src.code_indexer.api_clients.base_client import CIDXRemoteAPIClient
+        from code_indexer.api_clients.base_client import CIDXRemoteAPIClient
 
         assert isinstance(system_client, CIDXRemoteAPIClient)
         assert hasattr(system_client, "server_url")

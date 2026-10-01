@@ -221,7 +221,9 @@ class TestAddIndexesToGoldenRepoFloorDateWiring:
                 floor_date
             )
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["temporal"]
+                alias="test-repo",
+                index_types=["temporal"],
+                submitter_username="example-admin",
             )
             _run_captured_worker(manager)
 

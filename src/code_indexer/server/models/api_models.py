@@ -102,6 +102,22 @@ class SystemHealthInfo(BaseModel):
     )
 
 
+class AuditHealthInfo(BaseModel):
+    """Per-process audit capture telemetry (informational only)."""
+
+    records_dropped_since_boot: int = Field(
+        ...,
+        description="Audit records this server process could not write since "
+        "it started. Per-process; read it together with node_id. Never "
+        "affects the overall health status.",
+    )
+    node_id: Optional[str] = Field(
+        default=None,
+        description="Cluster node id stamped on this process's audit rows "
+        "(null in solo mode).",
+    )
+
+
 class HealthCheckResponse(BaseModel):
     """Health check endpoint response."""
 
@@ -126,6 +142,33 @@ class HealthCheckResponse(BaseModel):
         "report CURRENT, unresolved conditions). Populated from "
         "HealthCheckService.get_golden_repo_reconcile_auto_heal_event() so an "
         "operator can discover it via this /health field without log-searching.",
+    )
+    # Any: a dynamic, nested JSON payload (a bounded list of per-repo
+    # dicts under 'repos') -- mirrors the identical Dict[str, Any]
+    # typing on the sibling field above, for the same reason.
+    fleet_migration_dedup_state: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Story #1560 AC13/AC14/AC16: per-golden-repo record of "
+        "duplicate point_id groups auto-resolved (deleted) during fleet "
+        "migration, or null if none currently active. UNLIKE "
+        "last_golden_repo_reconcile_auto_heal, this DOES factor into "
+        "`status`/`failure_reasons` (AC15) -- lost search coverage is a "
+        "real, current degradation, not a resolved historical event. "
+        "Schema: {'affected_total': int, 'repos': [{'golden_alias': str, "
+        "'records_deleted': int, 'collection_total': int, 'loss_ratio': "
+        "float, 'incomplete': true, 'dropped_at': str|null (ISO-8601 UTC)}"
+        ", ...]}. 'repos' is bounded to at most 50 entries (AC16), ordered "
+        "by (dropped_at DESC, alias ASC) with NULL dropped_at sorted last "
+        "on both backends (AC17/R3); 'affected_total' is the UNBOUNDED "
+        "count. Cleared entries (AC8) are excluded. Populated from "
+        "HealthCheckService.get_fleet_migration_dedup_state_summary().",
+    )
+    audit: Optional[AuditHealthInfo] = Field(
+        default=None,
+        description="Unified audit capture telemetry for this process: the "
+        "count of audit records dropped since boot and this node's id. "
+        "Informational only -- it never factors into `status` or "
+        "`failure_reasons`, so an audit store hiccup can never drain a node.",
     )
 
 
@@ -297,6 +340,18 @@ class FileListQueryParams(BaseModel):
             "path_index (indexed source files only) instead of walking the working "
             "tree over NFS. size_bytes/modified_at are not populated in this mode. "
             "Falls back to the full walk when no index is present."
+        ),
+    )
+    direct_children_of: Optional[str] = Field(
+        default=None,
+        description=(
+            "When set, restrict results to files whose parent directory equals "
+            "this value exactly (empty string means the repository root). Used "
+            "by browse_directory's and list_files' recursive=False mode "
+            "(Bug #1886) so a single glob pattern doesn't have to (and, via "
+            "gitignore-style matching, cannot) express a single-level depth "
+            "boundary on its own. None (the default) applies no depth "
+            "restriction, preserving prior behavior for every other caller."
         ),
     )
 

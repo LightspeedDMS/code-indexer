@@ -124,6 +124,7 @@ def _capture_temporal_commands(
         registered_manager.add_index_to_golden_repo(
             alias="test-repo",
             index_type="temporal",
+            submitter_username="example-admin",
         )
 
     return [c for c in captured_cmds if c[:2] == ["cidx", "index"]]

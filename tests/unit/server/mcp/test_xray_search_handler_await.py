@@ -54,7 +54,7 @@ async def _run_with_await(
     user = _make_user(UserRole.NORMAL_USER)
     params = {**VALID_PARAMS, "await_seconds": await_seconds}
     with patch(
-        "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+        "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
         return_value="/some/path",
     ):
         with _xray_single_repo_env(resolved_future=resolved_future):

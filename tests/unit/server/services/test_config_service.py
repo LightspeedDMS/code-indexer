@@ -601,46 +601,6 @@ class TestOIDCConfigValidation:
         assert config.oidc_provider_config.username_claim == ""
 
 
-class TestClaudeDelegationSettings:
-    """Test Claude Delegation settings in ConfigService (Story #721)."""
-
-    def test_get_delegation_settings_returns_skip_ssl_verify_false_by_default(
-        self, tmp_path
-    ):
-        """Test that _get_delegation_settings returns skip_ssl_verify field (default False)."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        settings = service.get_all_settings()
-
-        # Verify skip_ssl_verify is present in claude_delegation section
-        assert "claude_delegation" in settings
-        assert "skip_ssl_verify" in settings["claude_delegation"]
-        assert settings["claude_delegation"]["skip_ssl_verify"] is False
-
-    def test_get_delegation_settings_returns_skip_ssl_verify_true_when_configured(
-        self, tmp_path
-    ):
-        """Test that _get_delegation_settings returns skip_ssl_verify=True when set."""
-        from code_indexer.server.config.delegation_config import (
-            ClaudeDelegationConfig,
-        )
-
-        service = ConfigService(server_dir_path=str(tmp_path))
-        delegation_manager = service.get_delegation_manager()
-
-        # Save config with skip_ssl_verify=True
-        config = ClaudeDelegationConfig(
-            claude_server_url="https://test.example.com",
-            claude_server_username="testuser",
-            claude_server_credential="testpass",
-            skip_ssl_verify=True,
-        )
-        delegation_manager.save_config(config)
-
-        # Get settings and verify skip_ssl_verify is True
-        settings = service.get_all_settings()
-        assert settings["claude_delegation"]["skip_ssl_verify"] is True
-
-
 def test_clone_backend_cow_daemon_are_bootstrap_keys() -> None:
     """Story #510 / Bug #1034: clone_backend and cow_daemon must be bootstrap keys.
 

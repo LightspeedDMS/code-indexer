@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import shutil
 
-from src.code_indexer.indexing.image_extractor import (
+from code_indexer.indexing.image_extractor import (
     MarkdownImageExtractor,
     HtmlImageExtractor,
     ImageExtractorFactory,

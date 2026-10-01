@@ -50,9 +50,12 @@ from ..models.branch_models import BranchListResponse
 from ..models.activated_repository import ActivatedRepository
 
 from ..auth import dependencies
+from . import repo_access_http
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
+from ..services.file_listing_paths import build_non_composite_path_pattern
+from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -80,6 +83,16 @@ def register_repos_v2_routes(
         repository_listing_manager: RepositoryListingManager instance
         background_job_manager: BackgroundJobManager instance
     """
+
+    def _enforce_golden_access(username: str, repo_id: str) -> None:
+        """A repo_id that is not one of the caller's own activations names a
+        golden repository, which requires group access to it (shared guard;
+        403 access_denied, 500 when the access service is unavailable;
+        admins bypass). Checked before the golden lookup, so an unknown and
+        an ungranted repository are refused alike."""
+        repo_access_http.enforce_repo_access(
+            getattr(app.state, "access_filtering_service", None), username, repo_id
+        )
 
     @app.get("/api/repositories/{repo_id}")
     def get_repository_details_v2(
@@ -296,6 +309,7 @@ def register_repos_v2_routes(
             pass
 
         # Strategy 2: Try to find repository among golden repositories
+        _enforce_golden_access(current_user.username, cleaned_repo_id)
         try:
             # Check if this is a golden repository that the user can access
             golden_repo_details = repository_listing_manager.get_repository_details(
@@ -493,12 +507,13 @@ def register_repos_v2_routes(
 
             if not repo_found:
                 # Also check golden repositories
+                _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
                     repo_details = repository_listing_manager.get_repository_details(
                         alias=cleaned_repo_id, username=current_user.username
                     )
                     repo_found = True
-                    repo_path = Path(repo_details["path"])
+                    repo_path = Path(repo_details["clone_path"])
                 except RepositoryListingError:
                     pass
 
@@ -532,6 +547,8 @@ def register_repos_v2_routes(
                     current_branch=current_branch_name,
                 )
 
+        except HTTPException:
+            raise
         except ValueError as e:
             # Handle git repository errors
             if "Not a git repository" in str(e):
@@ -606,6 +623,7 @@ def register_repos_v2_routes(
 
             if not repo_found:
                 # Also check golden repositories
+                _enforce_golden_access(current_user.username, cleaned_repo_id)
                 try:
                     repository_listing_manager.get_repository_details(
                         alias=cleaned_repo_id, username=current_user.username
@@ -785,8 +803,18 @@ def register_repos_v2_routes(
         List files in repository with pagination and filtering.
 
         Supports both single and composite repository file listing.
-        For composite repos, use path and recursive parameters.
-        For single repos, use existing pagination and filtering.
+        `recursive` is COMPOSITE-ONLY: it controls _list_composite_files'
+        walk depth for composite repos and is otherwise ignored entirely
+        (Bug #1886, R3 revision -- a prior round applied it as a
+        non-composite depth restriction too, which regressed two absolute
+        path_pattern shapes and silently broke every deployed
+        `cidx repos files` call, since the CLI client always sends
+        recursive=false).
+        For single (non-composite) repos, `path` narrows results to a
+        subtree (see file_listing_paths.build_non_composite_path_pattern
+        for the exact rule: an absolute path_pattern still overrides
+        `path` entirely);
+        `path_pattern`/`language`/`sort_by`/pagination apply as before.
         If content=True and path points to a single file, return file content.
         Uses real file system operations following CLAUDE.md Foundation #1.
         """
@@ -805,7 +833,19 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
-            file_path = Path(repo.path) / path
+
+            # Bug #1891: confine the resolved target to repo.path BEFORE any
+            # exists()/is_file()/open() touches the filesystem. A caller-
+            # supplied `path` containing parent-directory segments, an
+            # absolute path, or a symlink pointing outside the repository
+            # must never reach the filesystem calls below. The 404 here is
+            # byte-identical to the ordinary not-found response so an
+            # escape attempt cannot be distinguished from a legitimately
+            # missing file.
+            try:
+                file_path = resolve_confined_path(Path(repo.path), path)
+            except PermissionError:
+                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
 
             if not file_path.exists():
                 raise HTTPException(status_code=404, detail=f"File '{path}' not found")
@@ -858,7 +898,11 @@ def register_repos_v2_routes(
                 current_user.username, repo_id
             )
             if repo_dict and repo_dict.get("is_composite", False):
-                # Composite repository - use simple file listing
+                # Composite repository - use simple file listing.
+                # Bug #1886 (R3 revision): byte-identical to HEAD --
+                # `recursive` is a plain bool again (composite-only,
+                # unaffected by the non-composite path-pattern change
+                # below).
                 repo = ActivatedRepository.from_dict(repo_dict)
                 files = _list_composite_files(
                     repo, path=path or "", recursive=recursive
@@ -888,10 +932,22 @@ def register_repos_v2_routes(
             )
 
         try:
+            # Bug #1886 (R3 revision): `path` narrows a non-composite
+            # listing to a subtree (see
+            # file_listing_paths.build_non_composite_path_pattern);
+            # `recursive` is composite-only and never consulted here.
+            # BACKWARD COMPATIBILITY: `path` absent/root -> path_pattern
+            # passed through unchanged, exactly HEAD's behavior. No
+            # direct_children_of / depth restriction is ever applied on
+            # this route.
+            effective_path_pattern = build_non_composite_path_pattern(
+                path, path_pattern
+            )
+
             query_params = FileListQueryParams(
                 page=page,
                 limit=limit,
-                path_pattern=path_pattern,
+                path_pattern=effective_path_pattern,
                 language=language,
                 sort_by=sort_by,
             )
@@ -933,6 +989,9 @@ def register_repos_v2_routes(
         Executes semantic search using real vector embeddings and Filesystem
         following CLAUDE.md Foundation #1: No mocks.
         """
+        # repo_id names a global repository: searching it requires group
+        # access to it, checked before any search work.
+        _enforce_golden_access(current_user.username, repo_id)
         try:
             search_response = search_service.search_repository(repo_id, search_request)
             return search_response

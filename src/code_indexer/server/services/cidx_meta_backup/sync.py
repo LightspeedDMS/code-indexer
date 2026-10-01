@@ -1,16 +1,39 @@
-"""Bidirectional git sync for mutable cidx-meta."""
+"""Git backup mirror for mutable cidx-meta.
+
+Bug #1555 (root-cause fix): the remote is a passive BACKUP MIRROR of
+cidx-meta-global's local state -- never a peer whose independent history
+must be preserved. This is an explicit product decision: the git remote
+connection exists purely to exercise git-remote-backup capability for the
+staging environment; there is nothing on the remote worth preserving, and
+local cidx-meta content is always authoritative.
+
+The previous design (Story #926 / Bug #1539) rebased local commits onto
+``origin/{branch}`` before pushing, which treated the remote as a peer.
+Since cidx-meta content is machine-generated (descriptions, dep-map YAML),
+a remote commit touching the SAME generated file as a local regenerated
+commit produced a genuine, structurally UNRESOLVABLE content conflict --
+the automatic Claude conflict resolver failed identically on every retry
+against that exact commit, and Bug #1539's circuit-breaker (correctly)
+quarantined the sync indefinitely. There was no path to self-resolution:
+the same conflict recurred on every attempt against an unchanged upstream
+target.
+
+``sync()`` no longer rebases at all. It commits local changes, then
+publishes local HEAD directly with ``git push --force-with-lease``,
+overwriting whatever the remote holds. A diverged remote is therefore
+never a stuck state: it self-heals on the very next scheduled sync cycle
+with no operator action, because there is no conflict class left to get
+stuck on.
+"""
 
 from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
-
-from .conflict_resolver import ClaudeConflictResolver
 
 
 @dataclass
@@ -20,17 +43,16 @@ class SyncResult:
 
 
 class CidxMetaBackupSync:
-    """Sync local mutable cidx-meta writes with a remote git repository."""
+    """Mirror local mutable cidx-meta writes to a remote git repository.
 
-    def __init__(
-        self,
-        cidx_meta_path: str,
-        branch: str,
-        claude_resolver: Optional[ClaudeConflictResolver],
-    ) -> None:
+    Local is the sole source of truth (Bug #1555): this pushes TO the
+    remote, it never merges FROM it. See the module docstring for the
+    full design rationale.
+    """
+
+    def __init__(self, cidx_meta_path: str, branch: str) -> None:
         self.cidx_meta_path = cidx_meta_path
         self.branch = branch
-        self.claude_resolver = claude_resolver or ClaudeConflictResolver()
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         env = build_non_interactive_git_env()
@@ -50,20 +72,6 @@ class CidxMetaBackupSync:
     @staticmethod
     def _stderr_or_stdout(result: subprocess.CompletedProcess) -> str:
         return (result.stderr or result.stdout or "").strip()
-
-    def _rebase_in_progress(self) -> bool:
-        """Return True when git has stopped mid-rebase with state on disk.
-
-        A non-zero rebase exit code does NOT always mean a conflict stopped it.
-        git may fail before creating any state (dirty working tree, invalid
-        upstream, pre-rebase hook, lock contention, etc.).  We only enter the
-        conflict-resolution path when git has actually written its rebase-state
-        directory, meaning there is a rebase to --continue or --abort.
-        """
-        git_dir = Path(self.cidx_meta_path) / ".git"
-        return (git_dir / "rebase-merge").is_dir() or (
-            git_dir / "rebase-apply"
-        ).is_dir()
 
     def sync(self) -> SyncResult:
         status = self._git("status", "--porcelain")
@@ -87,40 +95,20 @@ class CidxMetaBackupSync:
         if not local_committed and not remote_changed:
             return SyncResult(skipped=True, sync_failure=None)
 
-        rebase_result = self._git("rebase", f"origin/{self.branch}", check=False)
-        if rebase_result.returncode != 0:
-            if not self._rebase_in_progress():
-                # Rebase failed before creating any state (pre-rebase hook, dirty
-                # working tree, invalid upstream, lock contention, etc.).  There is
-                # nothing to --continue or --abort; surface the original failure.
-                raise RuntimeError(
-                    "rebase failed: " + self._stderr_or_stdout(rebase_result)
-                )
-            conflict_files = self._git(
-                "diff", "--name-only", "--diff-filter=U", check=False
-            ).stdout.splitlines()
-            resolver_result = self.claude_resolver.resolve(
-                self.cidx_meta_path, conflict_files, self.branch
-            )
-            remaining_conflicts = self._git(
-                "diff", "--name-only", "--diff-filter=U", check=False
-            ).stdout.strip()
-            if resolver_result.success and not remaining_conflicts:
-                continue_result = self._git("rebase", "--continue", check=False)
-                if continue_result.returncode != 0:
-                    self._git("rebase", "--abort", check=False)
-                    raise RuntimeError(
-                        "conflict resolution failed: "
-                        + self._stderr_or_stdout(continue_result)
-                    )
-            else:
-                self._git("rebase", "--abort", check=False)
-                raise RuntimeError(
-                    "conflict resolution failed: "
-                    + str(resolver_result.error or "unknown error")
-                )
-
-        push_result = self._git("push", "origin", self.branch, check=False)
+        # Bug #1555: local is authoritative -- publish it directly rather
+        # than rebasing onto (and thereby preserving) the remote's
+        # history. --force-with-lease, not --force: the fetch immediately
+        # above refreshed this process's origin/{branch} tracking ref, so
+        # the lease reflects genuinely current remote state, making this
+        # push race-safe against a concurrent writer without
+        # reintroducing any merge/rebase step. A lease mismatch (another
+        # writer pushed between our fetch and this push) simply defers to
+        # the next scheduled cycle, whose fresh fetch updates the lease
+        # and self-heals automatically -- consistent with this module's
+        # "never gets stuck" guarantee.
+        push_result = self._git(
+            "push", "--force-with-lease", "origin", self.branch, check=False
+        )
         if push_result.returncode != 0:
             sync_failure = f"push failed: {self._stderr_or_stdout(push_result)}"
 

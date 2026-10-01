@@ -1,0 +1,955 @@
+//! AC7: the mmap-backed `--graph-in <path>` file format -- "the CSR arena
+//! of packed structs is directly mappable", reusing #1785's `--facts-in`
+//! file-handoff pattern for the graph itself.
+//!
+//! This is a POSITIONAL BINARY format, never a marshalling protocol
+//! (JSON/bincode): every section is a fixed-width record count followed by
+//! that many fixed-width (or explicitly length-prefixed) records, decoded
+//! by straight little-endian integer reads over the mmap'd byte slice --
+//! never a recursive/structured parser. `write_graph_file` runs in the
+//! PARENT (the graph is already fully built in memory); `read_graph_file`
+//! runs in the analyze CHILD, backed by a real `memmap2::Mmap` over the
+//! file the parent wrote.
+//!
+//! Scope note (documented, not hidden): `binder_depths` (AC4 per-language
+//! diagnostic metadata) is deliberately NOT included in this wire format --
+//! it is presentation/observability data the analyze child's bounded graph
+//! ops (`super::ops`) never consume, and every symbol/reference/candidate
+//! needed for reachability, orphan-detection, and path-shaped findings IS
+//! carried. A `CodeGraph` reconstructed via `read_graph_file` reports an
+//! empty `binder_depths()` slice; this does not affect any AC7 op.
+
+use super::builder::CodeGraphBuilder;
+use super::candidate::Candidate;
+use super::code_graph::CodeGraph;
+use super::wire_cursor::{invalid, read_count_capped, take};
+use crate::graph::budget::AnalysisCompleteness;
+use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+use std::io::{self, Write};
+use std::path::Path;
+
+/// Story #1835: bumped from `XRAYGRF1` to `XRAYGRF2` because this format
+/// gained a new mandatory section (per-symbol visibility) between
+/// signatures and the completeness byte -- a POSITIONAL format cannot add
+/// a section without invalidating every file written by the old writer.
+/// This is the "version strategy" documented at the top of this module:
+/// any graph file written by pre-#1835 code now fails the magic-number
+/// check below and is reported as `AnalyzeStatus::GraphInvalid` (see
+/// `xray-cli::run_analyze_graph`) rather than being silently misparsed.
+/// Safe in practice because this file is a same-invocation parent/child
+/// handoff (`--graph-out` written and `--graph-in` read by the SAME `cidx`
+/// command), never a cross-run persistent cache -- see module docs.
+///
+/// Bug #1858: bumped again, `XRAYGRF2` -> `XRAYGRF3`, for the identical
+/// reason -- a new mandatory section (per-symbol `DeclarationKind`) is
+/// added between visibility and the completeness byte, so a
+/// pre-#1858-written file must fail the magic check below rather than be
+/// silently misparsed (its bytes would otherwise be read as if they were
+/// the completeness byte). Same safety argument as the #1835 bump: this
+/// is a same-invocation parent/child handoff, never a persistent cache.
+const MAGIC: &[u8; 8] = b"XRAYGRF4";
+/// `from`(4) + `file`(4) + `line`(4) + `kind`(1) + `cand_start`(4) + `cand_len`(2).
+const REFERENCE_RECORD_MIN_BYTES: usize = 19;
+/// `symbol`(4) + `reasons`(2).
+const CANDIDATE_RECORD_MIN_BYTES: usize = 6;
+/// `len`(4) prefix; the string bytes themselves are additional and vary.
+const STRING_RECORD_MIN_BYTES: usize = 4;
+/// `symbol`(8) + `referenced`(1).
+const SYMBOL_RECORD_MIN_BYTES: usize = 9;
+/// `dense_id`(4) + `len`(4) prefix; the signature text itself is additional.
+const SIGNATURE_RECORD_MIN_BYTES: usize = 8;
+/// `dense_id`(4) + `visibility`(1).
+const VISIBILITY_RECORD_MIN_BYTES: usize = 5;
+/// `dense_id`(4) + `kind`(1).
+const KIND_RECORD_MIN_BYTES: usize = 5;
+/// `dense_id`(4) + `file_string_id`(4) + `line`(4).
+const LOCATION_RECORD_MIN_BYTES: usize = 12;
+/// `dense_id`(4).
+const NON_INSTANTIABLE_CONSTRUCTOR_RECORD_MIN_BYTES: usize = 4;
+
+/// Writes `graph` to `path` in the AC7 wire format. Sections, in order:
+/// magic, references, candidates (recomputed from `candidates_for` in
+/// reference order -- see module docs on why that reconstructs the exact
+/// original flat arena), interned strings, interned symbols, referenced
+/// bits, per-symbol cached signatures, per-symbol visibility (Story
+/// #1835), per-symbol declaration kind (Bug #1858), per-symbol
+/// DECLARATION location (Bug #1900), completeness byte, and (Bug #1926,
+/// epic #1906 P2 rework) a TRUE TRAILING, OPTIONAL per-symbol
+/// non-instantiable-constructor section -- unlike every section above,
+/// which is mandatory and positioned BEFORE the completeness byte, this
+/// one is appended AFTER it and its absence is a valid, backward-
+/// compatible file (`read_graph_file` treats "no more bytes" here as an
+/// empty set, never a corruption error), so no MAGIC bump was needed for
+/// this addition.
+pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
+    let mut w = io::BufWriter::new(std::fs::File::create(path)?);
+    w.write_all(MAGIC)?;
+    write_references_and_candidates(&mut w, graph)?;
+    write_strings(&mut w, graph)?;
+    write_symbols_and_referenced_bits(&mut w, graph)?;
+    write_signatures(&mut w, graph)?;
+    write_visibilities(&mut w, graph)?;
+    write_kinds(&mut w, graph)?;
+    write_locations(&mut w, graph)?;
+    w.write_all(&[completeness_to_byte(graph.completeness())])?;
+    write_non_instantiable_constructors(&mut w, graph)?;
+    w.flush()
+}
+
+fn write_references_and_candidates(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let references = graph.references();
+    w.write_all(&(references.len() as u64).to_le_bytes())?;
+    let mut candidate_count: u64 = 0;
+    for reference in references {
+        candidate_count += graph.candidates_for(reference).len() as u64;
+    }
+    for reference in references {
+        w.write_all(&reference.from.to_le_bytes())?;
+        w.write_all(&reference.file.to_le_bytes())?;
+        w.write_all(&reference.line.to_le_bytes())?;
+        w.write_all(&[reference.kind])?;
+        w.write_all(&reference.cand_start.to_le_bytes())?;
+        w.write_all(&reference.cand_len.to_le_bytes())?;
+    }
+    w.write_all(&candidate_count.to_le_bytes())?;
+    for reference in references {
+        for candidate in graph.candidates_for(reference) {
+            w.write_all(&candidate.symbol().to_le_bytes())?;
+            w.write_all(&candidate.reasons().to_le_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+fn write_strings(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let count = graph.string_count();
+    w.write_all(&(count as u64).to_le_bytes())?;
+    for id in 0..count as u32 {
+        let s = graph.resolve_string(id);
+        w.write_all(&(s.len() as u32).to_le_bytes())?;
+        w.write_all(s.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn write_symbols_and_referenced_bits(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let count = graph.symbol_count();
+    w.write_all(&(count as u64).to_le_bytes())?;
+    for id in 0..count as u32 {
+        w.write_all(&graph.resolve_symbol(id).to_le_bytes())?;
+        w.write_all(&[graph.is_symbol_referenced(id) as u8])?;
+    }
+    Ok(())
+}
+
+fn write_signatures(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, &str)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if let Some(sig) = graph.signature_for(id) {
+            present.push((id, sig));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, sig) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&(sig.len() as u32).to_le_bytes())?;
+        w.write_all(sig.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Story #1835: mirrors `write_signatures` exactly, but only ever writes
+/// entries whose `Visibility` is NOT `Unknown` -- a dense id absent from
+/// this section decodes back to `Unknown` via `CodeGraph::visibility_for`
+/// on read, the identical "absent means the safe default" contract
+/// `signature_for` already uses for missing signatures.
+fn write_visibilities(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, Visibility)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        let visibility = graph.visibility_for(id);
+        if visibility != Visibility::Unknown {
+            present.push((id, visibility));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, visibility) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&[visibility_to_byte(visibility)])?;
+    }
+    Ok(())
+}
+
+fn visibility_to_byte(v: Visibility) -> u8 {
+    match v {
+        Visibility::Public => 0,
+        Visibility::Protected => 1,
+        Visibility::Private => 2,
+        Visibility::Unknown => 3,
+    }
+}
+
+/// Bug #1858: mirrors `write_visibilities` exactly, but for `kind_for` --
+/// only writes entries with a KNOWN kind. A dense id absent from this
+/// section decodes back to `None` via `CodeGraph::kind_for` on read, the
+/// identical "absent means the safe default" contract `signature_for` and
+/// `write_visibilities` already use.
+fn write_kinds(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, DeclarationKind)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if let Some(kind) = graph.kind_for(id) {
+            present.push((id, kind));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, kind) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&[kind_to_byte(kind)])?;
+    }
+    Ok(())
+}
+
+/// Bug #1900 (epic #1906 P5): mirrors `write_kinds` exactly, but for
+/// `location_for` -- only writes entries with a KNOWN location. A dense id
+/// absent from this section decodes back to `None` via
+/// `CodeGraph::location_for` on read, the identical "absent means the safe
+/// default" contract `signature_for`/`write_visibilities`/`write_kinds`
+/// already use. `file_string_id` refers into the SAME interned-strings
+/// section `write_strings` already wrote above, so no separate string
+/// table is needed for this section.
+fn write_locations(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, u32, u32)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if let Some((file_string_id, line)) = graph.raw_location_for(id) {
+            present.push((id, file_string_id, line));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, file_string_id, line) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&file_string_id.to_le_bytes())?;
+        w.write_all(&line.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Bug #1926: the true TRAILING, OPTIONAL section
+/// -- see `write_graph_file`'s doc comment for why this lives AFTER the
+/// completeness byte rather than alongside the other mandatory sections.
+fn write_non_instantiable_constructors(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<u32> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if graph.is_non_instantiable_constructor(id) {
+            present.push(id);
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for id in present {
+        w.write_all(&id.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn kind_to_byte(k: DeclarationKind) -> u8 {
+    match k {
+        DeclarationKind::Type => 0,
+        DeclarationKind::Method => 1,
+        DeclarationKind::Field => 2,
+        DeclarationKind::Constant => 3,
+        DeclarationKind::Package => 4,
+    }
+}
+
+/// One decoded reference record, not yet placed through
+/// `CodeGraphBuilder::add_reference` (which recomputes `cand_start`/
+/// `cand_len` for the NEW arena) -- `cand_start`/`cand_len` here only
+/// slice `raw_candidates`, the flat array read alongside it.
+struct RawReference {
+    from: u32,
+    file: u32,
+    line: u32,
+    kind: u8,
+    cand_start: u32,
+    cand_len: u16,
+}
+
+/// A decoded candidate record: `(dense symbol id, reasons bitmask)`.
+type RawCandidate = (u32, u16);
+
+fn read_references_and_candidates(data: &[u8], pos: &mut usize) -> io::Result<(Vec<RawReference>, Vec<RawCandidate>)> {
+    use std::mem::size_of;
+    let ref_count = read_count_capped(data, pos, REFERENCE_RECORD_MIN_BYTES)?;
+    let mut references = Vec::with_capacity(ref_count);
+    for _ in 0..ref_count {
+        references.push(RawReference {
+            from: u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()),
+            file: u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()),
+            line: u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()),
+            kind: take(data, pos, size_of::<u8>())?[0],
+            cand_start: u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()),
+            cand_len: u16::from_le_bytes(take(data, pos, size_of::<u16>())?.try_into().unwrap()),
+        });
+    }
+    let cand_count = read_count_capped(data, pos, CANDIDATE_RECORD_MIN_BYTES)?;
+    let mut candidates = Vec::with_capacity(cand_count);
+    for _ in 0..cand_count {
+        let symbol = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        let reasons = u16::from_le_bytes(take(data, pos, size_of::<u16>())?.try_into().unwrap());
+        candidates.push((symbol, reasons));
+    }
+    Ok((references, candidates))
+}
+
+/// Populates `builder`'s string table, symbol table, referenced bits, and
+/// cached signatures from the wire format, in that section order, and
+/// returns the total number of symbols decoded -- the caller uses this to
+/// validate every OTHER decoded symbol id (`reference.from`, candidate
+/// `symbol`) against the real, just-built table. Every signature's own
+/// `dense_id` is validated against that same count HERE, since
+/// `symbol_count` is only known partway through this function.
+///
+/// Rejects a DUPLICATE (or otherwise out-of-sequence) symbol entry as
+/// corrupt: `CodeGraphBuilder::intern_symbol` dedups and returns the
+/// EXISTING dense id for a repeat, which would otherwise make the
+/// builder's real, distinct symbol count SMALLER than the returned
+/// `symbol_count` -- and every downstream `reference.from`/candidate
+/// `symbol`/signature `dense_id` check compares against that returned
+/// count, so an undetected duplicate would let a dense id the table
+/// never actually assigned pass validation and panic later inside
+/// `SymbolTable::resolve`. Asserting `intern_symbol`'s result equals the
+/// current loop index catches that the moment it happens.
+fn read_strings_symbols_and_signatures(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder) -> io::Result<usize> {
+    use std::mem::size_of;
+    let string_count = read_count_capped(data, pos, STRING_RECORD_MIN_BYTES)?;
+    for _ in 0..string_count {
+        let len = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()) as usize;
+        let s = std::str::from_utf8(take(data, pos, len)?).map_err(|e| invalid(&e.to_string()))?;
+        builder.intern_string(s);
+    }
+    let symbol_count = read_count_capped(data, pos, SYMBOL_RECORD_MIN_BYTES)?;
+    for i in 0..symbol_count {
+        let symbol = u64::from_le_bytes(take(data, pos, size_of::<u64>())?.try_into().unwrap());
+        let referenced = take(data, pos, size_of::<u8>())?[0] != 0;
+        let dense = builder.intern_symbol(symbol);
+        if dense as usize != i {
+            return Err(invalid("duplicate or out-of-order symbol id in graph file"));
+        }
+        if referenced {
+            builder.mark_referenced(dense);
+        }
+    }
+    let sig_count = read_count_capped(data, pos, SIGNATURE_RECORD_MIN_BYTES)?;
+    for _ in 0..sig_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("signature dense_id outside decoded symbol table"));
+        }
+        let len = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap()) as usize;
+        let sig = std::str::from_utf8(take(data, pos, len)?).map_err(|e| invalid(&e.to_string()))?;
+        builder.add_signature(dense_id, sig.to_string());
+    }
+    read_visibilities(data, pos, builder, symbol_count)?;
+    read_kinds(data, pos, builder, symbol_count)?;
+    read_locations(data, pos, builder, symbol_count, string_count)?;
+    Ok(symbol_count)
+}
+
+/// Story #1835: mirrors the signature-reading loop directly above, but for
+/// the visibility section `write_visibilities` appends right after
+/// signatures. Rejects a `visibility` byte outside `visibility_from_byte`'s
+/// known range and a `dense_id` outside the decoded symbol table -- the
+/// same two corruption checks the signature loop already applies.
+fn read_visibilities(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let visibility_count = read_count_capped(data, pos, VISIBILITY_RECORD_MIN_BYTES)?;
+    for _ in 0..visibility_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("visibility dense_id outside decoded symbol table"));
+        }
+        let byte = take(data, pos, size_of::<u8>())?[0];
+        let visibility = visibility_from_byte(byte).ok_or_else(|| invalid(&format!("corrupt visibility byte: {byte}")))?;
+        builder.add_visibility(dense_id, visibility);
+    }
+    Ok(())
+}
+
+fn visibility_from_byte(b: u8) -> Option<Visibility> {
+    match b {
+        0 => Some(Visibility::Public),
+        1 => Some(Visibility::Protected),
+        2 => Some(Visibility::Private),
+        3 => Some(Visibility::Unknown),
+        _ => None,
+    }
+}
+
+/// Bug #1858: mirrors the visibility-reading loop directly above, but for
+/// the kind section `write_kinds` appends right after visibility. Rejects
+/// a `kind` byte outside `kind_from_byte`'s known range and a `dense_id`
+/// outside the decoded symbol table -- the same two corruption checks the
+/// visibility loop already applies.
+fn read_kinds(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let kind_count = read_count_capped(data, pos, KIND_RECORD_MIN_BYTES)?;
+    for _ in 0..kind_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("kind dense_id outside decoded symbol table"));
+        }
+        let byte = take(data, pos, size_of::<u8>())?[0];
+        let kind = kind_from_byte(byte).ok_or_else(|| invalid(&format!("corrupt kind byte: {byte}")))?;
+        builder.add_kind(dense_id, kind);
+    }
+    Ok(())
+}
+
+/// Bug #1900 (epic #1906 P5): mirrors the kind-reading loop directly above,
+/// but for the location section `write_locations` appends right after
+/// declaration kind. Rejects a `dense_id` outside the decoded symbol
+/// table -- the same corruption check every other sparse section applies.
+///
+/// Review round 2 (BLOCKING P3): `file_string_id` IS now validated against
+/// the decoded string count too, symmetric with `dense_id`'s check against
+/// `symbol_count`. The prior doc comment here justified skipping this check
+/// by pointing at `CodeGraph::location_for`'s `self.strings.resolve` call
+/// as an accepted panicking consumer -- that reasoning was wrong: unlike
+/// `write_strings`'s own trusted internal `resolve_string` calls (which
+/// only ever read ids THIS SAME PROCESS just wrote), `location_for` is
+/// reachable from a dylib-supplied `GraphHandle` on a `--graph-in` file
+/// this process did not produce, and ADR-002 Defect 2 exists precisely so
+/// no panic can cross that boundary. `location_for` itself was ALSO fixed
+/// to use the checked `try_resolve` (defense in depth), but rejecting the
+/// corruption here, at decode time, is the earlier and more informative
+/// failure point.
+fn read_locations(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize, string_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let location_count = read_count_capped(data, pos, LOCATION_RECORD_MIN_BYTES)?;
+    for _ in 0..location_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("location dense_id outside decoded symbol table"));
+        }
+        let file_string_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if file_string_id as usize >= string_count {
+            return Err(invalid("location file_string_id outside decoded string table"));
+        }
+        let line = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        builder.add_location(dense_id, file_string_id, line);
+    }
+    Ok(())
+}
+
+/// Bug #1926: mirrors `read_locations`'s bounds
+/// checking, but for the true trailing, optional section
+/// `write_non_instantiable_constructors` appends AFTER the completeness
+/// byte -- see `read_graph_file`'s own call site for why this is only
+/// ever invoked when the file genuinely carries these bytes.
+fn read_non_instantiable_constructors(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let count = read_count_capped(data, pos, NON_INSTANTIABLE_CONSTRUCTOR_RECORD_MIN_BYTES)?;
+    for _ in 0..count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("non-instantiable-constructor dense_id outside decoded symbol table"));
+        }
+        builder.add_non_instantiable_constructor(dense_id);
+    }
+    Ok(())
+}
+
+fn kind_from_byte(b: u8) -> Option<DeclarationKind> {
+    match b {
+        0 => Some(DeclarationKind::Type),
+        1 => Some(DeclarationKind::Method),
+        2 => Some(DeclarationKind::Field),
+        3 => Some(DeclarationKind::Constant),
+        4 => Some(DeclarationKind::Package),
+        _ => None,
+    }
+}
+
+/// Reads a graph previously written by `write_graph_file` back into a
+/// real, OWNED `CodeGraph` (the analyze CHILD's side of the AC7 handoff),
+/// accessing `path` via a real `memmap2::Mmap` during decoding, then
+/// copying the decoded data ONCE into `CodeGraph`'s own owned storage --
+/// the returned graph does not keep the mapping alive. Fails loud
+/// (`InvalidData`) on a bad magic number, a truncated section, an
+/// out-of-bounds candidate window, a duplicate symbol entry, or a symbol
+/// id outside the decoded symbol table.
+pub fn read_graph_file(path: &Path) -> io::Result<CodeGraph> {
+    let file = std::fs::File::open(path)?;
+    // SAFETY: mmap(2) over a plain, caller-controlled regular file this
+    // process just opened read-only, written once and fully by the
+    // parent before this child was ever spawned.
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let data: &[u8] = &mmap;
+    if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
+        return Err(invalid("graph file: bad magic number"));
+    }
+    let mut pos = MAGIC.len();
+
+    let (raw_references, raw_candidates) = read_references_and_candidates(data, &mut pos)?;
+    let mut builder = CodeGraphBuilder::with_candidate_capacity(raw_candidates.len());
+    let symbol_count = read_strings_symbols_and_signatures(data, &mut pos, &mut builder)?;
+
+    for reference in &raw_references {
+        if reference.from as usize >= symbol_count {
+            return Err(invalid("reference.from outside decoded symbol table"));
+        }
+        let start = reference.cand_start as usize;
+        let end = start.checked_add(reference.cand_len as usize).ok_or_else(|| invalid("candidate window overflows"))?;
+        let window = raw_candidates.get(start..end).ok_or_else(|| invalid("candidate window out of bounds"))?;
+        let mut candidates = Vec::with_capacity(window.len());
+        for &(symbol, reasons) in window {
+            if symbol as usize >= symbol_count {
+                return Err(invalid("candidate symbol outside decoded symbol table"));
+            }
+            candidates.push(Candidate::new(symbol, reasons));
+        }
+        builder.add_reference(reference.from, reference.file, reference.line, reference.kind, &candidates);
+    }
+
+    let completeness_byte = take(data, &mut pos, std::mem::size_of::<u8>())?[0];
+    builder.set_completeness(match completeness_byte {
+        0 => AnalysisCompleteness::Complete,
+        1 => AnalysisCompleteness::FactBudgetExceeded,
+        2 => AnalysisCompleteness::IndexBudgetExceeded,
+        3 => AnalysisCompleteness::DerivationTruncated,
+        4 => AnalysisCompleteness::ResolutionAmbiguous,
+        5 => AnalysisCompleteness::ParseErrorsPresent,
+        6 => AnalysisCompleteness::RepoIndexIncomplete,
+        other => return Err(invalid(&format!("corrupt completeness byte: {other}"))),
+    });
+    // Bug #1926: a TRUE TRAILING, OPTIONAL
+    // section -- a pre-#1926 file simply ends here (`pos == data.len()`),
+    // which is a valid, backward-compatible file (empty set), never a
+    // corruption error. Only a file that genuinely carries these bytes
+    // attempts to decode them (and still validates them like every other
+    // section, so a truncated/corrupt trailing section IS rejected).
+    if pos < data.len() {
+        read_non_instantiable_constructors(data, &mut pos, &mut builder, symbol_count)?;
+    }
+    Ok(builder.build())
+}
+
+fn completeness_to_byte(c: AnalysisCompleteness) -> u8 {
+    match c {
+        AnalysisCompleteness::Complete => 0,
+        AnalysisCompleteness::FactBudgetExceeded => 1,
+        AnalysisCompleteness::IndexBudgetExceeded => 2,
+        AnalysisCompleteness::DerivationTruncated => 3,
+        AnalysisCompleteness::ResolutionAmbiguous => 4,
+        AnalysisCompleteness::ParseErrorsPresent => 5,
+        AnalysisCompleteness::RepoIndexIncomplete => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::identity::make_symbol_id;
+    use crate::graph::reasons;
+
+    /// Bug #1900 (epic #1906 P2, review round 2 -- BLOCKING P3): mirrors
+    /// `read_visibilities`/`read_kinds`'s own `dense_id` bounds check, but
+    /// for `file_string_id` against the DECODED STRING table -- the
+    /// missing symmetry the review found: `read_locations` validated
+    /// `dense_id` but not `file_string_id`, and `CodeGraph::location_for`
+    /// (pre-fix) called the panicking `StringTable::resolve` on whatever
+    /// value decoded, so a corrupt/hand-crafted `--graph-in` file could
+    /// panic the analyze child across the GraphHandle FFI boundary. `RED
+    /// against unmodified code`: `read_locations` takes no `string_count`
+    /// parameter yet, so this fails to compile.
+    #[test]
+    fn read_locations_rejects_a_file_string_id_outside_the_decoded_string_table() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes()); // location_count = 1
+        data.extend_from_slice(&0u32.to_le_bytes()); // dense_id = 0 (valid)
+        data.extend_from_slice(&999u32.to_le_bytes()); // file_string_id -- OUT OF RANGE
+        data.extend_from_slice(&5u32.to_le_bytes()); // line
+        let mut pos = 0usize;
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(1, 0));
+
+        let result = read_locations(&data, &mut pos, &mut builder, /* symbol_count */ 1, /* string_count */ 0);
+
+        assert!(
+            result.is_err(),
+            "a file_string_id outside the decoded string table must be rejected, \
+             mirroring the existing dense_id bounds check"
+        );
+    }
+
+    fn small_graph() -> CodeGraph {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(2);
+        let foo = builder.intern_symbol(make_symbol_id(1, 0));
+        let bar = builder.intern_symbol(make_symbol_id(1, 1));
+        let unreferenced = builder.intern_symbol(make_symbol_id(1, 2));
+        let _ = builder.intern_string("com.example.Foo");
+        builder.add_signature(foo, "foo()".to_string());
+        builder.mark_referenced(bar);
+        builder.add_reference(
+            foo,
+            1,
+            5,
+            0,
+            &[Candidate::new(bar, reasons::SAME_FILE), Candidate::new(unreferenced, reasons::SAME_PACKAGE)],
+        );
+        builder.set_completeness(AnalysisCompleteness::IndexBudgetExceeded);
+        builder.build()
+    }
+
+    /// AC7's own discriminating requirement for this module: a graph
+    /// written to disk and read back via `read_graph_file` must be
+    /// QUERY-EQUIVALENT to the original -- every reference, its candidate
+    /// window, resolved symbols/strings, the referenced-bit, the cached
+    /// signature, and the completeness state all round-trip exactly. A
+    /// wrong implementation that silently dropped a section (e.g. wrote
+    /// referenced_bits but never read them back) would still "round trip"
+    /// on a naive equality check of just the reference count -- this test
+    /// checks every query surface a real `analyze_graph` callback uses.
+    #[test]
+    fn graph_round_trips_through_a_real_file_via_mmap() {
+        let original = small_graph();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        assert_eq!(reloaded.references().len(), original.references().len());
+        let orig_ref = original.references()[0];
+        let reloaded_ref = reloaded.references()[0];
+        assert_eq!(reloaded_ref.from, orig_ref.from);
+        assert_eq!(reloaded_ref.line, orig_ref.line);
+
+        let orig_candidates: Vec<_> = original.candidates_for(&orig_ref).iter().map(|c| c.symbol()).collect();
+        let reloaded_candidates: Vec<_> = reloaded.candidates_for(&reloaded_ref).iter().map(|c| c.symbol()).collect();
+        assert_eq!(reloaded_candidates, orig_candidates);
+
+        assert_eq!(reloaded.resolve_string(0), "com.example.Foo");
+        assert_eq!(reloaded.resolve_symbol(0), original.resolve_symbol(0));
+
+        let foo_dense = reloaded.dense_id_for(make_symbol_id(1, 0)).unwrap();
+        let bar_dense = reloaded.dense_id_for(make_symbol_id(1, 1)).unwrap();
+        assert_eq!(reloaded.signature_for(foo_dense), Some("foo()"));
+        assert!(reloaded.is_symbol_referenced(bar_dense));
+        assert_eq!(reloaded.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+    }
+
+    /// Story #1835 (RED against unmodified code -- the wire format has no
+    /// visibility section yet, so `visibility_for` silently defaults to
+    /// `Unknown` after a round trip and `is_definitely_dead_code` reports
+    /// `None` instead of the original `Some(true)`): the `--graph-out`/
+    /// `--graph-in` parent/child handoff (`xray-cli`'s `run_analyze_graph`)
+    /// is the ONLY place `analyze_graph` ever actually reads a `CodeGraph`
+    /// from in production -- if visibility silently disappeared across
+    /// this file boundary, the dead-code capability this story restores
+    /// would work in every unit test and still be dead on arrival for any
+    /// real CLI invocation.
+    #[test]
+    fn visibility_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let unreferenced_private = builder.intern_symbol(make_symbol_id(2, 0));
+        let unreferenced_public = builder.intern_symbol(make_symbol_id(2, 1));
+        builder.add_visibility(unreferenced_private, Visibility::Private);
+        builder.add_visibility(unreferenced_public, Visibility::Public);
+        // Bug #1858: attach the tracked-reference kind real production
+        // always writes, so the dead-code verdict below isn't suppressed.
+        builder.add_kind(unreferenced_private, DeclarationKind::Method);
+        builder.add_kind(unreferenced_public, DeclarationKind::Method);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_visibility.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let private_dense = reloaded.dense_id_for(make_symbol_id(2, 0)).unwrap();
+        let public_dense = reloaded.dense_id_for(make_symbol_id(2, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(private_dense),
+            Some(true),
+            "a Private symbol's dead-code verdict must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(public_dense),
+            None,
+            "a Public symbol must stay undecidable after the wire round trip too"
+        );
+    }
+
+    /// Bug #1900 (epic #1906 P5): mirrors
+    /// `visibility_round_trips_through_a_real_file_via_mmap`/
+    /// `kind_round_trips_through_a_real_file_via_mmap` exactly, but for
+    /// `location_for` -- the same `--graph-out`/`--graph-in` parent/child
+    /// handoff is the ONLY place `analyze_graph` ever actually reads a
+    /// `CodeGraph` from in production, so if declaration location silently
+    /// disappeared across this file boundary, `location_for` would work in
+    /// every in-process unit test and still be dead on arrival for any
+    /// real CLI invocation. `RED against unmodified code`: the wire format
+    /// has no location section yet, so this fails to compile
+    /// (`add_location` does not exist).
+    #[test]
+    fn location_round_trips_through_a_real_file_via_mmap() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let with_location = builder.intern_symbol(make_symbol_id(4, 0));
+        builder.intern_symbol(make_symbol_id(4, 1));
+        let file_string_id = builder.intern_string("com/example/Widget.java");
+        builder.add_location(with_location, file_string_id, 17);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_location.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let with_location_dense = reloaded.dense_id_for(make_symbol_id(4, 0)).unwrap();
+        let without_location_dense = reloaded.dense_id_for(make_symbol_id(4, 1)).unwrap();
+        assert_eq!(
+            reloaded.location_for(with_location_dense),
+            Some(("com/example/Widget.java", 17)),
+            "a recorded declaration location must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.location_for(without_location_dense),
+            None,
+            "a symbol with no recorded location must stay None after the wire round trip too"
+        );
+    }
+
+    /// Bug #1858: mirrors `visibility_round_trips_through_a_real_file_via_mmap`
+    /// exactly, but for `kind_for` -- the same `--graph-out`/`--graph-in`
+    /// parent/child handoff is the ONLY place `analyze_graph` ever actually
+    /// reads a `CodeGraph` from in production, so if declaration kind
+    /// silently disappeared across this file boundary, the Bug #1858 fix
+    /// would work in every in-process unit test and still be dead on
+    /// arrival for any real CLI invocation.
+    #[test]
+    fn kind_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::DeclarationKind;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let field_symbol = builder.intern_symbol(make_symbol_id(3, 0));
+        let method_symbol = builder.intern_symbol(make_symbol_id(3, 1));
+        builder.add_kind(field_symbol, DeclarationKind::Field);
+        builder.add_kind(method_symbol, DeclarationKind::Method);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_kind.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let field_dense = reloaded.dense_id_for(make_symbol_id(3, 0)).unwrap();
+        let method_dense = reloaded.dense_id_for(make_symbol_id(3, 1)).unwrap();
+        assert_eq!(
+            reloaded.kind_for(field_dense),
+            Some(DeclarationKind::Field),
+            "a Field symbol's declaration kind must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.kind_for(method_dense),
+            Some(DeclarationKind::Method),
+            "a Method symbol's declaration kind must survive the wire round trip too"
+        );
+    }
+
+    /// Bug #1926: mirrors `visibility_round_trips_through_a_real_file_via_
+    /// mmap` exactly, but for `is_non_instantiable_constructor` -- the
+    /// same `--graph-out`/`--graph-in` parent/child handoff is the ONLY
+    /// place `analyze_graph` ever actually reads a `CodeGraph` from in
+    /// production. Also proves `visibility_of()`/`visibility_for` still
+    /// reports `Private` for the qualifying symbol even after this fact is
+    /// attached and round-tripped -- this is a SEPARATE carried fact,
+    /// never a `Visibility` rewrite.
+    #[test]
+    fn non_instantiable_constructor_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let lone_ctor = builder.intern_symbol(make_symbol_id(5, 0));
+        let ordinary_private = builder.intern_symbol(make_symbol_id(5, 1));
+        builder.add_visibility(lone_ctor, Visibility::Private);
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(lone_ctor, DeclarationKind::Method);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        builder.add_non_instantiable_constructor(lone_ctor);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_non_instantiable_ctor.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let lone_ctor_dense = reloaded.dense_id_for(make_symbol_id(5, 0)).unwrap();
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(5, 1)).unwrap();
+        assert_eq!(
+            reloaded.visibility_for(lone_ctor_dense),
+            Visibility::Private,
+            "the non-instantiable-constructor fact must never rewrite the symbol's OWN declared visibility"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(lone_ctor_dense),
+            None,
+            "a lone non-instantiable constructor must be undecidable after the wire round trip"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private symbol must still be reported dead after the round trip"
+        );
+    }
+
+    /// Bug #1926: the non-instantiable-constructor
+    /// section is a TRUE TRAILING, OPTIONAL addition -- a file written by
+    /// PRE-#1926 code has no such bytes at all. Simulates that exact shape
+    /// by writing a real graph with ZERO qualifying symbols (whose own
+    /// trailing section is therefore exactly the 8-byte empty-count
+    /// prefix and nothing else) and then truncating those 8 bytes off the
+    /// file, reproducing a file that ends immediately after the
+    /// completeness byte -- byte-for-byte what a pre-#1926 writer
+    /// produced. `read_graph_file` must still succeed (no MAGIC bump, no
+    /// corruption error) and report no non-instantiable constructors.
+    #[test]
+    fn graph_file_with_no_trailing_section_at_all_reads_back_as_an_empty_set() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(6, 0));
+        // Bug #1926 (final round, item 4 "new-reader-on-old-file"): an
+        // ORDINARY unreferenced private method, unrelated to the new
+        // trailing section, must round-trip its dead-code verdict
+        // unchanged through a file that never carried this section at all.
+        let ordinary_private = builder.intern_symbol(make_symbol_id(6, 1));
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_old_format.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+
+        let mut bytes = std::fs::read(&path).expect("read back the written file");
+        assert!(bytes.len() >= 8, "the empty trailing section must be exactly the 8-byte count prefix");
+        bytes.truncate(bytes.len() - 8);
+        std::fs::write(&path, &bytes).expect("write the truncated, pre-#1926-shaped file");
+
+        let reloaded = read_graph_file(&path).expect("a file with no trailing section at all must still read successfully");
+        let dense = reloaded.dense_id_for(make_symbol_id(6, 0)).unwrap();
+        assert!(
+            !reloaded.is_non_instantiable_constructor(dense),
+            "a symbol from a pre-#1926-shaped file must never be reported non-instantiable"
+        );
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(6, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private method's dead-code verdict must survive reading a \
+             pre-#1926-shaped file completely unchanged"
+        );
+    }
+
+    /// Bug #1926, test-only: a byte-for-byte mirror of HEAD's (pre-#1926)
+    /// `read_graph_file` -- decodes through the completeness byte and
+    /// STOPS, never attempting to read the trailing non-instantiable-
+    /// constructor section this file may or may not carry. This is what
+    /// lets `old_reader_view_of_a_new_file_...` genuinely exercise "an old
+    /// reader binary given a real new-format file", rather than re-running
+    /// TODAY's reader (which already knows to tolerate a short file) on a
+    /// manually truncated one.
+    fn read_graph_file_pre_1926(path: &Path) -> io::Result<CodeGraph> {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: mmap(2) over a plain, caller-controlled regular file this
+        // process just opened read-only, written once and fully before
+        // this read ever starts.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let data: &[u8] = &mmap;
+        if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
+            return Err(invalid("graph file: bad magic number"));
+        }
+        let mut pos = MAGIC.len();
+
+        let (raw_references, raw_candidates) = read_references_and_candidates(data, &mut pos)?;
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(raw_candidates.len());
+        let symbol_count = read_strings_symbols_and_signatures(data, &mut pos, &mut builder)?;
+
+        for reference in &raw_references {
+            if reference.from as usize >= symbol_count {
+                return Err(invalid("reference.from outside decoded symbol table"));
+            }
+            let start = reference.cand_start as usize;
+            let end = start.checked_add(reference.cand_len as usize).ok_or_else(|| invalid("candidate window overflows"))?;
+            let window = raw_candidates.get(start..end).ok_or_else(|| invalid("candidate window out of bounds"))?;
+            let mut candidates = Vec::with_capacity(window.len());
+            for &(symbol, reasons) in window {
+                if symbol as usize >= symbol_count {
+                    return Err(invalid("candidate symbol outside decoded symbol table"));
+                }
+                candidates.push(Candidate::new(symbol, reasons));
+            }
+            builder.add_reference(reference.from, reference.file, reference.line, reference.kind, &candidates);
+        }
+
+        let completeness_byte = take(data, &mut pos, std::mem::size_of::<u8>())?[0];
+        builder.set_completeness(match completeness_byte {
+            0 => AnalysisCompleteness::Complete,
+            1 => AnalysisCompleteness::FactBudgetExceeded,
+            2 => AnalysisCompleteness::IndexBudgetExceeded,
+            3 => AnalysisCompleteness::DerivationTruncated,
+            4 => AnalysisCompleteness::ResolutionAmbiguous,
+            5 => AnalysisCompleteness::ParseErrorsPresent,
+            6 => AnalysisCompleteness::RepoIndexIncomplete,
+            other => return Err(invalid(&format!("corrupt completeness byte: {other}"))),
+        });
+        // Deliberately STOPS here -- pre-#1926 code has no idea a trailing
+        // section could follow, and never asks `pos < data.len()` at all.
+        Ok(builder.build())
+    }
+
+    /// Bug #1926 (old-reader-on-new-file): a reader built BEFORE this
+    /// section existed, given a file WRITTEN AFTER it, with a REAL
+    /// non-empty trailing section present (never truncated -- the whole
+    /// point is that an old reader ignores bytes it never asks for, not
+    /// that the file happens to be short). `read_graph_file_pre_1926`
+    /// must still succeed on the complete file and preserve the ordinary
+    /// private method's dead-code verdict, proving the format addition is
+    /// genuinely backward compatible for a reader that has no idea it
+    /// exists.
+    #[test]
+    fn old_reader_view_of_a_new_file_still_reads_successfully_and_preserves_ordinary_verdicts() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let ctor = builder.intern_symbol(make_symbol_id(7, 0));
+        builder.add_visibility(ctor, Visibility::Private);
+        builder.add_kind(ctor, DeclarationKind::Method);
+        builder.add_non_instantiable_constructor(ctor);
+        let ordinary_private = builder.intern_symbol(make_symbol_id(7, 1));
+        builder.add_visibility(ordinary_private, Visibility::Private);
+        builder.add_kind(ordinary_private, DeclarationKind::Method);
+        let graph = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_new_format.bin");
+        write_graph_file(&graph, &path).expect("write must succeed");
+        let bytes = std::fs::read(&path).expect("read back the written file");
+        assert!(
+            bytes.len() > 8,
+            "fixture sanity: the trailing section must carry the real non-instantiable-constructor \
+             entry, not just the empty-count prefix"
+        );
+
+        let reloaded = read_graph_file_pre_1926(&path)
+            .expect("an old reader that has never heard of the trailing section must still read a complete new-format file successfully");
+        let ordinary_private_dense = reloaded.dense_id_for(make_symbol_id(7, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(ordinary_private_dense),
+            Some(true),
+            "an ordinary unreferenced private method's dead-code verdict must be preserved when an \
+             old reader silently ignores the trailing section it never reads"
+        );
+    }
+}

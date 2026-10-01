@@ -22,7 +22,7 @@ class TestTokenWhitespaceStripping:
         Note: The actual stripping happens in routes.py save_api_key().
         This test verifies the clean token works after stripping.
         """
-        from src.code_indexer.server.services.ci_token_manager import CITokenManager
+        from code_indexer.server.services.ci_token_manager import CITokenManager
 
         server_dir = tmp_path / ".cidx-server"
         server_dir.mkdir()

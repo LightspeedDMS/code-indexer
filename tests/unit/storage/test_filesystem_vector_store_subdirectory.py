@@ -32,7 +32,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         result = store.create_collection(
             "test_coll", vector_size=1024, subdirectory="multimodal_index"
@@ -71,7 +73,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection(
             "test_coll", vector_size=1024, subdirectory="multimodal_index"
         )
@@ -102,9 +106,13 @@ class TestFilesystemVectorStoreSubdirectory:
 
         assert result["status"] == "ok", "upsert should succeed"
 
-        # Verify JSON files created in subdirectory
+        # Verify JSON files created in subdirectory. Select by the actual
+        # vector-record naming convention (vector_*.json) rather than a
+        # "not collection_meta" blacklist -- Bug #1619 added a second,
+        # small bookkeeping sidecar (hnsw_sync_state.json) to the
+        # collection root that a blacklist approach would wrongly match.
         json_files = list((tmp_path / "multimodal_index" / "test_coll").rglob("*.json"))
-        vector_files = [f for f in json_files if "collection_meta" not in f.name]
+        vector_files = [f for f in json_files if f.name.startswith("vector_")]
         assert len(vector_files) > 0, "Vector files should exist in subdirectory"
 
         # Verify stored data
@@ -141,7 +149,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Create same collection name in two subdirectories
         store.create_collection(
@@ -226,7 +236,9 @@ class TestFilesystemVectorStoreSubdirectory:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Create collection without subdirectory (existing behavior)
         result = store.create_collection("test_coll", vector_size=1024)

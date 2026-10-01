@@ -168,7 +168,6 @@ class RepositoryMatcher:
                 format_error_log(
                     "GIT-GENERAL-058",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise MatchingError(error_msg) from e
@@ -241,7 +240,6 @@ class RepositoryMatcher:
                 format_error_log(
                     "GIT-GENERAL-059",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise MatchingError(error_msg) from e
@@ -281,7 +279,6 @@ class RepositoryMatcher:
                 format_error_log(
                     "GIT-GENERAL-060",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise MatchingError(error_msg) from e
@@ -316,7 +313,6 @@ class RepositoryMatcher:
                         format_error_log(
                             "GIT-GENERAL-061",
                             f"Invalid last_indexed timestamp: {repo_data['last_indexed']}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -334,7 +330,6 @@ class RepositoryMatcher:
                         format_error_log(
                             "GIT-GENERAL-062",
                             f"Invalid created_at timestamp: {repo_data['created_at']}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -384,7 +379,6 @@ class RepositoryMatcher:
                         format_error_log(
                             "GIT-GENERAL-063",
                             f"Invalid last_accessed timestamp: {repo_data['last_accessed']}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -402,7 +396,6 @@ class RepositoryMatcher:
                         format_error_log(
                             "GIT-GENERAL-064",
                             f"Invalid activated_at timestamp: {repo_data['activated_at']}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 

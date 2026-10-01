@@ -28,13 +28,13 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
     JobStatus,
 )
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 # All tests are integration-style (real SQLite, real worker threads) but fast
 pytestmark = pytest.mark.slow

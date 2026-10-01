@@ -127,9 +127,34 @@ def test_search_service_keeps_warning_and_error_logs() -> None:
     assert "logger.error(" in source
 
 
-_SEARCH_HANDLER_PATH = (
-    _REPO_ROOT / "src" / "code_indexer" / "server" / "mcp" / "handlers" / "search.py"
+# Issue #1935: search.py was split into the search/ package. The three
+# audit-log markers this guard checks now live in two different submodules.
+_SEARCH_CODE_SEARCH_PATH = (
+    _REPO_ROOT
+    / "src"
+    / "code_indexer"
+    / "server"
+    / "mcp"
+    / "handlers"
+    / "search"
+    / "code_search.py"
 )
+_SEARCH_OMNI_PATH = (
+    _REPO_ROOT
+    / "src"
+    / "code_indexer"
+    / "server"
+    / "mcp"
+    / "handlers"
+    / "search"
+    / "omni.py"
+)
+
+_AUDIT_MARKER_SOURCE_FILES = {
+    "search_code entry:": _SEARCH_CODE_SEARCH_PATH,
+    "search_code complete:": _SEARCH_CODE_SEARCH_PATH,
+    "_omni_search_code post-expansion:": _SEARCH_OMNI_PATH,
+}
 
 
 def test_search_code_handler_audit_logs_demoted_to_debug() -> None:
@@ -139,17 +164,12 @@ def test_search_code_handler_audit_logs_demoted_to_debug() -> None:
     are demoted rather than deleted -- but they must not be INFO, or they would
     acquire the logging handler lock on the hot path at default log levels.
     """
-    source = _SEARCH_HANDLER_PATH.read_text()
-
-    # Locate each audit line and assert the logger call immediately preceding the
-    # message string is .debug( not .info(.
-    for marker in (
-        "search_code entry:",
-        "search_code complete:",
-        "_omni_search_code post-expansion:",
-    ):
+    # Locate each audit line (in its owning submodule) and assert the logger
+    # call immediately preceding the message string is .debug( not .info(.
+    for marker, source_path in _AUDIT_MARKER_SOURCE_FILES.items():
+        source = source_path.read_text()
         idx = source.find(marker)
-        assert idx != -1, f"audit log {marker!r} not found in search.py"
+        assert idx != -1, f"audit log {marker!r} not found in {source_path.name}"
         preceding = source[:idx]
         debug_pos = preceding.rfind("logger.debug(")
         info_pos = preceding.rfind("logger.info(")

@@ -286,7 +286,7 @@
             <ul class="history-list">
                 {% for item in query_history %}
                 <li>
-                    <a href="#" onclick="loadHistoryQuery('{{ item.query_text }}', '{{ item.repository }}', '{{ item.search_mode }}'); return false;">
+                    <a href="#" data-query-text="{{ item.query_text }}" data-repository="{{ item.repository }}" data-search-mode="{{ item.search_mode }}" onclick="loadHistoryQuery(this.dataset.queryText, this.dataset.repository, this.dataset.searchMode); return false;">
                         <span class="history-query">{{ item.query_text[:50] }}{% if item.query_text|length > 50 %}...{% endif %}</span>
                         <span class="history-mode">[{{ item.search_mode }}]</span>
                     </a>

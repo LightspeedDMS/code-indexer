@@ -16,6 +16,22 @@ from code_indexer.cli import cli
 from code_indexer.api_clients.repos_client import APIClientError
 
 
+@pytest.fixture(autouse=True)
+def mock_remote_mode():
+    """Auto-mock the repos_group command-mode gate to "remote".
+
+    The repos_group Click group is decorated with @require_mode("remote"),
+    which calls disabled_commands.detect_current_mode() for real before any
+    subcommand (activate/deactivate) is dispatched. Without this, every CLI
+    invocation below runs against this repo's actual local-mode CWD and
+    raises DisabledCommandError before the intended command logic executes.
+    """
+    with patch(
+        "code_indexer.disabled_commands.detect_current_mode", return_value="remote"
+    ):
+        yield
+
+
 class TestRepositoryActivationCommand:
     """Test repository activation command functionality."""
 
@@ -209,7 +225,7 @@ class TestRepositoryActivationExecution:
 
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     @patch("code_indexer.cli.ActivationProgressDisplay")
     def test_execute_repository_activation_success(
         self, mock_display_class, mock_client_class, mock_load_creds, mock_find_root
@@ -222,14 +238,14 @@ class TestRepositoryActivationExecution:
 
         # Setup credential mocks
         mock_load_creds.return_value = {
-            "server_url": "https://test-server.com",
-            "username": "test",
-            "password": "test",
+            "server_url": "https://fake-test-server.example",
+            "username": "fake_user",
+            "password": "fake_password",
         }
 
         # Setup client mocks
         mock_client = Mock()
-        mock_client.activate_repository = AsyncMock(
+        mock_client.activate_repository = Mock(
             return_value={
                 "status": "completed",
                 "user_alias": "my-repo",
@@ -259,7 +275,7 @@ class TestRepositoryActivationExecution:
 
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     @patch("code_indexer.cli.ActivationProgressDisplay")
     def test_execute_repository_activation_api_error(
         self, mock_display_class, mock_client_class, mock_load_creds, mock_find_root
@@ -272,14 +288,14 @@ class TestRepositoryActivationExecution:
 
         # Setup credential mocks
         mock_load_creds.return_value = {
-            "server_url": "https://test-server.com",
-            "username": "test",
-            "password": "test",
+            "server_url": "https://fake-test-server.example",
+            "username": "fake_user",
+            "password": "fake_password",
         }
 
         # Setup client mock to raise API error
         mock_client = Mock()
-        mock_client.activate_repository = AsyncMock(
+        mock_client.activate_repository = Mock(
             side_effect=APIClientError("Repository not found")
         )
         mock_client_class.return_value = mock_client
@@ -302,7 +318,7 @@ class TestRepositoryDeactivationExecution:
 
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_execute_repository_deactivation_success(
         self, mock_client_class, mock_load_creds, mock_find_root
     ):
@@ -314,14 +330,14 @@ class TestRepositoryDeactivationExecution:
 
         # Setup credential mocks
         mock_load_creds.return_value = {
-            "server_url": "https://test-server.com",
-            "username": "test",
-            "password": "test",
+            "server_url": "https://fake-test-server.example",
+            "username": "fake_user",
+            "password": "fake_password",
         }
 
         # Setup client mock
         mock_client = Mock()
-        mock_client.deactivate_repository = AsyncMock(
+        mock_client.deactivate_repository = Mock(
             return_value={
                 "status": "completed",
                 "message": "Repository deactivated successfully",
@@ -343,7 +359,7 @@ class TestRepositoryDeactivationExecution:
 
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_execute_repository_deactivation_api_error(
         self, mock_client_class, mock_load_creds, mock_find_root
     ):
@@ -355,14 +371,14 @@ class TestRepositoryDeactivationExecution:
 
         # Setup credential mocks
         mock_load_creds.return_value = {
-            "server_url": "https://test-server.com",
-            "username": "test",
-            "password": "test",
+            "server_url": "https://fake-test-server.example",
+            "username": "fake_user",
+            "password": "fake_password",
         }
 
         # Setup mock to raise API error
         mock_client = Mock()
-        mock_client.deactivate_repository = AsyncMock(
+        mock_client.deactivate_repository = Mock(
             side_effect=APIClientError("Repository not found")
         )
         mock_client_class.return_value = mock_client

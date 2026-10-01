@@ -70,10 +70,11 @@ class TestJobsCommandTDD:
                 # Should indicate mode restriction
                 assert "'remote'" in result.output.lower()
 
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     @patch("code_indexer.cli.find_project_root")
     @patch("code_indexer.cli.ProjectCredentialManager")
     def test_jobs_list_error_handling_no_config(
-        self, mock_credential_manager, mock_find_root, cli_runner
+        self, mock_credential_manager, mock_find_root, mock_detect_mode, cli_runner
     ):
         """Test jobs list error handling when no config found."""
         # Mock no project root found
@@ -85,6 +86,7 @@ class TestJobsCommandTDD:
         assert result.exit_code == 1
         assert "No project configuration found" in result.output
 
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     @patch("code_indexer.cli.find_project_root")
     @patch("code_indexer.remote.config.load_remote_configuration")
     @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
@@ -93,6 +95,7 @@ class TestJobsCommandTDD:
         mock_load_encrypted_creds,
         mock_load_remote_config,
         mock_find_root,
+        mock_detect_mode,
         cli_runner,
     ):
         """Test jobs list error handling when no credentials found."""

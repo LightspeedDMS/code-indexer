@@ -193,12 +193,6 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
         "admin_logs_query",
         {"limit": 10},
     ),
-    # Delegation
-    (
-        "list_delegation_functions",
-        "list_delegation_functions",
-        {},
-    ),
     # Audit logs
     (
         "query_audit_logs",

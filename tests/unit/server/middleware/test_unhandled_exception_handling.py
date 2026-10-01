@@ -171,22 +171,81 @@ class TestUnhandledExceptionHandling:
         assert "POST /api/repositories/analyze" in log_record.message
         assert "deep_analysis=true" in log_record.message
 
-    def test_unhandled_exception_correlation_id_uniqueness(
+    def test_correlation_id_unique_per_call_when_no_ambient_context(
         self, error_handler: GlobalErrorHandler, mock_request: Request
     ):
-        """Test that each unhandled exception gets unique correlation ID."""
-        exception = RuntimeError("Test error")
+        """Bug #1648: GlobalErrorHandler._resolve_correlation_id() reuses the
+        AMBIENT request correlation id when one is active, falling back to a
+        freshly generated id only when no ambient context exists. This test
+        covers that FALLBACK branch specifically (explicit no-ambient-context
+        precondition below) -- with nothing ambient to share, each call
+        legitimately gets its own unique, freshly generated id. See
+        test_correlation_id_shared_across_calls_under_same_ambient_context
+        below for the complementary common-case branch, where an ambient id
+        IS active and both calls correctly share it.
 
-        # Generate multiple responses for same exception
-        response1 = error_handler.handle_unhandled_exception(exception, mock_request)
-        response2 = error_handler.handle_unhandled_exception(exception, mock_request)
+        tests/unit/server/conftest.py's tree-wide autouse fixture already
+        resets the ContextVar around every test; the explicit set(None)/
+        try/finally here is defense-in-depth self-containment, not a
+        substitute for it.
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            _correlation_id_var,
+        )
 
-        # Correlation IDs should be unique
-        assert response1["correlation_id"] != response2["correlation_id"]
+        token = _correlation_id_var.set(None)  # explicit: no ambient context
+        try:
+            exception = RuntimeError("Test error")
 
-        # Both should be valid UUIDs
-        uuid.UUID(response1["correlation_id"])
-        uuid.UUID(response2["correlation_id"])
+            # Generate multiple responses for same exception
+            response1 = error_handler.handle_unhandled_exception(
+                exception, mock_request
+            )
+            response2 = error_handler.handle_unhandled_exception(
+                exception, mock_request
+            )
+
+            # No ambient id active -- each call falls back to its own fresh one
+            assert response1["correlation_id"] != response2["correlation_id"]
+
+            # Both should be valid UUIDs
+            uuid.UUID(response1["correlation_id"])
+            uuid.UUID(response2["correlation_id"])
+        finally:
+            _correlation_id_var.reset(token)
+
+    def test_correlation_id_shared_across_calls_under_same_ambient_context(
+        self, error_handler: GlobalErrorHandler, mock_request: Request
+    ):
+        """Bug #1648: when an ambient request correlation id IS active (the
+        common production case -- CorrelationBridgeMiddleware sets one for
+        every real request), multiple errors handled within that SAME
+        ambient context must all reuse it rather than each generating their
+        own -- matching the x-correlation-id response header and the log
+        store's correlation_id column (Bug #1641).
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            _correlation_id_var,
+            set_current_correlation_id,
+        )
+
+        token = _correlation_id_var.set(None)
+        try:
+            set_current_correlation_id("shared-ambient-id-1648")
+
+            exception = RuntimeError("Test error")
+
+            response1 = error_handler.handle_unhandled_exception(
+                exception, mock_request
+            )
+            response2 = error_handler.handle_unhandled_exception(
+                exception, mock_request
+            )
+
+            assert response1["correlation_id"] == "shared-ambient-id-1648"
+            assert response2["correlation_id"] == "shared-ambient-id-1648"
+        finally:
+            _correlation_id_var.reset(token)
 
     def test_different_exception_types_handling(
         self, error_handler: GlobalErrorHandler, mock_request: Request

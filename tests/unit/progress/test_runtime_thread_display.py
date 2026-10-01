@@ -10,7 +10,7 @@ class TestRuntimeThreadDisplay:
 
     def test_progress_callback_receives_correct_concurrent_files(self):
         """Test that CleanSlotTracker can handle correct number of concurrent files."""
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,
@@ -48,7 +48,7 @@ class TestRuntimeThreadDisplay:
 
     def test_clean_slot_tracker_uses_configured_slots(self):
         """Test that CleanSlotTracker uses the configured slot count correctly."""
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,

@@ -49,11 +49,12 @@ Log-audit gate:
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_xray_cli
+from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import (
     HTTP_OK,
     call_mcp_tool,
@@ -158,17 +159,21 @@ _UNSUPPORTED_LANGUAGE_ERROR: str = "UnsupportedLanguage"
 
 
 def _poll_job(
-    client: TestClient, job_id: str, headers: dict[str, str]
+    client: TestClient, job_id: str, get_headers: Callable[[], dict]
 ) -> dict[str, Any]:
     """Poll GET /api/jobs/{job_id} until a terminal state is reached.
 
     Uses a monotonic deadline (Messi Rule #14 — bounded loop).  Raises
     TimeoutError if the job does not complete within _JOB_POLL_DEADLINE_SECONDS.
 
+    Bug #1803: get_headers is called fresh on EVERY poll iteration, not
+    once before the loop -- a frozen dict can outlive the JWT's real
+    remaining life over this loop's deadline.
+
     Args:
         client: Session-scoped TestClient bound to the in-process server.
         job_id: Background job identifier returned by an async MCP tool call.
-        headers: Authorization headers dict.
+        get_headers: Zero-arg callable returning fresh Authorization headers.
 
     Returns:
         The complete job status dict from the final poll response.
@@ -179,7 +184,7 @@ def _poll_job(
     """
     deadline = time.monotonic() + _JOB_POLL_DEADLINE_SECONDS
     while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=headers)
+        resp = client.get(f"/api/jobs/{job_id}", headers=get_headers())
         assert resp.status_code == 200, (
             f"Job poll for {job_id!r} returned HTTP {resp.status_code}: "
             f"{resp.text[:300]}"
@@ -195,7 +200,9 @@ def _poll_job(
 
 
 def _resolve_search_result(
-    client: TestClient, mcp_result: dict[str, Any], headers: dict[str, str]
+    client: TestClient,
+    mcp_result: dict[str, Any],
+    get_headers: Callable[[], dict],
 ) -> dict[str, Any]:
     """Return the search result dict from an xray_search / xray_explore response.
 
@@ -208,7 +215,7 @@ def _resolve_search_result(
     job_id = mcp_result.get("job_id")
     if not job_id:
         return mcp_result
-    job_body = _poll_job(client, job_id, headers)
+    job_body = _poll_job(client, job_id, get_headers)
     assert job_body.get("status") == "completed", (
         f"xray job {job_id!r} ended with status {job_body.get('status')!r}: {job_body}"
     )
@@ -217,7 +224,7 @@ def _resolve_search_result(
 
 def _call_xray_search(
     client: TestClient,
-    headers: dict[str, str],
+    get_headers: Callable[[], dict],
     args: dict[str, Any],
 ) -> dict[str, Any]:
     """Call xray_search, resolve inline or async result, and return the result dict.
@@ -228,7 +235,9 @@ def _call_xray_search(
 
     Args:
         client: Session-scoped TestClient.
-        headers: Authorization headers dict.
+        get_headers: Zero-arg callable returning fresh Authorization headers
+            (Bug #1803: called once here, and again fresh on every poll
+            iteration inside _resolve_search_result -> _poll_job).
         args: xray_search argument dict (must include repository_alias, pattern,
               search_target, and one of evaluator_code or pattern_name).
 
@@ -238,7 +247,7 @@ def _call_xray_search(
     Raises:
         AssertionError: On HTTP-level failures or unexpected response shapes.
     """
-    resp = call_mcp_tool(client, "xray_search", args, headers)
+    resp = call_mcp_tool(client, "xray_search", args, get_headers())
     assert resp.status_code == HTTP_OK, (
         f"xray_search returned HTTP {resp.status_code}: {resp.text[:400]}"
     )
@@ -246,7 +255,7 @@ def _call_xray_search(
     assert "error" not in mcp_result, (
         f"xray_search returned synchronous error (validation rejected?): {mcp_result}"
     )
-    return _resolve_search_result(client, mcp_result, headers)
+    return _resolve_search_result(client, mcp_result, get_headers)
 
 
 def _non_unsupported_errors(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -288,7 +297,7 @@ class TestAC1TwoPhasePipelineFindings:
     def test_inline_evaluator_returns_findings(
         self,
         seeded_indexed_client: tuple[TestClient, str],
-        auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """xray_search with inline threshold-2 evaluator returns at least one match.
 
@@ -304,7 +313,7 @@ class TestAC1TwoPhasePipelineFindings:
 
         result = _call_xray_search(
             client,
-            auth_headers,
+            admin_token_provider.get_headers,
             {
                 "repository_alias": alias,
                 "pattern": _CF_REGEX,
@@ -329,7 +338,7 @@ class TestAC1TwoPhasePipelineFindings:
     def test_inline_evaluator_match_shape(
         self,
         seeded_indexed_client: tuple[TestClient, str],
-        auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """Each match from the inline evaluator has expected shape fields.
 
@@ -341,7 +350,7 @@ class TestAC1TwoPhasePipelineFindings:
 
         result = _call_xray_search(
             client,
-            auth_headers,
+            admin_token_provider.get_headers,
             {
                 "repository_alias": alias,
                 "pattern": _CF_REGEX,
@@ -425,6 +434,7 @@ class TestAC2AstDumpAndExplore:
         self,
         seeded_indexed_client: tuple[TestClient, str],
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """xray_explore returns matches with ast_debug root type==module.
 
@@ -459,8 +469,11 @@ class TestAC2AstDumpAndExplore:
         assert "error" not in mcp_result, (
             f"AC2 explore: xray_explore returned an error: {mcp_result}"
         )
-        # xray_explore completes inline when fast, else returns a job_id to poll.
-        result = _resolve_search_result(client, mcp_result, auth_headers)
+        # xray_explore completes inline when fast, else returns a job_id to poll
+        # (Bug #1803: get_headers, called fresh per iteration, not a frozen dict).
+        result = _resolve_search_result(
+            client, mcp_result, admin_token_provider.get_headers
+        )
         matches: list[dict[str, Any]] = result.get("matches") or []
 
         assert len(matches) >= 1, (
@@ -529,6 +542,7 @@ class TestAC3StoreReusePatterName:
         self,
         seeded_indexed_client: tuple[TestClient, str],
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """xray_search by pattern_name (threshold 2) returns non-empty matches.
 
@@ -559,7 +573,7 @@ class TestAC3StoreReusePatterName:
 
         result = _call_xray_search(
             client,
-            auth_headers,
+            admin_token_provider.get_headers,
             {
                 "repository_alias": alias,
                 "pattern": _CF_REGEX,
@@ -615,6 +629,7 @@ class TestMutationThreshold999:
         self,
         seeded_indexed_client: tuple[TestClient, str],
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """Stored deep-nesting evaluator at threshold 999 returns exactly zero matches.
 
@@ -647,7 +662,7 @@ class TestMutationThreshold999:
 
         result = _call_xray_search(
             client,
-            auth_headers,
+            admin_token_provider.get_headers,
             {
                 "repository_alias": alias,
                 "pattern": _CF_REGEX,

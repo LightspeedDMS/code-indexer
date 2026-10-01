@@ -601,3 +601,67 @@ class TestAC4LazyLoad:
             f"LAZY-LOAD VIOLATION: tree_sitter_languages was imported at CLI startup.\n"
             f"Subprocess output: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Story #1811 (S5, AC4): analyze_graph front-door dispatch proof
+# ---------------------------------------------------------------------------
+
+# Graph-mode evaluator using `unsafe` -- must be rejected by the SAME
+# validate_rust_evaluator() gate xray_search uses, via the analyze_graph
+# front door specifically.
+_GRAPH_FORBIDDEN_UNSAFE_EVALUATOR: str = (
+    "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n"
+    "    unsafe {}\n"
+    "    Vec::new()\n"
+    "}\n"
+    "fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n"
+    "    GraphResult::default()\n"
+    "}"
+)
+
+
+class TestAnalyzeGraphFrontDoorDispatch:
+    """Story #1811 (S5, AC4): proves `analyze_graph` is genuinely dispatchable
+    through the REAL MCP front door -- not merely present as a Python symbol.
+
+    A forbidden-construct evaluator is rejected with the SAME
+    `xray_evaluator_validation_failed` shape `xray_search` uses (AC1 above),
+    fired BEFORE any repository resolution -- so this test needs no real
+    golden repo, no embedding key, and no second app (reuses `test_client`/
+    `auth_headers`, matching this module's own anti-dual-app invariant).
+    Reaching this exact response through a real HTTP-shaped `tools/call`
+    request against the fully-booted FastAPI app proves the WHOLE chain
+    resolves for real: `TOOL_REGISTRY["analyze_graph"]` lookup -> permission
+    check -> the `access_filtering_service` repo-access gate -> `HANDLER_
+    REGISTRY["analyze_graph"]` -> `handle_analyze_graph` -> its own
+    `validate_rust_evaluator` call.
+    """
+
+    def test_analyze_graph_forbidden_construct_rejected_via_real_front_door(
+        self,
+        test_client: TestClient,
+        auth_headers: dict,
+    ) -> None:
+        resp = call_mcp_tool(
+            test_client,
+            "analyze_graph",
+            {
+                "repository_alias": "does-not-need-to-exist-for-this-check",
+                "evaluator_code": _GRAPH_FORBIDDEN_UNSAFE_EVALUATOR,
+            },
+            auth_headers,
+        )
+        assert resp.status_code == HTTP_OK, (
+            f"analyze_graph returned HTTP {resp.status_code}: {resp.text[:400]}"
+        )
+        body = resp.json()
+        result = _parse_result(body)
+        assert result.get("error") == "xray_evaluator_validation_failed", (
+            "analyze_graph must be dispatchable through the real MCP front "
+            f"door and reach its own real validation logic. Full result: "
+            f"{result}. Full resp_body: {body}"
+        )
+        assert result.get("error_code") == "forbidden_unsafe", (
+            f"expected error_code=forbidden_unsafe, got {result.get('error_code')!r}: {result}"
+        )

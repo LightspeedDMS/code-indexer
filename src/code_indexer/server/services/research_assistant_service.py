@@ -135,6 +135,28 @@ class ResearchAssistantService:
         else:
             self._conn_manager = None  # type: ignore[assignment]
 
+    def _resolve_node_local_session_folder(self, session_id: str) -> Path:
+        """
+        Resolve the node-local filesystem path for a session's working folder
+        (Bug #1485).
+
+        The ``folder_path`` value persisted in (and returned from) the
+        session backend/DB may be a stale absolute path written by a PRIOR
+        deployment whose service-account home differed from THIS node's. It
+        is retained purely for advisory/display purposes; it must NEVER be
+        trusted for an actual filesystem operation (mkdir, chdir, upload,
+        delete). The only trustworthy source of truth for where a session's
+        folder actually lives on THIS node is ``self._research_base_dir``
+        combined with the session id.
+
+        Args:
+            session_id: Session ID (e.g. "default" or a UUID)
+
+        Returns:
+            The node-local Path for the session's working folder.
+        """
+        return self._research_base_dir / session_id
+
     def _detect_repo_root(self) -> Optional[str]:
         """
         Detect CIDX repository root from file location.
@@ -472,7 +494,12 @@ class ResearchAssistantService:
                     folder_path=folder_path,
                 )
                 session = self._backend.get_session("default")
-            self._ensure_session_folder_setup(session["folder_path"])
+            # Bug #1485: NEVER trust session["folder_path"] read back from
+            # shared cluster storage for a filesystem operation -- a prior
+            # deployment with a different service-account home may have
+            # persisted a now-foreign absolute path. Always recompute from
+            # THIS node's own research_base_dir instead.
+            self._ensure_session_folder_setup(folder_path)
             return session  # type: ignore[no-any-return]
 
         result: dict = {"session": None, "created": False, "folder_path": None}
@@ -503,8 +530,11 @@ class ResearchAssistantService:
         self._conn_manager.execute_atomic(_do_get_or_create)
 
         if result["session"] is not None:
-            # Ensure folder and softlink exist even if session already in DB
-            self._ensure_session_folder_setup(result["session"]["folder_path"])
+            # Ensure folder and softlink exist even if session already in DB.
+            # Bug #1485: recompute from research_base_dir, never trust the
+            # stored folder_path -- it may be a stale absolute path from a
+            # prior deployment with a different service-account home.
+            self._ensure_session_folder_setup(folder_path)
             return result["session"]  # type: ignore[no-any-return]
 
         # Ensure folder and softlink exist (AC3)
@@ -541,7 +571,11 @@ class ResearchAssistantService:
             session = self._backend.get_session(session_id)
             if session is None:
                 return False
-            folder_path = session["folder_path"]
+            # Bug #1485: NEVER trust session["folder_path"] for the actual
+            # delete -- it may be a stale absolute path persisted by a
+            # prior deployment with a different service-account home.
+            # Recompute from THIS node's own research_base_dir instead.
+            folder_path = str(self._resolve_node_local_session_folder(session_id))
             self._backend.delete_session(session_id)
             folder = Path(folder_path)
             if folder.exists():
@@ -571,7 +605,11 @@ class ResearchAssistantService:
         if not result["found"]:
             return False
 
-        folder_path = result["folder_path"]
+        # Bug #1485: NEVER trust result["folder_path"] (the stored DB value)
+        # for the actual delete -- it may be a stale absolute path
+        # persisted by a prior deployment with a different service-account
+        # home. Recompute from THIS node's own research_base_dir instead.
+        folder_path = str(self._resolve_node_local_session_folder(session_id))
 
         # Delete session folder from filesystem
         folder = Path(folder_path)
@@ -1063,11 +1101,15 @@ class ResearchAssistantService:
         # Keep existing _jobs dict as primary for poll_job() compatibility.
         if self._job_tracker is not None:
             try:
+                # Bug #1479: stash session_id in tracker metadata so a
+                # cross-node poll_job() can resolve the session even when
+                # the poll request itself doesn't carry session_id.
                 self._job_tracker.register_job(
                     job_id,
                     "research_assistant_chat",
                     username="system",
                     repo_alias="server",
+                    metadata={"session_id": session_id},
                 )
                 self._job_tracker.update_status(job_id, status="running")
             except Exception as e:
@@ -1087,6 +1129,83 @@ class ResearchAssistantService:
 
         return job_id
 
+    # Bug #1479: JobTracker status buckets, matching the exact strings its
+    # own update_status()/complete_job()/fail_job()/cancel_job() write.
+    _TRACKER_RUNNING_STATUSES = ("pending", "running", "resolving_prerequisites")
+    _TRACKER_COMPLETE_STATUSES = ("completed", "completed_partial")
+    _TRACKER_ERROR_STATUSES = ("failed", "cancelled")
+
+    def _poll_via_job_tracker(
+        self, job_id: str, session_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bug #1479: Resolve poll_job() status via the cluster-shared JobTracker.
+
+        The local ``_jobs`` dict is per-process state — a poll routed by
+        HAProxy to a different node/worker than the one running the job
+        always misses it. JobTracker (PostgreSQL-backed in cluster mode) is
+        genuinely cross-node, and ``execute_prompt``/``_run_claude_background``
+        already dual-register/update it, so it is authoritative here.
+
+        Returns None when the tracker has no usable record for job_id, in
+        which case the caller falls through to the pre-existing DB-message
+        fallback.
+        """
+        if self._job_tracker is None:
+            return None
+
+        try:
+            tracked_job = self._job_tracker.get_job(job_id)
+        except Exception as e:
+            logger.warning(
+                "JobTracker lookup failed during poll_job for %s: %s",
+                job_id,
+                e,
+                exc_info=True,
+            )
+            return None
+
+        if tracked_job is None:
+            return None
+
+        tracker_session_id = None
+        if tracked_job.metadata:
+            tracker_session_id = tracked_job.metadata.get("session_id")
+        resolved_session_id = tracker_session_id or session_id
+
+        if tracked_job.status in self._TRACKER_RUNNING_STATUSES:
+            return {
+                "status": "running",
+                "response": None,
+                "error": None,
+                "session_id": resolved_session_id,
+            }
+
+        if tracked_job.status in self._TRACKER_ERROR_STATUSES:
+            return {
+                "status": "error",
+                "error": tracked_job.error or "Job failed",
+                "session_id": resolved_session_id,
+            }
+
+        if tracked_job.status in self._TRACKER_COMPLETE_STATUSES:
+            if resolved_session_id:
+                messages = self.get_messages(resolved_session_id)
+                assistant_messages = [m for m in messages if m["role"] == "assistant"]
+                if assistant_messages:
+                    return {
+                        "status": "complete",
+                        "response": assistant_messages[-1]["content"],
+                        "session_id": resolved_session_id,
+                        "fallback": True,
+                    }
+            # Tracker says complete but no response recoverable yet (rare
+            # race) - fall through to the pre-existing fallback below.
+            return None
+
+        # Unknown/unhandled tracker status - fall through rather than guess.
+        return None
+
     def poll_job(self, job_id: str, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Poll status of a Claude execution job (AC4).
@@ -1094,6 +1213,11 @@ class ResearchAssistantService:
         Bug #151 Fix: When job not found in memory (server restart, job expiry),
         falls back to checking database for messages. If messages exist,
         returns complete status to recover lost job state.
+
+        Bug #1479 Fix: Before that DB-message fallback, consults the
+        cluster-shared JobTracker so a poll routed to a different node/worker
+        than the one running the job sees the real status (running/complete/
+        error) instead of a spurious "Job not found".
 
         Args:
             job_id: Job ID returned by execute_prompt
@@ -1113,6 +1237,12 @@ class ResearchAssistantService:
                     "error": job.get("error"),
                     "session_id": job.get("session_id"),
                 }
+
+        # Job not found in local memory - consult the cluster-shared
+        # JobTracker before falling back to the message-only DB check.
+        tracker_result = self._poll_via_job_tracker(job_id, session_id)
+        if tracker_result is not None:
+            return tracker_result
 
         # Job not found in memory - try database fallback (Bug #151 fix)
         if session_id:
@@ -1369,7 +1499,19 @@ class ResearchAssistantService:
             session = self.get_session(session_id)
             if not session:
                 session = self.get_default_session()
-            working_dir = Path(session["folder_path"])
+            # Bug #1485: NEVER trust session["folder_path"] for the Claude
+            # CLI working directory -- it may be a stale absolute path
+            # persisted by a prior deployment with a different
+            # service-account home. Always recompute from THIS node's own
+            # research_base_dir instead. session.get("id", session_id) uses
+            # the method's own authoritative session_id parameter as a
+            # fallback for an incomplete session dict (e.g. one that only
+            # carries folder_path) -- a real get_session()/
+            # get_default_session() row always has "id", so this is
+            # byte-identical in production.
+            working_dir = self._resolve_node_local_session_folder(
+                session.get("id", session_id)
+            )
 
             # Story #997: Enforce pace-maker config before Claude CLI invocation (non-fatal)
             try:
@@ -1716,7 +1858,11 @@ class ResearchAssistantService:
         if not session:
             return 0
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         if not uploads_dir.exists():
             return 0
 
@@ -1782,7 +1928,13 @@ class ResearchAssistantService:
                 }
 
             # AC2: Create uploads folder
-            uploads_dir = Path(session["folder_path"]) / "uploads"
+            # Bug #1485: NEVER trust session["folder_path"] for the uploads
+            # dir -- it may be a stale absolute path persisted by a prior
+            # deployment with a different service-account home. Always
+            # recompute from THIS node's own research_base_dir instead.
+            uploads_dir = (
+                self._resolve_node_local_session_folder(session_id) / "uploads"
+            )
             uploads_dir.mkdir(exist_ok=True)
 
             # AC2: Sanitize filename
@@ -1827,7 +1979,11 @@ class ResearchAssistantService:
         if not session:
             return []
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         if not uploads_dir.exists():
             return []
 
@@ -1868,7 +2024,11 @@ class ResearchAssistantService:
         # Sanitize filename to prevent path traversal
         safe_filename = self.sanitize_filename(filename)
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         file_path = (uploads_dir / safe_filename).resolve()
 
         # Verify path is within uploads directory (path traversal protection)
@@ -1907,7 +2067,11 @@ class ResearchAssistantService:
         # Sanitize filename to prevent path traversal
         safe_filename = self.sanitize_filename(filename)
 
-        uploads_dir = Path(session["folder_path"]) / "uploads"
+        # Bug #1485: NEVER trust session["folder_path"] for the uploads
+        # dir -- it may be a stale absolute path persisted by a prior
+        # deployment with a different service-account home. Always
+        # recompute from THIS node's own research_base_dir instead.
+        uploads_dir = self._resolve_node_local_session_folder(session_id) / "uploads"
         file_path = (uploads_dir / safe_filename).resolve()
 
         # Verify path is within uploads directory (path traversal protection)

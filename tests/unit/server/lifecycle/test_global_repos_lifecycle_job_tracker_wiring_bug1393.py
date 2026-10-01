@@ -116,21 +116,21 @@ def test_concurrent_activation_rejected_when_refresh_already_in_progress(
         job_tracker=real_job_tracker,
     )
 
-    # Simulate an ALREADY in-flight global_repo_refresh for "evolution",
+    # Simulate an ALREADY in-flight global_repo_refresh for "example-repo",
     # registered exactly like _execute_refresh() registers itself (Bug #935):
     # repo_alias is the full "-global" suffixed alias.
     real_job_tracker.register_job(
-        "refresh-evolution-global",
+        "refresh-example-repo-global",
         operation_type="global_repo_refresh",
         username="system",
-        repo_alias="evolution-global",
+        repo_alias="example-repo-global",
     )
-    real_job_tracker.update_status("refresh-evolution-global", status="running")
+    real_job_tracker.update_status("refresh-example-repo-global", status="running")
 
     # A concurrent activation attempt for the SAME golden repo must now be
     # rejected via check_refresh_not_in_progress -- reached through the
     # manager's own refresh_scheduler, not a test-only injected one.
     with pytest.raises(DuplicateJobError) as exc_info:
-        lifecycle.refresh_scheduler.check_refresh_not_in_progress("evolution")
+        lifecycle.refresh_scheduler.check_refresh_not_in_progress("example-repo")
 
-    assert exc_info.value.existing_job_id == "refresh-evolution-global"
+    assert exc_info.value.existing_job_id == "refresh-example-repo-global"

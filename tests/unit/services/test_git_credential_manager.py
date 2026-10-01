@@ -576,7 +576,8 @@ class TestGitCredentialManager:
         manager = GitCredentialManager(initialized_db)
         original = "ghp_mysecrettoken_123456789012345678901"
         encrypted = manager._encrypt_token(original)
-        decrypted = manager._decrypt_token(encrypted)
+        decrypted, used_fallback = manager._decrypt_token(encrypted)
 
         assert decrypted == original
+        assert used_fallback is False
         assert encrypted != original

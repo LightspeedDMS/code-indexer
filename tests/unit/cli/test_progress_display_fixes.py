@@ -14,11 +14,11 @@ from unittest.mock import Mock
 from rich.console import Console
 from rich.progress import TimeElapsedColumn, TimeRemainingColumn
 
-from src.code_indexer.progress.multi_threaded_display import (
+from code_indexer.progress.multi_threaded_display import (
     MultiThreadedProgressManager,
 )
-from src.code_indexer.progress.progress_display import RichLiveProgressManager
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.progress.progress_display import RichLiveProgressManager
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 
 class TestNoneValueDefense:
@@ -184,7 +184,7 @@ class TestHashPhaseSlotTracker:
         hash_slot_tracker = CleanSlotTracker(max_slots=14)
 
         # Add test file data to slot 0
-        from src.code_indexer.services.clean_slot_tracker import FileData, FileStatus
+        from code_indexer.services.clean_slot_tracker import FileData, FileStatus
 
         test_file_data = FileData(
             filename="test_hash.py", file_size=1024, status=FileStatus.PROCESSING

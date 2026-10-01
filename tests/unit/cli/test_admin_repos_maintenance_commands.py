@@ -6,9 +6,28 @@ list, show, and refresh operations. Follows Foundation #1 compliance
 with minimal mocking and real CLI integration testing.
 """
 
+from unittest.mock import patch
+
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
+
+
+def _invoke_remote(runner: CliRunner, args):
+    """Invoke the CLI with the require_mode("remote") gate on admin_group
+    mocked to pass.
+
+    disabled_commands.py independently binds detect_current_mode via its own
+    module-level import, so it is unaffected by patching find_project_root at
+    code_indexer.mode_detection.command_mode_detector (see #1742). Without
+    this, every admin_group invocation raises DisabledCommandError before
+    reaching the command's own --help/argument-validation output.
+    """
+    with patch(
+        "code_indexer.disabled_commands.detect_current_mode",
+        return_value="remote",
+    ):
+        return runner.invoke(cli, args)
 
 
 class TestAdminReposMaintenanceCommands:
@@ -17,7 +36,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_list_command_exists(self):
         """Test that admin repos list command exists."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "list", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "list", "--help"])
 
         # Command should exist and show help
         assert result.exit_code == 0
@@ -27,7 +46,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_show_command_exists(self):
         """Test that admin repos show command exists."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "show", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "show", "--help"])
 
         # Command should exist and show help
         assert result.exit_code == 0
@@ -38,7 +57,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_refresh_command_exists(self):
         """Test that admin repos refresh command exists."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "refresh", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "refresh", "--help"])
 
         # Command should exist and show help
         assert result.exit_code == 0
@@ -49,7 +68,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_show_requires_alias_argument(self):
         """Test that admin repos show requires alias argument."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "show"])
+        result = _invoke_remote(runner, ["admin", "repos", "show"])
 
         # Should fail without alias
         assert result.exit_code != 0
@@ -58,7 +77,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_refresh_requires_alias_argument(self):
         """Test that admin repos refresh requires alias argument."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "refresh"])
+        result = _invoke_remote(runner, ["admin", "repos", "refresh"])
 
         # Should fail without alias
         assert result.exit_code != 0
@@ -115,7 +134,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_list_help_contains_examples(self):
         """Test that list command help contains usage examples."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "list", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "list", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output
@@ -124,7 +143,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_show_help_contains_examples(self):
         """Test that show command help contains usage examples."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "show", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "show", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output
@@ -133,7 +152,7 @@ class TestAdminReposMaintenanceCommands:
     def test_admin_repos_refresh_help_contains_examples(self):
         """Test that refresh command help contains usage examples."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "refresh", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "refresh", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output
@@ -180,7 +199,7 @@ class TestAdminReposCommandIntegration:
     def test_admin_repos_group_help(self):
         """Test admin repos group help."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "--help"])
 
         assert result.exit_code == 0
         assert "Repository management commands" in result.output
@@ -192,7 +211,7 @@ class TestAdminReposCommandIntegration:
     def test_admin_repos_list_help_details(self):
         """Test admin repos list command help details."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "list", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "list", "--help"])
 
         assert result.exit_code == 0
         assert "List all golden repositories" in result.output
@@ -203,7 +222,7 @@ class TestAdminReposCommandIntegration:
     def test_admin_repos_show_help_details(self):
         """Test admin repos show command help details."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "show", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "show", "--help"])
 
         assert result.exit_code == 0
         assert "Show detailed information" in result.output
@@ -214,7 +233,7 @@ class TestAdminReposCommandIntegration:
     def test_admin_repos_refresh_help_details(self):
         """Test admin repos refresh command help details."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "refresh", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "refresh", "--help"])
 
         assert result.exit_code == 0
         assert "Refresh a golden repository" in result.output
@@ -228,12 +247,12 @@ class TestAdminReposCommandIntegration:
         runner = CliRunner()
 
         # Test admin group commands all exist
-        admin_result = runner.invoke(cli, ["admin", "--help"])
+        admin_result = _invoke_remote(runner, ["admin", "--help"])
         assert "repos" in admin_result.output
         assert "users" in admin_result.output
 
         # Test repos subcommands exist
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+        repos_result = _invoke_remote(runner, ["admin", "repos", "--help"])
         assert "add" in repos_result.output
         assert "list" in repos_result.output
         assert "show" in repos_result.output
@@ -241,7 +260,7 @@ class TestAdminReposCommandIntegration:
 
         # All should be available and follow same pattern
         for cmd in ["add", "list", "show", "refresh"]:
-            cmd_result = runner.invoke(cli, ["admin", "repos", cmd, "--help"])
+            cmd_result = _invoke_remote(runner, ["admin", "repos", cmd, "--help"])
             assert cmd_result.exit_code == 0, (
                 f"Command {cmd} should exist and show help"
             )

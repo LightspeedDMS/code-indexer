@@ -5,10 +5,34 @@ Following Foundation #1 compliance: Zero mocks, real functionality testing.
 Tests the admin password change command with proper validation and safety features.
 """
 
+import json
+import os
 import tempfile
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
+
+
+def _invoke_remote(runner: CliRunner, args, **kwargs):
+    """Invoke the CLI inside an isolated filesystem containing a REAL,
+    valid .code-indexer/.remote-config file, so admin_group's
+    require_mode("remote") gate passes via genuine on-disk mode detection
+    (CommandModeDetector) rather than any mock. Without a remote-mode
+    project on disk, every admin_group invocation raises
+    DisabledCommandError before reaching the command's own real
+    validation/help logic (Foundation #1 anti-mock compliance).
+    """
+    with runner.isolated_filesystem():
+        os.makedirs(".code-indexer", exist_ok=True)
+        with open(".code-indexer/.remote-config", "w") as f:
+            json.dump(
+                {
+                    "server_url": "https://cidx.example.com",
+                    "encrypted_credentials": {"username": "test-fixture-user"},
+                },
+                f,
+            )
+        return runner.invoke(cli, args, **kwargs)
 
 
 class TestAdminPasswordChangeCommand:
@@ -17,7 +41,7 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_command_exists(self):
         """Test that change-password command is registered correctly."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "users", "change-password", "--help"])
+        result = _invoke_remote(runner, ["admin", "users", "change-password", "--help"])
 
         # Should show help without error
         assert result.exit_code == 0
@@ -29,7 +53,7 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_requires_username(self):
         """Test that username argument is required."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "users", "change-password"])
+        result = _invoke_remote(runner, ["admin", "users", "change-password"])
 
         # Should fail with missing argument error
         assert result.exit_code != 0
@@ -38,8 +62,8 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_invalid_username_format(self):
         """Test that invalid username format is rejected."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
+        result = _invoke_remote(
+            runner,
             [
                 "admin",
                 "users",
@@ -58,8 +82,8 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_weak_password_validation(self):
         """Test that weak passwords are rejected."""
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
+        result = _invoke_remote(
+            runner,
             [
                 "admin",
                 "users",
@@ -169,7 +193,7 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_help_contains_examples(self):
         """Test that help text contains usage examples."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "users", "change-password", "--help"])
+        result = _invoke_remote(runner, ["admin", "users", "change-password", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output
@@ -188,8 +212,8 @@ class TestAdminPasswordChangeCommand:
         ]
 
         for weak_password in weak_passwords:
-            result = runner.invoke(
-                cli,
+            result = _invoke_remote(
+                runner,
                 [
                     "admin",
                     "users",
@@ -215,7 +239,7 @@ class TestAdminPasswordChangeCommand:
         admin_result = runner.invoke(cli, ["admin", "--help"])
         assert "users" in admin_result.output
 
-        users_result = runner.invoke(cli, ["admin", "users", "--help"])
+        users_result = _invoke_remote(runner, ["admin", "users", "--help"])
         assert "create" in users_result.output
         assert "list" in users_result.output
         assert "show" in users_result.output
@@ -225,7 +249,7 @@ class TestAdminPasswordChangeCommand:
 
         # All should be available and follow same pattern
         for cmd in ["create", "list", "show", "update", "delete", "change-password"]:
-            cmd_result = runner.invoke(cli, ["admin", "users", cmd, "--help"])
+            cmd_result = _invoke_remote(runner, ["admin", "users", cmd, "--help"])
             assert cmd_result.exit_code == 0, (
                 f"Command {cmd} should exist and show help"
             )

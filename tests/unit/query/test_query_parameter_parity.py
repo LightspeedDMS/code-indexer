@@ -21,11 +21,15 @@ a parameter was added/removed from one interface without updating others.
 
 import subprocess
 import re
+from pathlib import Path
 from typing import Set
 import pytest
 
 from code_indexer.server.app import SemanticQueryRequest
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
+
+# tests/unit/query/test_query_parameter_parity.py -> repo root (3 parents up)
+_PROJECT_ROOT = Path(__file__).parents[3]
 
 
 # Complete parameter inventory (24 parameters)
@@ -97,7 +101,7 @@ def get_cli_parameters() -> Set[str]:
         ["python3", "-m", "code_indexer.cli", "query", "--help"],
         capture_output=True,
         text=True,
-        cwd="/home/jsbattig/Dev/code-indexer",
+        cwd=str(_PROJECT_ROOT),
     )
 
     if result.returncode != 0:

@@ -1,6 +1,7 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
 import asyncio
+import functools
 import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -8,17 +9,43 @@ from fastapi import FastAPI
 import anyio.to_thread
 import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 from code_indexer.server.startup.bootstrap import _detect_repo_root
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
+    """Eagerly create the dependency-map output directory (Bug #1621).
+
+    Without this, {golden_repos_dir}/cidx-meta/dependency-map/ is only ever
+    created lazily, as a side effect of the first analysis run. That meant
+    `_get_dep_map_output_dir()` (dependency_map_routes.py) returned None for
+    every request on a never-before-visited node -- including the very
+    request that would otherwise trigger the directory's creation -- causing
+    a spurious "Dashboard analysis infrastructure unavailable" error on the
+    first dashboard load. The next poll a few seconds later would then
+    succeed once something else happened to create the directory.
+
+    This is a single, trivial O(1) directory creation, unconditionally safe
+    to run once at startup regardless of whether the dependency-map feature
+    is enabled -- it does not scale with fleet size (unlike golden-repo-count
+    work, which must never run unbacked on the startup path).
+
+    Returns the (created, or already-existing) directory path.
+    """
+    dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+    dep_map_dir.mkdir(parents=True, exist_ok=True)
+    return dep_map_dir
 
 
 def _make_dep_map_repair_invoker_fn(
@@ -73,6 +100,193 @@ def _make_dep_map_repair_invoker_fn(
     return _invoker
 
 
+def _build_job_counts_callback(job_tracker: Any) -> Callable[[], Dict[str, int]]:
+    """Build the JobMetrics observable-gauge callback for
+    cidx.jobs.active/cidx.jobs.queued (Story #1586 AC3/AC6).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (same pattern as _make_dep_map_repair_invoker_fn above). Composes
+    JobTracker's OWN get_active_job_count()/get_queued_jobs_count() --
+    never reimplements the counting logic (Messi Rule #4 anti-duplication).
+    """
+
+    def _callback() -> Dict[str, int]:
+        return {
+            "active": job_tracker.get_active_job_count(),
+            "queued": job_tracker.get_queued_jobs_count(),
+        }
+
+    return _callback
+
+
+_REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS = 900.0
+# Poll interval for _RepositoryCountsCache.wait_for_idle()'s bounded busy-wait.
+_REPO_COUNTS_WAIT_FOR_IDLE_POLL_SECONDS = 0.01
+
+
+class _RepositoryCountsCache:
+    """Background-refreshed, single-flighted, non-blocking cache for the
+    cidx.repos.total/cidx.repos.indexed observable-gauge values (Story
+    #1586 code-review Finding 1, BLOCKING).
+
+    OTEL's SynchronousMeasurementConsumer.collect() holds a lock across ALL
+    registered observable-gauge callbacks and enforces export_timeout_millis
+    (default 30s) -- checked only BETWEEN callbacks, never DURING one. The
+    repo-counts computation is an O(fleet) filesystem/NFS walk
+    (list_golden_repos() + per-repo _index_exists()) that can legitimately
+    take tens of seconds at production scale (~900 repos, this project's
+    documented design target -- CLAUDE.md) and can block FOREVER if a
+    `hard` NFSv3 mount wedges. JobMetrics also registers TWO separate
+    callbacks that each read this same value, so an unpaced walk ran twice
+    per collection cycle.
+
+    This cache makes the read path O(1): get() ALWAYS returns the
+    last-computed value immediately and never runs the compute function
+    itself. A background daemon thread (started by _maybe_start_refresh)
+    performs the actual computation, at most once per
+    `refresh_interval_seconds`, single-flighted (only one refresh in
+    flight at a time). A stalled/hung refresh simply means the served
+    value goes stale -- it never blocks a caller or the OTEL exporter
+    thread, and it never blocks MeterProvider.shutdown() (which also calls
+    collect()).
+    """
+
+    def __init__(
+        self,
+        compute_fn: Callable[[], Dict[str, int]],
+        refresh_interval_seconds: float = _REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
+        if refresh_interval_seconds <= 0:
+            raise ValueError(
+                f"refresh_interval_seconds must be positive, got "
+                f"{refresh_interval_seconds}"
+            )
+        self._compute_fn = compute_fn
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._lock = threading.Lock()
+        self._value: Dict[str, int] = {"total": 0, "indexed": 0}
+        self._last_refresh_at: Optional[float] = None
+        self._refresh_in_flight = False
+        # Immediately kick off a background priming refresh so the first
+        # real OTEL scrape (after machine_metrics_interval_seconds, default
+        # 60s) is very likely already populated -- but this constructor,
+        # and every get() call, NEVER blocks waiting for it.
+        self._maybe_start_refresh(force=True)
+
+    def get(self) -> Dict[str, int]:
+        """Return the last-computed counts immediately (O(1), never
+        blocks); opportunistically triggers a background refresh if due."""
+        self._maybe_start_refresh(force=False)
+        with self._lock:
+            return dict(self._value)
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Test-only: block (bounded by `timeout`) until no refresh is in
+        flight. Returns True if idle was reached, False on timeout.
+        """
+        if timeout < 0:
+            raise ValueError(f"timeout must be non-negative, got {timeout}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._refresh_in_flight:
+                    return True
+            time.sleep(_REPO_COUNTS_WAIT_FOR_IDLE_POLL_SECONDS)
+        with self._lock:
+            return not self._refresh_in_flight
+
+    def _maybe_start_refresh(self, *, force: bool) -> None:
+        """Start a background refresh thread if none is in flight and
+        either `force` is True or the refresh interval has elapsed. The
+        actual compute+store work is a nested closure (not a separate
+        method) run on a dedicated daemon thread.
+
+        If starting the thread itself fails (e.g. RuntimeError from the
+        OS/interpreter under resource exhaustion), _refresh_in_flight is
+        reset under the lock so a start failure never permanently wedges
+        all future refreshes behind a phantom in-flight flag.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._refresh_in_flight:
+                return
+            if (
+                not force
+                and self._last_refresh_at is not None
+                and now - self._last_refresh_at < self._refresh_interval_seconds
+            ):
+                return
+            self._refresh_in_flight = True
+
+        def _do_refresh() -> None:
+            result: Optional[Dict[str, int]] = None
+            try:
+                result = self._compute_fn()
+            except Exception as exc:
+                logger.warning(f"Repository counts background refresh failed: {exc}")
+            with self._lock:
+                if result is not None:
+                    self._value = result
+                self._last_refresh_at = time.monotonic()
+                self._refresh_in_flight = False
+
+        try:
+            threading.Thread(
+                target=_do_refresh, name="cidx-repo-counts-refresh", daemon=True
+            ).start()
+        except Exception as exc:
+            logger.warning(f"Failed to start repository counts refresh thread: {exc}")
+            with self._lock:
+                self._refresh_in_flight = False
+
+
+def _build_repository_counts_callback(
+    golden_repo_manager: Any,
+    refresh_interval_seconds: float = _REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS,
+) -> Callable[[], Dict[str, int]]:
+    """Build the JobMetrics observable-gauge callback for
+    cidx.repos.total/cidx.repos.indexed (Story #1586 AC3/AC6).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (same pattern as _make_dep_map_repair_invoker_fn above). total is
+    len(golden_repo_manager.list_golden_repos()); indexed is the count of
+    those repos where golden_repo_manager._index_exists(golden_repo,
+    "semantic") is True -- the existing predicate reused exactly as-is
+    (never a new bare glob/existence check).
+
+    Story #1586 Finding 1 fix (BLOCKING): the O(fleet) walk below now runs
+    on a background daemon thread inside a _RepositoryCountsCache, never
+    directly on the calling (OTEL exporter) thread -- see that class's
+    docstring. The returned callback exposes its backing cache as
+    `.cache` for tests that need to observe/await background-refresh state.
+    """
+
+    def _compute() -> Dict[str, int]:
+        repo_dicts = golden_repo_manager.list_golden_repos()
+        total = len(repo_dicts)
+        indexed = 0
+        for repo_dict in repo_dicts:
+            alias = repo_dict.get("alias")
+            if not alias:
+                continue
+            golden_repo = golden_repo_manager.get_golden_repo(alias)
+            if golden_repo is not None and golden_repo_manager._index_exists(
+                golden_repo, "semantic"
+            ):
+                indexed += 1
+        return {"total": total, "indexed": indexed}
+
+    cache = _RepositoryCountsCache(
+        _compute, refresh_interval_seconds=refresh_interval_seconds
+    )
+
+    def _callback() -> Dict[str, int]:
+        return cache.get()
+
+    _callback.cache = cache  # type: ignore[attr-defined]
+    return _callback
+
+
 def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
     """Wire fault injection state on app.state for both normal and degraded startup.
 
@@ -95,6 +309,241 @@ def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
         return
 
     wire_fault_injection(app, startup_config)
+
+
+def _wire_query_tracker_into_semantic_query_manager(
+    app: Any, query_tracker: Any
+) -> None:
+    """Inject the server-wide QueryTracker singleton onto SemanticQueryManager
+    (Story #1457 AC1/AC2 live wiring, final piece).
+
+    Mirrors the existing set_shard_ownership POST-HOC wiring pattern
+    elsewhere in this module: app.state.semantic_query_manager is wired by
+    app_wiring.py before this lifespan startup code runs, so it is normally
+    present here; a defensive None-check keeps this a safe no-op if not
+    (e.g. in a degraded/partial startup path), matching the same fail-safe
+    style set_shard_ownership's call site already uses.
+
+    Without this call, SemanticQueryManager.query_tracker stays None and
+    _execute_temporal_query never constructs a TemporalShardResolver,
+    regardless of golden_repo_alias -- byte-identical to pre-#1457 behavior.
+    """
+    semantic_query_manager = getattr(app.state, "semantic_query_manager", None)
+    if semantic_query_manager is not None:
+        semantic_query_manager.set_query_tracker(query_tracker)
+
+    # Story #1458 AC13: same singleton, into ActivatedRepoManager, so its
+    # deactivation drain (wait_for_activated_repo_query_drain) has a real,
+    # live tracker to observe -- without this, ActivatedRepoManager's
+    # _query_tracker stays None and the drain is a permanent, silent
+    # (fail-open by design) no-op in production.
+    activated_repo_manager = getattr(app.state, "activated_repo_manager", None)
+    if activated_repo_manager is not None:
+        activated_repo_manager.set_query_tracker(query_tracker)
+
+
+def _materialize_solo_ssh_keys(
+    backend_registry: Any, ssh_dir: str = "~/.ssh"
+) -> Optional[Dict[str, Any]]:
+    """Materialize solo/SQLite-mode SSH keys from the backend to disk (Issue #1507).
+
+    `SSHKeySyncService` (Bug #428/#581/#1072) already writes DB-registered SSH
+    keys out to ``~/.ssh/`` and regenerates the CIDX-managed block of
+    ``~/.ssh/config`` -- it is fully backend-agnostic (``fernet=None`` means
+    "write the private key bytes as-is", which is exactly solo mode's own
+    storage convention: `SSHKeyManager.create_key()` never encrypts when no
+    PG backend/fernet is configured). It was previously constructed ONLY
+    inside the `storage_mode == "postgres"` cluster branch below, so a
+    solo/SQLite server (what production actually runs) had no equivalent
+    startup self-heal: a key correctly registered in the `ssh_keys` table
+    could still be missing from disk (fresh host, wiped ``~/.ssh``, DB
+    relocated to a new node) with no way to recover. This helper is called
+    from the solo/SQLite branch of the startup path further below in this
+    module, right after the cluster-mode block.
+
+    `StorageFactory.create_backends()` (`server/storage/factory.py`)
+    constructs an `SSHKeysSqliteBackend` for `backend_registry.ssh_keys` in
+    BOTH storage modes (confirmed by reading `service_init.py`: the SQLite
+    branch calls the same factory, unconditionally), so this call site needs
+    no PG-specific wiring -- it reuses the exact same sync mechanism cluster
+    mode already relies on, pointed at the solo backend instead.
+
+    Extracted as a small, dedicated, unit-testable helper (mirroring the
+    `_wire_query_tracker_into_semantic_query_manager` precedent above)
+    rather than left inline in lifespan.py's large async startup generator,
+    which cannot be unit tested in isolation without a full FastAPI app.
+
+    Returns the `sync()` result dict, or None if `backend_registry` has no
+    `ssh_keys` attribute (defensive -- should not happen given the factory
+    always populates it, kept fail-soft per this module's convention).
+    """
+    ssh_keys_backend = getattr(backend_registry, "ssh_keys", None)
+    if ssh_keys_backend is None:
+        return None
+
+    from code_indexer.server.services.ssh_key_sync_service import SSHKeySyncService
+
+    sync_service = SSHKeySyncService(ssh_keys_backend=ssh_keys_backend, ssh_dir=ssh_dir)
+    result: Dict[str, Any] = sync_service.sync()
+    return result
+
+
+def _log_vsr_sweep_completion(
+    vsr_result: Any,  # Any: avoids an eager module-level import of
+    # VersionedSnapshotReconcileResult -- its producer module is only
+    # ever imported lazily inside the Bug #1567 startup block's own
+    # try/except (mirrors this file's existing latency_tracker: Any
+    # convention on make_lifespan).
+) -> None:
+    """Bug #1567c: unconditional completion summary for the versioned-
+    snapshot orphan sweep -- emitted every time the sweep runs, whether
+    or not it found anything, so a silent skip is never indistinguishable
+    from a healthy zero-candidate run. INFO level always (never WARNING
+    for a clean run -- see Bug #1565 lesson on by-design-condition
+    WARNING noise).
+
+    Deletion is unconditional (Bug #1567: a fix must not ship behind an
+    off-by-default toggle) -- there is no report/delete mode left to log.
+    """
+    if vsr_result is None:
+        # Defensive only -- the real startup call site always passes a
+        # genuine VersionedSnapshotReconcileResult. Nothing to summarize.
+        return
+    if vsr_result.aborted:
+        # Abort cases (single-flight conflict / unhealthy base dir) already
+        # log their own message inside the reconciler; nothing more to add.
+        return
+    actually_scheduled = bool(vsr_result.scheduled_paths)
+    logger.info(
+        "Startup: Bug #1567 versioned-snapshot orphan sweep completed: "
+        "scanned %d namespace(s) %s, found %d candidate(s), %d "
+        "namespace(s) skipped %s, deletions_scheduled=%s",
+        len(vsr_result.scanned_namespaces),
+        vsr_result.scanned_namespaces,
+        len(vsr_result.scheduled_paths),
+        len(vsr_result.skipped_namespaces),
+        list(vsr_result.skipped_namespaces.keys()),
+        actually_scheduled,
+    )
+
+
+def _log_vsr_guard_skip(
+    global_lifecycle_manager: Any,  # Any: only ever None-checked here --
+    # importing GlobalReposLifecycleManager purely for this type hint
+    # would add an import-time coupling this module does not need.
+    snapshot_manager: Any,  # Any: same reasoning -- only None-checked.
+) -> None:
+    """Bug #1567c: the sweep guard (`global_lifecycle_manager is not None
+    and snapshot_manager is not None`) previously skipped SILENTLY on
+    either dependency being None. This is the ONLY mechanism that heals
+    pre-existing leaked snapshots -- a silent skip on it is the exact
+    failure class Bug #1567 exists to eliminate, so this is WARNING
+    (not INFO): it means the healing mechanism did not run this cycle.
+    """
+    missing = []
+    if global_lifecycle_manager is None:
+        missing.append("global_lifecycle_manager")
+    if snapshot_manager is None:
+        missing.append("snapshot_manager")
+    logger.warning(
+        "Startup: Bug #1567 versioned-snapshot orphan sweep SKIPPED -- "
+        "required dependency not available: %s (this is the only "
+        "mechanism that heals pre-existing leaked .versioned snapshots; "
+        "it did not run this cycle)",
+        ", ".join(missing),
+    )
+
+
+def _construct_hnsw_orphan_repair_sweep_scheduler(
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- guarded below.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Any:
+    """Validate dependencies and build the sweep scheduler (Story #1360).
+
+    Raises:
+        RuntimeError: if either required collaborator is unavailable.
+    """
+    from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
+        HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
+    )
+    from code_indexer.server.services.config_service import get_config_service
+
+    if backend_registry is None:
+        raise RuntimeError("backend_registry is not available")
+    if not (
+        hasattr(golden_repo_manager, "activated_repo_manager")
+        and golden_repo_manager.activated_repo_manager is not None
+    ):
+        raise RuntimeError(
+            "golden_repo_manager.activated_repo_manager is not available"
+        )
+
+    return _HNSWOrphanRepairSweepScheduler(
+        golden_repo_manager=golden_repo_manager,
+        activated_repo_manager=golden_repo_manager.activated_repo_manager,
+        state_backend=backend_registry.hnsw_orphan_sweep_state,
+        background_job_manager=background_job_manager,
+        config_service=get_config_service(),
+    )
+
+
+def _record_hnsw_orphan_repair_sweep_failure(app: Any, error: Exception) -> None:
+    """Bug #1864: make a sweep startup failure outlive the boot log.
+
+    The reason is stored on ``app.state`` (set explicitly, never left unset,
+    so the stats endpoint can tell "started cleanly" from "never reached this
+    block") and logged at ERROR -- the level ``admin_logs_query`` and the
+    Post-E2E log-audit gate select on -- instead of a WARNING that scrolls
+    away while the node boots reporting healthy.
+    """
+    app.state.hnsw_orphan_repair_sweep_scheduler = None
+    app.state.hnsw_orphan_repair_sweep_startup_error = str(error)
+    logger.error(
+        format_error_log(
+            "APP-GENERAL-090",
+            f"Failed to initialize HNSW orphan repair sweep scheduler: {error} "
+            "-- this node will NOT repair orphaned HNSW indexes; see "
+            "GET /api/admin/hnsw-orphan-sweep/stats -> local_scheduler",
+        ),
+        exc_info=True,
+    )
+
+
+def _start_hnsw_orphan_repair_sweep_scheduler(
+    app: Any,  # Any: FastAPI at runtime, but only `app.state` is touched.
+    *,
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- see the constructor guard.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Optional[Any]:
+    """Start the HNSW orphan repair fleet sweep (Story #1360), recording the
+    outcome on ``app.state``. A failure DEGRADES the node rather than killing
+    boot -- but is never silent (Bug #1864).
+
+    Returns:
+        The started scheduler, or None when startup failed.
+    """
+    logger.info(
+        "Server startup: Initializing HNSW orphan repair sweep scheduler",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    try:
+        scheduler = _construct_hnsw_orphan_repair_sweep_scheduler(
+            golden_repo_manager, backend_registry, background_job_manager
+        )
+        scheduler.start()
+    except Exception as e:
+        _record_hnsw_orphan_repair_sweep_failure(app, e)
+        return None
+
+    app.state.hnsw_orphan_repair_sweep_scheduler = scheduler
+    app.state.hnsw_orphan_repair_sweep_startup_error = None
+    logger.info(
+        "HNSW orphan repair sweep scheduler started",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return scheduler
 
 
 def make_lifespan(
@@ -127,6 +576,21 @@ def make_lifespan(
         - Shutdown: Stop background services gracefully
         - Shutdown: Clean up resources
         """
+        # Issue #1546 Fix 1 (Codex review): stamp the explicit "still
+        # resolving" sentinel as the VERY FIRST statement of startup,
+        # before ANYTHING else runs -- including the storage_mode
+        # computation below. This closes a design-level hazard: if any
+        # future refactor causes background work (e.g. a scheduler's
+        # background thread) to be kicked off before the real
+        # app.state.storage_mode assignment a few lines down, that code
+        # would see the sentinel (via is_storage_mode_undetermined())
+        # instead of a bare missing attribute -- letting
+        # AliasLockStoreFactory.resolve() fail loud instead of silently
+        # caching a node-local SQLite lock store invisible to other
+        # cluster nodes. Overwritten unconditionally by the real value
+        # immediately below; nothing observes it in steady state.
+        app.state.storage_mode = STORAGE_MODE_PENDING_SENTINEL
+
         # Get server data directory (used by multiple components)
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
@@ -137,17 +601,24 @@ def make_lifespan(
         # and MCP handlers can access it without re-reading config.
         app.state.storage_mode = storage_mode
 
-        # EVO-66819: expose backend_registry on app.state EARLY, alongside
-        # storage_mode. resolve_backend_registry_state() reads BOTH together, so
-        # any startup-window consumer that resolves the shared registry through
-        # app.state -- notably GlobalActivator (used by the golden-repo reconcile's
-        # is_globally_active() + index_path repair, below) -- must see it here.
-        # Previously it was only assigned much later in this lifespan, so in
-        # postgres/cluster mode the startup reconcile hit
-        # "storage_mode=postgres but backend_registry not set; falling back to
-        # SQLite", read an EMPTY per-node registry, and silently repaired nothing
-        # (0 pointers / 0 index_paths). backend_registry is a fully-built,
-        # never-mutated make_lifespan() param, so setting it here is safe.
+        # Bug #1515: Make backend_registry available to MCP handlers AND to
+        # RefreshScheduler/GlobalActivator (via registry_factory's
+        # resolve_backend_registry_attr()) as early as possible -- BEFORE
+        # GlobalReposLifecycleManager is constructed and started below.
+        # GlobalReposLifecycleManager.start() immediately spawns a background
+        # "golden-repos-reconcile" thread that calls
+        # RefreshScheduler.reconcile_golden_repos(), which lazily resolves the
+        # shared PostgreSQL backend via app.state.backend_registry. If this
+        # assignment happened later (as it previously did, right before the
+        # Langfuse SDK eager-init call), that first reconciliation pass (and
+        # any activation racing server startup) would silently fall back to
+        # an empty per-node SQLite registry in cluster (postgres) mode,
+        # logging "storage_mode=postgres but backend_registry not set;
+        # falling back to SQLite" and producing genuine registry drift.
+        # In SQLite mode it contains SQLite backends; in postgres mode, PG
+        # backends. MCP handlers use app.state.backend_registry
+        # unconditionally.
+        # (EVO-66819 is the same fix on the fork side.)
         app.state.backend_registry = backend_registry
 
         # Story #680: Store latency_tracker in app.state for dashboard route access.
@@ -243,9 +714,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-008",
                     f"Failed to initialize SQLite log handler: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
@@ -346,9 +816,11 @@ def make_lifespan(
         if getattr(_cache_cfg, "query_path_cache_enabled", True):
 
             def _repo_config_loader(repo_path: str) -> Any:
-                return _ConfigManager.create_with_backtrack(
-                    Path(repo_path)
-                ).get_config()
+                # Bug #1690: load_verified_config() verifies the resolved
+                # config genuinely describes repo_path itself, rather than
+                # blind-trusting create_with_backtrack()'s own silent
+                # ancestor-backtrack / bare-Config() defaulting.
+                return _ConfigManager.load_verified_config(Path(repo_path))
 
             app.state.repo_config_cache = _RepoConfigCache(
                 config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
@@ -491,9 +963,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-009",
                     f"Failed to initialize SQLite database or run migrations: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize ApiMetricsService with database for multi-worker support
@@ -527,9 +998,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-010",
                     f"Failed to initialize ApiMetricsService: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Issue #1159: Initialize SearchEventLogWriter (per-query operational stats).
@@ -653,7 +1123,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1392",
                     f"Failed to run hnswlib capability check on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -695,9 +1164,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-012",
                     f"Failed to run SSH key migration on startup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.ssh_migration_result = None
 
@@ -735,20 +1203,51 @@ def make_lifespan(
                 migrate_flat_file_to_sqlite,
             )
 
-            audit_service = AuditLogService(
-                groups_db_path,
-                storage_backend=(
-                    backend_registry.audit_log if backend_registry is not None else None
-                ),
+            # Off the event loop: construction runs the audit schema upgrade
+            # (ALTER TABLE / CREATE INDEX under an exclusive lock), which can
+            # take seconds on a large audit table.
+            audit_service = await anyio.to_thread.run_sync(
+                functools.partial(
+                    AuditLogService,
+                    groups_db_path,
+                    storage_backend=(
+                        backend_registry.audit_log
+                        if backend_registry is not None
+                        else None
+                    ),
+                )
             )
             # Issue #1241 P1.3: start the async background writer so log() and
             # log_raw() enqueue records instead of blocking the request thread.
             audit_service.start()
             app.state.audit_service = audit_service
+            # Unified audit capture: bind the ONE started service as the
+            # process-wide sink.  No manager holds its own audit reference;
+            # every capture resolves this binding at emission time.  node_id
+            # is the bootstrap cluster.node_id (None in solo mode).
+            from code_indexer.server.services.audit_capture import (
+                bind_audit_service,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _audit_get_config_service,
+            )
+
+            _audit_cluster_cfg = _audit_get_config_service().get_config().cluster
+            bind_audit_service(
+                audit_service,
+                node_id=(
+                    _audit_cluster_cfg.node_id
+                    if _audit_cluster_cfg is not None
+                    else None
+                ),
+            )
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
-            # calls from password_audit_logger also route to SQLite
-            password_audit_logger.set_audit_service(audit_service)
+            # calls from password_audit_logger also route to SQLite.  Off the
+            # event loop: switching modes closes the flat-file handler.
+            await anyio.to_thread.run_sync(
+                password_audit_logger.set_audit_service, audit_service
+            )
 
             logger.info(
                 "Story #399: AuditLogService initialized and injected into GroupAccessManager",
@@ -758,8 +1257,9 @@ def make_lifespan(
             # AC4: Migration is recoverable — historical data loss, not functional failure
             try:
                 flat_file = Path(server_data_dir) / "password_audit.log"
-                migrated, skipped = migrate_flat_file_to_sqlite(
-                    flat_file, audit_service
+                # Off the event loop: file reads plus durable audit writes.
+                migrated, skipped = await anyio.to_thread.run_sync(
+                    migrate_flat_file_to_sqlite, flat_file, audit_service
                 )
                 if migrated > 0 or skipped > 0:
                     logger.info(
@@ -813,7 +1313,6 @@ def make_lifespan(
                         format_error_log(
                             "APP-GENERAL-013",
                             f"Failed to seed existing golden repos or admin users: {seed_error}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -835,9 +1334,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-014",
                     f"Failed to initialize GroupAccessManager: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize and start global repos background services
@@ -919,9 +1417,8 @@ def make_lifespan(
                         f"Failed to initialize VersionedSnapshotManager "
                         f"(clone_backend={getattr(server_config, 'clone_backend', 'unknown')}): "
                         f"{snap_exc}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 app.state.snapshot_manager = None
 
@@ -951,9 +1448,40 @@ def make_lifespan(
             )
             global_lifecycle_manager.start()
 
+            # Bug #1567: wire the durable pending-deletion-queue backend
+            # into CleanupManager so a scheduled deletion survives a
+            # restart/worker-recycle. Reuses golden_repo_manager's OWN
+            # shared metadata backend (_sqlite_backend -- PostgreSQL in
+            # cluster mode, SQLite in solo mode, per Bug #1533's
+            # established pattern) rather than opening a second store.
+            # Fail-soft: without this, CleanupManager still works exactly
+            # as before Bug #1567 (in-process-only queue).
+            if golden_repo_manager is not None:
+                try:
+                    _cleanup_persistence_backend = getattr(
+                        golden_repo_manager, "_sqlite_backend", None
+                    )
+                    if _cleanup_persistence_backend is not None:
+                        global_lifecycle_manager.cleanup_manager.set_persistence_backend(
+                            _cleanup_persistence_backend
+                        )
+                except Exception as _cpb_exc:
+                    logger.warning(
+                        "Startup: Bug #1567 CleanupManager persistence-backend "
+                        "wiring failed (non-fatal, queue stays in-process-only "
+                        "for this run): %s",
+                        _cpb_exc,
+                    )
+
             # Store lifecycle manager in app state for access by query handlers
             app.state.global_lifecycle_manager = global_lifecycle_manager
             app.state.query_tracker = global_lifecycle_manager.query_tracker
+            # Story #1457 AC1/AC2: inject the SAME QueryTracker singleton
+            # into SemanticQueryManager so temporal queries can construct a
+            # real, pin()-capable TemporalShardResolver.
+            _wire_query_tracker_into_semantic_query_manager(
+                app, global_lifecycle_manager.query_tracker
+            )
             app.state.golden_repos_dir = str(golden_repos_dir)
 
             # Wire refresh_scheduler into golden_repo_manager so that
@@ -1218,7 +1746,6 @@ def make_lifespan(
                                 "clone) will fail on this node until the "
                                 "underlying issue is resolved and the server "
                                 "is restarted.",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                 else:
@@ -1235,7 +1762,6 @@ def make_lifespan(
                             "None. Repository activation (CoW clone) will "
                             "fail on this node until the underlying issue is "
                             "resolved and the server is restarted.",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
@@ -1260,7 +1786,6 @@ def make_lifespan(
                         "for the root cause). Repository activation (CoW "
                         "clone) will fail on this node until the underlying "
                         "issue is resolved and the server is restarted.",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1275,9 +1800,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-015",
                     f"Failed to start global repos background services: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # EVO-65021: eagerly validate the scip_backend config at startup so a
@@ -1318,6 +1842,7 @@ def make_lifespan(
 
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
         payload_cache = None
+        chunk_store_cross_process_poller = None
         logger.info(
             "Server startup: Initializing PayloadCache for semantic search",
             extra={"correlation_id": get_correlation_id()},
@@ -1357,18 +1882,68 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            # Bug #1775 round 5: register this process's PayloadCache for
+            # cross-process chunk-store stale-prefix publishing, and start
+            # the background poller that discovers prefixes published by
+            # OTHER workers/nodes -- see chunk_store_cache_cross_process.py
+            # module docstring for the full design rationale.
+            from code_indexer.storage.shared.chunk_store_cache import (
+                get_global_chunk_store_cache,
+            )
+            from code_indexer.server.services.cidx_meta_backup import (
+                get_cidx_meta_path,
+            )
+            from code_indexer.server.storage.shared.snapshot_paths import (
+                is_versioned_snapshot,
+            )
+            from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+                ChunkStoreCrossProcessPoller,
+                register_payload_cache,
+            )
+
+            register_payload_cache(payload_cache)
+            chunk_store_cross_process_poller = ChunkStoreCrossProcessPoller(
+                chunk_store_cache=get_global_chunk_store_cache(
+                    lease_root=get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    ),
+                    is_versioned_snapshot=is_versioned_snapshot,
+                ),
+                payload_cache=payload_cache,
+            )
+            chunk_store_cross_process_poller.start()
+            app.state.chunk_store_cross_process_poller = (
+                chunk_store_cross_process_poller
+            )
+            logger.info(
+                "ChunkStoreCrossProcessPoller started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         except Exception as e:
             # Log error but don't block server startup
             logger.error(
                 format_error_log(
                     "APP-GENERAL-016",
                     f"Failed to initialize PayloadCache: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
+            app.state.chunk_store_cross_process_poller = None
+            # Bug #1775 round 6: if register_payload_cache() succeeded
+            # above but a LATER step in this same try block failed (e.g.
+            # poller construction/start), the module-level registration
+            # would otherwise dangle, pointed at a PayloadCache this
+            # except block just declared unavailable. Always clear it on
+            # this path -- cheap and idempotent even if registration
+            # never happened.
+            from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+                reset_registered_payload_cache,
+            )
+
+            reset_registered_payload_cache()
 
         # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
         # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
@@ -1418,7 +1993,6 @@ def make_lifespan(
                             "and connection_pool both None); ConfigService will stay "
                             "on bootstrap SQLite config, and API key seeding below "
                             "will NOT see PG-backed VoyageAI/Cohere keys",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
             except Exception as _early_pool_exc:
@@ -1427,7 +2001,6 @@ def make_lifespan(
                         "APP-GENERAL-053",
                         f"Early ConfigService pool set failed (schedulers will use "
                         f"bootstrap defaults): {_early_pool_exc}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1508,7 +2081,6 @@ def make_lifespan(
                             f"reads/writes fail LOUD instead of silently "
                             f"degrading to the NFS-backed SQLite backend "
                             f"(Bug #1313)",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
             except Exception as _temporal_backend_exc:
@@ -1537,9 +2109,8 @@ def make_lifespan(
                         f"installed a poison factory so temporal reads/writes "
                         f"fail LOUD instead of silently degrading to the "
                         f"NFS-backed SQLite backend: {_temporal_backend_exc}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Startup: Auto-seed API keys if server config is blank (Story #20)
@@ -1588,7 +2159,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-017",
                     f"Failed to auto-seed API keys on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1664,7 +2234,6 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-018",
                         "ClaudeCliManager initialization failed (smart descriptions may be unavailable)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1674,7 +2243,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-019",
                     f"Failed to initialize ClaudeCliManager on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1697,7 +2265,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-050",
                     f"Failed to initialize Codex CLI credential management on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1742,7 +2309,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-020",
                     f"Failed to initialize scheduled catch-up service: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1945,7 +2511,6 @@ def make_lifespan(
                         f"_check_lifecycle_backfill_wiring(). Fix: ensure "
                         f"global_lifecycle_manager initializes successfully BEFORE "
                         f"the description scheduler wiring block (lifespan.py ~895).",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1971,7 +2536,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-021",
                     f"Failed to initialize description refresh scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2013,7 +2577,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-033",
                     f"Failed to initialize data retention scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2029,7 +2592,7 @@ def make_lifespan(
         try:
             from code_indexer.server.services.research_cleanup_service import (
                 ResearchCleanupScheduler,
-                make_backend_live_folder_provider,
+                make_backend_live_session_id_provider,
             )
             from code_indexer.server.services.research_assistant_service import (
                 _default_research_base_dir,
@@ -2056,7 +2619,7 @@ def make_lifespan(
             # reflects the active store.
             def _research_sessions_backend_supplier():
                 # Resolve the active backend lazily (the registry is only wired
-                # after startup). None -> make_backend_live_folder_provider
+                # after startup). None -> make_backend_live_session_id_provider
                 # raises -> cleanup() aborts with ZERO deletions (fail-safe).
                 if backend_registry is not None:
                     registry_backend = backend_registry.research_sessions
@@ -2074,7 +2637,7 @@ def make_lifespan(
             research_cleanup_scheduler = ResearchCleanupScheduler(
                 research_base_dir=_default_research_base_dir(),
                 retention_days_provider=_research_retention_days_provider,
-                live_folder_provider=make_backend_live_folder_provider(
+                live_session_id_provider=make_backend_live_session_id_provider(
                     _research_sessions_backend_supplier
                 ),
             )
@@ -2090,7 +2653,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-054",
                     f"Failed to initialize research cleanup scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2173,54 +2735,61 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-036",
                     f"Failed to initialize activated reaper scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
         # Startup: Initialize HNSW Orphan Repair Fleet Sweep Scheduler
         # (Story #1360, Epic #1333 S3)
-        hnsw_orphan_repair_sweep_scheduler = None
+        # The started scheduler is stored on `app.state` by the helper (which
+        # is where the admin stats endpoint reads it from); no local binding
+        # is needed here.
+        _start_hnsw_orphan_repair_sweep_scheduler(
+            app,
+            golden_repo_manager=golden_repo_manager,
+            backend_registry=backend_registry,
+            background_job_manager=background_job_manager,
+        )
+
+        # Startup: Initialize Fleet Migration Scheduler (Story #1458,
+        # Epic #1454). Ships DISABLED by default (fleet_migration_config.
+        # enabled defaults to False) -- requires explicit operator opt-in
+        # via the Web UI Config Screen's "Fleet Migration" section
+        # (round-6 item #10: web/routes.py's _VALID_CONFIG_SECTIONS +
+        # config_service.py's _fleet_migration_settings/_update_fleet_
+        # migration_setting) before it ever consolidates/deletes real
+        # on-disk chunk data for any golden repo.
+        fleet_migration_scheduler = None
+        temporal_legacy_migration_scheduler = None
         logger.info(
-            "Server startup: Initializing HNSW orphan repair sweep scheduler",
+            "Server startup: Initializing fleet migration scheduler",
             extra={"correlation_id": get_correlation_id()},
         )
         try:
-            from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
-                HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
+            from code_indexer.server.services.fleet_migration.scheduler import (
+                FleetMigrationScheduler as _FleetMigrationScheduler,
             )
             from code_indexer.server.services.config_service import get_config_service
 
-            if backend_registry is None:
-                raise RuntimeError("backend_registry is not available")
-            if not (
-                hasattr(golden_repo_manager, "activated_repo_manager")
-                and golden_repo_manager.activated_repo_manager is not None
-            ):
-                raise RuntimeError(
-                    "golden_repo_manager.activated_repo_manager is not available"
-                )
+            if refresh_scheduler is None:
+                raise RuntimeError("refresh_scheduler is not available")
 
-            hnsw_orphan_repair_sweep_scheduler = _HNSWOrphanRepairSweepScheduler(
+            fleet_migration_scheduler = _FleetMigrationScheduler(
                 golden_repo_manager=golden_repo_manager,
-                activated_repo_manager=golden_repo_manager.activated_repo_manager,
-                state_backend=backend_registry.hnsw_orphan_sweep_state,
+                refresh_scheduler=refresh_scheduler,
                 background_job_manager=background_job_manager,
                 config_service=get_config_service(),
             )
-            hnsw_orphan_repair_sweep_scheduler.start()
-            app.state.hnsw_orphan_repair_sweep_scheduler = (
-                hnsw_orphan_repair_sweep_scheduler
-            )
+            fleet_migration_scheduler.start()
+            app.state.fleet_migration_scheduler = fleet_migration_scheduler
             logger.info(
-                "HNSW orphan repair sweep scheduler started",
+                "Fleet migration scheduler started",
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as e:
             logger.warning(
                 format_error_log(
-                    "APP-GENERAL-090",
-                    f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
+                    "APP-GENERAL-091",
+                    f"Failed to initialize fleet migration scheduler: {e}",
                 )
             )
 
@@ -2266,6 +2835,30 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
+        # Issue #1548: legacy temporal relocation is independently gated by
+        # config flags and must never prevent server startup.
+        try:
+            from code_indexer.server.services.temporal_legacy_migration.scheduler import (
+                TemporalLegacyMigrationScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            temporal_legacy_migration_scheduler = TemporalLegacyMigrationScheduler(
+                golden_repo_manager=golden_repo_manager,
+                config_service=get_config_service(),
+                refresh_scheduler=refresh_scheduler,
+                background_job_manager=background_job_manager,
+            )
+            temporal_legacy_migration_scheduler.start()
+            app.state.temporal_legacy_migration_scheduler = (
+                temporal_legacy_migration_scheduler
+            )
+        except Exception as e:
+            logger.warning(
+                "Temporal legacy migration scheduler unavailable; startup continues: %s",
+                e,
+                exc_info=True,
+            )
 
         # Startup: Initialize in-process embedding-stats writer (Story #1418
         # Phase 3). Without this, the live server process never installs a
@@ -2303,7 +2896,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1418",
                     f"Failed to initialize embedding stats writer: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2344,7 +2936,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1420",
                     f"Failed to initialize embedding stats retention scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2445,6 +3036,15 @@ def make_lifespan(
             # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
             _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
 
+            # Bug #1621: eagerly create the dep-map output directory here, before
+            # anything below checks for its existence. Without this, a
+            # never-before-visited node has no cidx-meta/dependency-map/ on disk
+            # until the first analysis run happens to create it lazily -- so the
+            # very first dashboard HTMX poll sees `_get_dep_map_output_dir()`
+            # return None and renders a spurious "infrastructure unavailable"
+            # error, even though the directory would exist moments later.
+            _ensure_dep_map_output_dir(golden_repos_dir)
+
             # Bug #1040 follow-up: clean stale sentinel lock files on startup.
             # Server restart kills analysis threads but leaves sentinel files on
             # disk, blocking the dep-map UI with a stuck "Processing..." state.
@@ -2535,6 +3135,30 @@ def make_lifespan(
                 except Exception as _eoe:
                     logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
 
+            # Self-heal: repair cidx-meta's "-global" registry entry if the
+            # very first bootstrap (initialize_services(), called before the
+            # FastAPI `app` object -- and therefore app.state.backend_registry
+            # -- exists) wrote it to the wrong (per-node SQLite) backend.
+            # See repair_cidx_meta_global_registration()'s docstring for the
+            # full root-cause explanation. Must run HERE -- after
+            # app.state.backend_registry was set above -- so
+            # GlobalActivator.registry resolves the correct shared backend
+            # this time. Idempotent/O(1); fail-soft, never blocks startup.
+            if golden_repo_manager is not None:
+                try:
+                    from code_indexer.server.startup.bootstrap import (
+                        repair_cidx_meta_global_registration,
+                    )
+
+                    repair_cidx_meta_global_registration(
+                        golden_repo_manager, str(golden_repos_dir)
+                    )
+                except Exception as _cmgr_repair_err:
+                    logger.warning(
+                        "Startup: cidx-meta global-registration repair failed: %s",
+                        _cmgr_repair_err,
+                    )
+
             # Bug #1317: reconcile golden_repos registry-orphans (rows with
             # no on-disk clone -- can arise from a provisioning failure that
             # predates the atomicity guard, a manually-deleted clone
@@ -2543,45 +3167,254 @@ def make_lifespan(
             # fail-soft, log the count, never block startup. Correct on
             # both SQLite (solo) and PostgreSQL (cluster) since
             # list_golden_repos() always queries the shared backend.
+            #
+            # Production-scale hazard fix: reconcile_golden_repo_registry is
+            # a plain synchronous `def` whose _run_sweep() performs one
+            # filesystem resolution (get_actual_repo_path) PER GOLDEN REPO.
+            # At production scale (~900 golden repos) that is ~900 blocking
+            # metadata ops; called bare inside this async lifespan it froze
+            # the ENTIRE event loop for the sweep's whole duration -- and
+            # since the cow-storage mount is `hard` NFSv3, an unresponsive
+            # NFS server makes os.stat() block in uninterruptible kernel
+            # retry with NO timeout, i.e. a permanently hung server at boot
+            # rather than merely a slow one. Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_vsr_sweep` closure below (Bug #1567) exactly. Backgrounded
+            # via asyncio.create_task (not awaited) because nothing later in
+            # lifespan reads the reconcile result -- same rationale as that
+            # sibling.
             if golden_repo_manager is not None:
+
+                async def _run_golden_repo_reconcile_sweep() -> None:
+                    try:
+                        import anyio.to_thread as _to_thread
+                        from code_indexer.server.services.golden_repo_reconciler import (
+                            reconcile_golden_repo_registry,
+                        )
+
+                        # EVO-65484/GAP-4: thread the refresh_scheduler through so a
+                        # stale golden-repo index is detected and refreshed, not just
+                        # registry orphans. Upstream's threaded/backgrounded shape is
+                        # kept -- it fixes a real event-loop freeze at ~900 repos.
+                        _reconcile_refresh_scheduler = (
+                            global_lifecycle_manager.refresh_scheduler
+                            if global_lifecycle_manager is not None
+                            else None
+                        )
+                        _reconcile_result = await _to_thread.run_sync(
+                            lambda: reconcile_golden_repo_registry(
+                                golden_repo_manager,
+                                refresh_scheduler=_reconcile_refresh_scheduler,
+                            )
+                        )
+                        if _reconcile_result.stale_indexes_found:
+                            logger.info(
+                                "Startup: GAP-4 reconcile found %d stale golden-repo "
+                                "index(es) (%d refresh(es) triggered, %d failed): %s",
+                                len(_reconcile_result.stale_indexes_found),
+                                len(_reconcile_result.stale_indexes_refreshed),
+                                len(_reconcile_result.stale_indexes_failed),
+                                _reconcile_result.stale_indexes_found,
+                            )
+                        if _reconcile_result.orphans_found:
+                            logger.info(
+                                "Startup: Bug #1317 reconcile found %d "
+                                "golden-repo registry-orphan(s) (%d "
+                                "removal(s) submitted, %d failed to "
+                                "submit): %s",
+                                len(_reconcile_result.orphans_found),
+                                len(_reconcile_result.orphans_removed),
+                                len(_reconcile_result.orphans_failed),
+                                _reconcile_result.orphans_found,
+                            )
+                    except Exception as _gre:  # noqa: BLE001 -- startup safety
+                        logger.warning(
+                            "Startup: golden-repo registry-orphan reconcile failed: %s",
+                            _gre,
+                        )
+
+                asyncio.create_task(_run_golden_repo_reconcile_sweep())
+
+            # Bug #1567: orphan sweep for leaked `.versioned` snapshots.
+            # CleanupManager's durable queue (wired above) only stops
+            # FUTURE leaks -- this heals the EXISTING backlog every
+            # installation already has. Deletion is UNCONDITIONAL: an
+            # earlier revision gated it behind a Web UI report/delete mode
+            # setting (since removed), but shipping "report" as the
+            # default meant the leak (229 snapshots for one repo, ~120GB,
+            # confirmed live) stayed unfixed on every deployment -- a bug
+            # fix must not ship behind an off-by-default toggle. The real
+            # safety mechanisms (minimum-absolute-age floor, keep-last-N
+            # retention, cross-alias pointer protection, ts_live anchoring
+            # -- see versioned_snapshot_reconciler.py's module docstring)
+            # decide WHICH paths are safe to delete; WHETHER to delete is
+            # no longer a decision exposed here.
+            # Fail-soft: never blocks startup.
+            #
+            # Bug #1570 Half 2: golden_repo_manager is also passed so a
+            # namespace whose alias pointer was deleted by a PAST removal
+            # (before Half 1's write-path fix existed) can be reclaimed --
+            # see versioned_snapshot_reclaim.py's module docstring for the
+            # conjunctive discriminator that keeps this fail-closed for a
+            # repo that still exists.
+            if global_lifecycle_manager is not None and snapshot_manager is not None:
+                # Production-scale hazard fix: reconcile_versioned_snapshots()
+                # is a plain synchronous `def` performing ~18 filesystem ops
+                # per `.versioned/` namespace. At production scale (~900
+                # golden repos) that is ~16K blocking metadata ops; called
+                # bare inside this async lifespan it froze the ENTIRE event
+                # loop for the sweep's whole duration -- and since the
+                # cow-storage mount is `hard` NFSv3, an unresponsive NFS
+                # server makes os.stat() block in uninterruptible kernel
+                # retry with NO timeout, i.e. a permanently hung server at
+                # boot rather than merely a slow one. Offloaded via
+                # anyio.to_thread.run_sync, mirroring the sibling
+                # `_run_orphan_sweep` closure above (Story #1032 AC8 / HIGH
+                # #3) exactly. Backgrounded via asyncio.create_task (not
+                # awaited) because nothing later in lifespan reads
+                # _vsr_result -- same rationale as that sibling.
+                async def _run_vsr_sweep() -> None:
+                    try:
+                        import anyio.to_thread as _to_thread
+                        from code_indexer.server.services.versioned_snapshot_reconciler import (
+                            reconcile_versioned_snapshots,
+                        )
+
+                        _vsr_result = await _to_thread.run_sync(
+                            lambda: reconcile_versioned_snapshots(
+                                str(golden_repos_dir),
+                                snapshot_manager=snapshot_manager,
+                                alias_manager=global_lifecycle_manager.refresh_scheduler.alias_manager,
+                                cleanup_manager=global_lifecycle_manager.cleanup_manager,
+                                job_tracker=job_tracker,
+                                golden_repo_manager=golden_repo_manager,
+                            )
+                        )
+                        # Bug #1567c: unconditional -- previously only logged
+                        # when something was found, making a healthy
+                        # zero-candidate sweep indistinguishable from one that
+                        # silently never ran.
+                        _log_vsr_sweep_completion(_vsr_result)
+                    except Exception as _vsr_exc:  # noqa: BLE001 -- startup safety
+                        logger.warning(
+                            "Startup: Bug #1567 versioned-snapshot orphan sweep "
+                            "failed (non-fatal): %s",
+                            _vsr_exc,
+                        )
+
+                asyncio.create_task(_run_vsr_sweep())
+            else:
+                # Bug #1567c: this guard previously skipped SILENTLY --
+                # the ONLY mechanism that heals pre-existing leaked
+                # `.versioned` snapshots must never fail to run without a
+                # visible signal.
+                _log_vsr_guard_skip(global_lifecycle_manager, snapshot_manager)
+
+            # Bug #1871: sweep individually-expired files out of the LEGACY
+            # (pre-relocation, git-tracked) snapshot-reader-lease directory.
+            # This is the SAFE replacement for the retracted "delete it at
+            # startup" plan: it never removes the directory itself -- an
+            # old-version node mid-rolling-upgrade may still recreate and
+            # renew leases there -- it only removes files whose OWN
+            # recorded ttl_seconds has already elapsed
+            # (sweep_expired_lease_files). Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_vsr_sweep` closure immediately above, because this is a
+            # synchronous filesystem walk that must never block the event
+            # loop at fleet scale (~900 golden repos, `hard` NFSv3 mount).
+            # Backgrounded via asyncio.create_task (not awaited) because
+            # nothing later in lifespan reads the result -- the counts are
+            # only ever logged.
+            async def _run_legacy_lease_sweep() -> None:
                 try:
-                    from code_indexer.server.services.golden_repo_reconciler import (
-                        reconcile_golden_repo_registry,
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        _legacy_lease_directory,
+                        sweep_expired_lease_files,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
                     )
 
-                    _reconcile_refresh_scheduler = (
-                        global_lifecycle_manager.refresh_scheduler
-                        if global_lifecycle_manager is not None
-                        else None
+                    _lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
                     )
-                    _reconcile_result = reconcile_golden_repo_registry(
-                        golden_repo_manager,
-                        refresh_scheduler=_reconcile_refresh_scheduler,
+                    _removed, _errors = await _to_thread.run_sync(
+                        lambda: sweep_expired_lease_files(
+                            _legacy_lease_directory(_lease_root)
+                        )
                     )
-                    if _reconcile_result.orphans_found:
-                        logger.info(
-                            "Startup: Bug #1317 reconcile found %d golden-repo "
-                            "registry-orphan(s) (%d removal(s) submitted, %d "
-                            "failed to submit): %s",
-                            len(_reconcile_result.orphans_found),
-                            len(_reconcile_result.orphans_removed),
-                            len(_reconcile_result.orphans_failed),
-                            _reconcile_result.orphans_found,
-                        )
-                    if _reconcile_result.stale_indexes_found:
-                        logger.info(
-                            "Startup: GAP-4 reconcile found %d stale golden-repo "
-                            "index(es) (%d refresh(es) triggered, %d failed): %s",
-                            len(_reconcile_result.stale_indexes_found),
-                            len(_reconcile_result.stale_indexes_refreshed),
-                            len(_reconcile_result.stale_indexes_failed),
-                            _reconcile_result.stale_indexes_found,
-                        )
-                except Exception as _gre:
+                    _log = logger.warning if _errors else logger.info
+                    _log(
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep removed %d expired file(s) with %d error(s)",
+                        _removed,
+                        _errors,
+                    )
+                except Exception as _lease_sweep_exc:  # noqa: BLE001 -- startup safety
                     logger.warning(
-                        "Startup: golden-repo registry-orphan reconcile failed: %s",
-                        _gre,
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep failed (non-fatal): %s",
+                        _lease_sweep_exc,
                     )
+
+            asyncio.create_task(_run_legacy_lease_sweep())
+
+            # Bug #1871 follow-up (caught by the E2E Phase 4 post-run
+            # log-audit gate): this module's own
+            # LeaseDirectoryAmbiguousError docstring already promises that
+            # "server startup unconditionally creates this directory
+            # before serving traffic" -- nothing actually did. The
+            # PRIMARY (relocated `.scratch`) lease directory was only ever
+            # created as a side effect of a WRITER taking a lease
+            # (SnapshotReaderLease.acquire -> _lease_directory(...,
+            # create=True)). On a fresh server where no reader has yet
+            # taken a lease, snapshot_has_live_reader() found the
+            # directory absent and raised LeaseDirectoryAmbiguousError;
+            # cleanup_manager.py caught that and deferred cleanup
+            # indefinitely, so snapshots accumulated without bound at the
+            # project's ~900-repo production scale. This closure closes
+            # that gap by unconditionally creating the directory here, so
+            # its later absence is genuinely anomalous -- exactly what the
+            # ambiguous-error docstring assumes and what the defer-on-
+            # ambiguous cleanup path (the actual Bug #1871 data-loss fix)
+            # requires to ever converge. Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_legacy_lease_sweep` closure immediately above, because
+            # this is a synchronous mkdir() that must never block the
+            # event loop at fleet scale (`hard` NFSv3 mount can block a
+            # bare filesystem call forever). Backgrounded via
+            # asyncio.create_task (not awaited) because nothing later in
+            # lifespan reads the result.
+            async def _run_primary_lease_directory_bootstrap() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        ensure_primary_lease_directory,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
+                    )
+
+                    _primary_lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    )
+                    _primary_lease_dir = await _to_thread.run_sync(
+                        lambda: ensure_primary_lease_directory(_primary_lease_root)
+                    )
+                    logger.info(
+                        "Startup: ensured primary snapshot-reader lease "
+                        "directory exists at %s",
+                        _primary_lease_dir,
+                    )
+                except Exception as _lease_dir_exc:  # noqa: BLE001 -- startup safety
+                    logger.warning(
+                        "Startup: failed to ensure primary snapshot-reader "
+                        "lease directory exists (non-fatal): %s",
+                        _lease_dir_exc,
+                    )
+
+            asyncio.create_task(_run_primary_lease_directory_bootstrap())
 
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
@@ -2682,7 +3515,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-022",
                     f"Failed to initialize dependency map scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2750,7 +3582,6 @@ def make_lifespan(
                         format_error_log(
                             "MONITOR-GENERAL-010",
                             "Self-monitoring enabled but could not detect GitHub repo from git remote - service disabled",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     app.state.self_monitoring_service = None
@@ -2839,7 +3670,6 @@ def make_lifespan(
                 format_error_log(
                     "MONITOR-GENERAL-011",
                     f"Failed to start self-monitoring service: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             app.state.self_monitoring_service = None
@@ -2907,9 +3737,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-021",
                     f"Failed to initialize MCP Session cleanup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize TelemetryManager for OTEL (Story #695)
@@ -2925,7 +3754,14 @@ def make_lifespan(
             config_service = get_config_service()
             server_config = config_service.get_config()
 
-            # Apply environment variable overrides (e.g., CIDX_TELEMETRY_ENABLED)
+            # Apply environment variable overrides (e.g., CIDX_SERVER_HOST,
+            # CIDX_LOG_LEVEL). Story #1676 AC1: telemetry configuration is
+            # managed exclusively via the Web UI Config Screen (DB-backed) --
+            # apply_env_overrides() no longer applies any of the 5 legacy
+            # CIDX_TELEMETRY_*/CIDX_OTEL_*/CIDX_DEPLOYMENT_ENVIRONMENT
+            # variables to server_config.telemetry_config below; it only logs
+            # one aggregated WARNING if any of them are still present in the
+            # process environment.
             config_manager = ServerConfigManager()
             server_config = config_manager.apply_env_overrides(server_config)
 
@@ -2936,8 +3772,35 @@ def make_lifespan(
                 # Lazy import telemetry module only when enabled
                 from code_indexer.server.telemetry import get_telemetry_manager
 
+                # Story #1676 AC6: resolve this process's cluster node
+                # identity via the SAME shared resolver service_init.py and
+                # the cluster-services block below use for JobTracker /
+                # NodeHeartbeatService (resolve_cluster_node_id) -- never a
+                # second/competing identity scheme. server_config.cluster is
+                # the already-parsed ClusterConfig from this same
+                # config.json (see ServerConfigManager's "cluster" ->
+                # ClusterConfig conversion), so we build the small raw-dict
+                # shape the resolver expects from it instead of re-reading
+                # config.json a third time in this startup routine. In solo
+                # (non-cluster) mode server_config.cluster is None and the
+                # resolver's existing f"{hostname}-cidx" fallback applies
+                # unchanged.
+                from code_indexer.server.utils.cluster_node_id import (
+                    resolve_cluster_node_id,
+                )
+
+                _telemetry_raw_cluster_cfg = (
+                    {"cluster": {"node_id": server_config.cluster.node_id}}
+                    if server_config.cluster is not None
+                    else None
+                )
+                _telemetry_cluster_node_id = resolve_cluster_node_id(
+                    _telemetry_raw_cluster_cfg
+                )
+
                 telemetry_manager = get_telemetry_manager(
-                    server_config.telemetry_config
+                    server_config.telemetry_config,
+                    cluster_node_id=_telemetry_cluster_node_id,
                 )
                 app.state.telemetry_manager = telemetry_manager
 
@@ -2948,6 +3811,50 @@ def make_lifespan(
                     f"protocol={server_config.telemetry_config.collector_protocol}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+
+                # Story #1586 AC6: construct ApplicationMetrics (Story #698's
+                # search/FTS/embedding counters+histograms) and JobMetrics
+                # (Story #699's job/repo counters+gauges) alongside the
+                # other telemetry primitives -- gated identically (enabled +
+                # export_metrics).
+                if server_config.telemetry_config.export_metrics:
+                    from code_indexer.server.telemetry.metrics_instrumentation import (
+                        get_application_metrics,
+                    )
+                    from code_indexer.server.telemetry.job_metrics import (
+                        get_job_metrics,
+                    )
+
+                    application_metrics = get_application_metrics(telemetry_manager)
+                    app.state.application_metrics = application_metrics
+
+                    logger.info(
+                        f"ApplicationMetrics initialized: active="
+                        f"{application_metrics.is_active}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+                    job_metrics = get_job_metrics(telemetry_manager)
+                    job_metrics.set_job_counts_callback(
+                        _build_job_counts_callback(job_tracker)
+                    )
+                    job_metrics.set_repository_counts_callback(
+                        _build_repository_counts_callback(golden_repo_manager)
+                    )
+                    app.state.job_metrics = job_metrics
+
+                    logger.info(
+                        f"JobMetrics initialized: active={job_metrics.is_active}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    app.state.application_metrics = None
+                    app.state.job_metrics = None
+                    logger.info(
+                        "ApplicationMetrics/JobMetrics: export_metrics disabled "
+                        "in configuration",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
 
                 # Initialize MachineMetricsExporter for OTEL (Story #696)
                 if server_config.telemetry_config.machine_metrics_enabled:
@@ -2973,27 +3880,48 @@ def make_lifespan(
                         extra={"correlation_id": get_correlation_id()},
                     )
 
-                # Initialize FastAPI instrumentation for OTEL (Story #697)
-                if server_config.telemetry_config.export_traces:
-                    from code_indexer.server.telemetry.instrumentation import (
-                        instrument_fastapi,
-                    )
+                # FastAPI OTEL instrumentation (Story #697) is no longer
+                # applied here. Bug #1679: by the time this lifespan body
+                # executes, Starlette has ALREADY built its ASGI
+                # middleware stack (it builds that stack lazily on the
+                # very first ASGI message the app receives, which is the
+                # "lifespan" startup message itself) -- calling
+                # instrument_fastapi() at this point was a structural
+                # no-op that silently produced zero HTTP request spans on
+                # every deployment. Instrumentation now happens
+                # immediately after `FastAPI(...)` is constructed, in
+                # startup/app_wiring.py's create_fastapi_app(), well
+                # before this lifespan body ever runs.
+                logger.debug(
+                    "FastAPI OTEL instrumentation already applied at "
+                    "app-construction time (see app_wiring.py)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
 
-                    instrumented = instrument_fastapi(app, telemetry_manager)
-                    if instrumented:
-                        logger.info(
-                            "FastAPI instrumented with OTEL tracing",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    else:
-                        logger.debug(
-                            "FastAPI instrumentation skipped",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
+                # Story #1676 AC5: outbound HTTP span instrumentation
+                # (httpx, process-global). Unlike FastAPI instrumentation
+                # above, HTTPXClientInstrumentor monkey-patches
+                # httpx.HTTPTransport/AsyncHTTPTransport directly -- no
+                # Bug #1679-style ordering constraint -- so it is safe to
+                # apply here in the lifespan body. Gated identically to
+                # instrument_fastapi()'s own gate (telemetry_config.enabled,
+                # this whole `if` block) rather than export_traces alone,
+                # matching instrument_fastapi()'s rationale: real
+                # per-request overhead is added even with a no-op tracer.
+                # Deliberately process-global (Story #1676 AC5 Non-Goal):
+                # also instruments non-embedding httpx traffic (e.g.
+                # ShardRouter calls below) -- intentional, not scoped.
+                from code_indexer.server.telemetry.instrumentation import (
+                    instrument_httpx,
+                )
+
+                instrument_httpx()
             else:
                 # Telemetry disabled - set to None
                 app.state.telemetry_manager = None
                 app.state.machine_metrics_exporter = None
+                app.state.application_metrics = None
+                app.state.job_metrics = None
                 logger.info(
                     "TelemetryManager: Telemetry disabled in configuration",
                     extra={"correlation_id": get_correlation_id()},
@@ -3005,12 +3933,13 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-022",
                     f"Failed to initialize TelemetryManager: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.telemetry_manager = None
             app.state.machine_metrics_exporter = None
+            app.state.application_metrics = None
+            app.state.job_metrics = None
 
         # Startup: Initialize OIDC authentication if configured
         logger.info(
@@ -3083,9 +4012,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-023",
                     f"Failed to initialize OIDC: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             logger.info(
                 "OIDC routes registered but manager not initialized - SSO login will return 404 until configured",
@@ -3206,9 +4134,8 @@ def make_lifespan(
                             format_error_log(
                                 "APP-GENERAL-030",
                                 f"Failed to generate Langfuse READMEs after sync: {readme_err}",
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            ),
+                            exc_info=True,
                         )
 
                 elapsed = time.monotonic() - _callback_start
@@ -3259,9 +4186,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-029",
                     f"Failed to initialize Langfuse Trace Sync Service: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.langfuse_sync_service = None
 
@@ -3288,19 +4214,34 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # backend_registry is now set on app.state EARLY (right after
-        # storage_mode, see EVO-66819) so startup-window consumers resolve the
-        # shared registry -- MCP handlers (both modes) read it from there.
+        # Bug #1515: app.state.backend_registry is now assigned much earlier
+        # in this function (immediately after app.state.storage_mode), before
+        # GlobalReposLifecycleManager/RefreshScheduler/GlobalActivator are
+        # constructed -- see that assignment for the full rationale.
+        # (EVO-66819 is the same fix on the fork side.)
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
-        # singleton. The singleton is created at import time with no backend; we inject
-        # it here after backend_registry is available.
+        # singleton. We inject it here after backend_registry is available.
+        #
+        # Bug #1686 follow-up: this used to do a bare-name
+        # `from ...routers.diagnostics import diagnostics_service as
+        # _diagnostics_service` import. Bug #1686 changed that module
+        # global's default from an eagerly-constructed instance to `None`
+        # (to stop a bare import of the router from touching the live DB),
+        # so the bare-name import here bound to None and
+        # `_diagnostics_service._backend = ...` raised
+        # `AttributeError: 'NoneType' object has no attribute '_backend'`,
+        # unconditionally crashing real server startup (this guard is
+        # always true on a real server). Calling _get_diagnostics_service()
+        # instead lazily constructs the singleton right now, at real
+        # STARTUP time -- exactly what Bug #1686 always intended to allow;
+        # only import-time construction was ever the problem.
         if backend_registry is not None and hasattr(backend_registry, "diagnostics"):
             from code_indexer.server.routers.diagnostics import (
-                diagnostics_service as _diagnostics_service,
+                _get_diagnostics_service,
             )
 
-            _diagnostics_service._backend = backend_registry.diagnostics
+            _get_diagnostics_service()._backend = backend_registry.diagnostics
             logger.info(
                 "Bug #532: DiagnosticsBackend injected into diagnostics_service singleton",
                 extra={"correlation_id": get_correlation_id()},
@@ -3331,7 +4272,12 @@ def make_lifespan(
         if storage_mode == "postgres" and backend_registry is not None:
             try:
                 _pg_dsn = ""
-                _configured_node_id = ""
+                # Bug (E2E Phase 6 discovery): holds the raw parsed
+                # config.json dict so _node_id below can resolve via the
+                # SAME resolve_cluster_node_id() helper service_init.py
+                # uses for JobTracker's node_id -- see that call site for
+                # why the two must never diverge.
+                _cfg_data: Optional[Dict[str, Any]] = None
                 _sharding_enabled = False
                 _shard_replicas = 1
                 try:
@@ -3355,7 +4301,6 @@ def make_lifespan(
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
                             _cluster_cfg = _cfg_data.get("cluster", {})
-                            _configured_node_id = _cluster_cfg.get("node_id", "")
                             _sharding_enabled = bool(
                                 _cluster_cfg.get("sharding_enabled", False)
                             )
@@ -3373,11 +4318,22 @@ def make_lifespan(
                         backend_registry.critical_connection_pool
                         or backend_registry.connection_pool
                     )
-                    _node_id = (
-                        _configured_node_id
-                        if _configured_node_id
-                        else f"{os.uname().nodename}-cidx"
+                    # Bug (E2E Phase 6 discovery): resolve via the SAME
+                    # shared helper service_init.py uses for JobTracker's
+                    # node_id (see that call site for the full defect
+                    # explanation) -- a prior independent computation here
+                    # defaulted to f"{hostname}-cidx" while service_init.py
+                    # defaulted to "local", so a job's executing_node stamp
+                    # (from JobTracker) could never match this node's own
+                    # identity in get_active_nodes() (from
+                    # NodeHeartbeatService, wired a few lines below), and
+                    # JobReconciliationService's dead-node reclaim wrongly
+                    # treated a live, still-running job as abandoned.
+                    from code_indexer.server.utils.cluster_node_id import (
+                        resolve_cluster_node_id,
                     )
+
+                    _node_id = resolve_cluster_node_id(_cfg_data)
 
                     # Story #501 AC3: Tag log records with the cluster node ID so
                     # the admin UI can aggregate and filter logs per node.
@@ -3931,15 +4887,6 @@ def make_lifespan(
 
                     get_token_blacklist().set_connection_pool(_cluster_pool)
 
-                    # Bug #577: Wire DelegationJobTracker for cluster
-                    from code_indexer.server.services.delegation_job_tracker import (
-                        DelegationJobTracker,
-                    )
-
-                    DelegationJobTracker.get_instance().set_connection_pool(
-                        _cluster_pool
-                    )
-
                     # Bug #581 / Bug #1072: Sync SSH keys from PG to local ~/.ssh/
                     try:
                         from code_indexer.server.services.ssh_key_sync_service import (
@@ -3999,8 +4946,10 @@ def make_lifespan(
                             ci = new_config.claude_integration_config
                             if ci and ci.anthropic_api_key:
                                 sync_svc.sync_anthropic_key(ci.anthropic_api_key)
-                            if ci and ci.voyage_api_key:
-                                sync_svc.sync_voyageai_key(ci.voyage_api_key)
+                            if ci and ci.voyageai_api_key:
+                                sync_svc.sync_voyageai_key(ci.voyageai_api_key)
+                            if ci and ci.cohere_api_key:
+                                sync_svc.sync_cohere_key(ci.cohere_api_key)
                         except Exception:
                             logger.debug(
                                 "Bug #586: API key sync on config change failed",
@@ -4285,6 +5234,28 @@ def make_lifespan(
                 # service initialization has completed (success, no-op, or error).
                 app.state.scip_reconcile_leader_gate_ready = True
 
+        # Issue #1507: Solo/SQLite mode has no cluster to sync SSH keys across,
+        # but a DB-registered key can still be missing from ~/.ssh/ (fresh
+        # host, wiped ~/.ssh, DB copied to a new node) -- self-heal it at
+        # startup the same way the cluster branch above already does for
+        # PostgreSQL mode, reusing the same SSHKeySyncService unmodified.
+        if storage_mode != "postgres" and backend_registry is not None:
+            try:
+                _solo_ssh_sync_result = _materialize_solo_ssh_keys(backend_registry)
+                if _solo_ssh_sync_result is not None:
+                    logger.info(
+                        "Issue #1507: Solo SSH key materialization complete: "
+                        "%d written, %d removed, %d unchanged",
+                        len(_solo_ssh_sync_result.get("written", [])),
+                        len(_solo_ssh_sync_result.get("removed", [])),
+                        len(_solo_ssh_sync_result.get("unchanged", [])),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Issue #1507: Solo SSH key materialization failed (non-fatal): %s",
+                    exc,
+                )
+
         # Story #492: Start NodeMetricsWriterService (always on, SQLite or postgres)
         # When backend_registry is available (postgres/cluster mode), use its node_metrics
         # backend so NodeMetricsPostgresBackend is used instead of SQLite.
@@ -4350,9 +5321,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-032",
                     f"Failed to start NodeMetricsWriterService: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.node_metrics_writer = None
             app.state.node_metrics_backend = None
@@ -4376,9 +5346,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-034",
                     f"Failed to start DatabaseConnectionManager cleanup daemon: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1079 Phase E: build the embedding coalescer registry ONCE, after
@@ -4412,9 +5381,8 @@ def make_lifespan(
                     "APP-GENERAL-1079",
                     f"Failed to build embedding coalescer registry "
                     f"(queries will use the direct governed call): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1105: build the query embedding cache ONCE after providers +
@@ -4464,9 +5432,8 @@ def make_lifespan(
                     "APP-GENERAL-1105",
                     f"Failed to build query embedding cache "
                     f"(queries will use the live path): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1295 (Epic #1288 final): build EmbeddingCacheOtelMetrics --
@@ -4500,6 +5467,16 @@ def make_lifespan(
                 if _wired_cache is not None
                 else (lambda: 0)
             )
+            # Bug #1536: write_failures_fn -- same wired-cache-or-zero pattern
+            # as total_entries_fn above. Makes a persistent
+            # record_miss_or_shadow write failure (backend upsert() raised
+            # or returned False) observable via a rising OTEL gauge instead
+            # of only a buried per-event WARNING log line.
+            _write_failures_fn = (
+                _wired_cache.write_failures_since_start
+                if _wired_cache is not None
+                else (lambda: 0)
+            )
 
             def _windowed_metrics_fn(from_ts: float, to_ts: float) -> Any:
                 _see_writer = get_search_embed_event_writer()
@@ -4520,6 +5497,7 @@ def make_lifespan(
                 _cache_otel_meter,
                 total_entries_fn=_total_entries_fn,
                 windowed_metrics_fn=_windowed_metrics_fn,
+                write_failures_fn=_write_failures_fn,
             )
             logger.info(
                 "EmbeddingCacheOtelMetrics built and wired "
@@ -4533,9 +5511,8 @@ def make_lifespan(
                     "APP-GENERAL-1295",
                     f"Failed to build EmbeddingCacheOtelMetrics "
                     f"(cache OTEL metrics will be disabled): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
@@ -4658,6 +5635,26 @@ def make_lifespan(
                 _sel_stop_exc,
             )
 
+        # Issue #1516: non-blocking reset of the shared parallel-query
+        # ThreadPoolExecutor singleton. Defense-in-depth for graceful
+        # in-process lifespan cycles (e.g. test suites that spin up/tear
+        # down the FastAPI app repeatedly in one process) -- a true
+        # interpreter exit is already handled by concurrent.futures.thread's
+        # own atexit handler, which joins all worker threads regardless of
+        # whether shutdown() was ever called.
+        try:
+            from code_indexer.server.query.parallel_query_executor import (
+                reset_global_parallel_query_executor,
+            )
+
+            reset_global_parallel_query_executor()
+        except Exception as _pqe_reset_exc:
+            logger.warning(
+                "Issue #1516: failed to reset shared parallel-query executor "
+                "during shutdown: %s",
+                _pqe_reset_exc,
+            )
+
         # Story #1293: drain the search-embed-event writer on shutdown and
         # clear the process-level accessor.
         try:
@@ -4766,6 +5763,25 @@ def make_lifespan(
         _xray_executor.shutdown(wait=False)
         # perf: Shut down the shared query executor (mirror of the two above).
         _query_executor.shutdown(wait=False)
+        # Bug #1800: dispose the discovery branch-fetch pool -- the one
+        # process-wide pool that had no shutdown at all. Its workers are
+        # non-daemon, so leaving them alive makes interpreter exit join them and
+        # stalls `systemctl restart cidx-server` behind in-flight git ls-remote
+        # work. Imported function-locally to keep routes off this module's
+        # import path.
+        from code_indexer.server.web.routes import (
+            shutdown_discovery_branch_fetch_executor,
+        )
+
+        shutdown_discovery_branch_fetch_executor()
+
+        # Bug #1800: same defect class, second pool -- the deep-fidelity audit
+        # executor in the storage layer also had no disposal anywhere.
+        from code_indexer.storage.filesystem_vector_store import (
+            shutdown_deep_fidelity_audit_executor,
+        )
+
+        shutdown_deep_fidelity_audit_executor()
 
         # Story #1079 Phase E: clear the process-level coalescer registry so a
         # subsequent lifespan cycle in the same process does not inherit a stale
@@ -4910,9 +5926,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-033",
                         f"Error stopping NodeMetricsWriterService: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
@@ -4932,13 +5947,89 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-024",
                         f"Error stopping global repos background services: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
-        # Shutdown: Stop PayloadCache background cleanup (Story #679)
-        if payload_cache is not None:
+        # Shutdown: Stop ChunkStoreCrossProcessPoller (Bug #1775 round 5).
+        # Stopped BEFORE PayloadCache is closed below -- the poller reads
+        # from it on every tick.
+        poller_stopped_cleanly = True  # No poller -> nothing to worry about.
+        if chunk_store_cross_process_poller is not None:
+            try:
+                poller_stopped_cleanly = chunk_store_cross_process_poller.stop()
+                if poller_stopped_cleanly:
+                    logger.info(
+                        "ChunkStoreCrossProcessPoller stopped successfully",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    # Round 6 (Codex): stop() itself already logged a
+                    # WARNING with the timeout detail -- this second,
+                    # higher-severity log makes the operational risk
+                    # visible at ERROR too. Round 7: PayloadCache.close()
+                    # below is now SKIPPED in this case (see the guard
+                    # there). Round 8 correction (Claude): this is
+                    # DEFENSIVE/over-cautious given PayloadCache.close()'s
+                    # CURRENT implementation (it only stops a background
+                    # cleanup thread -- it does not tear down the
+                    # connection manager or backend the poller actually
+                    # reads from), NOT a fix for an active use-after-close
+                    # race that exists today. Kept anyway as cheap
+                    # defense-in-depth: the whole process is exiting
+                    # regardless, so skipping the close costs nothing
+                    # (the OS reclaims everything on exit) and guards
+                    # against a FUTURE change to close()'s scope.
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1775",
+                            "ChunkStoreCrossProcessPoller did not confirm "
+                            "stop -- PayloadCache.close() will be skipped",
+                        )
+                    )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1775",
+                        f"Error stopping ChunkStoreCrossProcessPoller: {e}",
+                    ),
+                    exc_info=True,
+                )
+                poller_stopped_cleanly = False
+
+        # Bug #1775 round 6: clear the module-level cross-process
+        # PayloadCache registration on shutdown, regardless of whether a
+        # poller existed -- otherwise it survives into a torn-down
+        # PayloadCache, a real cross-test/cross-lifecycle contamination
+        # risk for in-process E2E suites (Claude code review finding).
+        from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+            reset_registered_payload_cache,
+        )
+
+        reset_registered_payload_cache()
+
+        # Shutdown: Stop PayloadCache background cleanup (Story #679).
+        # Round 7 (Codex): SKIP closing it if the poller above did not
+        # confirm a clean stop. Round 8 correction (Claude): this is
+        # DEFENSIVE/over-cautious given PayloadCache.close()'s CURRENT
+        # implementation (it only stops a background cleanup thread --
+        # it does not tear down the connection manager or backend the
+        # poller actually reads from), NOT a fix for an active
+        # use-after-close race that exists today. Kept anyway as cheap
+        # defense-in-depth: the process is exiting regardless, so
+        # skipping the close costs nothing (the OS reclaims everything
+        # on exit) and guards against a FUTURE change to close()'s
+        # scope.
+        if payload_cache is not None and not poller_stopped_cleanly:
+            logger.warning(
+                "Skipping PayloadCache.close() -- ChunkStoreCrossProcess"
+                "Poller did not confirm stop; the process is exiting "
+                "regardless, so leaving it open (defensive precaution; "
+                "not a fix for an active hazard in close()'s current "
+                "implementation) costs nothing.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        elif payload_cache is not None:
             try:
                 payload_cache.close()
                 logger.info(
@@ -4950,9 +6041,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-025",
                         f"Error stopping PayloadCache: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop DependencyLatencyTracker background flush (Story #680)
@@ -4968,9 +6058,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping DependencyLatencyTracker: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop MCP Session cleanup (Story #731)
@@ -4986,9 +6075,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-026",
                         f"Error stopping MCP Session cleanup: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop data retention scheduler (Story #401)
@@ -5007,9 +6095,49 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
+                )
+
+        # Shutdown: Stop fleet migration scheduler (Story #1458, Epic
+        # #1454). Codex MEDIUM finding (round 5): this daemon thread was
+        # started at startup (fleet_migration_scheduler.start()) but
+        # never signaled to stop/joined during shutdown, unlike every
+        # sibling scheduler.
+        fleet_migration_scheduler_state = getattr(
+            app.state, "fleet_migration_scheduler", None
+        )
+        if fleet_migration_scheduler_state is not None:
+            try:
+                fleet_migration_scheduler_state.stop()
+                logger.info(
+                    "Fleet migration scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1458",
+                        f"Error stopping fleet migration scheduler: {e}",
+                    ),
+                    exc_info=True,
+                )
+
+        temporal_legacy_scheduler_state = getattr(
+            app.state, "temporal_legacy_migration_scheduler", None
+        )
+        if temporal_legacy_scheduler_state is not None:
+            try:
+                temporal_legacy_scheduler_state.stop()
+                logger.info(
+                    "Temporal legacy migration scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    "Error stopping temporal legacy migration scheduler: %s",
+                    e,
+                    exc_info=True,
                 )
 
         # Shutdown: Stop research cleanup scheduler (Bug #1085)
@@ -5028,9 +6156,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-055",
                         f"Error stopping research cleanup scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop activated reaper scheduler (Story #967)
@@ -5049,9 +6176,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-037",
                         f"Error stopping activated reaper scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop embedding stats writer (Story #1418 Phase 3)
@@ -5074,9 +6200,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-1419",
                         f"Error stopping embedding stats writer: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop embedding stats retention scheduler (Story #1418
@@ -5096,9 +6221,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-1421",
                         f"Error stopping embedding stats retention scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop description refresh scheduler (Story #190)
@@ -5117,9 +6241,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping description refresh scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # --- LLM Lease Lifecycle shutdown ---
@@ -5159,9 +6282,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-029",
                         f"Error stopping cidx-meta refresh debouncer: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop dependency map scheduler (Story #193)
@@ -5180,9 +6302,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-028",
                         f"Error stopping dependency map scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop self-monitoring service (Epic #71)
@@ -5198,9 +6319,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-028",
                         f"Error stopping self-monitoring service: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop Langfuse Trace Sync Service (Story #168)
@@ -5216,9 +6336,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-030",
                         f"Error stopping Langfuse Trace Sync Service: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop TelemetryManager and flush pending telemetry (Story #695)
@@ -5234,9 +6353,50 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping TelemetryManager: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
+                )
+
+        # Issue #1241 P1.3: drain the audit-log async writer on shutdown; rows
+        # it cannot write in time are counted (see AuditLogService.stop).
+        # Placed AFTER every audit emitter above has stopped (MCP executor,
+        # global repos lifecycle, schedulers, self-monitoring), so their
+        # shutdown-time captures still reach the store.  The log listener is
+        # already stopped here: drop ERROR lines reach the last-resort stderr
+        # handler (the journal), and the drop COUNT stays exact.  Accepted
+        # residual: _mcp_executor.shutdown(wait=False) does not wait, so an MCP
+        # handler still running after the unbind records a counted drop.
+        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        # The unbind runs even when the stop raises, so no process-wide
+        # binding -- the capture sink or the module-level password audit
+        # logger -- outlives the writer.  Off the event loop: stop() joins
+        # the writer (up to its timeout) and the unbind opens a file.
+        try:
+            _audit_svc = getattr(app.state, "audit_service", None)
+            if _audit_svc is not None:
+                await anyio.to_thread.run_sync(_audit_svc.stop)
+        except Exception as _audit_stop_exc:
+            logger.warning(
+                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
+                _audit_stop_exc,
+            )
+        finally:
+            try:
+                from code_indexer.server.auth.audit_logger import (
+                    password_audit_logger as _shutdown_password_audit_logger,
+                )
+                from code_indexer.server.services.audit_capture import (
+                    clear_audit_service,
+                )
+
+                clear_audit_service()
+                await anyio.to_thread.run_sync(
+                    _shutdown_password_audit_logger.set_audit_service, None
+                )
+            except Exception as _audit_clear_exc:
+                logger.warning(
+                    "failed to unbind the audit service during shutdown: %s",
+                    _audit_clear_exc,
                 )
 
         # Bug #878 Fix A.2: stop the DatabaseConnectionManager cleanup daemon.
@@ -5254,9 +6414,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-035",
                     f"Error stopping DatabaseConnectionManager cleanup daemon: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Shutdown: Clean up other resources

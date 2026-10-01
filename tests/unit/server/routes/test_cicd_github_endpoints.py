@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # Test constants
-TEST_OWNER = "jsbattig"
+TEST_OWNER = "example-org"
 TEST_REPO = "code-indexer"
 TEST_RUN_ID = 12345678
 TEST_JOB_ID = 87654321

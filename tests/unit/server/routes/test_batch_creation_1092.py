@@ -51,6 +51,7 @@ class TestAddGoldenRepoSkipValidationFlag:
                 repo_url="https://github.com/org/repo.git",
                 alias="my-alias",
                 skip_pre_flight_git_validation=True,
+                submitter_username="example-admin",
             )
 
             mock_validate.assert_not_called()
@@ -73,6 +74,7 @@ class TestAddGoldenRepoSkipValidationFlag:
             manager.add_golden_repo(
                 repo_url="https://github.com/org/repo.git",
                 alias="my-alias-2",
+                submitter_username="example-admin",
             )
 
             mock_validate.assert_called_once()

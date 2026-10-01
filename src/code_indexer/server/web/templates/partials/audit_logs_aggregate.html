@@ -1,0 +1,46 @@
+<div class="audit-results" data-export-query="{{ export_query }}" data-view="auth_activity">
+    <div class="audit-summary">
+        <p class="audit-view-label"><strong>Authentication activity</strong> (grouped)</p>
+        <p class="audit-window">Window: {{ window_label }}</p>
+    </div>
+    {% if truncated %}
+    <p class="audit-groups-truncated">Only the largest groups are shown; narrow the window or the filters to see the rest.</p>
+    {% endif %}
+    <table class="audit-table striped">
+        <thead>
+            <tr>
+                <th>Action</th>
+                <th>Outcome</th>
+                <th>Count</th>
+                <th>Distinct actors</th>
+                <th>Distinct IPs</th>
+                <th>First seen (UTC)</th>
+                <th>Last seen (UTC)</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for group in groups %}
+            <tr class="audit-group" data-action-type="{{ group.action_type }}" data-outcome="{{ group.outcome or '' }}">
+                <td>{{ group.action_type }}</td>
+                <td>{{ group.outcome or '-' }}</td>
+                <td class="audit-group-count">{{ group.count }}</td>
+                <td>{{ group.distinct_actors }}</td>
+                <td>{{ group.distinct_ips }}</td>
+                <td>{{ group.first_seen }}</td>
+                <td>{{ group.last_seen }}</td>
+                <td><button type="button" class="outline audit-drilldown" hx-get="{{ group.drill_url }}" hx-target="#audit-list-section" hx-swap="innerHTML">View rows</button></td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="no-data">No authentication activity in this window.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+<datalist id="audit-actor-options">
+    {% for name in actor_options %}
+    <option value="{{ name }}"></option>
+    {% endfor %}
+</datalist>

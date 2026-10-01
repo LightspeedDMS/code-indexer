@@ -27,7 +27,6 @@ from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import UserManager, UserRole
 from code_indexer.server.auth.jwt_manager import JWTManager
 from code_indexer.server.auth.rate_limiter import PasswordChangeRateLimiter
-from code_indexer.server.utils.config_manager import PasswordSecurityConfig
 from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
 from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
 from code_indexer.server.auth import dependencies
@@ -53,24 +52,8 @@ class RealComponentTestInfrastructure:
         self.refresh_token_manager: Optional[RefreshTokenManager] = None
         self._original_cidx_server_dir: Optional[str] = None
         self._original_dependencies: Optional[Dict[str, Any]] = None
-
-    @staticmethod
-    def create_weak_password_config() -> PasswordSecurityConfig:
-        """
-        Create weak password security config for testing.
-
-        Disables all security checks to allow simple test passwords.
-        """
-        return PasswordSecurityConfig(
-            min_length=1,  # Very short passwords allowed
-            max_length=128,
-            required_char_classes=0,  # No character class requirements
-            min_entropy_bits=0,  # No entropy requirements
-            check_common_passwords=False,  # Allow common passwords
-            check_personal_info=False,  # Allow personal info
-            check_keyboard_patterns=False,  # Allow keyboard patterns
-            check_sequential_chars=False,  # Allow sequential chars like "123"
-        )
+        self._original_real_audit_service: Optional[Any] = None
+        self._original_real_audit_log_file_path: Optional[str] = None
 
     def setup(self) -> None:
         """
@@ -105,54 +88,61 @@ class RealComponentTestInfrastructure:
             Real FastAPI application with all security middleware enabled
 
         CRITICAL: NO MOCKS - Uses real components throughout
+
+        NOTE (#1698): user_manager and password_audit_logger are captured
+        as closures over their create_app()-time instances by the routes
+        extracted into inline_auth.py/inline_admin_users.py (Story #409)
+        -- reassigning the `dependencies.user_manager` / `audit_logger.
+        password_audit_logger` module attributes AFTER create_app() has
+        ZERO effect on already-registered route closures. The previous
+        implementation built a completely separate JSON-backed UserManager
+        and a brand new PasswordChangeAuditLogger and reassigned module
+        attributes to them -- invisible to every real request, so every
+        login through this infrastructure 401'd regardless of test order
+        (confirmed live via direct experimentation). Fixed by deriving
+        user_manager from the app's own dependencies post-create_app(),
+        and by mutating the REAL password_audit_logger singleton's
+        handler in place (mirrors the established #1681 fix pattern)
+        instead of building a disconnected replacement.
         """
-        # Store original global instances
-        original_dependencies = {
-            "jwt_manager": getattr(dependencies, "jwt_manager", None),
-            "user_manager": getattr(dependencies, "user_manager", None),
-        }
-
-        # Store original audit logger
-        from code_indexer.server.auth import audit_logger as audit_module
-
-        original_audit_logger = getattr(audit_module, "password_audit_logger", None)
-
-        # Create our own user manager with weak password config for testing
         assert self.temp_dir is not None, (
             "temp_dir must be set before creating test app"
         )
-        weak_password_config = self.create_weak_password_config()
-        users_file_path = str(self.temp_dir / "users.json")
-        test_user_manager = UserManager(
-            users_file_path=users_file_path,
-            password_security_config=weak_password_config,
-        )
 
-        # Create test audit logger that writes to our temp directory
-        audit_log_path = self.temp_dir / "audit" / "password_changes.log"
-        test_audit_logger = PasswordChangeAuditLogger(str(audit_log_path))
+        # Isolate the REAL password_audit_logger singleton's handler to
+        # this test's own tempdir -- restored via cleanup()'s
+        # _restore_password_audit_logger().
+        from code_indexer.server.auth import audit_logger as audit_module
 
-        # The create_app() function will create its own managers using our test environment
-        # Since we set CIDX_SERVER_DATA_DIR, it will use our temp directory
+        real_audit_logger = audit_module.password_audit_logger
+        self._original_real_audit_service = real_audit_logger._audit_service
+        self._original_real_audit_log_file_path = real_audit_logger.log_file_path
+
+        # The create_app() function will create its own managers using our
+        # test environment. Since we set CIDX_SERVER_DATA_DIR, it will use
+        # our temp directory. Route closures (login, change-password, etc.)
+        # are fixed to whatever these managers are AT THIS POINT.
         app = cast(FastAPI, create_app())
 
-        # Override with our test components
-        dependencies.user_manager = test_user_manager
-        audit_module.password_audit_logger = test_audit_logger
+        # Derive user_manager from the app's own dependencies so test
+        # users are created in the SAME instance the route closures
+        # captured (#1698).
+        self.user_manager = dependencies.user_manager
 
-        # Also override in app module since it imports directly
-        import code_indexer.server.app as app_module
-
-        app_module.password_audit_logger = test_audit_logger
+        # Isolate the REAL audit logger singleton's handler in place --
+        # creating a brand new PasswordChangeAuditLogger and reassigning
+        # module attributes (the old approach) is invisible to
+        # inline_admin_users.py's name-bound `password_audit_logger`
+        # import.
+        audit_log_path = self.temp_dir / "audit" / "password_changes.log"
+        isolated_audit_logger = PasswordChangeAuditLogger(str(audit_log_path))
+        real_audit_logger._audit_service = None
+        real_audit_logger.audit_logger = isolated_audit_logger.audit_logger
+        real_audit_logger.log_file_path = isolated_audit_logger.log_file_path
+        self.audit_logger = real_audit_logger
 
         # Store the managers for our tests to use
         self.jwt_manager = dependencies.jwt_manager
-        self.user_manager = dependencies.user_manager
-        self.audit_logger = test_audit_logger
-
-        # Store original instances for cleanup
-        self._original_dependencies = original_dependencies
-        self._original_dependencies["password_audit_logger"] = original_audit_logger
 
         return app
 
@@ -363,16 +353,11 @@ class RealComponentTestInfrastructure:
         if self.client:
             self.client.close()
 
-        # Restore original dependency instances
-        if self._original_dependencies:
-            for key, value in self._original_dependencies.items():
-                if key == "password_audit_logger":
-                    # Restore audit logger in its module
-                    from code_indexer.server.auth import audit_logger as audit_module
-
-                    audit_module.password_audit_logger = value
-                else:
-                    setattr(dependencies, key, value)
+        # Restore the REAL password_audit_logger singleton to a genuinely
+        # working state (#1698) -- reassigning stale object references
+        # does not reopen handlers set_audit_service() closed in place;
+        # mirrors the established #1681 fix pattern.
+        self._restore_password_audit_logger()
 
         # Restore original environment
         if self._original_cidx_server_dir is not None:
@@ -400,6 +385,39 @@ class RealComponentTestInfrastructure:
         self.audit_logger = None
         self.refresh_token_manager = None
         self._original_cidx_server_dir = None
+
+    def _restore_password_audit_logger(self) -> None:
+        """Restore the REAL password_audit_logger singleton to a genuinely
+        WORKING state after create_test_app() isolated its handler to this
+        test's own tempdir.
+
+        set_audit_service() (audit_logger.py) closes and removes handlers
+        on the shared, name-cached Logger object IN PLACE -- restoring
+        only the `.audit_logger`/`.log_file_path` references afterward
+        would re-point at that SAME now-handler-less Logger, permanently
+        breaking every later real-component test in the same pytest
+        session that logs through this singleton (see #1681 / #1698).
+        Reopen a real handler instead.
+        """
+        from code_indexer.server.auth.audit_logger import (
+            password_audit_logger as real_audit_logger,
+            PasswordChangeAuditLogger,
+        )
+
+        for handler in real_audit_logger.audit_logger.handlers[:]:
+            handler.close()
+            real_audit_logger.audit_logger.removeHandler(handler)
+        if self._original_real_audit_service is not None:
+            real_audit_logger.set_audit_service(self._original_real_audit_service)
+        elif self._original_real_audit_log_file_path:
+            restored = PasswordChangeAuditLogger(
+                log_file_path=self._original_real_audit_log_file_path
+            )
+            real_audit_logger._audit_service = None
+            real_audit_logger.audit_logger = restored.audit_logger
+            real_audit_logger.log_file_path = restored.log_file_path
+        self._original_real_audit_service = None
+        self._original_real_audit_log_file_path = None
 
 
 @pytest.fixture

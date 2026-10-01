@@ -32,7 +32,7 @@ from code_indexer.server.mcp.protocol import _check_repository_access
 from code_indexer.server.auth.user_manager import User, UserRole
 
 CREATED_AT = datetime(2024, 1, 1, tzinfo=timezone.utc)
-TEST_USERNAME = "Seba.Battig@lightspeeddms.com"
+TEST_USERNAME = "Jane.Doe@example.com"
 
 
 # ---------------------------------------------------------------------------

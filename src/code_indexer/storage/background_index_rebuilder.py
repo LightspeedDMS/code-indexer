@@ -29,7 +29,12 @@ import time
 from pathlib import Path
 from typing import Callable, Generator
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    fsync_directory,
+    fsync_path,
+    nfs_safe_flock,
+    nfs_safe_funlock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,33 +110,60 @@ class BackgroundIndexRebuilder:
         Note:
             If target_file exists, it will be atomically replaced. The OS
             handles cleanup of the old file once all file handles are closed.
+
+            Bug #1529: atomic is not durable. Every index this method
+            publishes is rewritten IN PLACE at a stable path, so the contents
+            are flushed BEFORE the rename and the containing directory AFTER
+            it. The ordering is the whole point -- an fsync on the wrong side
+            of the rename provides no durability at all.
         """
         # Verify temp file exists
         if not temp_file.exists():
             raise FileNotFoundError(f"Temp file does not exist: {temp_file}")
 
+        # Flush the built index before publishing it. fsync_path handles both
+        # shapes this method serves: a plain file (HNSW, id_index) and a
+        # directory (Tantivy FTS).
+        fsync_path(temp_file)
+
         # Atomic rename (kernel-level atomic operation)
         # This is why queries don't need locks - the rename is instantaneous
         os.rename(temp_file, target_file)
 
+        # Flush the directory entry so the rename itself survives power-loss.
+        fsync_directory(target_file.parent)
+
         logger.debug(f"Atomic swap: {temp_file} → {target_file}")
 
     def rebuild_with_lock(
-        self, build_fn: Callable[[Path], None], target_file: Path
+        self,
+        build_fn: Callable[[Path], None],
+        target_file: Path,
+        lock_already_held: bool = False,
     ) -> None:
         """Rebuild index in background with lock held for entire duration.
 
         Pattern:
-            1. Acquire exclusive lock
+            1. Acquire exclusive lock (skipped when lock_already_held=True)
             2. Cleanup orphaned .tmp files from crashes (AC9)
             3. Build index to .tmp file
             4. Atomic swap .tmp → target
-            5. Release lock
+            5. Release lock (skipped when lock_already_held=True)
 
         Args:
             build_fn: Function that builds index to temp file
                      Signature: build_fn(temp_file: Path) -> None
             target_file: Path to target index file
+            lock_already_held: Bug #1575 Part C -- when True, the caller
+                already holds ``.index_rebuild.lock`` (e.g.
+                ``end_indexing()``'s Part C decision engine, which acquires
+                the lock once for the whole rebuild-or-reuse decision) and
+                this method must NOT try to acquire it again: ``flock()`` is
+                per OPEN FILE DESCRIPTION, not per-process, so a second
+                ``open()`` + ``flock(LOCK_EX)`` on the same lock file from
+                the same process would block forever waiting on itself.
+                Default False preserves byte-identical behavior for every
+                pre-existing caller (acquires the lock as before).
 
         Note:
             Lock is held for ENTIRE rebuild, not just atomic swap. This
@@ -141,8 +173,10 @@ class BackgroundIndexRebuilder:
         """
         temp_file = Path(str(target_file) + ".tmp")
 
+        lock_cm = contextlib.nullcontext() if lock_already_held else self.acquire_lock()
+
         try:
-            with self.acquire_lock():
+            with lock_cm:
                 logger.info(f"Starting background rebuild: {target_file}")
 
                 # FIRST: Cleanup orphaned .tmp files from crashes (AC9)

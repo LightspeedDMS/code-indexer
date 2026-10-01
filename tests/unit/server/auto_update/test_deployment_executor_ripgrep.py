@@ -6,7 +6,9 @@ RipgrepInstaller utility class. The actual ripgrep installation logic is
 comprehensively tested in tests/unit/server/utils/test_ripgrep_installer.py.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import Mock, patch
 
 import pytest
@@ -111,6 +113,38 @@ class TestEnsureRipgrepDelegation:
         assert result is True
 
 
+@contextmanager
+def _all_steps_except_ripgrep(executor: DeploymentExecutor) -> Iterator[None]:
+    """Mock the execute() steps this file's tests must isolate, except
+    ensure_ripgrep.
+
+    Shared by the TestExecuteMethodIntegration tests below to avoid
+    duplicating this patch list (mirrors test_rust_toolchain.py's
+    _all_steps_except_rust). Includes _build_hnswlib_with_fallback (Bug
+    #1651/#1640): with a fake repo_path, its unmocked fallback branch does
+    a real `git clone`. Also includes _ensure_cli_dependencies_synced (Bug
+    #1715): with a fake repo_path, its unmocked branch does a real
+    `pip install -e .`.
+    """
+    with (
+        patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
+        patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"),
+        patch.object(executor, "git_pull", return_value=True),
+        patch.object(executor, "git_submodule_update", return_value=True),
+        patch.object(executor, "build_custom_hnswlib", return_value=True),
+        patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
+        patch.object(executor, "pip_install", return_value=True),
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
+        patch.object(executor, "_ensure_rust_toolchain", return_value=True),
+        patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
+        patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
+        patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+    ):
+        yield
+
+
 @pytest.mark.slow
 class TestExecuteMethodIntegration:
     """Tests for execute() method integration with ripgrep installation."""
@@ -126,36 +160,15 @@ class TestExecuteMethodIntegration:
 
     def test_execute_calls_ensure_ripgrep(self, executor, tmp_path):
         """Test that execute() method calls ensure_ripgrep()."""
-        # Setup mocks for all execute() dependencies
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
-        with patch.object(
-            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        with (
+            _all_steps_except_ripgrep(executor),
+            patch.object(executor, "ensure_ripgrep") as mock_ensure_rg,
         ):
-            with patch.object(
-                executor, "_calculate_auto_update_hash", return_value="same_hash"
-            ):
-                with patch.object(executor, "git_pull", return_value=True):
-                    with patch.object(
-                        executor, "git_submodule_update", return_value=True
-                    ):
-                        with patch.object(
-                            executor, "build_custom_hnswlib", return_value=True
-                        ):
-                            with patch.object(
-                                executor, "pip_install", return_value=True
-                            ):
-                                with patch.object(
-                                    executor, "ensure_ripgrep"
-                                ) as mock_ensure_rg:
-                                    mock_ensure_rg.return_value = True
-                                    with patch.object(
-                                        executor,
-                                        "_ensure_rust_toolchain",
-                                        return_value=True,
-                                    ):
-                                        result = executor.execute()
+            mock_ensure_rg.return_value = True
+            result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -165,34 +178,15 @@ class TestExecuteMethodIntegration:
 
     def test_execute_continues_if_ripgrep_fails(self, executor, tmp_path):
         """Test that execute() continues even if ensure_ripgrep fails."""
-        # Setup mocks for all execute() dependencies
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
         with (
-            patch.object(
-                executor, "_ensure_git_safe_directory_wildcard", return_value=True
-            ),
-            patch.object(
-                executor, "_calculate_auto_update_hash", return_value="same_hash"
-            ),
+            _all_steps_except_ripgrep(executor),
+            patch.object(executor, "ensure_ripgrep") as mock_ensure_rg,
         ):
-            with patch.object(executor, "git_pull", return_value=True):
-                with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(
-                        executor, "build_custom_hnswlib", return_value=True
-                    ):
-                        with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(
-                                executor, "ensure_ripgrep"
-                            ) as mock_ensure_rg:
-                                mock_ensure_rg.return_value = False  # ripgrep fails
-                                with patch.object(
-                                    executor,
-                                    "_ensure_rust_toolchain",
-                                    return_value=True,
-                                ):
-                                    result = executor.execute()
+            mock_ensure_rg.return_value = False  # ripgrep fails
+            result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -206,34 +200,15 @@ class TestExecuteMethodIntegration:
 
         caplog.set_level(logging.INFO)
 
-        # Setup mocks for all execute() dependencies
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
         with (
-            patch.object(
-                executor, "_ensure_git_safe_directory_wildcard", return_value=True
-            ),
-            patch.object(
-                executor, "_calculate_auto_update_hash", return_value="same_hash"
-            ),
+            _all_steps_except_ripgrep(executor),
+            patch.object(executor, "ensure_ripgrep") as mock_ensure_rg,
         ):
-            with patch.object(executor, "git_pull", return_value=True):
-                with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(
-                        executor, "build_custom_hnswlib", return_value=True
-                    ):
-                        with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(
-                                executor, "ensure_ripgrep"
-                            ) as mock_ensure_rg:
-                                mock_ensure_rg.return_value = True
-                                with patch.object(
-                                    executor,
-                                    "_ensure_rust_toolchain",
-                                    return_value=True,
-                                ):
-                                    result = executor.execute()
+            mock_ensure_rg.return_value = True
+            result = executor.execute()
 
         # Verify ripgrep success was logged at INFO level
         assert any(
@@ -248,34 +223,15 @@ class TestExecuteMethodIntegration:
 
         caplog.set_level(logging.ERROR)
 
-        # Setup mocks for all execute() dependencies
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
         with (
-            patch.object(
-                executor, "_ensure_git_safe_directory_wildcard", return_value=True
-            ),
-            patch.object(
-                executor, "_calculate_auto_update_hash", return_value="same_hash"
-            ),
+            _all_steps_except_ripgrep(executor),
+            patch.object(executor, "ensure_ripgrep") as mock_ensure_rg,
         ):
-            with patch.object(executor, "git_pull", return_value=True):
-                with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(
-                        executor, "build_custom_hnswlib", return_value=True
-                    ):
-                        with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(
-                                executor, "ensure_ripgrep"
-                            ) as mock_ensure_rg:
-                                mock_ensure_rg.return_value = False
-                                with patch.object(
-                                    executor,
-                                    "_ensure_rust_toolchain",
-                                    return_value=True,
-                                ):
-                                    result = executor.execute()
+            mock_ensure_rg.return_value = False
+            result = executor.execute()
 
         # Verify ripgrep failure was logged at ERROR level with error code
         assert any(

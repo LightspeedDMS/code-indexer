@@ -15,13 +15,13 @@ import threading
 from unittest.mock import Mock
 from pathlib import Path
 from concurrent.futures import Future
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
-from src.code_indexer.services.file_chunking_manager import (
+from code_indexer.services.file_chunking_manager import (
     FileChunkingManager,
     FileProcessingResult,
 )
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 
 class MockVectorCalculationManager:
@@ -46,7 +46,7 @@ class MockVectorCalculationManager:
         # Simulate async processing
         def complete_future():
             time.sleep(self.submit_delay)
-            from src.code_indexer.services.vector_calculation_manager import (
+            from code_indexer.services.vector_calculation_manager import (
                 VectorResult,
             )
 
@@ -74,7 +74,7 @@ class MockVectorCalculationManager:
         self, chunk_texts: List[str], metadata: Dict[str, Any]
     ) -> "Future":
         """Mock submit_batch_task method for batch processing."""
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         future: Future[VectorResult] = Future()
 
@@ -111,8 +111,13 @@ class MockFixedSizeChunker:
     def __init__(self):
         self.chunk_calls = []
 
-    def chunk_file(self, file_path: Path) -> List[Dict]:
-        """Mock chunk_file method."""
+    def chunk_file(
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict]:
+        """Mock chunk_file method -- signature mirrors the REAL
+        FixedSizeChunker.chunk_file(file_path, repo_root=...) API that
+        FileChunkingManager actually calls (repo_root is accepted, and
+        unused here since this mock never performs image extraction)."""
         self.chunk_calls.append(file_path)
 
         # Simulate chunking based on file content
@@ -122,7 +127,9 @@ class MockFixedSizeChunker:
         except (IOError, OSError):
             content = "mock content"
 
-        # Return mock chunks
+        # Return mock chunks -- shape mirrors the REAL chunker's chunk
+        # dict exactly (text/chunk_index/total_chunks/size/file_path/
+        # file_extension/line_start/line_end/images).
         return (
             [
                 {
@@ -134,6 +141,7 @@ class MockFixedSizeChunker:
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 1,
                     "line_end": 10,
+                    "images": [],
                 },
                 {
                     "text": content[400:] if len(content) > 500 else "",
@@ -144,6 +152,7 @@ class MockFixedSizeChunker:
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 8,
                     "line_end": 20,
+                    "images": [],
                 },
             ]
             if len(content) > 500
@@ -157,6 +166,7 @@ class MockFixedSizeChunker:
                     "file_extension": file_path.suffix.lstrip("."),
                     "line_start": 1,
                     "line_end": 5,
+                    "images": [],
                 }
             ]
         )
@@ -388,11 +398,16 @@ class TestFileChunkingManagerAcceptanceCriteria:
             # All points in single atomic operation
             assert upsert_call["point_count"] > 0
 
-            # All points should be from same file
+            # All points should be from same file. CURRENT CONTRACT:
+            # _normalize_path_for_storage() stores paths RELATIVE to
+            # codebase_dir (CoW-clone/repository-move portability) --
+            # codebase_dir is self.test_file_path.parent here, so the
+            # stored path is exactly the filename, never the absolute path.
+            expected_relative_path = str(
+                self.test_file_path.relative_to(self.test_file_path.parent)
+            )
             for point in upsert_call["points"]:
-                assert str(self.test_file_path) in str(
-                    point.get("payload", {}).get("path", "")
-                )
+                assert point.get("payload", {}).get("path") == expected_relative_path
 
     def test_error_handling_chunking_failure(self):
         """Test error handling when chunking fails."""
@@ -440,7 +455,7 @@ class TestFileChunkingManagerAcceptanceCriteria:
 
         # Create a mock future that returns a result with error
         failing_future: Future[Any] = Future()
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         failing_result = VectorResult(
             task_id="failed_batch",
@@ -500,10 +515,13 @@ class TestFileChunkingManagerAcceptanceCriteria:
 
             result = future.result(timeout=10.0)
 
-            # FileProcessingResult should indicate failure
+            # FileProcessingResult should indicate failure. CURRENT
+            # CONTRACT: file_chunking_manager.py's write-failure branch
+            # reports "Vector storage write failed: {e}" (not the stale
+            # "Filesystem write failed" wording this test used to expect).
             assert result.success is False
             assert result.error is not None
-            assert "Filesystem write failed" in str(result.error)
+            assert "Vector storage write failed" in str(result.error)
 
     def test_thread_pool_management(self):
         """Test ThreadPoolExecutor lifecycle management."""
@@ -681,6 +699,25 @@ class TestFileChunkingManagerAcceptanceCriteria:
 class TestFileChunkingManagerValidation:
     """Test parameter validation and edge cases."""
 
+    def setup_method(self):
+        """Setup test environment (mirrors
+        TestFileChunkingManagerAcceptanceCriteria.setup_method) -- several
+        tests below need a real codebase_dir, derived from
+        self.test_file_path.parent."""
+        self.test_file = tempfile.NamedTemporaryFile(
+            mode="w", delete=False, suffix=".py"
+        )
+        self.test_file.write("print('Hello, World!')\n" * 100)
+        self.test_file.close()
+        self.test_file_path = Path(self.test_file.name)
+
+    def teardown_method(self):
+        """Cleanup test environment (defensive hasattr guard so a
+        partial-setup failure never masks the real failure with an
+        unrelated AttributeError during teardown)."""
+        if hasattr(self, "test_file_path") and self.test_file_path.exists():
+            self.test_file_path.unlink()
+
     def test_invalid_thread_count_validation(self):
         """Test that invalid thread counts raise ValueError."""
         mock_vector_manager = MockVectorCalculationManager()
@@ -733,7 +770,10 @@ class TestFileChunkingManagerValidation:
                 codebase_dir=self.test_file_path.parent,
             )
 
-        with pytest.raises(ValueError, match="filesystem_client cannot be None"):
+        # CURRENT CONTRACT: the constructor's actual parameter is named
+        # vector_store_client (not the stale "filesystem_client" name),
+        # and its None-check message matches that real parameter name.
+        with pytest.raises(ValueError, match="vector_store_client cannot be None"):
             FileChunkingManager(
                 vector_manager=mock_vector_manager,
                 chunker=mock_chunker,
@@ -1030,8 +1070,17 @@ class TestFileChunkingManagerValidation:
             },
         ]
 
-        # Create mock multimodal client with proper config
-        mock_multimodal_client = Mock()
+        # Create mock multimodal client with proper config -- spec
+        # restricted to the REAL VoyageMultimodalClient's actual public
+        # surface (get_multimodal_embedding, config). A bare, unspec'd
+        # Mock() auto-vivifies ANY accessed attribute, including
+        # "collection_name" -- which the real VoyageAI client deliberately
+        # does NOT have (only CohereMultimodalClient defines that
+        # property) -- silently defeating production's
+        # getattr(self.multimodal_client, "collection_name",
+        # self.multimodal_client.config.model) fallback and returning an
+        # auto-created child Mock instead of the intended string.
+        mock_multimodal_client = Mock(spec=["get_multimodal_embedding", "config"])
         mock_multimodal_client.get_multimodal_embedding.return_value = (0.1,) * 1024
         mock_multimodal_client.config = Mock()
         mock_multimodal_client.config.model = "voyage-multimodal-3"

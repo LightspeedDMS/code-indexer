@@ -35,6 +35,119 @@ def make_py_fixture(tmp_path: Path, files: dict) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Genuine Rust evaluators (Bug #1805)
+#
+# The engine these CLI commands actually run against is the Rust backend
+# (RustNativeBackend), so a valid evaluator MUST be Rust source containing
+# `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` — the legacy
+# Python expression `return True` is NOT valid Rust and must be rejected.
+# ---------------------------------------------------------------------------
+
+# Unconditional match: fires once per file the Phase-1 regex already
+# selected. Used where a test only cares about flag/plumbing behavior, not
+# about which construct was matched.
+VALID_RUST_EVALUATOR = (
+    "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { "
+    'vec![EvalFinding { pattern: "match".to_string(), '
+    "line: node.start_line, snippet: String::new() }] }"
+)
+
+# Discriminating: only fires on `password = "..."` assignments, so it
+# proves the evaluator genuinely executed against real Rust semantics
+# rather than passing because of a weak assertion. RHS value is a clearly
+# non-sensitive placeholder — the evaluator itself does not inspect it.
+HARDCODED_PASSWORD_EVALUATOR = """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    for assign in node.descendants_of_kind("assignment") {
+        if let Some(ident) = assign.child_by_kind("identifier") {
+            if ident.text() == "password" && assign.has_descendant_of_kind("string") {
+                findings.push(EvalFinding {
+                    pattern: "hardcoded-password".to_string(),
+                    line: assign.start_line,
+                    snippet: assign.text().to_string(),
+                });
+            }
+        }
+    }
+    findings
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Bug #1805: genuine Rust evaluator end-to-end (RED before fix, GREEN after)
+# ---------------------------------------------------------------------------
+
+
+def test_xray_search_real_rust_evaluator_produces_genuine_match(tmp_path: Path):
+    """Bug #1805 regression: a real Rust evaluator must be accepted and
+    produce a specific real finding, not a boilerplate-satisfiable
+    substring. Regex '.' selects BOTH fixture files so 'only auth.py
+    matches' proves the evaluator itself discriminates, not the Phase-1
+    pre-filter.
+    """
+    repo_dir = make_py_fixture(
+        tmp_path,
+        {
+            "auth.py": "password = 'CHANGE_ME_NOT_REAL'\n",
+            "utils.py": "# no secrets here\n",
+        },
+    )
+    runner = CliRunner()
+    result = invoke_xray_search(
+        runner,
+        [
+            "--repo",
+            str(repo_dir),
+            "--regex",
+            ".",
+            "--eval",
+            HARDCODED_PASSWORD_EVALUATOR,
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (
+        f"Expected exit 0 with a genuine Rust evaluator, got {result.exit_code}. "
+        f"Output: {result.output}"
+    )
+    data = json.loads(result.output)
+    matches = data["matches"]
+    assert len(matches) == 1, f"Expected exactly 1 match, got {len(matches)}: {matches}"
+    match = matches[0]
+    assert match["pattern"] == "hardcoded-password", match
+    assert match["file_path"] == "auth.py", match
+    assert match["line_number"] == 1, match
+    file_paths = [m["file_path"] for m in matches]
+    assert "utils.py" not in file_paths, (
+        "utils.py has no hardcoded password assignment and must not match"
+    )
+
+
+def test_xray_search_legacy_python_evaluator_string_now_rejected(tmp_path: Path):
+    """Bug #1805 regression: 'return True' is not valid Rust and must now
+    be rejected with a Rust-meaningful reason -- never the old misleading
+    Python 'syntax_error' that pointed at line 1 of valid Rust.
+    """
+    runner = CliRunner()
+    result = invoke_xray_search(
+        runner,
+        ["--repo", str(tmp_path), "--regex", "x", "--eval", "return True", "--json"],
+    )
+    assert result.exit_code == 2, (
+        f"Expected exit 2 for legacy Python evaluator, got {result.exit_code}. "
+        f"Output: {result.output}"
+    )
+    output_lower = result.output.lower()
+    assert "evaluate_node" in output_lower or "missing_entry_point" in output_lower, (
+        f"Expected a Rust-meaningful rejection reason, got: {result.output}"
+    )
+    assert "syntax_error" not in output_lower, (
+        f"Must not surface the misleading Python syntax_error: {result.output}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Flag validation — timeout bounds
 # ---------------------------------------------------------------------------
 
@@ -50,7 +163,7 @@ def test_xray_search_invalid_timeout_low():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--timeout",
             "5",
         ],
@@ -70,7 +183,7 @@ def test_xray_search_invalid_timeout_high():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--timeout",
             "900",
         ],
@@ -94,7 +207,7 @@ def test_xray_search_invalid_max_files_zero():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "0",
         ],
@@ -115,7 +228,7 @@ def test_xray_search_invalid_max_files_negative():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "-1",
         ],
@@ -180,7 +293,7 @@ def test_xray_search_invalid_repo_path():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 2
@@ -203,7 +316,7 @@ def test_xray_search_eval_file_loads_code(tmp_path: Path):
         {"main.py": "password = 'secret'\n"},
     )
     eval_file = tmp_path / "eval.py"
-    eval_file.write_text("return True", encoding="utf-8")
+    eval_file.write_text(VALID_RUST_EVALUATOR, encoding="utf-8")
 
     runner = CliRunner()
     result = invoke_xray_search(
@@ -226,7 +339,7 @@ def test_xray_search_eval_file_loads_code(tmp_path: Path):
 def test_xray_search_eval_and_eval_file_mutually_exclusive(tmp_path: Path):
     """Providing both --eval and --eval-file should exit non-zero."""
     eval_file = tmp_path / "eval.py"
-    eval_file.write_text("return True", encoding="utf-8")
+    eval_file.write_text(VALID_RUST_EVALUATOR, encoding="utf-8")
 
     runner = CliRunner()
     result = invoke_xray_search(
@@ -237,7 +350,7 @@ def test_xray_search_eval_and_eval_file_mutually_exclusive(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--eval-file",
             str(eval_file),
         ],
@@ -289,7 +402,7 @@ def test_xray_search_runs_against_real_fixture(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0, f"Output: {result.output}"
@@ -312,7 +425,7 @@ def test_xray_search_table_shows_files_and_elapsed(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0
@@ -335,7 +448,7 @@ def test_xray_search_no_matches_exits_zero(tmp_path: Path):
             "--regex",
             "ZZZNOTFOUND",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0
@@ -362,7 +475,7 @@ def test_xray_search_json_output(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--json",
         ],
     )
@@ -401,7 +514,7 @@ def test_xray_search_json_includes_partial_key_on_cap(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "1",
             "--json",
@@ -442,7 +555,7 @@ def test_xray_search_max_files_cap_shows_partial(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "2",
         ],
@@ -476,7 +589,7 @@ def test_xray_search_target_filename(tmp_path: Path):
             "--regex",
             r"auth.*\.py$",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--target",
             "filename",
         ],
@@ -499,7 +612,7 @@ def test_xray_search_invalid_target_value():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--target",
             "xml",
         ],
@@ -536,7 +649,7 @@ def test_xray_search_include_pattern_filters_files(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--include",
             "*.py",
             "--json",
@@ -567,7 +680,7 @@ def test_xray_search_exclude_pattern_filters_files(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--exclude",
             "test/*",
             "--json",
@@ -599,7 +712,7 @@ def test_xray_search_quiet_suppresses_progress(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--quiet",
         ],
     )
@@ -622,7 +735,7 @@ def test_xray_search_missing_repo_flag():
     runner = CliRunner()
     result = invoke_xray_search(
         runner,
-        ["--regex", "x", "--eval", "return True"],
+        ["--regex", "x", "--eval", VALID_RUST_EVALUATOR],
     )
     assert result.exit_code != 0
 
@@ -632,7 +745,7 @@ def test_xray_search_missing_regex_flag():
     runner = CliRunner()
     result = invoke_xray_search(
         runner,
-        ["--repo", "/tmp", "--eval", "return True"],
+        ["--repo", "/tmp", "--eval", VALID_RUST_EVALUATOR],
     )
     assert result.exit_code != 0
 

@@ -4,7 +4,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
-from code_indexer.config import Config
+from typing import Optional
+
+from code_indexer.config import Config, OverrideConfig
 from code_indexer.services.smart_indexer import SmartIndexer
 
 
@@ -146,9 +148,22 @@ def commit_files(repo_path: Path, files: dict, message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_smart_indexer(repo_path: Path, metadata_path: Path) -> SmartIndexer:
-    """Build a SmartIndexer with real Config and mocked embedding/vector backends."""
-    config = Config(codebase_dir=repo_path)
+def build_smart_indexer(
+    repo_path: Path,
+    metadata_path: Path,
+    override_config: Optional[OverrideConfig] = None,
+) -> SmartIndexer:
+    """Build a SmartIndexer with real Config and mocked embedding/vector backends.
+
+    Args:
+        override_config: Optional real OverrideConfig (e.g. with
+            force_include_patterns set) -- threaded through so
+            FileFinder.override_filter_service is a real, non-None
+            instance for tests that need it (Codex Finding #10 parity
+            tests). None (default) preserves existing callers' behavior
+            exactly.
+    """
+    config = Config(codebase_dir=repo_path, override_config=override_config)
 
     mock_provider = Mock()
     mock_provider.get_provider_name.return_value = "test"

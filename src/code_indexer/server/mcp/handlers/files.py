@@ -4,7 +4,9 @@ Domain module for file operation handlers. Part of the handlers package
 modularization (Story #496).
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import logging
 from typing import Dict, Any, Optional, Tuple
@@ -13,6 +15,16 @@ from pathlib import Path
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.file_listing_paths import (
+    normalize_listing_path,
+    compute_direct_children_of,
+    escape_gitwildmatch_literal,
+    is_absolute_path_pattern,
+)
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.logging_utils import format_error_log
 from ._utils import (
     CapBreach,
@@ -81,12 +93,58 @@ def _start_auto_watch_if_needed(
 
     Shared by handle_create_file, handle_edit_file, handle_delete_file.
     Logs and continues on failure (auto-watch is enhancement, not critical).
+
+    Bug #1683 (round 1): previously constructed a bare, unwired
+    `ActivatedRepoManager()` here -- its constructor hardcodes
+    `Path.home()/".cidx-server"/"data"` and ignores `CIDX_SERVER_DATA_DIR`,
+    so in cluster mode (or any deployment overriding the data dir) it read
+    from the WRONG per-node store, found nothing, and (via the caller's
+    fallback) mis-triggered auto-watch/indexing on the wrong directory.
+    Fixed to resolve the DI-wired singleton from app.state instead
+    (`_utils._get_activated_repo_manager()`, the same Bug #1533 pattern
+    already used in this handler package for the same manager -- see
+    `mcp/handlers/search.py`).
+
+    Bug #1683 (round 2): `get_activated_repo_path` is a bare
+    `os.path.join` with no existence check, so a bad/typo'd/stale
+    `repository_alias` (never activated, or deactivated by another
+    cluster node) resolves to a non-existent path that is still handed to
+    `auto_watch_manager.start_watch`. That path's `ConfigManager.
+    create_with_backtrack` finds no config up-tree and defaults
+    `codebase_dir` to `"."`, which resolves against the SERVER PROCESS's
+    CWD -- silently watching/indexing the server's own project tree
+    instead of failing loudly. Round 2 added a `Path.is_dir()` existence
+    guard, but this was REJECTED in review on two independently-reproduced
+    grounds: (1) an activated-repo directory that EXISTS but was never
+    indexed (an orphan clone from a partially-failed activation, or a repo
+    deactivated on another cluster node -- the real-world `admin/tstwiki`
+    shape) sails straight through `is_dir()` and still lands on the CWD
+    fallback; (2) the guard is self-defeating -- for a genuinely
+    non-existent alias, the FIRST errant `start_watch` call (via
+    `BackendFactory...get_vector_store_client()`, downstream of
+    `DaemonWatchManager.start_watch`) materializes
+    `<repo_path>/.code-indexer/index` as a side effect, so `is_dir()`
+    returns True on every subsequent call and the guard permanently
+    disables itself for that alias.
+
+    Bug #1683 (round 3): replaced the filesystem probe with the
+    established, registry/DB-backed authority already used at 10+ other
+    sites in this handler package --
+    `activated_repo_manager.user_has_activated_repo(username, alias)`
+    (`activated_repo_manager.py`, Story #1039) -- which answers "is this a
+    real, currently-activated repo for this user" rather than "does
+    something exist on disk at the path we'd compute", and is therefore
+    immune to on-disk residue left by any prior errant run. The bare
+    `Path(repo_path).is_dir()` check is retained as defense-in-depth (it
+    also covers the `is_write_exception` branch, which
+    `user_has_activated_repo` does not), but no longer the primary guard
+    for the activated-repo branch (Messi Rule 2: fail loud, never
+    substitute a fallback location). The root-cause fix for EVERY caller
+    of `AutoWatchManager.start_watch` (not just this one) lives in
+    `services/auto_watch_manager.py` itself.
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
-    from code_indexer.server.repositories.activated_repo_manager import (
-        ActivatedRepoManager,
-    )
 
     try:
         if file_crud_service.is_write_exception(repository_alias):
@@ -94,12 +152,48 @@ def _start_auto_watch_if_needed(
                 file_crud_service.get_write_exception_path(repository_alias)
             )
         else:
-            activated_repo_manager = ActivatedRepoManager()
+            activated_repo_manager = _utils._get_activated_repo_manager()
+            if activated_repo_manager is None:
+                raise RuntimeError(
+                    "activated_repo_manager not initialized on app.state"
+                )
+            if not activated_repo_manager.user_has_activated_repo(
+                user.username, repository_alias
+            ):
+                # Bug #1683 round 3; round 2's code 220 collided with 9
+                # pre-existing list_pull_requests sites and used an
+                # is_dir() check that a prior errant run's own side
+                # effects could permanently satisfy.
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-223",
+                        f"Skipping auto-watch for {repository_alias}: not a "
+                        f"registered activated repo for {user.username} -- "
+                        f"refusing an orphan/stale directory that a "
+                        f"filesystem-existence check alone cannot detect "
+                        f"(Bug #1683 round 3)",
+                    )
+                )
+                return
             repo_path = activated_repo_manager.get_activated_repo_path(
                 username=user.username, user_alias=repository_alias
             )
+        if not Path(repo_path).is_dir():
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-223",
+                    f"Skipping auto-watch for {repository_alias}: resolved "
+                    f"path does not exist ({repo_path}) -- refusing to let "
+                    f"ConfigManager backtracking fall back to the server "
+                    f"CWD (Bug #1683 round 2/3)",
+                )
+            )
+            return
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
         golden_repos_dir = getattr(
-            _utils.app_module.app.state, "golden_repos_dir", None
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "golden_repos_dir",
+            None,
         )
         if not _is_write_mode_active(repository_alias, golden_repos_dir):
             auto_watch_manager.start_watch(repo_path)
@@ -113,7 +207,6 @@ def _start_auto_watch_if_needed(
             format_error_log(
                 error_code,
                 f"Failed to start auto-watch for {repository_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -292,13 +385,19 @@ def _build_path_pattern(
     path: str, recursive: bool, user_path_pattern: Optional[str]
 ) -> Optional[str]:
     """Build path pattern for list_files from path + user pattern."""
-    path = path.rstrip("/") if path else ""
+    # Bug #1886 (R2): see _build_browse_path_pattern's identical comment.
+    path = normalize_listing_path(path)
     if path:
+        # Bug #1886 (R4): escape gitwildmatch metacharacters in the LITERAL
+        # path component (e.g. a Next.js dynamic-route dir "app/[slug]")
+        # before splicing it into the pattern -- `user_path_pattern` is a
+        # caller-supplied pattern by contract and is never auto-escaped.
+        escaped_path = escape_gitwildmatch_literal(path)
         if user_path_pattern:
             if recursive:
-                return f"{path}/**/{user_path_pattern}"
-            return f"{path}/{user_path_pattern}"
-        return f"{path}/**/*" if recursive else f"{path}/*"
+                return f"{escaped_path}/**/{user_path_pattern}"
+            return f"{escaped_path}/{user_path_pattern}"
+        return f"{escaped_path}/**/*" if recursive else f"{escaped_path}/*"
     if user_path_pattern:
         return user_path_pattern
     return None
@@ -352,22 +451,27 @@ def _build_browse_path_pattern(
 
     Differs from _build_path_pattern in handling absolute patterns.
     """
-    path = path.rstrip("/") if path else ""
+    # Bug #1886 (R2): normalize leading/trailing "/" and a leading "./" so
+    # a request like path="/src" or path="./src/" builds the same pattern
+    # as path="src" -- pathspec's gitwildmatch does not treat a leading
+    # "./" as a no-op (it silently fails to match).
+    path = normalize_listing_path(path)
 
-    is_absolute_pattern = False
-    if user_path_pattern:
-        is_absolute_pattern = "/" in user_path_pattern or user_path_pattern.startswith(
-            "**"
-        )
+    is_absolute_pattern = is_absolute_path_pattern(user_path_pattern)
 
     if path:
+        # Bug #1886 (R4): escape gitwildmatch metacharacters in the LITERAL
+        # path component (e.g. a Next.js dynamic-route dir "app/[slug]")
+        # before splicing it into the pattern -- `user_path_pattern` is a
+        # caller-supplied pattern by contract and is never auto-escaped.
+        escaped_path = escape_gitwildmatch_literal(path)
         if user_path_pattern:
             if is_absolute_pattern:
                 return user_path_pattern
             if recursive:
-                return f"{path}/**/{user_path_pattern}"
-            return f"{path}/{user_path_pattern}"
-        return f"{path}/**/*" if recursive else f"{path}/*"
+                return f"{escaped_path}/**/{user_path_pattern}"
+            return f"{escaped_path}/{user_path_pattern}"
+        return f"{escaped_path}/**/*" if recursive else f"{escaped_path}/*"
     if user_path_pattern:
         return user_path_pattern
     return None
@@ -686,7 +790,6 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-034",
                     f"Omni-list-files failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -708,6 +811,10 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List files in a repository."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.models.api_models import FileListQueryParams
 
     try:
@@ -722,8 +829,12 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -743,13 +854,32 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         recursive = params.get("recursive", True)
         user_path_pattern = params.get("path_pattern")
 
+        normalized_list_path = normalize_listing_path(path)
         final_path_pattern = _build_path_pattern(path, recursive, user_path_pattern)
+
+        # Bug #1886 (R3): recursive=False is documented ("direct children
+        # only") but was never enforced -- same fix as browse_directory's
+        # R1/R2, sharing the identical helper.
+        #
+        # Bug #1886 (R4): list_files NEVER overrides a non-empty `path`
+        # with an absolute user pattern (path_pattern is always relative to
+        # path, per its own tool doc -- see the round-3 review note); the
+        # built pattern only stands alone, verbatim, when `path` itself is
+        # empty and a pattern was supplied. That is the ONLY scenario in
+        # which final_path_pattern is safe to re-parse for a depth base --
+        # every other case was built by escaping+prefixing normalized_path,
+        # so the base must come from normalized_path directly.
+        pattern_overrides_path = bool(user_path_pattern) and not normalized_list_path
+        direct_children_of = compute_direct_children_of(
+            normalized_list_path, recursive, final_path_pattern, pattern_overrides_path
+        )
 
         query_params = FileListQueryParams(
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
             indexed_only=bool(params.get("indexed_only", False)),
+            direct_children_of=direct_children_of,
         )
 
         if repository_alias and repository_alias.endswith("-global"):
@@ -786,6 +916,10 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get content of a specific file with optional pagination."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
@@ -794,8 +928,12 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -889,6 +1027,26 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "metadata": {},
             }
         )
+    except PermissionError as denied:
+        # Bug #1891 D3: a caller-triggerable path-confinement escape
+        # attempt (resolve_confined_path()) is an EXPECTED security
+        # rejection, not a server error -- same shape as the
+        # FileNotFoundError branch above, but logged at INFO with no
+        # traceback so it cannot trip the E2E Phase 3/4 log-audit gate
+        # (tests/e2e/log_audit_gate.py), which fails a phase on any new
+        # ERROR/WARNING log entry. No caller-supplied path is logged.
+        logger.info(
+            "get_file_content: access denied (path confinement)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": str(denied),
+                "file_content": [],
+                "metadata": {},
+            }
+        )
     except Exception as e:
         logger.exception(
             f"Unexpected error in get_file_content: {e}",
@@ -917,7 +1075,8 @@ def _recover_file_content_via_global(
     if not isinstance(repository_alias, str) or repository_alias.endswith("-global"):
         return None
 
-    _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if _grm is None:
         return None
 
@@ -975,6 +1134,10 @@ def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Browse directory recursively."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.models.api_models import FileListQueryParams
 
     try:
@@ -985,8 +1148,12 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1017,6 +1184,39 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             bp["path"], bp["recursive"], bp["user_path_pattern"]
         )
 
+        # Bug #1886: recursive=False means "immediate children only" -- the
+        # glob pattern built above cannot express that on its own (gitignore-
+        # style matching doesn't anchor a bare "*" at "/"), so pass an
+        # explicit depth restriction that FileListingService applies BEFORE
+        # limit truncation. recursive=True (default) passes None: no
+        # restriction, byte-for-byte unchanged behavior.
+        #
+        # R1 (round 2): when user_path_pattern is "absolute" (overrides
+        # `path` entirely -- see _build_browse_path_pattern above), the
+        # depth base must come from final_path_pattern's own literal
+        # directory prefix, not from `path` (which may be irrelevant or
+        # simply wrong, e.g. path="wrong/path" + an absolute pattern).
+        #
+        # Bug #1886 (R4): `pattern_overrides_path` is the explicit signal
+        # for that override case -- an absolute user pattern, OR `path`
+        # itself being empty (the pattern then stands alone, verbatim).
+        # Every other pattern was built by escaping+prefixing
+        # normalized_browse_path (escape_gitwildmatch_literal), so
+        # re-parsing it for a depth base would either see an escaped
+        # metachar as "still a glob" (wrongly disabling the restriction) or
+        # yield a base that never equals a real file's unescaped dirname.
+        normalized_browse_path = normalize_listing_path(bp["path"])
+        user_path_pattern = bp["user_path_pattern"]
+        pattern_overrides_path = bool(user_path_pattern) and (
+            is_absolute_path_pattern(user_path_pattern) or not normalized_browse_path
+        )
+        direct_children_of = compute_direct_children_of(
+            normalized_browse_path,
+            bp["recursive"],
+            final_path_pattern,
+            pattern_overrides_path,
+        )
+
         query_params = FileListQueryParams(
             page=_DEFAULT_PAGE,
             limit=bp["limit"],
@@ -1024,6 +1224,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             language=bp["language"],
             sort_by=bp["sort_by"],
             indexed_only=bp["indexed_only"],
+            direct_children_of=direct_children_of,
         )
 
         # Perf fast-path: a NON-recursive browse of a subdirectory only needs that one
@@ -1069,7 +1270,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             serialized_files, repository_alias, user
         )
 
-        path_normalized = (bp["path"].rstrip("/") if bp["path"] else "") or "/"
+        path_normalized = normalized_browse_path or "/"
         structure = {
             "path": path_normalized,
             "files": serialized_files,
@@ -1150,7 +1351,6 @@ def _handle_crud_exception(
             format_error_log(
                 error_code,
                 log_msg,
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     else:
@@ -1420,6 +1620,10 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for directory_tree tool - generate hierarchical tree view."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
 
     repository_alias = args.get("repository_alias")
@@ -1430,8 +1634,12 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+        # of a bare getattr(_utils.app_module, name, None), which would
+        # otherwise permanently construct the process-wide app singleton
+        # as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repository_alias):
                 from ._global_fallback import try_global_fallback

@@ -17,11 +17,13 @@ from ..services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
     HostConflictError,
+    PublicKeyNotFoundError,
 )
 from ..services.ssh_key_generator import (
     InvalidKeyNameError,
     KeyAlreadyExistsError,
 )
+from ..services.ssh_input_validation import InvalidHostnameError
 
 
 # Request/Response Models
@@ -135,20 +137,21 @@ def get_ssh_key_manager() -> SSHKeyManager:
 router = APIRouter(prefix="/api/ssh-keys", tags=["SSH Keys"])
 
 
-def create_ssh_key(request: CreateKeyRequest) -> CreateKeyResponse:
+def create_ssh_key(request: CreateKeyRequest, *, actor: str) -> CreateKeyResponse:
     """
-    Create a new SSH key pair.
+    Create a new SSH key pair (recorded with *actor* as the acting user).
 
     Returns the public key for copy/paste to git hosting providers.
     """
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.create_key(
-            name=request.name,
+        metadata = manager.create_key_audited(
+            request.name,
             key_type=request.key_type,
             email=request.email,
             description=request.description,
+            actor=actor,
         )
 
         return CreateKeyResponse(
@@ -198,14 +201,30 @@ def list_ssh_keys() -> KeyListResponse:
     return KeyListResponse(managed=managed, unmanaged=unmanaged)
 
 
-def delete_ssh_key(name: str) -> DeleteKeyResponse:
+def delete_ssh_key(name: str, *, actor: str) -> DeleteKeyResponse:
     """
-    Delete an SSH key, its config entries, and metadata.
+    Delete an SSH key, its config entries, and metadata (recorded with *actor*).
 
     This operation is idempotent - succeeds even if key doesn't exist.
+
+    Bug #1521: ``delete_key()`` returns False when the Bug #1519 provenance
+    guard refuses to remove a same-named file this server never proved it
+    wrote.  That return value used to be discarded, so a refused deletion was
+    reported as a success -- a silent lie about a safety-critical operation.
+    409 Conflict matches this router's existing convention for "the request is
+    valid but conflicts with the current state" (see KeyAlreadyExistsError and
+    HostConflictError above).
     """
     manager = get_ssh_key_manager()
-    manager.delete_key(name)
+    if not manager.delete_key_audited(name, actor=actor):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refused to delete '{name}': an untracked file of that name "
+                f"exists in the SSH directory and this server has no record of "
+                f"creating it. Remove it manually if it is genuinely unwanted."
+            ),
+        )
     return DeleteKeyResponse(success=True, message=f"Key '{name}' deleted")
 
 
@@ -222,21 +241,23 @@ def get_public_key(name: str) -> Response:
         return Response(content=public_key, media_type="text/plain")
     except KeyNotFoundError:
         raise HTTPException(status_code=404, detail=f"Key not found: {name}")
+    except PublicKeyNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
-def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
+def assign_host(
+    name: str, request: AssignHostRequest, *, actor: str
+) -> KeyWithHostsResponse:
     """
-    Assign a host to an SSH key.
+    Assign a host to an SSH key (recorded with *actor* as the acting user).
 
     Updates ~/.ssh/config with the new host mapping.
     """
     manager = get_ssh_key_manager()
 
     try:
-        metadata = manager.assign_key_to_host(
-            key_name=name,
-            hostname=request.hostname,
-            force=request.force,
+        metadata = manager.assign_key_to_host_audited(
+            name, request.hostname, force=request.force, actor=actor
         )
 
         return KeyWithHostsResponse(
@@ -252,6 +273,8 @@ def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
         raise HTTPException(status_code=404, detail=f"Key not found: {name}")
     except HostConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except InvalidHostnameError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # Register routes with proper decorators
@@ -263,10 +286,10 @@ def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
 )
 def api_create_ssh_key(
     request: CreateKeyRequest,
-    _current_user: User = Depends(get_current_admin_user_hybrid),
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> CreateKeyResponse:
     """Create a new SSH key pair."""
-    return create_ssh_key(request)
+    return create_ssh_key(request, actor=current_user.username)
 
 
 @router.get(
@@ -288,10 +311,10 @@ def api_list_ssh_keys(
 )
 def api_delete_ssh_key(
     name: str,
-    _current_user: User = Depends(get_current_admin_user_hybrid),
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> DeleteKeyResponse:
     """Delete an SSH key."""
-    return delete_ssh_key(name)
+    return delete_ssh_key(name, actor=current_user.username)
 
 
 @router.get("/{name}/public")
@@ -311,7 +334,7 @@ def api_get_public_key(
 def api_assign_host(
     name: str,
     request: AssignHostRequest,
-    _current_user: User = Depends(get_current_admin_user_hybrid),
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> KeyWithHostsResponse:
     """Assign a host to an SSH key."""
-    return assign_host(name, request)
+    return assign_host(name, request, actor=current_user.username)

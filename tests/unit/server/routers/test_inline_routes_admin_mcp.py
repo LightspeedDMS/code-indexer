@@ -173,6 +173,9 @@ class TestAdminDeleteUserMcpCredential:
         )
         mock_um = Mock()
         mock_um.get_user.return_value = None
+        # Every attempt goes through the audited revocation first; for an
+        # unknown account the real backends delete nothing and return False.
+        mock_um.delete_mcp_credential.return_value = False
 
         with _patch_closure(handler, "user_manager", mock_um):
             response = admin_client.delete(
@@ -180,6 +183,7 @@ class TestAdminDeleteUserMcpCredential:
             )
 
         assert response.status_code == 404
+        assert response.json()["detail"] == "User not found"
 
     def test_credential_not_found_returns_404(self, admin_client):
         handler = _find_route_handler(

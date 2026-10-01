@@ -32,8 +32,9 @@ from code_indexer.server.telemetry.machine_metrics import (
 from code_indexer.server.telemetry.instrumentation import (
     instrument_fastapi,
     uninstrument_fastapi,
+    instrument_httpx,
+    uninstrument_httpx,
     DEFAULT_EXCLUDED_URLS,
-    reset_instrumentation_state,
 )
 from code_indexer.server.telemetry.correlation_bridge import (
     CorrelationBridgeMiddleware,
@@ -53,16 +54,11 @@ from code_indexer.server.telemetry.job_metrics import (
     reset_job_metrics,
 )
 from code_indexer.server.telemetry.spans import (
-    traced,
     create_span,
     get_tracer,
-    add_span_attribute,
-    add_span_event,
     reset_spans_state,
 )
 from code_indexer.server.telemetry.log_handler import (
-    OTELLogHandler,
-    OTELLogFormatter,
     get_trace_context,
 )
 
@@ -78,8 +74,9 @@ __all__ = [
     # Instrumentation
     "instrument_fastapi",
     "uninstrument_fastapi",
+    "instrument_httpx",
+    "uninstrument_httpx",
     "DEFAULT_EXCLUDED_URLS",
-    "reset_instrumentation_state",
     # Correlation bridge
     "CorrelationBridgeMiddleware",
     "get_current_correlation_id",
@@ -95,14 +92,9 @@ __all__ = [
     "get_job_metrics",
     "reset_job_metrics",
     # Custom spans
-    "traced",
     "create_span",
     "get_tracer",
-    "add_span_attribute",
-    "add_span_event",
     "reset_spans_state",
     # Log handler
-    "OTELLogHandler",
-    "OTELLogFormatter",
     "get_trace_context",
 ]

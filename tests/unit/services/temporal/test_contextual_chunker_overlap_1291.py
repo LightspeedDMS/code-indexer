@@ -6,11 +6,11 @@ aggregated document with 15% overlap while voyage-context-4 keeps 0% overlap
 -- producing DIFFERENT chunk boundaries for the same input.
 """
 
-from src.code_indexer.services.temporal.commit_aggregator import (
+from code_indexer.services.temporal.commit_aggregator import (
     AggregatedCommitDocument,
     ProvenanceSection,
 )
-from src.code_indexer.services.temporal.contextual_chunker import (
+from code_indexer.services.temporal.contextual_chunker import (
     chunk_aggregated_document,
 )
 

@@ -223,7 +223,7 @@ class TestBranchChangeBinaryFiltering:
         13 source files changed + hundreds of binary files between branches.
         Only source files should appear in files_to_reindex.
         """
-        repo = tmp_path / "evolution"
+        repo = tmp_path / "example-repo"
         repo.mkdir()
         _create_git_repo(repo)
 

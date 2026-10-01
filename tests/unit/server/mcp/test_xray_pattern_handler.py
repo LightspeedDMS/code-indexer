@@ -98,33 +98,76 @@ def _xray_single_repo_env(
     if resolved_future is None:
         resolved_future = asyncio.Future()  # pending
 
+    # H3 (consolidated review, Issue #1811/Bug #1812, Codex): pattern-name
+    # resolution now ALSO offloads via loop.run_in_executor (see
+    # handlers.xray._infra._resolve_evaluator_code_off_loop), so a pattern_name
+    # test now sees TWO run_in_executor calls -- the NEW pattern-resolution
+    # one (awaited synchronously, must resolve to the REAL result for the
+    # test to observe genuine pattern-lookup behavior) and the pre-existing
+    # job-execution one (fire-and-forget with a done-callback, never
+    # awaited directly by the handler -- its future can stay pending, as
+    # `resolved_future` already models). The FIRST call is always the
+    # pattern-resolution one in the real code path, so it alone is executed
+    # EAGERLY (for real, synchronously) here; every subsequent call keeps
+    # the pre-existing `resolved_future` behavior unchanged.
+    call_count = {"n": 0}
+
+    def _run_in_executor_side_effect(_executor: Any, func: Any, *args: Any) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            real_result = func(*args)
+            first_call_future: "asyncio.Future[Any]" = asyncio.Future()
+            first_call_future.set_result(real_result)
+            return first_call_future
+        return resolved_future
+
     loop_instance = MagicMock()
-    loop_instance.run_in_executor.return_value = resolved_future
+    loop_instance.run_in_executor.side_effect = _run_in_executor_side_effect
 
     with (
         patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
         patch(
-            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
             return_value=repo_path,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
+            return_value=repo_path,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_background_job_manager",
             return_value=mock_bjm,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_job_tracker",
             return_value=mock_jt,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
+            return_value=mock_jt,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search._get_xray_executor",
             return_value=mock_exec,
         ),
         patch(
-            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+            "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._search.validate_rust_evaluator"
         ) as mock_validate,
+        patch(
+            "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator"
+        ) as mock_validate_explore,
         patch("asyncio.get_running_loop", return_value=loop_instance),
     ):
         mock_validate.return_value = MagicMock(ok=True)
+        mock_validate_explore.return_value = MagicMock(ok=True)
         yield mock_bjm, mock_jt, mock_exec, loop_instance
 
 
@@ -158,7 +201,7 @@ class TestHandleStoreXrayPattern:
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             result = handle_store_xray_pattern(
@@ -176,7 +219,7 @@ class TestHandleStoreXrayPattern:
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             result = handle_store_xray_pattern(
@@ -195,7 +238,7 @@ class TestHandleStoreXrayPattern:
         cidx_meta = _make_cidx_meta(tmp_path)
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             # Also mock git commit on service instances
@@ -232,7 +275,7 @@ class TestHandleStoreXrayPattern:
             self._git_commit = MagicMock()  # type: ignore[method-assign]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+            "code_indexer.server.mcp.handlers.xray._store_pattern._get_cidx_meta_path",
             return_value=cidx_meta,
         ):
             with patch.object(XrayPatternService, "__init__", patched_init):
@@ -284,7 +327,7 @@ class TestXraySearchPatternName:
             mock_app,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._search._resolve_repo_path",
                 return_value="/some/path",
             ):
                 result = await handle_xray_search(
@@ -325,7 +368,7 @@ class TestXraySearchPatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):
@@ -348,32 +391,29 @@ class TestXraySearchPatternName:
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
         user = _make_user()
-        mock_bjm = self._make_mock_bjm()
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
         cidx_meta = _make_cidx_meta(tmp_path)
 
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
-            mock_app,
+        with (
+            _xray_single_repo_env(repo_path="/some/path") as (
+                mock_bjm,
+                mock_jt,
+                mock_exec,
+                mock_loop,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
+                return_value=cidx_meta,
+            ),
         ):
-            with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/path",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
-                    return_value=cidx_meta,
-                ):
-                    result = await handle_xray_search(
-                        {
-                            "repository_alias": "myrepo-global",
-                            "pattern": "def ",
-                            "search_target": "content",
-                            "pattern_name": "nonexistent-pattern",
-                        },
-                        user=user,
-                    )
+            result = await handle_xray_search(
+                {
+                    "repository_alias": "myrepo-global",
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "nonexistent-pattern",
+                },
+                user=user,
+            )
 
         body = _parse_response(result)
         assert body["error"] == "pattern_not_found"
@@ -401,7 +441,7 @@ class TestXraySearchPatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):
@@ -445,7 +485,7 @@ class TestXrayExplorePatternName:
             mock_app,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
                 return_value="/some/path",
             ):
                 result = await handle_xray_explore(
@@ -484,7 +524,7 @@ class TestXrayExplorePatternName:
                 mock_loop,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                "code_indexer.server.mcp.handlers.xray._infra._get_cidx_meta_path",
                 return_value=cidx_meta,
             ),
         ):

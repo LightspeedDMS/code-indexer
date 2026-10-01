@@ -1,0 +1,67 @@
+{
+  "description": "Story #1493 AC3 fixed, recorded query set for the temporal overfetch-ceiling recall comparison. Run via scripts/analysis/temporal_overfetch_1493_recall_compare.py against a repo built by scripts/analysis/temporal_overfetch_1493_build_fixture.py.",
+  "target_repo_fixture": {
+    "builder_script": "scripts/analysis/temporal_overfetch_1493_build_fixture.py",
+    "shape": "20 real commits, two quarters (2024 Q1 and 2024 Q3, 10 commits each), six rotating topic files, EACH commit's diff sized (~1009-line full-file rewrite) so its aggregated per-commit document chunks into ~36 pieces (matching temporal_overfetch_1493_ac4_benchmark.py's 2.7% head-density ratio), real VoyageAI embeddings via `cidx index --index-commits` (measured: 612 total chunks, achieved_head_ratio=0.0327). Corrects the ORIGINAL fixture, which produced exactly 1 chunk/commit (100% head chunks) -- see build_fixture.py's module docstring for the full methodology-flaw history.",
+    "shard_identifiers": ["code-indexer-temporal-voyage_context_4-2024Q1", "code-indexer-temporal-voyage_context_4-2024Q3"],
+    "sizing_rationale": "Q1's real total is 252 chunks (6 pure-addition first-touch commits at ~18 chunks each + 4 modified commits at ~36 each) and Q3's is 360 chunks (all 10 modified) -- both exceed the AC1 combined-overfetch-ceiling's capped threshold for the worst-case query (true_user_limit=3 * TEMPORAL_COMBINED_OVERFETCH_CEILING=60 = 180), so the cap actually truncates real per-shard candidates rather than trivially returning everything regardless of cap value. Commit COUNT no longer needs to be large (520->20): realistic PER-COMMIT chunking density, not commit count, is what makes the corpus realistic -- see reports/perf/temporal_overfetch_1493_corpus_stats.json for the full per-commit measured breakdown."
+  },
+  "queries": [
+    {
+      "query_id": "Q1_commit_message_multi_shard",
+      "query_text": "authentication session handling",
+      "chunk_type": "commit_message",
+      "limit": 10,
+      "time_range_all": true,
+      "purpose": "worst-case chunk_type (40x) across BOTH quarterly shards (multi-shard dispatch)"
+    },
+    {
+      "query_id": "Q2_commit_message_small_limit",
+      "query_text": "payment processing billing",
+      "chunk_type": "commit_message",
+      "limit": 5,
+      "time_range_all": true,
+      "purpose": "small limit amplifies the combined multiplier's absolute row count"
+    },
+    {
+      "query_id": "Q3_commit_diff",
+      "query_text": "caching layer invalidation",
+      "chunk_type": "commit_diff",
+      "limit": 10,
+      "time_range_all": true,
+      "purpose": "commit_diff's real 'no is_head filtering' semantics (regression-guards the bug this story's own review caught and fixed)"
+    },
+    {
+      "query_id": "Q4_no_chunk_type",
+      "query_text": "database migrations queries",
+      "chunk_type": null,
+      "limit": 10,
+      "time_range_all": true,
+      "purpose": "no post-filters, all-time -> search_limit == limit exactly (AC1 cap is a byte-identical no-op here)"
+    },
+    {
+      "query_id": "Q5_commit_message_larger_limit",
+      "query_text": "search indexing ranking",
+      "chunk_type": "commit_message",
+      "limit": 20,
+      "time_range_all": true,
+      "purpose": "larger limit -- combined multiplier ratio unchanged but absolute overfetch volume larger"
+    },
+    {
+      "query_id": "Q6_commit_diff_single_shard",
+      "query_text": "structured logging metrics",
+      "chunk_type": "commit_diff",
+      "limit": 10,
+      "time_range": "2024-01-01..2024-06-30",
+      "purpose": "single-shard (2024Q1 only) case, per AC3's explicit single-shard requirement"
+    },
+    {
+      "query_id": "Q7_commit_message_worst_case_small_limit",
+      "query_text": "optimize search algorithm performance",
+      "chunk_type": "commit_message",
+      "limit": 3,
+      "time_range_all": true,
+      "purpose": "report's documented absolute worst case: smallest limit x chunk_type=commit_message x multi-shard"
+    }
+  ]
+}

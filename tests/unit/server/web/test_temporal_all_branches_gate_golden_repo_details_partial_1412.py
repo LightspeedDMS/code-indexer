@@ -66,7 +66,7 @@ def _make_gate_config(enabled: bool):
 
 def _invoke_handler(alias: str, gate_enabled: bool) -> dict:
     """Invoke golden_repo_details_partial and return the template context."""
-    from src.code_indexer.server.web.routes import golden_repo_details_partial
+    from code_indexer.server.web.routes import golden_repo_details_partial
 
     req = _make_request()
     session = _make_admin_session()
@@ -84,25 +84,25 @@ def _invoke_handler(alias: str, gate_enabled: bool) -> dict:
 
     with (
         patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=session,
         ),
         patch(
-            "src.code_indexer.server.web.routes._get_golden_repo_manager",
+            "code_indexer.server.web.routes._get_golden_repo_manager",
             return_value=mock_manager,
         ),
         patch(
-            "src.code_indexer.server.web.routes._get_repo_category_service",
+            "code_indexer.server.web.routes._get_repo_category_service",
             return_value=mock_category_service,
         ),
         patch(
-            "src.code_indexer.server.web.routes.get_csrf_token_from_cookie",
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie",
             return_value="csrf-tok",
         ),
-        patch("src.code_indexer.server.web.routes.set_csrf_cookie", MagicMock()),
-        patch("src.code_indexer.server.web.routes.templates", mock_tmpl),
+        patch("code_indexer.server.web.routes.set_csrf_cookie", MagicMock()),
+        patch("code_indexer.server.web.routes.templates", mock_tmpl),
         patch(
-            "src.code_indexer.server.web.routes.get_config_service",
+            "code_indexer.server.web.routes.get_config_service",
             return_value=_make_gate_config(gate_enabled),
         ),
     ):

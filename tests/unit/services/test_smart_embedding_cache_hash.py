@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import Mock
 
 
-from src.code_indexer.services.file_chunking_manager import FileChunkingManager
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.file_chunking_manager import FileChunkingManager
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ class FakeVectorCalculationManager:
         """Record the call and return a future with fake embeddings."""
         self.batch_calls.append(list(chunk_texts))
 
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         future: Future = Future()
         embeddings = tuple(

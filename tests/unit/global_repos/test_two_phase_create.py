@@ -219,3 +219,51 @@ class TestAtomicWriteDescription:
                 )
 
         mock_scheduler.release_write_lock.assert_called_once()
+
+    def test_atomic_write_raises_when_lock_not_acquired(self, tmp_path):
+        """Bug #1506 Item 2: atomic_write_description must raise (not
+        silently write the file) when acquire_write_lock returns False --
+        i.e. the cidx-meta write lock is already held by another writer.
+        Previously the boolean return value was discarded and the write
+        proceeded unconditionally, contradicting the function's own
+        docstring ('Lock acquisition failure propagates to the caller')."""
+        from code_indexer.global_repos.lifecycle_batch_runner import (
+            LifecycleLockUnavailableError,
+        )
+        from code_indexer.global_repos.meta_description_hook import (
+            atomic_write_description,
+        )
+
+        target = tmp_path / "not_acquired.md"
+        mock_scheduler = MagicMock()
+        mock_scheduler.acquire_write_lock.return_value = False
+
+        with pytest.raises(LifecycleLockUnavailableError):
+            atomic_write_description(
+                target, "content", refresh_scheduler=mock_scheduler
+            )
+
+        assert not target.exists(), (
+            "Target file must NOT be written when the lock was not acquired"
+        )
+
+    def test_atomic_write_does_not_release_lock_when_never_acquired(self, tmp_path):
+        """Companion to the raise test above: since the lock was never
+        actually acquired, release_write_lock must never be called."""
+        from code_indexer.global_repos.lifecycle_batch_runner import (
+            LifecycleLockUnavailableError,
+        )
+        from code_indexer.global_repos.meta_description_hook import (
+            atomic_write_description,
+        )
+
+        target = tmp_path / "not_acquired2.md"
+        mock_scheduler = MagicMock()
+        mock_scheduler.acquire_write_lock.return_value = False
+
+        with pytest.raises(LifecycleLockUnavailableError):
+            atomic_write_description(
+                target, "content", refresh_scheduler=mock_scheduler
+            )
+
+        mock_scheduler.release_write_lock.assert_not_called()

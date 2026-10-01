@@ -206,6 +206,10 @@ class TestResolvingPrerequisitesState:
             "FAILED",
             "CANCELLED",
             "RESOLVING_PREREQUISITES",
+            # Bug #1950: terminal status for a job whose worker process was
+            # killed by an orderly server restart/shutdown, distinct from a
+            # genuine FAILED so it never poisons /health's failed-job count.
+            "INTERRUPTED",
         }
 
         actual_statuses = {status.name for status in JobStatus}

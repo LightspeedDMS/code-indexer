@@ -179,10 +179,10 @@ def test_macos_bsd_du_fallback(
 
     assert temporal_row is not None, "Temporal Index row should exist"
 
-    # Verify status is "✅ Available" (not error)
+    # Verify status is "✅ Idle" (healthy, not building; not error)
     component, status, details = temporal_row[0], temporal_row[1], temporal_row[2]
     assert component == "Temporal Index"
-    assert status == "✅ Available", f"Expected '✅ Available', got: '{status}'"
+    assert status == "✅ Idle", f"Expected '✅ Idle', got: '{status}'"
 
     # Verify storage size calculation worked (14336 KB = ~14 MB)
     assert "Storage:" in details
@@ -277,10 +277,10 @@ def test_empty_stdout_handled_gracefully(
 
     assert temporal_row is not None, "Temporal Index row should exist"
 
-    # Verify status is "✅ Available" (Python fallback worked)
+    # Verify status is "✅ Idle" (Python fallback worked)
     component, status, details = temporal_row[0], temporal_row[1], temporal_row[2]
     assert component == "Temporal Index"
-    assert status == "✅ Available", f"Expected '✅ Available', got: '{status}'"
+    assert status == "✅ Idle", f"Expected '✅ Idle', got: '{status}'"
 
     # Verify storage size was calculated via Python fallback
     assert "Storage:" in details
@@ -380,10 +380,10 @@ def test_gnu_du_success_path(
 
     assert temporal_row is not None, "Temporal Index row should exist"
 
-    # Verify status is "✅ Available"
+    # Verify status is "✅ Idle"
     component, status, details = temporal_row[0], temporal_row[1], temporal_row[2]
     assert component == "Temporal Index"
-    assert status == "✅ Available", f"Expected '✅ Available', got: '{status}'"
+    assert status == "✅ Idle", f"Expected '✅ Idle', got: '{status}'"
 
     # Verify exact storage size (14680064 bytes = 14.0 MB)
     assert "Storage: 14.0 MB" in details

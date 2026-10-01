@@ -28,7 +28,7 @@ import pytest
 
 from code_indexer.server.services.research_cleanup_service import (
     ResearchCleanupService,
-    make_backend_live_folder_provider,
+    make_backend_live_session_id_provider,
 )
 
 
@@ -52,13 +52,16 @@ class _FakeBackend:
     must consume it via the registry instead of opening a hardcoded SQLite DB.
     """
 
-    def __init__(self, folder_paths):
-        self._folder_paths = list(folder_paths)
+    def __init__(self, session_ids):
+        self._session_ids = list(session_ids)
         self.calls = 0
 
     def list_sessions(self):
         self.calls += 1
-        return [{"id": "x", "folder_path": p} for p in self._folder_paths]
+        # folder_path is intentionally irrelevant/unused by the id-based
+        # provider (Bug #1485 follow-up) -- included only because real
+        # backend rows always carry it.
+        return [{"id": i, "folder_path": f"/irrelevant/{i}"} for i in self._session_ids]
 
 
 class _RaisingBackend:
@@ -81,14 +84,15 @@ class TestBackendAwareLiveSet:
             base, "a1b2c3d4-0000-4000-8000-000000000001", age_days=100
         )
 
-        # The active backend (postgres in cluster) knows the live session.
-        backend = _FakeBackend({str(live)})
-        provider = make_backend_live_folder_provider(lambda: backend)
+        # The active backend (postgres in cluster) knows the live session,
+        # identified by SESSION ID (Bug #1485 follow-up), never by path.
+        backend = _FakeBackend({live.name})
+        provider = make_backend_live_session_id_provider(lambda: backend)
 
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=provider,
+            live_session_id_provider=provider,
         )
         result = svc.cleanup()
 
@@ -106,11 +110,11 @@ class TestBackendAwareLiveSet:
             base, "a1b2c3d4-0000-4000-8000-000000000002", age_days=100
         )
 
-        provider = make_backend_live_folder_provider(lambda: None)
+        provider = make_backend_live_session_id_provider(lambda: None)
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=provider,
+            live_session_id_provider=provider,
         )
         result = svc.cleanup()  # must NOT raise
 
@@ -127,11 +131,11 @@ class TestBackendAwareLiveSet:
             base, "a1b2c3d4-0000-4000-8000-000000000003", age_days=100
         )
 
-        provider = make_backend_live_folder_provider(lambda: _RaisingBackend())
+        provider = make_backend_live_session_id_provider(lambda: _RaisingBackend())
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=provider,
+            live_session_id_provider=provider,
         )
         result = svc.cleanup()  # must NOT raise
 
@@ -149,11 +153,11 @@ class TestBackendAwareLiveSet:
         def _supplier():
             raise RuntimeError("registry not wired")
 
-        provider = make_backend_live_folder_provider(_supplier)
+        provider = make_backend_live_session_id_provider(_supplier)
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=provider,
+            live_session_id_provider=provider,
         )
         result = svc.cleanup()  # must NOT raise
 
@@ -173,7 +177,7 @@ class TestUuidShapeGuard:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),  # no live rows at all
+            live_session_id_provider=lambda: set(),  # no live rows at all
         )
         with caplog.at_level(logging.WARNING):
             result = svc.cleanup()
@@ -192,7 +196,7 @@ class TestUuidShapeGuard:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -209,7 +213,7 @@ class TestUuidShapeGuard:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -244,7 +248,7 @@ class TestSymlinkSafeRecency:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 
@@ -267,7 +271,7 @@ class TestSymlinkSafeRecency:
         svc = ResearchCleanupService(
             research_base_dir=base,
             retention_days=3,
-            live_folder_provider=lambda: set(),
+            live_session_id_provider=lambda: set(),
         )
         result = svc.cleanup()
 

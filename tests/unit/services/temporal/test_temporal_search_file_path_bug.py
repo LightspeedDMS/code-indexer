@@ -8,7 +8,7 @@ Bug: Lines 430 and 478 only checked 'file_path' field, but some payloads use 'pa
 
 import unittest
 from unittest.mock import Mock
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 

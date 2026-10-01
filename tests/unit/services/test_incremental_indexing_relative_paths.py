@@ -115,107 +115,117 @@ class TestGitDeltaReturnsRelativePaths:
         assert added_path == "src/foo.py"
 
 
-class TestIncrementalIndexingConvertsRelativeToAbsolute:
-    """Tests that the incremental indexing path converts relative git paths to absolute."""
+def _run_do_incremental_index(
+    indexer, repo, initial_commit, second_commit, working_dir_files=None
+):
+    """Module-level helper to call _do_incremental_index with all required
+    mocks. Shared by TestIncrementalIndexingConvertsRelativeToAbsolute and
+    TestIncrementalIndexingDedupesAcrossTracks -- kept as a plain function
+    (not a shared base class) so pytest never re-collects/re-runs one
+    class's tests under the other."""
+    captured_files = []
 
-    def _call_do_incremental_index(self, indexer, repo, initial_commit, second_commit):
-        """Helper to call _do_incremental_index with all required mocks."""
-        captured_files = []
+    def capture_process_files(files, *args, **kwargs):
+        captured_files.extend(files)
+        return ProcessingStats()
 
-        def capture_process_files(files, *args, **kwargs):
-            captured_files.extend(files)
-            return ProcessingStats()
+    if working_dir_files is None:
+        working_dir_files = []
 
-        git_status = {
-            "git_available": True,
-            "current_branch": "master",
-            "current_commit": second_commit,
-            "is_dirty": False,
-        }
+    git_status = {
+        "git_available": True,
+        "current_branch": "master",
+        "current_commit": second_commit,
+        "is_dirty": False,
+    }
 
-        # Mock progressive_metadata to return a resume_timestamp so we go into
-        # incremental path (not full-index path), and return last_indexed_commit
-        # so the git delta path is triggered.
-        indexer.progressive_metadata.metadata["status"] = "completed"
+    # Mock progressive_metadata to return a resume_timestamp so we go into
+    # incremental path (not full-index path), and return last_indexed_commit
+    # so the git delta path is triggered.
+    indexer.progressive_metadata.metadata["status"] = "completed"
+    with patch.object(
+        indexer.progressive_metadata,
+        "can_resume_interrupted_operation",
+        return_value=False,
+    ):
         with patch.object(
             indexer.progressive_metadata,
-            "can_resume_interrupted_operation",
-            return_value=False,
+            "get_resume_timestamp",
+            return_value=1.0,  # non-zero => incremental path
         ):
             with patch.object(
                 indexer.progressive_metadata,
-                "get_resume_timestamp",
-                return_value=1.0,  # non-zero => incremental path
+                "get_last_indexed_commit",
+                return_value=initial_commit,
             ):
-                with patch.object(
-                    indexer.progressive_metadata,
-                    "get_last_indexed_commit",
-                    return_value=initial_commit,
-                ):
-                    with patch.object(indexer.progressive_metadata, "start_indexing"):
+                with patch.object(indexer.progressive_metadata, "start_indexing"):
+                    with patch.object(
+                        indexer.progressive_metadata, "set_files_to_index"
+                    ):
                         with patch.object(
-                            indexer.progressive_metadata, "set_files_to_index"
+                            indexer.progressive_metadata, "update_progress"
                         ):
                             with patch.object(
-                                indexer.progressive_metadata, "update_progress"
+                                indexer.progressive_metadata,
+                                "update_commit_watermark",
                             ):
                                 with patch.object(
                                     indexer.progressive_metadata,
-                                    "update_commit_watermark",
+                                    "complete_indexing",
                                 ):
                                     with patch.object(
-                                        indexer.progressive_metadata,
-                                        "complete_indexing",
+                                        indexer,
+                                        "_delete_files_from_backend",
+                                        return_value=0,
                                     ):
                                         with patch.object(
-                                            indexer,
-                                            "_delete_files_from_backend",
-                                            return_value=0,
+                                            indexer.file_finder,
+                                            "find_modified_files",
+                                            return_value=working_dir_files,
                                         ):
                                             with patch.object(
                                                 indexer.file_finder,
-                                                "find_modified_files",
+                                                "find_files",
                                                 return_value=[],
                                             ):
                                                 with patch.object(
-                                                    indexer.file_finder,
-                                                    "find_files",
-                                                    return_value=[],
+                                                    indexer.git_topology_service,
+                                                    "get_current_branch",
+                                                    return_value="master",
                                                 ):
                                                     with patch.object(
                                                         indexer.git_topology_service,
-                                                        "get_current_branch",
-                                                        return_value="master",
+                                                        "is_git_available",
+                                                        return_value=False,
                                                     ):
                                                         with patch.object(
-                                                            indexer.git_topology_service,
-                                                            "is_git_available",
-                                                            return_value=False,
+                                                            indexer.progress_log,
+                                                            "start_session",
+                                                            return_value="session-id",
                                                         ):
                                                             with patch.object(
                                                                 indexer.progress_log,
-                                                                "start_session",
-                                                                return_value="session-id",
+                                                                "complete_session",
                                                             ):
                                                                 with patch.object(
-                                                                    indexer.progress_log,
-                                                                    "complete_session",
+                                                                    indexer,
+                                                                    "process_files_high_throughput",
+                                                                    side_effect=capture_process_files,
                                                                 ):
-                                                                    with patch.object(
-                                                                        indexer,
-                                                                        "process_files_high_throughput",
-                                                                        side_effect=capture_process_files,
-                                                                    ):
-                                                                        indexer._do_incremental_index(
-                                                                            batch_size=10,
-                                                                            progress_callback=None,
-                                                                            git_status=git_status,
-                                                                            provider_name="voyage",
-                                                                            model_name="voyage-3",
-                                                                            safety_buffer_seconds=0,
-                                                                            quiet=True,
-                                                                        )
-        return captured_files
+                                                                    indexer._do_incremental_index(
+                                                                        batch_size=10,
+                                                                        progress_callback=None,
+                                                                        git_status=git_status,
+                                                                        provider_name="voyage",
+                                                                        model_name="voyage-3",
+                                                                        safety_buffer_seconds=0,
+                                                                        quiet=True,
+                                                                    )
+    return captured_files
+
+
+class TestIncrementalIndexingConvertsRelativeToAbsolute:
+    """Tests that the incremental indexing path converts relative git paths to absolute."""
 
     def test_files_passed_to_process_files_are_absolute(self, tmp_path):
         """When git diff returns relative paths, process_files_high_throughput
@@ -228,7 +238,7 @@ class TestIncrementalIndexingConvertsRelativeToAbsolute:
         metadata_path = tmp_path / "metadata.json"
         indexer = _make_smart_indexer(repo, metadata_path)
 
-        captured_files = self._call_do_incremental_index(
+        captured_files = _run_do_incremental_index(
             indexer, repo, initial_commit, second_commit
         )
 
@@ -254,7 +264,7 @@ class TestIncrementalIndexingConvertsRelativeToAbsolute:
         metadata_path = tmp_path / "metadata.json"
         indexer = _make_smart_indexer(repo, metadata_path)
 
-        captured_files = self._call_do_incremental_index(
+        captured_files = _run_do_incremental_index(
             indexer, repo, initial_commit, second_commit
         )
 
@@ -265,6 +275,70 @@ class TestIncrementalIndexingConvertsRelativeToAbsolute:
         file_paths = [Path(f) for f in captured_files]
         assert expected_absolute in file_paths, (
             f"Expected {expected_absolute} in files, got: {file_paths}"
+        )
+
+
+class TestIncrementalIndexingDedupesAcrossTracks:
+    """Regression tests for Issue #1574: a physical file discovered by BOTH
+    change-detection tracks (git-delta relative path AND mtime-scan absolute
+    path) must be de-duplicated on the absolutized path and therefore
+    appear exactly once in files_to_index -- never twice.
+
+    Before the fix, _do_incremental_index() deduplicates the raw path
+    STRINGS via set() BEFORE absolutizing them, so 'src/dup.py' (relative,
+    from the git delta) and '/repo/src/dup.py' (absolute, from the mtime
+    scan) survive as two distinct set members even though they resolve to
+    the identical physical file -- causing that file to be hashed, chunked,
+    embedded, and upserted twice in the same run.
+
+    Uses the module-level _run_do_incremental_index() helper (shared with
+    TestIncrementalIndexingConvertsRelativeToAbsolute) with its
+    `working_dir_files` seam to drive Track 2. Deliberately NOT a subclass
+    of TestIncrementalIndexingConvertsRelativeToAbsolute -- inheriting
+    between two concrete Test* classes causes pytest to re-collect and
+    re-run the parent's tests under the subclass too.
+    """
+
+    def test_file_found_by_both_tracks_indexed_exactly_once(self, tmp_path):
+        """A file present in both the git-delta track (relative path) and the
+        mtime-scan track (absolute path) must appear exactly once in the
+        files passed to process_files_high_throughput -- proving the merge
+        dedupes on resolved absolute path, not on raw path string."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        initial_commit = _create_git_repo(repo)
+        # This commit makes 'src/dup.py' show up in git_delta.added, i.e. the
+        # git-delta track (Track 1), as a REPO-RELATIVE path string.
+        second_commit = _add_commit(repo, "src/dup.py", "def dup(): pass\n")
+
+        metadata_path = tmp_path / "metadata.json"
+        indexer = _make_smart_indexer(repo, metadata_path)
+
+        # Same physical file, reported by the mtime-scan track (Track 2) as
+        # an ABSOLUTE path -- exactly how FileFinder.find_modified_files
+        # (via os.walk on an absolute codebase_dir) actually reports files.
+        absolute_dup_path = repo / "src" / "dup.py"
+
+        captured_files = _run_do_incremental_index(
+            indexer,
+            repo,
+            initial_commit,
+            second_commit,
+            working_dir_files=[absolute_dup_path],
+        )
+
+        # NOTE: intentionally NOT normalizing with Path(f).resolve() here --
+        # the production code de-duplicates on the ABSOLUTIZED path only
+        # (prefixing with codebase_dir), never on the symlink-resolved
+        # path. Asserting against .resolve()'d paths would pin a STRONGER
+        # equivalence than the code actually provides and could mask a
+        # future regression. Assert directly against the raw captured
+        # paths instead.
+        assert len(captured_files) == 1, (
+            "File present in BOTH change-detection tracks (relative git "
+            "delta + absolute mtime scan) must be de-duplicated to exactly "
+            f"one entry, but appeared {len(captured_files)} times in "
+            f"files_to_index: {captured_files}"
         )
 
 

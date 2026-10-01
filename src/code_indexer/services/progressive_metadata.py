@@ -3,6 +3,7 @@ Progressive metadata manager for resumable indexing operations.
 """
 
 import json
+import logging
 import time
 import fcntl
 from pathlib import Path
@@ -10,6 +11,14 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
 from code_indexer.utils.file_locking import nfs_safe_flock
+from code_indexer.services.resume_state_seal import (
+    RESUME_SEAL_FIELD,
+    compute_resume_seal,
+    content_digest,
+    seal_matches,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressiveMetadata:
@@ -17,6 +26,14 @@ class ProgressiveMetadata:
 
     def __init__(self, metadata_path: Path):
         self.metadata_path = metadata_path
+        # Seal of the on-disk state as loaded, and the digest of that state's
+        # content -- kept so enable_resume_seal() can verify it later, once
+        # the server-held key is known, without holding a second full copy.
+        self._loaded_seal: Optional[object] = None
+        self._loaded_digest: Optional[bytes] = None
+        self._resume_seal_key: Optional[bytes] = None
+        self._resume_seal_binding = ""
+        self._loaded_state_sealed = False
         self.metadata = self._load_metadata()
 
     def _load_metadata(self) -> Dict[str, Any]:
@@ -51,6 +68,11 @@ class ProgressiveMetadata:
                 with open(self.metadata_path, "r") as f:
                     loaded_data = json.load(f)
                     if isinstance(loaded_data, dict):
+                        # The seal is never part of the working metadata: it
+                        # is verified once (enable_resume_seal) and rewritten
+                        # on every sealed save.
+                        self._loaded_seal = loaded_data.pop(RESUME_SEAL_FIELD, None)
+                        self._loaded_digest = content_digest(loaded_data)
                         # Merge existing data with default structure to ensure new fields are present
                         merged_metadata = default_metadata.copy()
                         merged_metadata.update(loaded_data)
@@ -69,6 +91,16 @@ class ProgressiveMetadata:
         # Ensure parent directory exists
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
+        payload: Dict[str, Any] = {
+            k: v for k, v in self.metadata.items() if k != RESUME_SEAL_FIELD
+        }
+        if self._resume_seal_key is not None:
+            payload[RESUME_SEAL_FIELD] = compute_resume_seal(
+                self._resume_seal_key,
+                self._resume_seal_binding,
+                content_digest(payload),
+            )
+
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(self.metadata_path.parent), suffix=".tmp"
         )
@@ -78,7 +110,7 @@ class ProgressiveMetadata:
                 tmp_f = os.fdopen(tmp_fd, "w")
                 fd_owned = True
                 with tmp_f:
-                    json.dump(self.metadata, tmp_f, indent=2)
+                    json.dump(payload, tmp_f, indent=2)
                 os.replace(tmp_path, str(self.metadata_path))
             finally:
                 if not fd_owned:
@@ -95,10 +127,49 @@ class ProgressiveMetadata:
                 pass
             raise
 
+    def enable_resume_seal(self, key: bytes) -> None:
+        """Seal every subsequent save with the server-held ``key``, and
+        verify whether the state as LOADED from disk carried a valid seal.
+
+        The seal is bound to the resolved metadata path, so resume state
+        copied in from another repository never validates. Verification
+        uses the load-time snapshot; when it fails, the caller discards the
+        stored file lists (``discard_file_tracking``), so no file list from
+        state without a valid seal reaches a later sealed save.
+        """
+        try:
+            binding = str(self.metadata_path.resolve())
+        except (OSError, RuntimeError) as exc:
+            logger.warning(
+                "Cannot resolve the resume metadata path (%s); stored resume "
+                "state will not be trusted and saves will not be sealed.",
+                type(exc).__name__,
+            )
+            return
+        self._resume_seal_key = key
+        self._resume_seal_binding = binding
+        self._loaded_state_sealed = self._loaded_digest is not None and seal_matches(
+            key, binding, self._loaded_digest, self._loaded_seal
+        )
+
+    def loaded_state_is_sealed(self) -> bool:
+        """True only when the on-disk state loaded by this instance carried a
+        valid server seal (see ``enable_resume_seal``)."""
+        return self._loaded_state_sealed
+
     def start_indexing(
         self, provider_name: str, model_name: str, git_status: Dict[str, Any]
     ):
         """Mark the start of an indexing operation."""
+        # INVARIANT: error_message describes only the run whose metadata it
+        # currently sits in. Any transition that starts, resumes, records
+        # new work for, or completes a run must therefore drop the previous
+        # run's error before that transition's own work begins. State this
+        # as the rule, not a list -- an enumeration silently falls one short
+        # the moment a new transition is added and this comment isn't. The
+        # four call sites that currently enforce it: start_indexing() (here),
+        # set_files_to_index(), resume_indexing(), and complete_indexing().
+        self.metadata.pop("error_message", None)
         self.metadata.update(
             {
                 "status": "in_progress",
@@ -115,6 +186,19 @@ class ProgressiveMetadata:
             }
         )
         self._save_metadata()
+
+    def start_fresh_indexing(
+        self, provider_name: str, model_name: str, git_status: Dict[str, Any]
+    ):
+        """Start a new run after discarding the prior run's file tracking.
+
+        Resume has a separate ``resume_indexing`` transition because it must
+        retain the prior run's file list and cursor.  Fresh runs use this
+        transition explicitly so a completed status can never be persisted
+        alongside another run's resumability fields.
+        """
+        self._reset_file_tracking()
+        self.start_indexing(provider_name, model_name, git_status)
 
     def update_progress(
         self, files_processed: int = 0, chunks_added: int = 0, failed_files: int = 0
@@ -136,6 +220,7 @@ class ProgressiveMetadata:
         self.metadata["indexed_at"] = datetime.now(timezone.utc).isoformat()
         # Update last_index_timestamp to current time for incremental indexing
         self.metadata["last_index_timestamp"] = time.time()
+        self.metadata.pop("error_message", None)
         self._save_metadata()
 
     def fail_indexing(self, error_message: Optional[str] = None):
@@ -143,6 +228,25 @@ class ProgressiveMetadata:
         self.metadata["status"] = "failed"
         if error_message:
             self.metadata["error_message"] = error_message
+        self._save_metadata()
+
+    def resume_indexing(self):
+        """Continuing a prior run: drop that run's error before new progress
+        is recorded.
+
+        See start_indexing() for the invariant this enforces: error_message
+        describes only the run whose metadata it sits in, so every run
+        transition drops the previous run's error. `_do_resume_interrupted`
+        (Bug #467) resumes a "failed" run without calling any of the other
+        three call sites: not start_indexing() (would wrongly reset
+        `files_processed`/`chunks_indexed` to 0), not set_files_to_index()
+        (no new file list is being recorded -- the old one is simply
+        continued), and not complete_indexing() (status must stay "failed"
+        for can_resume_interrupted_operation() to keep accepting it). This
+        method is the narrow resume-specific fourth call site: it drops the
+        stale error while deliberately leaving `status` untouched.
+        """
+        self.metadata.pop("error_message", None)
         self._save_metadata()
 
     def get_resume_timestamp(self, safety_buffer_seconds: int = 60) -> float:
@@ -254,8 +358,36 @@ class ProgressiveMetadata:
         }
         self._save_metadata()
 
+    def _reset_file_tracking(self) -> None:
+        """Discard file tracking belonging to a prior indexing run."""
+        self.metadata.update(
+            {
+                "total_files_to_index": 0,
+                "files_to_index": [],
+                "completed_files": [],
+                "failed_file_paths": [],
+                "current_file_index": 0,
+            }
+        )
+
     def set_files_to_index(self, file_paths: list) -> None:
-        """Set the complete list of files to be indexed for resumability."""
+        """Set the complete list of files to be indexed for resumability.
+
+        See start_indexing() for the invariant this enforces: error_message
+        describes only the run whose metadata it sits in, so every run
+        transition -- including recording a new work list -- drops the
+        previous run's error. This method is called by all three producers
+        of a files list (full index, incremental, reconcile; do not confuse
+        that count with the four call sites that enforce the invariant
+        overall), so putting the pop here closes Bug #1862's fourth
+        follow-up gap: incremental/reconcile skip start_indexing() (and its
+        pop) whenever status is already "in_progress", including when that
+        "in_progress" value was written to disk by PRE-FIX code alongside a
+        leftover error_message and simply read back unchanged on upgrade.
+        _do_resume_interrupted() does not call this method, so
+        resume_indexing() keeps its own, separate responsibility untouched.
+        """
+        self.metadata.pop("error_message", None)
         # Convert Path objects to strings for JSON serialization
         file_strings = [str(path) for path in file_paths]
 
@@ -314,6 +446,32 @@ class ProgressiveMetadata:
         self.metadata["failed_files"] = len(failed_files)
 
         self._save_metadata()
+
+    def set_failed_file_paths(
+        self, file_paths: List[str], failed_count: Optional[int] = None
+    ) -> None:
+        """Replace the recorded list of files the last run could not index.
+
+        The next run retries every recorded file (see SmartIndexer), so the
+        list always describes the most recent run only. ``failed_count``,
+        when given, also sets ``failed_files`` for a run that records no
+        other progress.
+        """
+        unique: List[str] = []
+        for path in file_paths:
+            if str(path) not in unique:
+                unique.append(str(path))
+        self.metadata["failed_file_paths"] = unique
+        if failed_count is not None:
+            self.metadata["failed_files"] = failed_count
+        self._save_metadata()
+
+    def discard_file_tracking(self) -> None:
+        """Drop the stored file lists (work list, completed and failed
+        files) from this in-memory state without saving; used when the
+        stored state is not trusted, so none of its file lists are acted on
+        or carried into a later save."""
+        self._reset_file_tracking()
 
     def can_resume_interrupted_operation(self) -> bool:
         """Check if there's an interrupted indexing operation that can be resumed.

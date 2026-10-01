@@ -91,6 +91,11 @@ class TestOverFetchDispatch:
                 "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
             ) as mock_phm:
                 mock_phm.get_instance.return_value.get_health.return_value = {}
+                # Bug #678/#1760: is_sinbinned must return False so providers
+                # are dispatched -- an unconfigured MagicMock defaults to a
+                # truthy return value, which would make every provider look
+                # sin-binned and trip the total-pre-skip guard.
+                mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                 manager._search_single_repository(
                     repo_path=repo_path,
                     repository_alias="repo",
@@ -133,6 +138,7 @@ class TestOverFetchDispatch:
                 "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
             ) as mock_phm:
                 mock_phm.get_instance.return_value.get_health.return_value = {}
+                mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                 manager._search_single_repository(
                     repo_path=repo_path,
                     repository_alias="repo",
@@ -170,6 +176,7 @@ class TestOverFetchDispatch:
                 "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
             ) as mock_phm:
                 mock_phm.get_instance.return_value.get_health.return_value = {}
+                mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                 results = manager._search_single_repository(
                     repo_path=repo_path,
                     repository_alias="repo",
@@ -226,6 +233,7 @@ class TestScoreGateIntegration:
                     "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
                 ) as mock_phm:
                     mock_phm.get_instance.return_value.get_health.return_value = {}
+                    mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                     manager._search_single_repository(
                         repo_path=repo_path,
                         repository_alias="repo",
@@ -329,6 +337,7 @@ class TestParallelTimeout:
                     "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
                 ) as mock_phm:
                     mock_phm.get_instance.return_value.get_health.return_value = {}
+                    mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                     manager._search_single_repository(
                         repo_path=repo_path,
                         repository_alias="repo",

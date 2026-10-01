@@ -1,0 +1,21 @@
+-- Migration 042: Drop delegation_job_results (Story #1487 -- Remove Claude
+-- Delegation Feature, complete removal).
+--
+-- The Claude Delegation feature (backend handlers, MCP tools, Web Config UI,
+-- ClaudeServerClient/PromptTemplateProcessor, DelegationJobTracker) has been
+-- fully removed from the codebase. delegation_job_results (created by
+-- migration 016) was the sole persistence table for that feature, written
+-- and read exclusively by DelegationJobTracker, which is deleted alongside
+-- it. An exhaustive repo-wide grep confirmed zero other consumers.
+--
+-- This project's standing rule is "NEVER DROP TABLE" (rolling restarts mean
+-- old and new nodes share a schema during upgrade). This migration is a
+-- DELIBERATE, EXPLICIT, USER-APPROVED exception to that rule, scoped ONLY to
+-- this table: the user was explicitly asked whether to drop the table or
+-- leave it permanently orphaned, and chose to drop it, accepting the narrow
+-- rolling-deploy risk given the table has zero remaining consumers once this
+-- feature is removed. This exception sets no precedent for any other table.
+--
+-- Migration 016 itself is NOT edited -- migration history is append-only.
+
+DROP TABLE IF EXISTS delegation_job_results;

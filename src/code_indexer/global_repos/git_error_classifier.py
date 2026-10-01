@@ -8,7 +8,7 @@ a threshold of consecutive failures (transient network/auth issues).
 Story #295: Auto-Recovery for Corrupted Golden Repo Git Object Database.
 """
 
-from typing import List
+from typing import List, Optional, Sequence, Union
 
 
 class GitFetchError(Exception):
@@ -18,12 +18,36 @@ class GitFetchError(Exception):
     Attributes:
         category: One of "permanent", "corruption", "transient", or "unknown".
         stderr: The raw stderr output from the failed git fetch command.
+        stdout: The raw stdout output from the failed git fetch command, or
+            None if unavailable. Optional (Bug #1832 follow-up) so a
+            stdout-only diagnostic (empty stderr) is still recoverable by
+            consumers such as refresh_scheduler.py.
+        returncode: The process exit code, or None when the fetch was killed
+            by a timeout (there is no exit code in that case) rather than
+            completing with a non-zero one.
+        cmd: The argv of the git command that failed, or None if unknown.
     """
 
-    def __init__(self, message: str, category: str, stderr: str):
+    def __init__(
+        self,
+        message: str,
+        category: str,
+        stderr: str,
+        *,
+        stdout: Optional[str] = None,
+        returncode: Optional[int] = None,
+        cmd: Optional[Union[str, Sequence[str]]] = None,
+    ):
         super().__init__(message)
         self.category = category
+        # stderr keeps its exact prior meaning: the raw, uncapped stderr
+        # string. refresh_scheduler.py reads it directly and
+        # classify_fetch_error() consumes it raw -- neither its semantics
+        # nor its uncapped-ness change with this widening.
         self.stderr = stderr
+        self.stdout = stdout
+        self.returncode = returncode
+        self.cmd = cmd
 
 
 # Patterns indicating a permanent, non-recoverable access/existence failure
@@ -42,6 +66,46 @@ PERMANENT_PATTERNS: List[str] = [
     "you don't have permission",
     "Repository not found",
     "remote: Not Found",
+    # Bug #1534, second Codex review round: WIDENED from the first round's
+    # "'origin' does not appear to be a git repository" (which required the
+    # literal quoted remote NAME) back to the bare tail phrase below.
+    # Empirically confirmed via real `git fetch` subprocess repros (see
+    # tests/unit/global_repos/test_git_error_classifier_1534.py) that this
+    # exact wording is emitted by git in (at least) two structurally
+    # distinct situations:
+    #   Form 1 -- no "origin" remote configured at all, where the quoted
+    #     string IS the remote name: "fatal: 'origin' does not appear to
+    #     be a git repository".
+    #   Form 2 -- an "origin" remote IS configured, but its URL resolves
+    #     to a path that no longer exists / is not a valid git repository
+    #     (e.g. a golden repo's origin pointing at a now-stale
+    #     resolved_source_path). Here git quotes the RESOLVED PATH, not
+    #     the literal string "origin": "fatal: '/some/stale/path' does
+    #     not appear to be a git repository". The first round's exact
+    #     "'origin'" quoting requirement never matched this real-world
+    #     case, so it fell through to the broader TRANSIENT pattern
+    #     "Could not read from remote" and was endlessly retried -- this
+    #     is the more realistic real-world trigger for Bug #1534.
+    # The first round's stated collision risk (a different remote name
+    # co-occurring with genuinely transient wording) does not occur in
+    # practice: real transient failures (Connection refused, Could not
+    # resolve host, unable to access ...) were verified via real
+    # subprocess repros to NEVER contain "does not appear to be a git
+    # repository" -- git only emits that phrase for a local resolve-time
+    # failure, a structurally different code path from a network
+    # transport error. The phrase is also NOT specific to the "origin"
+    # remote name -- any remote pointing at a non-repository path
+    # produces the identical structural failure, and is equally
+    # permanent regardless of the remote's name.
+    # Note: this phrase is also produced when a local file:// remote's
+    # .git is transiently hidden (e.g. NFS hiccup). This is intentionally
+    # still classified PERMANENT rather than TRANSIENT, because in this
+    # codebase PERMANENT still retries (longer backoff) but skips
+    # re-clone escalation -- which is the safer behavior for a
+    # possibly-transient local path (re-cloning could destroy a good
+    # clone if the source is only temporarily unavailable). See Bug
+    # #1534 round-3 review.
+    "does not appear to be a git repository",
 ]
 
 # Patterns indicating local object database corruption.

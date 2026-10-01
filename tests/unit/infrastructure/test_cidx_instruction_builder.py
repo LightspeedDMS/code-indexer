@@ -3,7 +3,7 @@
 import pytest
 
 from pathlib import Path
-from src.code_indexer.services.cidx_instruction_builder import (
+from code_indexer.services.cidx_instruction_builder import (
     CidxInstructionBuilder,
     create_cidx_instructions,
 )

@@ -210,6 +210,19 @@ class TestAutoUpdateSelfRestartDetection:
                         "_ensure_auto_update_service_has_cli_path",
                         return_value=True,
                     ),
+                    # Bug #1726: _ensure_cli_dependencies_synced was only
+                    # incidentally safe here because the class-level
+                    # @patch("subprocess.run") decorator on this test method
+                    # happens to catch its internal _run_pip_install_cmd()
+                    # call. It still performs a real shutil.which("cidx")
+                    # lookup + real shebang file read as an unguarded side
+                    # effect. Guard explicitly instead of relying on the
+                    # unrelated blanket subprocess.run mock.
+                    patch.object(
+                        executor,
+                        "_ensure_cli_dependencies_synced",
+                        return_value=True,
+                    ),
                 ):
                     result = executor.execute()
 

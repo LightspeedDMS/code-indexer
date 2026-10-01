@@ -10,21 +10,21 @@ inputSchema:
   properties:
     name:
       type: string
-      description: Trace name describing the task or investigation (e.g., "Authentication Bug Investigation", "Performance Optimization", "Feature Implementation"). This appears as the trace title in Langfuse dashboard.
+      description: Trace name describing the task or investigation. This appears as the trace title in Langfuse dashboard.
     input:
       type: string
       description: 'Optional: The user prompt or request that initiated this task. Captures the original question/instruction for full prompt observability in Langfuse.'
     strategy:
       type: string
-      description: 'Optional research strategy or approach (e.g., "depth-first exploration", "comparative analysis", "root cause investigation"). Stored as trace metadata for later analysis.'
+      description: 'Optional research strategy or approach. Stored as trace metadata for later analysis.'
     metadata:
       type: object
-      description: 'Optional additional metadata as key-value pairs. Examples: {"priority": "high", "project": "backend-refactor", "ticket": "JIRA-123"}. Metadata appears in Langfuse dashboard for filtering and analysis.'
+      description: 'Optional additional metadata as key-value pairs. Metadata appears in Langfuse dashboard for filtering and analysis.'
     tags:
       type: array
       items:
         type: string
-      description: 'Optional list of tags for categorizing the trace (e.g., ["bugfix", "high-priority", "authentication"]). Tags enable filtering and organization in Langfuse dashboard.'
+      description: 'Optional list of tags for categorizing the trace. Tags enable filtering and organization in Langfuse dashboard.'
     intel:
       type: object
       description: 'Optional prompt intelligence metadata for quality analysis. Provides insights into the nature and quality of the user request.'
@@ -33,25 +33,25 @@ inputSchema:
           type: number
           minimum: 0
           maximum: 1
-          description: 'User frustration level: 0.0 = calm/satisfied, 1.0 = very frustrated. Helps identify problematic interactions.'
+          description: 'User frustration level (0.0-1.0). See "INTEL CODES" below.'
         specificity:
           type: string
           enum: [surg, const, outc, expl]
-          description: 'Prompt type: surg=surgical (specific fix), const=constructive (building), outc=outcome-focused (goal-oriented), expl=exploratory (discovery).'
+          description: 'Prompt type classification. See "INTEL CODES" below for code meanings.'
         task_type:
           type: string
           enum: [bug, feat, refac, research, test, docs, debug, conf, other]
-          description: 'Task classification: bug=bug fix, feat=new feature, refac=refactoring, research=investigation, test=testing, docs=documentation, debug=debugging, conf=configuration, other=miscellaneous.'
+          description: 'Task classification. See "INTEL CODES" below for code meanings.'
         quality:
           type: number
           minimum: 0
           maximum: 1
-          description: 'Prompt quality score: 0.0 = poor/vague, 1.0 = excellent/clear. Indicates how well-structured the user request is.'
+          description: 'Prompt quality score (0.0-1.0). See "INTEL CODES" below.'
         iteration:
           type: integer
           minimum: 1
           maximum: 9
-          description: 'Task iteration count: How many attempts at this task (1 = first attempt, 2+ = retry/refinement).'
+          description: 'Task iteration count. See "INTEL CODES" below.'
   required:
   - name
 outputSchema:
@@ -86,9 +86,18 @@ IDEAL TRACE LIFECYCLE:
 
 FULL PROMPT OBSERVABILITY:
   Use 'input' parameter to capture the user's original prompt/request.
+  Use 'strategy' to record your approach (e.g., "depth-first exploration", "comparative analysis", "root cause investigation").
+  Use 'metadata' for structured key-value context (e.g., {"priority": "high", "project": "backend-refactor", "ticket": "JIRA-123"}).
   Use 'intel' object to add prompt quality metadata for analysis.
   Use 'tags' to categorize traces for easier filtering in Langfuse.
   At trace end, use 'output' to capture Claude's complete response.
+
+INTEL CODES:
+  specificity: surg=surgical (specific fix), const=constructive (building), outc=outcome-focused (goal-oriented), expl=exploratory (discovery).
+  task_type: bug=bug fix, feat=new feature, refac=refactoring, research=investigation, test=testing, docs=documentation, debug=debugging, conf=configuration, other=miscellaneous.
+  frustration: 0.0 = calm/satisfied, 1.0 = very frustrated. Helps identify problematic interactions.
+  quality: 0.0 = poor/vague, 1.0 = excellent/clear. Indicates how well-structured the user request is.
+  iteration: how many attempts at this task (1 = first attempt, 2+ = retry/refinement).
 
 NESTED TRACES: Starting a new trace while one is active creates a stack. end_trace() ends only the most recent.
 

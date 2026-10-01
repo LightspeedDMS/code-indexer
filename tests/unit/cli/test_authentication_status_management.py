@@ -17,12 +17,13 @@ Tests are organized by acceptance criteria:
 - AC5: Token Lifecycle Management
 """
 
+import dataclasses
 import json
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import Mock, patch
 import pytest
 from click.testing import CliRunner
 
@@ -71,6 +72,103 @@ class TestAuthenticationStatusCommands:
 
         return project_dir
 
+    def _make_auth_status(self, **overrides):
+        """Build an AuthStatus with sensible authenticated-user defaults,
+        overridable per test."""
+        from code_indexer.api_clients.auth_client import AuthStatus
+
+        # Explicit, correctly-typed base construction (not a **dict spread
+        # of a heterogeneous-value dict(), which mypy widens to
+        # dict[str, object] and can't verify field-by-field against the
+        # dataclass constructor). Per-test overrides are then applied via
+        # dataclasses.replace(), preserving the exact overridable-per-test
+        # behavior every call site relies on.
+        base = AuthStatus(
+            authenticated=True,
+            username="test_user",
+            role="user",
+            token_valid=True,
+            token_expires=None,
+            server_url="http://localhost:8000",
+            last_refreshed=None,
+            permissions=["read"],
+            server_reachable=True,
+        )
+        return dataclasses.replace(base, **overrides)
+
+    def _invoke_status_with_mocked_auth(self, project_dir, status, args):
+        """Invoke the CLI with create_auth_client mocked to return a client
+        whose get_auth_status() returns the given AuthStatus."""
+        with (
+            patch(
+                "code_indexer.api_clients.auth_client.create_auth_client"
+            ) as mock_create_client,
+            patch(
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
+            ) as mock_find_root,
+            patch(
+                "code_indexer.remote.config.load_remote_configuration"
+            ) as mock_load_config,
+        ):
+            mock_find_root.return_value = project_dir
+            mock_load_config.return_value = {
+                "server_url": "http://localhost:8000",
+                "encrypted_credentials": {"username": "test_user"},
+            }
+            mock_client = Mock()
+            mock_create_client.return_value = mock_client
+            mock_client.get_auth_status.return_value = status
+
+            with self.runner.isolated_filesystem():
+                os.chdir(str(project_dir))
+                return self.runner.invoke(cli, args)
+
+    def _make_credential_health(self, **overrides):
+        """Build a CredentialHealth with all-passing defaults, overridable
+        per test."""
+        from code_indexer.api_clients.auth_client import CredentialHealth
+
+        # Same pattern as _make_auth_status above: explicit, correctly-typed
+        # base construction, then dataclasses.replace() applies overrides --
+        # avoids the dict[str, object]-widened **spread mypy can't verify.
+        base = CredentialHealth(
+            healthy=True,
+            issues=[],
+            encryption_valid=True,
+            server_reachable=True,
+            token_signature_valid=True,
+            file_permissions_correct=True,
+            recovery_suggestions=[],
+        )
+        return dataclasses.replace(base, **overrides)
+
+    def _invoke_health_with_mocked_auth(self, project_dir, health, args):
+        """Invoke the CLI with create_auth_client mocked to return a client
+        whose check_credential_health() returns the given CredentialHealth."""
+        with (
+            patch(
+                "code_indexer.api_clients.auth_client.create_auth_client"
+            ) as mock_create_client,
+            patch(
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
+            ) as mock_find_root,
+            patch(
+                "code_indexer.remote.config.load_remote_configuration"
+            ) as mock_load_config,
+        ):
+            mock_find_root.return_value = project_dir
+            mock_load_config.return_value = {
+                "server_url": "http://localhost:8000",
+                "encrypted_credentials": {"username": "test_user"},
+            }
+            mock_client = Mock()
+            mock_create_client.return_value = mock_client
+            mock_client.check_credential_health.return_value = health
+
+            with self.runner.isolated_filesystem():
+                os.chdir(str(project_dir))
+                return self.runner.invoke(cli, args)
+
     # AC1: Authentication Status Display Tests
 
     def test_auth_status_command_exists(self):
@@ -108,7 +206,7 @@ class TestAuthenticationStatusCommands:
             }
 
             # Mock authenticated auth client
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock successful auth status
@@ -120,7 +218,6 @@ class TestAuthenticationStatusCommands:
                 role="user",
                 token_valid=True,
                 token_expires=None,
-                refresh_expires=None,
                 server_url="http://localhost:8000",
                 last_refreshed=None,
                 permissions=["read"],
@@ -162,7 +259,7 @@ class TestAuthenticationStatusCommands:
             }
 
             # Mock unauthenticated auth client
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock not authenticated status
@@ -174,7 +271,6 @@ class TestAuthenticationStatusCommands:
                 role=None,
                 token_valid=False,
                 token_expires=None,
-                refresh_expires=None,
                 server_url="http://localhost:8000",
                 last_refreshed=None,
                 permissions=[],
@@ -200,7 +296,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
 
             # Mock JWT token with user info
@@ -218,19 +314,19 @@ class TestAuthenticationStatusCommands:
 
     def test_auth_status_displays_token_expiration(self):
         """Test that status command calculates and displays token expiration time."""
+        from datetime import timedelta
+
         project_dir = self.create_temp_project_dir()
-
-        # Create future expiration time
-        datetime.now(timezone.utc).timestamp() + 3600  # 1 hour from now
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Token expiration display should fail (TDD - red phase)"
+        token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        status = self._make_auth_status(token_expires=token_expires)
+        result = self._invoke_status_with_mocked_auth(
+            project_dir, status, ["auth", "status"]
         )
+
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Token expires:" in result.output
 
     def test_auth_status_displays_server_url(self):
         """Test that status command displays current server URL from configuration."""
@@ -240,8 +336,10 @@ class TestAuthenticationStatusCommands:
             os.chdir(str(project_dir))
             result = self.runner.invoke(cli, ["auth", "status"])
 
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, "Server URL display should fail (TDD - red phase)"
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Server: http://localhost:8000" in result.output
 
     def test_auth_status_suggests_login_when_not_authenticated(self):
         """Test that status command suggests login when user is not authenticated."""
@@ -256,8 +354,10 @@ class TestAuthenticationStatusCommands:
             os.chdir(str(project_dir))
             result = self.runner.invoke(cli, ["auth", "status"])
 
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, "Login suggestion should fail (TDD - red phase)"
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Use 'cidx auth login' to authenticate" in result.output
 
     # AC2: Token Validity Verification Tests
 
@@ -268,7 +368,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.validate_token.return_value = True
 
@@ -283,19 +383,25 @@ class TestAuthenticationStatusCommands:
 
     def test_auth_status_detects_expired_token(self):
         """Test that status command detects expired tokens and displays expiration status."""
+        from datetime import timedelta
+
         project_dir = self.create_temp_project_dir()
-
-        # Create expired token (past timestamp)
-        datetime.now(timezone.utc).timestamp() - 3600  # 1 hour ago
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Expired token detection should fail (TDD - red phase)"
+        token_expires = datetime.now(timezone.utc) - timedelta(hours=1)
+        status = self._make_auth_status(
+            token_valid=False,
+            token_expires=token_expires,
+            permissions=[],
+            server_reachable=None,
         )
+        result = self._invoke_status_with_mocked_auth(
+            project_dir, status, ["auth", "status"]
+        )
+
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Token expired:" in result.output
+        assert "Token Status: Invalid/Expired" in result.output
 
     def test_auth_status_attempts_automatic_token_refresh(self):
         """Test that status command attempts automatic token refresh when token is expired."""
@@ -304,7 +410,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.refresh_token.return_value = {"access_token": "new_token"}
 
@@ -324,7 +430,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.refresh_token.return_value = {"access_token": "refreshed_token"}
 
@@ -344,7 +450,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
 
             from code_indexer.api_clients.base_client import AuthenticationError
@@ -373,7 +479,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
 
             from code_indexer.api_clients.base_client import AuthenticationError
@@ -408,41 +514,62 @@ class TestAuthenticationStatusCommands:
     def test_auth_status_verbose_displays_token_timestamps(self):
         """Test that verbose mode displays token issuance and refresh timestamps."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Token timestamps display should fail (TDD - red phase)"
+        status = self._make_auth_status(last_refreshed=datetime(2024, 1, 15, 10, 30, 0))
+        result = self._invoke_status_with_mocked_auth(
+            project_dir, status, ["auth", "status", "--verbose"]
         )
 
-    def test_auth_status_verbose_displays_refresh_token_expiration(self):
-        """Test that verbose mode displays refresh token expiration if available."""
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Last refreshed:" in result.output
+
+    def test_auth_status_has_no_refresh_expires_field(self):
+        """Bug #1756: AuthStatus.refresh_expires was a dead field -- the only
+        real producer (AuthAPIClient.get_auth_status()) hardcoded it to None,
+        and _display_auth_status() never read it. Investigation confirmed the
+        CLI's encrypted credential storage (ProjectCredentialManager /
+        DecryptedCredentials) persists only username+password, and the real
+        token-refresh path (_get_valid_token() -> _authenticate()) re-POSTs
+        /auth/login with those credentials rather than using a server-issued
+        refresh token -- so no real refresh-token-expiry data is ever
+        reachable at get_auth_status() call time. The field is removed per
+        Messi Rule #12 (Anti-Orphan-Code): wire it or don't write it."""
+        from code_indexer.api_clients.auth_client import AuthStatus
+
+        field_names = {f.name for f in dataclasses.fields(AuthStatus)}
+        assert "refresh_expires" not in field_names, (
+            "AuthStatus.refresh_expires should have been removed as a dead "
+            "field (bug #1756) -- it is still present on the dataclass"
+        )
+
+    def test_auth_status_verbose_still_works_without_refresh_expires_field(self):
+        """Verbose mode continues to work correctly now that the dead
+        refresh_expires field has been removed from AuthStatus (bug #1756)."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Refresh token expiration display should fail (TDD - red phase)"
+        status = self._make_auth_status()
+        result = self._invoke_status_with_mocked_auth(
+            project_dir, status, ["auth", "status", "--verbose"]
         )
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Detailed Information" in result.output
 
     def test_auth_status_verbose_displays_user_permissions(self):
         """Test that verbose mode displays user permissions from token claims."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "User permissions display should fail (TDD - red phase)"
+        status = self._make_auth_status(permissions=["read", "write"])
+        result = self._invoke_status_with_mocked_auth(
+            project_dir, status, ["auth", "status", "--verbose"]
         )
+
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
+        assert "Permissions:" in result.output
+        assert "read" in result.output
+        assert "write" in result.output
 
     def test_auth_status_verbose_tests_server_connectivity(self):
         """Test that verbose mode tests and displays server connectivity status."""
@@ -451,7 +578,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.test_connectivity.return_value = True
 
@@ -471,7 +598,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.get_server_version.return_value = "v1.2.3"
 
@@ -519,7 +646,7 @@ class TestAuthenticationStatusCommands:
             }
 
             # Mock auth client
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock healthy credential health
@@ -550,15 +677,15 @@ class TestAuthenticationStatusCommands:
     def test_auth_status_health_verifies_encryption_key_availability(self):
         """Test that health mode verifies encryption key availability."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Encryption key verification should fail (TDD - red phase)"
+        health = self._make_credential_health(encryption_valid=True)
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
         )
+
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "Credential file encryption" in result.output
 
     def test_auth_status_health_tests_server_connectivity_for_validation(self):
         """Test that health mode tests server connectivity for token validation."""
@@ -567,7 +694,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.test_connectivity.return_value = False
 
@@ -583,69 +710,78 @@ class TestAuthenticationStatusCommands:
     def test_auth_status_health_validates_token_signature(self):
         """Test that health mode validates JWT token structure and signature."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Token signature validation should fail (TDD - red phase)"
+        health = self._make_credential_health(token_signature_valid=True)
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
         )
+
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "Token signature validation" in result.output
 
     def test_auth_status_health_checks_file_permissions(self):
         """Test that health mode checks credential file permissions."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "File permissions check should fail (TDD - red phase)"
+        health = self._make_credential_health(file_permissions_correct=True)
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
         )
+
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "File permissions" in result.output
 
     def test_auth_status_health_displays_healthy_status(self):
         """Test that health mode displays healthy status when all checks pass."""
         project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Healthy status display should fail (TDD - red phase)"
+        health = self._make_credential_health(healthy=True)
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
         )
+
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "Overall Health: Healthy" in result.output
 
     def test_auth_status_health_handles_corrupted_credentials(self):
         """Test that health mode detects and reports corrupted credential files."""
         project_dir = self.create_temp_project_dir()
-
-        # Create corrupted credentials file
-        creds_path = project_dir / ".code-indexer" / ".creds"
-        creds_path.write_bytes(b"corrupted_data")
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, (
-            "Corrupted credentials handling should fail (TDD - red phase)"
+        health = self._make_credential_health(
+            healthy=False,
+            issues=["Credential file is corrupted or unreadable"],
+            encryption_valid=False,
         )
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
+        )
+
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "Issues Found" in result.output
+        assert "Credential file is corrupted or unreadable" in result.output
 
     def test_auth_status_health_provides_recovery_guidance(self):
         """Test that health mode provides specific recovery guidance for each issue type."""
         project_dir = self.create_temp_project_dir()
+        health = self._make_credential_health(
+            healthy=False,
+            issues=["Token signature invalid"],
+            token_signature_valid=False,
+            recovery_suggestions=["Run 'cidx auth login' to re-authenticate"],
+        )
+        result = self._invoke_health_with_mocked_auth(
+            project_dir, health, ["auth", "status", "--health"]
+        )
 
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "status", "--health"])
-
-        # Should fail as command doesn't exist yet (TDD - red phase)
-        assert result.exit_code != 0, "Recovery guidance should fail (TDD - red phase)"
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
+        assert "Recovery Suggestions" in result.output
+        assert "Run 'cidx auth login' to re-authenticate" in result.output
 
     # AC5: Token Lifecycle Management Tests
 
@@ -668,7 +804,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.refresh_token.return_value = {"access_token": "new_token"}
 
@@ -686,7 +822,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.refresh_token.return_value = {"access_token": "new_token"}
 
@@ -706,7 +842,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.refresh_token.return_value = {"access_token": "new_token"}
 
@@ -724,7 +860,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
 
             from code_indexer.api_clients.base_client import AuthenticationError
@@ -753,7 +889,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
 
             from code_indexer.api_clients.base_client import AuthenticationError
@@ -790,7 +926,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.validate_credentials.return_value = True
 
@@ -808,7 +944,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.validate_credentials.return_value = True
 
@@ -839,7 +975,7 @@ class TestAuthenticationStatusCommands:
         with patch(
             "code_indexer.api_clients.auth_client.AuthAPIClient"
         ) as mock_client_class:
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client_class.return_value = mock_client
             mock_client.validate_credentials.return_value = False
 
@@ -875,7 +1011,6 @@ class TestAuthStatusDataModels:
             role="user",
             token_valid=True,
             token_expires=None,
-            refresh_expires=None,
             server_url="http://localhost:8000",
             last_refreshed=None,
             permissions=["read", "write"],

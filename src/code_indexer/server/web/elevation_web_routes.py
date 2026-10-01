@@ -21,9 +21,12 @@ from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth.dependencies import (
     _is_elevation_enforcement_enabled,
-    get_current_admin_user_hybrid,
+    _mfa_setup_url_for_role,
+    get_current_user_hybrid,
 )
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.elevation_step_up import StepUpOutcome, step_up
+from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.web.mfa_routes import get_totp_service
 
@@ -41,7 +44,14 @@ _HTTP_SEE_OTHER = status.HTTP_303_SEE_OTHER
 _HTTP_BAD_REQUEST = status.HTTP_400_BAD_REQUEST
 _HTTP_UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED
 _HTTP_FORBIDDEN = status.HTTP_403_FORBIDDEN
+_HTTP_TOO_MANY_REQUESTS = status.HTTP_429_TOO_MANY_REQUESTS
 _HTTP_SERVICE_UNAVAILABLE = status.HTTP_503_SERVICE_UNAVAILABLE
+_HTTP_INTERNAL_SERVER_ERROR = status.HTTP_500_INTERNAL_SERVER_ERROR
+
+# Same wording as REST POST /auth/elevate's rate_limited response.
+_RATE_LIMITED_MESSAGE = "Too many elevation attempts. Try again later."
+# Same wording as REST POST /auth/elevate's elevation_create_failed response.
+_CREATE_FAILED_MESSAGE = "Elevation window not retrievable after create."
 
 
 class _ElevResult(Enum):
@@ -50,7 +60,9 @@ class _ElevResult(Enum):
     NO_CODE = auto()
     NO_MFA = auto()
     NO_SESSION = auto()
+    RATE_LIMITED = auto()
     INVALID_CODE = auto()
+    CREATE_FAILED = auto()
 
 
 def _sanitize_next(next_value: str) -> str:
@@ -92,10 +104,16 @@ def _elev_error(request: Request, safe_next: str, message: str, http_status: int
     )
 
 
-def _redirect_to_setup(safe_next: str):
-    """Redirect to MFA setup, bouncing back to safe_next afterwards."""
+def _redirect_to_setup(safe_next: str, setup_path: str):
+    """Redirect to MFA setup, bouncing back to safe_next afterwards.
+
+    `setup_path` is the caller's own role-appropriate setup page (see
+    _mfa_setup_url_for_role) -- elevation is available to every TOTP-enrolled
+    user, and the admin setup page is gated to an admin-role session, so a
+    non-admin caller must never be redirected there.
+    """
     return RedirectResponse(
-        url=f"/admin/mfa/setup?next={quote(safe_next, safe='')}",
+        url=f"{setup_path}?next={quote(safe_next, safe='')}",
         status_code=_HTTP_SEE_OTHER,
     )
 
@@ -109,32 +127,6 @@ def _resolve_session_key(request: Request) -> Optional[str]:
     return str(cookie) if cookie is not None else None
 
 
-def _verify_credentials(
-    totp_service, username: str, totp_code, recovery_code, client_ip: str
-):
-    """Verify TOTP or recovery code; return scope string or None on failure.
-
-    Args:
-        totp_service: Active TOTPService instance.
-        username: Authenticated admin username.
-        totp_code: TOTP code from form (may be None).
-        recovery_code: Recovery code from form (may be None).
-        client_ip: Client IP for audit purposes.
-
-    Returns:
-        Elevation scope string ("full" or "totp_repair") on success, None on failure.
-    """
-    if recovery_code:
-        if totp_service.verify_recovery_code(
-            username, recovery_code, ip_address=client_ip
-        ):
-            return "totp_repair"
-        return None
-    if totp_service.verify_enabled_code(username, totp_code):
-        return "full"
-    return None
-
-
 def _attempt_elevation(
     request: Request,
     username: str,
@@ -145,8 +137,8 @@ def _attempt_elevation(
     """Run the shared elevation decision pipeline.
 
     Executes all validation steps (kill-switch, code presence, MFA config,
-    session key, credential verification) and — on success — creates the
-    elevated session.  All audit log entries are emitted here so both the
+    session key, failed-attempt lockout, credential verification) and — on
+    success — creates the elevated session.  All audit log entries are emitted here so both the
     form and AJAX callers share identical observability.
 
     Args:
@@ -194,10 +186,27 @@ def _attempt_elevation(
         )
         return _ElevResult.NO_SESSION, None
 
-    scope = _verify_credentials(
-        totp_service, username, totp_code, recovery_code, client_ip
+    # The shared step-up: same limiter instance and key as REST /auth/elevate
+    # and MCP elevate_session, so failed attempts through any front door
+    # count against one lockout, checked before any code is verified.
+    result = step_up(
+        username,
+        totp_code=totp_code,
+        recovery_code=recovery_code,
+        session_key=session_key,
+        client_ip=client_ip,
+        totp_service=totp_service,
+        sessions=elevated_session_manager,
+        limiter=login_rate_limiter,
     )
-    if scope is None:
+    if result.outcome is StepUpOutcome.LOCKED_OUT:
+        logger.warning(
+            "Elevation attempt by %s from %s rejected — too many failed attempts",
+            username,
+            client_ip,
+        )
+        return _ElevResult.RATE_LIMITED, None
+    if result.outcome is StepUpOutcome.INVALID_CODE:
         code_type = "recovery code" if recovery_code else "TOTP code"
         logger.warning(
             "Elevation attempt by %s from %s rejected — invalid %s",
@@ -206,26 +215,33 @@ def _attempt_elevation(
             code_type,
         )
         return _ElevResult.INVALID_CODE, None
-
-    elevated_session_manager.create(
-        session_key=session_key,
-        username=username,
-        elevated_from_ip=client_ip,
-        scope=scope,
-    )
+    if result.outcome is StepUpOutcome.WINDOW_NOT_CREATED:
+        logger.error(
+            "Elevation window for %s from %s not retrievable after create",
+            username,
+            client_ip,
+        )
+        return _ElevResult.CREATE_FAILED, None
     logger.info(
-        "Elevation granted for %s from %s (scope=%s)", username, client_ip, scope
+        "Elevation granted for %s from %s (scope=%s)",
+        username,
+        client_ip,
+        result.scope,
     )
-    return _ElevResult.SUCCESS, scope
+    return _ElevResult.SUCCESS, result.scope
 
 
 @router.get("/admin/elevate", response_class=HTMLResponse)
 def elevate_page(
     request: Request,
     next: str = _DEFAULT_NEXT,
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
-    """Render the elevation form. Redirect to TOTP setup if user has no MFA."""
+    """Render the elevation form. Redirect to TOTP setup if user has no MFA.
+
+    Elevation is available to every TOTP-enrolled user, not only admins --
+    this route only opens a window for the CALLER's own username.
+    """
     safe_next = _sanitize_next(next)
     totp_service = get_totp_service()
     if totp_service is not None and not totp_service.is_mfa_enabled(user.username):
@@ -234,7 +250,7 @@ def elevate_page(
             user.username,
             safe_next,
         )
-        return _redirect_to_setup(safe_next)
+        return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     return templates.TemplateResponse(
         request,
         "elevate.html",
@@ -248,7 +264,7 @@ def elevate_form(
     next: str = Form(_DEFAULT_NEXT),
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """Process Web UI form submission and redirect on success."""
     safe_next = _sanitize_next(next)
@@ -265,9 +281,17 @@ def elevate_form(
     if result == _ElevResult.NO_CODE:
         return _elev_error(request, safe_next, "Provide a code.", _HTTP_BAD_REQUEST)
     if result == _ElevResult.NO_MFA:
-        return _redirect_to_setup(safe_next)
+        return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     if result == _ElevResult.NO_SESSION:
         return _elev_error(request, safe_next, "No session.", _HTTP_FORBIDDEN)
+    if result == _ElevResult.RATE_LIMITED:
+        return _elev_error(
+            request, safe_next, _RATE_LIMITED_MESSAGE, _HTTP_TOO_MANY_REQUESTS
+        )
+    if result == _ElevResult.CREATE_FAILED:
+        return _elev_error(
+            request, safe_next, _CREATE_FAILED_MESSAGE, _HTTP_INTERNAL_SERVER_ERROR
+        )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."
     return _elev_error(request, safe_next, error_msg, _HTTP_UNAUTHORIZED)
@@ -278,7 +302,7 @@ def elevate_ajax(
     request: Request,
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
-    user: User = Depends(get_current_admin_user_hybrid),
+    user: User = Depends(get_current_user_hybrid),
 ):
     """AJAX endpoint for inline modal elevation — returns JSON, never redirects."""
     client_ip = request.client.host if request.client else "unknown"
@@ -305,6 +329,16 @@ def elevate_ajax(
         return JSONResponse(
             {"success": False, "error": "No session."},
             status_code=_HTTP_FORBIDDEN,
+        )
+    if result == _ElevResult.RATE_LIMITED:
+        return JSONResponse(
+            {"success": False, "error": _RATE_LIMITED_MESSAGE},
+            status_code=_HTTP_TOO_MANY_REQUESTS,
+        )
+    if result == _ElevResult.CREATE_FAILED:
+        return JSONResponse(
+            {"success": False, "error": _CREATE_FAILED_MESSAGE},
+            status_code=_HTTP_INTERNAL_SERVER_ERROR,
         )
     # INVALID_CODE
     error_msg = "Invalid recovery code." if recovery_code else "Invalid code."

@@ -9,12 +9,12 @@ Validates that the new single data structure architecture works correctly:
 
 from rich.console import Console
 
-from src.code_indexer.services.clean_slot_tracker import (
+from code_indexer.services.clean_slot_tracker import (
     CleanSlotTracker,
     FileData,
     FileStatus,
 )
-from src.code_indexer.progress.multi_threaded_display import (
+from code_indexer.progress.multi_threaded_display import (
     MultiThreadedProgressManager,
 )
 

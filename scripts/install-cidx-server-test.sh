@@ -170,7 +170,7 @@ test_config_cow_daemon_backend_shape() {
         NODE_ID='staging'
         POSTGRES_DSN='postgresql://user:pass@host/db'
         CLONE_BACKEND='cow-daemon'
-        COW_DAEMON_URL='http://192.168.60.23:8081'
+        COW_DAEMON_URL='http://203.0.113.23:8081'
         COW_DAEMON_API_KEY='super-secret-key'
         NFS_MOUNT='/mnt/cow-storage'
         PORT=8000
@@ -186,7 +186,7 @@ test_config_cow_daemon_backend_shape() {
 
     echo "${output}" | grep -q '"clone_backend": "cow-daemon"' \
         && echo "${output}" | grep -q "cow_daemon" \
-        && echo "${output}" | grep -q '"daemon_url": "http://192.168.60.23:8081"' \
+        && echo "${output}" | grep -q '"daemon_url": "http://203.0.113.23:8081"' \
         && echo "${output}" | grep -q '"mount_point": "/mnt/cow-storage"'
 }
 run_test "write_config (cow-daemon backend) produces clone_backend + cow_daemon fields" \
@@ -941,16 +941,43 @@ test_fstab_entry_not_duplicated() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
-        add_fstab_entry '192.168.60.23:/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '192.168.60.23:/home/jsbattig/cow-storage' "${fstab_file}")"
+    line_count="$(grep -cF '203.0.113.23:/home/opuser/cow-storage' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     [[ "${line_count}" -eq 1 ]]
 }
 run_test "add_fstab_entry does not duplicate the entry on a second run" test_fstab_entry_not_duplicated
+
+test_fstab_entry_includes_nolock() {
+    # Issue #1510 follow-up: NFSv4.1 does not support client-side-only
+    # locking at all (nolock/local_lock is baked out by the protocol's own
+    # OPEN/LOCK state machine) -- empirically proven ineffective on the
+    # live staging mount. The mount is downgraded to NFSv3 (fstype=nfs,
+    # vers=3), which genuinely honors nolock via the separate NLM protocol.
+    local tmpdir fstab_file entry_line fstype
+    tmpdir="$(mktemp -d)"
+    fstab_file="${tmpdir}/fstab"
+    touch "${fstab_file}"
+
+    run_sourced "
+        DRY_RUN=false
+        add_fstab_entry '203.0.113.23:/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+    " >/dev/null
+
+    entry_line="$(grep -F '203.0.113.23:/home/opuser/cow-storage' "${fstab_file}")"
+    fstype="$(echo "${entry_line}" | awk '{print $3}')"
+    rm -rf "${tmpdir}"
+
+    [[ "${fstype}" == "nfs" ]] \
+        && echo "${entry_line}" | grep -qF 'vers=3' \
+        && echo "${entry_line}" | grep -qF 'nolock'
+}
+run_test "add_fstab_entry uses NFSv3 (fstype=nfs, vers=3) with nolock (issue #1510 follow-up)" \
+    test_fstab_entry_includes_nolock
 
 test_fstab_entry_dry_run_writes_nothing() {
     local tmpdir fstab_file output size
@@ -960,7 +987,7 @@ test_fstab_entry_dry_run_writes_nothing() {
 
     output="$(run_sourced "
         DRY_RUN=true
-        add_fstab_entry '192.168.60.23:/export' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_entry '203.0.113.23:/export' '/mnt/cow-storage' '${fstab_file}'
     ")"
 
     size="$(wc -l < "${fstab_file}")"
@@ -979,11 +1006,11 @@ test_fstab_bind_entry_not_duplicated() {
 
     run_sourced "
         DRY_RUN=false
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '/home/jsbattig/cow-storage  /mnt/cow-storage' "${fstab_file}")"
+    line_count="$(grep -cF '/home/opuser/cow-storage  /mnt/cow-storage' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     [[ "${line_count}" -eq 1 ]]
@@ -1000,10 +1027,10 @@ test_fstab_bind_entry_no_false_match_on_mount_point_substring() {
     run_sourced "
         DRY_RUN=false
         add_fstab_bind_entry '/srv/other-source' '/mnt/cow-storage-2' '${fstab_file}'
-        add_fstab_bind_entry '/home/jsbattig/cow-storage' '/mnt/cow-storage' '${fstab_file}'
+        add_fstab_bind_entry '/home/opuser/cow-storage' '/mnt/cow-storage' '${fstab_file}'
     " >/dev/null
 
-    line_count="$(grep -cF '/home/jsbattig/cow-storage  /mnt/cow-storage ' "${fstab_file}")"
+    line_count="$(grep -cF '/home/opuser/cow-storage  /mnt/cow-storage ' "${fstab_file}")"
     rm -rf "${tmpdir}"
 
     # Regression guard for L1: an unanchored substring dedup on mount_point
@@ -1095,7 +1122,7 @@ test_cluster_dry_run_end_to_end() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id staging \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:notarealpw@203.0.113.43/cidx_server" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     local file_exists=0
     [[ -f "${tmpdir}/.cidx-server/config.json" ]] && file_exists=1
@@ -1104,7 +1131,7 @@ test_cluster_dry_run_end_to_end() {
     [[ ${exit_code} -eq 0 && ${file_exists} -eq 0 ]] \
         && echo "${output}" | grep -q "Cluster mode: ENABLED" \
         && echo "${output}" | grep -q "node_id=staging" \
-        && ! echo "${output}" | grep -q "secretpw"
+        && ! echo "${output}" | grep -q "notarealpw"
 }
 run_test "Cluster --dry-run end-to-end: activates cluster mode, writes nothing, masks password" \
     test_cluster_dry_run_end_to_end
@@ -1114,21 +1141,23 @@ test_cow_daemon_dry_run_end_to_end() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id staging \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:pass@203.0.113.43/cidx_server" \
         --clone-backend cow-daemon \
-        --cow-daemon-url "http://192.168.60.23:8081" \
+        --cow-daemon-url "http://203.0.113.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
-        --nfs-server "192.168.60.23" \
-        --nfs-export "/home/jsbattig/cow-storage" \
+        --nfs-server "203.0.113.23" \
+        --nfs-export "/home/opuser/cow-storage" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     rm -rf "${tmpdir}"
 
     [[ ${exit_code} -eq 0 ]] \
         && echo "${output}" | grep -q "cow-daemon" \
         && echo "${output}" | grep -q "/mnt/cow-storage" \
+        && echo "${output}" | grep -q "nolock" \
+        && echo "${output}" | grep -q "vers=3" \
         && ! echo "${output}" | grep -q "daemon-key-xyz"
 }
-run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key" \
+run_test "CoW-daemon --dry-run end-to-end mentions mount/daemon, masks api key, uses NFSv3+nolock (issue #1510)" \
     test_cow_daemon_dry_run_end_to_end
 
 test_cow_local_bind_uses_bind_mount() {
@@ -1136,12 +1165,12 @@ test_cow_local_bind_uses_bind_mount() {
     tmpdir="$(mktemp -d)"
     output="$(HOME="${tmpdir}" bash "${INSTALL_SCRIPT}" \
         --node-id node-23 \
-        --postgres-dsn "postgresql://cidx:secretpw@192.168.68.43/cidx_server" \
+        --postgres-dsn "postgresql://cidx:pass@203.0.113.43/cidx_server" \
         --clone-backend cow-daemon \
-        --cow-daemon-url "http://192.168.60.23:8081" \
+        --cow-daemon-url "http://203.0.113.23:8081" \
         --cow-daemon-api-key "daemon-key-xyz" \
         --cow-local-bind \
-        --nfs-export "/home/jsbattig/cow-storage" \
+        --nfs-export "/home/opuser/cow-storage" \
         --dry-run 2>&1)" && exit_code=0 || exit_code=$?
     rm -rf "${tmpdir}"
 

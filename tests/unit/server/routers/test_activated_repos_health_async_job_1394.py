@@ -84,8 +84,8 @@ def _test_user() -> User:
 
 
 @pytest.fixture
-def real_job_manager():
-    manager = BackgroundJobManager()
+def real_job_manager(background_job_manager_factory):
+    manager = background_job_manager_factory()
     yield manager
     time.sleep(0.1)
 

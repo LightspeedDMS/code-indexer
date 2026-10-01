@@ -12,6 +12,10 @@ from ..auth.password_validator import (
     get_password_complexity_error_message,
 )
 from ..auth.user_manager import UserRole
+from ...validation.user_validation import (
+    validate_username_path_safe,
+    UserValidationError,
+)
 
 
 class LoginRequest(BaseModel):
@@ -101,10 +105,15 @@ class CreateUserRequest(BaseModel):
     @field_validator("username")
     @classmethod
     def validate_username(cls, v: str) -> str:
-        """Validate username is not empty or whitespace-only."""
+        """Validate username is not empty/whitespace-only and is safe to
+        use as a filesystem path component."""
         if not v or not v.strip():
             raise ValueError("Username cannot be empty or contain only whitespace")
-        return v.strip()
+        stripped = v.strip()
+        try:
+            return validate_username_path_safe(stripped)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
 
     @field_validator("password")
     @classmethod
@@ -226,10 +235,16 @@ class RegistrationRequest(BaseModel):
     @field_validator("username")
     @classmethod
     def validate_username(cls, v: str) -> str:
-        """Validate username is not empty."""
+        """Validate username is not empty and is safe to use as a
+        filesystem path component (this is the open
+        self-registration front door)."""
         if not v or not v.strip():
             raise ValueError("Username cannot be empty or contain only whitespace")
-        return v.strip()
+        stripped = v.strip()
+        try:
+            return validate_username_path_safe(stripped)
+        except UserValidationError as e:
+            raise ValueError(str(e)) from e
 
     @field_validator("email")
     @classmethod

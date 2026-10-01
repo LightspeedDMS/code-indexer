@@ -57,8 +57,23 @@ def _extract_response_data(mcp_response: dict) -> dict:
     return cast(dict, json.loads(content["text"]))
 
 
+def _admin_user() -> User:
+    """git_reset and git_clean are admin-only (their REST twins require
+    repository:admin); their handler bodies are exercised as an admin."""
+    return User(
+        username="testadmin",
+        role=UserRole.ADMIN,
+        password_hash="dummy_hash",
+        created_at=datetime.now(),
+    )
+
+
 class TestGitResetHandler:
     """Test git_reset MCP handler (F5: Recovery Operations)."""
+
+    @pytest.fixture
+    def mock_user(self):
+        return _admin_user()
 
     def test_git_reset_soft_success(
         self, mock_user, mock_git_service, mock_repo_manager
@@ -191,6 +206,10 @@ class TestGitResetHandler:
 
 class TestGitCleanHandler:
     """Test git_clean MCP handler (F5: Recovery Operations)."""
+
+    @pytest.fixture
+    def mock_user(self):
+        return _admin_user()
 
     def test_git_clean_requires_confirmation(
         self, mock_user, mock_git_service, mock_repo_manager

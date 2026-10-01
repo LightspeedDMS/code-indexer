@@ -106,10 +106,8 @@ class TestRemoteQueryExecution:
                     mock_execute_query.return_value = mock_query_results
 
                     # Execute query with basic parameters
-                    results = asyncio.run(
-                        execute_remote_query(
-                            "authentication function", 10, project_root
-                        )
+                    results = execute_remote_query(
+                        "authentication function", 10, project_root
                     )
 
                     # Verify results
@@ -164,17 +162,15 @@ class TestRemoteQueryExecution:
                     mock_execute_query.return_value = mock_query_results
 
                     # Execute query with all parameters
-                    results = asyncio.run(
-                        execute_remote_query(
-                            query_text="user authentication",
-                            limit=20,
-                            project_root=project_root,
-                            language="python",
-                            path="*/tests/*",
-                            min_score=0.8,
-                            include_source=True,
-                            accuracy="high",
-                        )
+                    results = execute_remote_query(
+                        query_text="user authentication",
+                        limit=20,
+                        project_root=project_root,
+                        language="python",
+                        path="*/tests/*",
+                        min_score=0.8,
+                        include_source=True,
+                        accuracy="high",
                     )
 
                     # Verify results
@@ -235,9 +231,7 @@ class TestRemoteQueryExecution:
                     ]
 
                     # Execute query (should trigger automatic linking)
-                    results = asyncio.run(
-                        execute_remote_query("main function", 5, project_root)
-                    )
+                    results = execute_remote_query("main function", 5, project_root)
 
                     # Verify automatic linking was triggered
                     mock_establish_link.assert_called_once_with(project_root)
@@ -293,8 +287,8 @@ class TestRemoteQueryExecution:
                         mock_execute_query.return_value = mock_query_results
 
                         # Execute query (should NOT trigger linking)
-                        results = asyncio.run(
-                            execute_remote_query("existing query", 10, project_root)
+                        results = execute_remote_query(
+                            "existing query", 10, project_root
                         )
 
                         # Verify automatic linking was NOT triggered
@@ -444,9 +438,7 @@ class TestRemoteQueryExecution:
                     mock_execute_query.return_value = expected_results
 
                     # Execute query
-                    results = asyncio.run(
-                        execute_remote_query("utility", 10, project_root)
-                    )
+                    results = execute_remote_query("utility", 10, project_root)
 
                     # Verify exact format match
                     assert len(results) == 1
@@ -639,8 +631,8 @@ class TestRepositoryLinkingIntegration:
                             ]
 
                             # Execute remote query (should trigger auto-linking)
-                            results = asyncio.run(
-                                execute_remote_query("application", 10, project_root)
+                            results = execute_remote_query(
+                                "application", 10, project_root
                             )
 
                             # Verify repository linking was attempted
@@ -706,9 +698,7 @@ class TestRepositoryLinkingIntegration:
                 ]
 
                 # First query - should establish link
-                results1 = asyncio.run(
-                    execute_remote_query("first query", 10, project_root)
-                )
+                results1 = execute_remote_query("first query", 10, project_root)
 
                 # Verify linking was called for first query
                 mock_establish_link.assert_called_once()
@@ -720,9 +710,7 @@ class TestRepositoryLinkingIntegration:
                 assert updated_config["repository_link"]["alias"] == "persistent-repo"
 
                 # Second query - should reuse existing link
-                results2 = asyncio.run(
-                    execute_remote_query("second query", 10, project_root)
-                )
+                results2 = execute_remote_query("second query", 10, project_root)
 
                 # Verify linking was NOT called again
                 assert mock_establish_link.call_count == 1  # Still only called once

@@ -99,7 +99,12 @@ class TestSmallPayloadPageIndexBug:
         assert data["total_pages"] == 1
 
     def test_small_payload_page_0_still_works(self, cache: PayloadCache) -> None:
-        """Caller using page=0 (default/legacy) on a single-page result still succeeds."""
+        """Caller using page=0 (default/legacy) on a single-page result still succeeds.
+
+        Bug #1928 final round (Codex P1): strict, no-clamp page validation
+        is a pages-v1 (xray-pv1-*) handle-only contract. A legacy handle
+        (produced by the plain cache.store() used here) must keep its
+        pre-#1928 lenient coercion exactly -- page=0 clamps to 1."""
         from code_indexer.server.mcp.handlers.xray import (
             handle_cidx_fetch_cached_payload,
         )

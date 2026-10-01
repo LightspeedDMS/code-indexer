@@ -11,6 +11,12 @@ from pathlib import Path
 import shutil
 from typing import List, Tuple
 
+from .ssh_input_validation import (
+    SSHConfigFormatError,
+    has_control_characters,
+    is_valid_hostname,
+)
+
 
 class CorruptedConfigError(Exception):
     """Raised when SSH config has CIDX start marker but missing end marker."""
@@ -150,11 +156,26 @@ class SSHConfigManager:
         for entry in new_cidx_entries:
             content += self._format_host_block(entry)
         content += self.CIDX_END_MARKER + "\n"
-        content += "\n"
 
-        # Preserve user section (excluding Include directives already written)
-        user_lines = parsed_config.user_section
-        content += "\n".join(user_lines)
+        # Preserve user section (excluding Include directives already written).
+        #
+        # Bug fix: ~/.ssh/config grew by one blank line on every sync. The
+        # single separator blank line added below (between the CIDX end
+        # marker and the user section) lies OUTSIDE the CIDX markers, so
+        # parse_config() folds it back into user_section as a leading empty
+        # string on the next parse. Without stripping it here, the next
+        # write would stack ANOTHER separator on top of that leading blank
+        # line, growing the file by one blank line per round-trip forever.
+        # Only LEADING blank lines are stripped -- blank lines the user
+        # placed further into their own section are preserved untouched.
+        user_lines = list(parsed_config.user_section)
+        while user_lines and user_lines[0] == "":
+            user_lines.pop(0)
+
+        if user_lines:
+            content += "\n" + "\n".join(user_lines)
+        else:
+            content += "\n"
 
         # Ensure parent directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,12 +190,35 @@ class SSHConfigManager:
         """
         Format a single Host block for SSH config.
 
+        Format-time backstop: every caller (SSHKeyManager, SSHKeySyncService)
+        is expected to have already validated/filtered ``entry`` before it
+        ever reaches here -- this is a defensive-invariant assertion (Messi
+        Rule #15), not the primary rejection point. A value written into a
+        Host block must never contain a character that can end or extend
+        its config line (a newline or carriage return); the checks below
+        are what stops that.
+
         Args:
             entry: HostEntry with host, hostname, and key_path
 
         Returns:
             Formatted Host block string
+
+        Raises:
+            SSHConfigFormatError: ``entry.host``/``entry.hostname`` fails the
+                strict hostname grammar, or ``entry.key_path`` contains a
+                control character. Never let a rejected value reach
+                ``~/.ssh/config``.
         """
+        if not is_valid_hostname(entry.host):
+            raise SSHConfigFormatError(f"Invalid Host value: {entry.host!r}")
+        if not is_valid_hostname(entry.hostname):
+            raise SSHConfigFormatError(f"Invalid HostName value: {entry.hostname!r}")
+        if has_control_characters(entry.key_path):
+            raise SSHConfigFormatError(
+                f"Invalid IdentityFile value: {entry.key_path!r}"
+            )
+
         block = f"Host {entry.host}\n"
         block += f"  HostName {entry.hostname}\n"
         block += "  User git\n"

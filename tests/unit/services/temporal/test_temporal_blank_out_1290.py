@@ -9,10 +9,10 @@ must never touch a v2 collection or a non-temporal collection.
 
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_blank_out import (
+from code_indexer.services.temporal.temporal_blank_out import (
     blank_out_legacy_temporal_collections,
 )
-from src.code_indexer.services.temporal.temporal_structure_marker import (
+from code_indexer.services.temporal.temporal_structure_marker import (
     write_structure_marker,
 )
 

@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from src.code_indexer.config import Config
-from src.code_indexer.services.file_chunking_manager import FileProcessingResult
-from src.code_indexer.services.high_throughput_processor import HighThroughputProcessor
+from code_indexer.config import Config
+from code_indexer.services.file_chunking_manager import FileProcessingResult
+from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +111,8 @@ class TestVanishedFileToctou1118:
             "but got WARNING records:\n" + "\n".join(r.message for r in warning_records)
         )
 
-    @patch(
-        "src.code_indexer.services.high_throughput_processor.VectorCalculationManager"
-    )
-    @patch("src.code_indexer.services.high_throughput_processor.FileChunkingManager")
+    @patch("code_indexer.services.high_throughput_processor.VectorCalculationManager")
+    @patch("code_indexer.services.high_throughput_processor.FileChunkingManager")
     def test_vanished_file_does_not_abort_good_files(
         self,
         mock_file_chunking_manager,
@@ -211,12 +209,12 @@ class TestVanishedFileToctou1118:
         THEN   it returns FileProcessingResult with success=False (not a crash)
         AND    result.error is set to a non-empty string
         """
-        from src.code_indexer.services.file_chunking_manager import (
+        from code_indexer.services.file_chunking_manager import (
             FileChunkingManager,
             FileProcessingResult,
         )
-        from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
-        from src.code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+        from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+        from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
 
         config = Config(codebase_dir=tmp_path)
         chunker = FixedSizeChunker(config)
@@ -270,12 +268,12 @@ class TestVanishedFileToctou1118:
         AND    success=False
         This is the RED test: FileProcessingResult has no 'vanished' field yet.
         """
-        from src.code_indexer.services.file_chunking_manager import (
+        from code_indexer.services.file_chunking_manager import (
             FileChunkingManager,
             FileProcessingResult,
         )
-        from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
-        from src.code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+        from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+        from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
 
         config = Config(codebase_dir=tmp_path)
         chunker = FixedSizeChunker(config)
@@ -315,10 +313,8 @@ class TestVanishedFileToctou1118:
             "FileProcessingResult for a vanished file must have vanished=True"
         )
 
-    @patch(
-        "src.code_indexer.services.high_throughput_processor.VectorCalculationManager"
-    )
-    @patch("src.code_indexer.services.high_throughput_processor.FileChunkingManager")
+    @patch("code_indexer.services.high_throughput_processor.VectorCalculationManager")
+    @patch("code_indexer.services.high_throughput_processor.FileChunkingManager")
     def test_vanished_chunking_result_not_counted_as_failure(
         self,
         mock_file_chunking_manager,
@@ -415,10 +411,8 @@ class TestVanishedFileToctou1118:
             f"Expected WARNING about vanished/ghost file; got: {warning_texts}"
         )
 
-    @patch(
-        "src.code_indexer.services.high_throughput_processor.VectorCalculationManager"
-    )
-    @patch("src.code_indexer.services.high_throughput_processor.FileChunkingManager")
+    @patch("code_indexer.services.high_throughput_processor.VectorCalculationManager")
+    @patch("code_indexer.services.high_throughput_processor.FileChunkingManager")
     def test_genuine_error_still_counted_as_failure(
         self,
         mock_file_chunking_manager,

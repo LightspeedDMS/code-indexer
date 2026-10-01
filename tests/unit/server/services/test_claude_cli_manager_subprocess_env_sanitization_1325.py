@@ -41,7 +41,9 @@ class TestCommitAndReindexSanitizesPythonPath:
         ):
             manager._commit_and_reindex(["some-alias"])
 
-        index_calls = [c for c in run_calls if c["cmd"] == ["cidx", "index"]]
+        # Story #1488 appends --new-collection-layout=chunks_db to the
+        # server-context reindex command, so match by the leading tokens.
+        index_calls = [c for c in run_calls if c["cmd"][:2] == ["cidx", "index"]]
         assert index_calls, f"expected a 'cidx index' call, got: {run_calls}"
         index_env = index_calls[0]["kwargs"].get("env")
         assert index_env is not None, "cidx index must receive a sanitized env"

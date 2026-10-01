@@ -453,6 +453,129 @@ class GroupsPostgresBackend:
                 row = cur.fetchone()
                 return _row_to_repo_access(row) if row else None
 
+    # ------------------------------------------------------------------
+    # Tool-to-group access (Story #1593, AC2)
+    # ------------------------------------------------------------------
+
+    def set_tool_access(
+        self, tool_name: str, group_id: int, allowed: bool, granted_by: str
+    ) -> bool:
+        """Set a tool's explicit allow/deny state for one group."""
+        if self.get_group(group_id) is None:
+            raise ValueError(f"Group with ID {group_id} not found")
+
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO tool_group_access "
+                    "(group_id, tool_name, allowed, granted_at, granted_by) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (group_id, tool_name) DO UPDATE SET "
+                    "allowed = EXCLUDED.allowed, "
+                    "granted_at = EXCLUDED.granted_at, "
+                    "granted_by = EXCLUDED.granted_by",
+                    (group_id, tool_name, allowed, now, granted_by),
+                )
+            conn.commit()
+        return True
+
+    def get_group_tools(self, group_id: int) -> List[str]:
+        """Return the explicitly allowed MCP tools for a group."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tool_name FROM tool_group_access "
+                    "WHERE group_id = %s AND allowed = TRUE "
+                    "ORDER BY LOWER(tool_name)",
+                    (group_id,),
+                )
+                # Some psycopg connection configurations expose text columns as
+                # bytes. The Protocol promises tool names as strings regardless
+                # of driver format.
+                return [
+                    value.decode() if isinstance(value, (bytes, bytearray)) else value
+                    for (value,) in cur.fetchall()
+                ]
+
+    def get_tool_groups(self, tool_name: str) -> List[Group]:
+        """Return groups that explicitly allow an MCP tool."""
+        with self._conn() as conn:
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                cur.execute(
+                    "SELECT g.id, g.name, g.description, g.is_default, g.created_at "
+                    "FROM groups g "
+                    "JOIN tool_group_access tga ON g.id = tga.group_id "
+                    "WHERE tga.tool_name = %s AND tga.allowed = TRUE "
+                    "ORDER BY LOWER(g.name)",
+                    (tool_name,),
+                )
+                return [_row_to_group(row) for row in cur.fetchall()]
+
+    def is_tool_allowed(self, tool_name: str, group_id: int) -> bool:
+        """Return whether a group has an explicit allow row for a tool."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT allowed FROM tool_group_access "
+                    "WHERE tool_name = %s AND group_id = %s",
+                    (tool_name, group_id),
+                )
+                row = cur.fetchone()
+                return bool(row[0]) if row is not None else False
+
+    def set_tool_access_all_groups(
+        self, tool_name: str, allowed: bool, granted_by: str
+    ) -> List[int]:
+        """Atomically set one tool's state for every current group."""
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO tool_group_access "
+                        "(group_id, tool_name, allowed, granted_at, granted_by) "
+                        "SELECT id, %s, %s, %s, %s FROM groups "
+                        "ON CONFLICT (group_id, tool_name) DO UPDATE SET "
+                        "allowed = EXCLUDED.allowed, "
+                        "granted_at = EXCLUDED.granted_at, "
+                        "granted_by = EXCLUDED.granted_by "
+                        "RETURNING group_id",
+                        (tool_name, allowed, now, granted_by),
+                    )
+                    affected = [row[0] for row in cur.fetchall()]
+                conn.commit()
+                return affected
+            except Exception:
+                conn.rollback()
+                raise
+
+    def is_tool_access_enforcement_ready(self) -> bool:
+        """
+        AC9: read-only check of Story 2's `tool_access_migration_complete`
+        readiness marker. This story only READS the marker -- Story 2
+        owns writing it (via a `tool_access_migration_state` table, single
+        row keyed by id=1, `complete BOOLEAN NOT NULL`).
+
+        Safe default: the marker table/row not existing yet (Story 2's
+        seeder hasn't landed or hasn't completed anywhere in the fleet)
+        returns False rather than raising -- callers fall back to the
+        legacy role-based check. Live read every call, never cached.
+        """
+        from psycopg import errors as psycopg_errors
+
+        with self._conn() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT complete FROM tool_access_migration_state WHERE id = 1"
+                    )
+                    row = cur.fetchone()
+                    return bool(row[0]) if row is not None else False
+            except psycopg_errors.UndefinedTable:
+                conn.rollback()
+                return False
+
     def auto_assign_golden_repo(self, repo_name: str) -> None:
         """Auto-assign a new golden repo to admins and powerusers groups."""
         from code_indexer.server.services.constants import (
@@ -518,7 +641,8 @@ class GroupsPostgresBackend:
                 return cur.fetchone() is not None
 
     # ------------------------------------------------------------------
-    # Audit logging (part of GroupsBackend protocol)
+    # Audit logging (part of GroupsBackend protocol).  Write only: rows are
+    # read through services/audit_log_query.query_audit_log.
     # ------------------------------------------------------------------
 
     def log_audit(
@@ -529,74 +653,9 @@ class GroupsPostgresBackend:
         target_id: str,
         details: Optional[str] = None,
     ) -> None:
-        """Insert an audit log entry."""
-        now = datetime.now(timezone.utc)
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO audit_logs "
-                    "(timestamp, admin_id, action_type, target_type, target_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (now, admin_id, action_type, target_type, target_id, details),
-                )
-            conn.commit()
+        """Insert an audit log entry through the audit backend's one write."""
+        from .audit_log_backend import AuditLogPostgresBackend
 
-    def get_audit_logs(
-        self,
-        action_type: Optional[str] = None,
-        target_type: Optional[str] = None,
-        admin_id: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
-        exclude_target_type: Optional[str] = None,
-    ) -> tuple:
-        """Query audit log entries with filters. Returns (list, total_count)."""
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        if action_type:
-            conditions.append("action_type = %s")
-            params.append(action_type)
-        if target_type:
-            conditions.append("target_type = %s")
-            params.append(target_type)
-        if admin_id:
-            conditions.append("admin_id = %s")
-            params.append(admin_id)
-        if date_from:
-            conditions.append("timestamp >= %s")
-            params.append(f"{date_from}T00:00:00")
-        if date_to:
-            conditions.append("timestamp <= %s")
-            params.append(f"{date_to}T23:59:59")
-        if exclude_target_type:
-            conditions.append("target_type != %s")
-            params.append(exclude_target_type)
-
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-        with self._conn() as conn:
-            with conn.cursor(row_factory=_dict_row_factory()) as cur:
-                cur.execute(f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params)
-                cnt_row = cur.fetchone()
-                total = cnt_row["cnt"] if cnt_row else 0
-
-                query = (
-                    f"SELECT id, timestamp, admin_id, action_type, "
-                    f"target_type, target_id, details "
-                    f"FROM audit_logs {where} ORDER BY timestamp DESC"
-                )
-                page_params = list(params)
-                if limit is not None:
-                    query += " LIMIT %s OFFSET %s"
-                    page_params.extend([limit, offset])
-                elif offset > 0:
-                    query += " OFFSET %s"
-                    page_params.append(offset)
-
-                cur.execute(query, page_params)
-                logs = [dict(r) for r in cur.fetchall()]
-
-        return logs, total
+        AuditLogPostgresBackend(self._pool).log(
+            admin_id, action_type, target_type, target_id, details
+        )

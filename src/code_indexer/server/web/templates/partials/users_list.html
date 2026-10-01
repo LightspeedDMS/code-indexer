@@ -19,9 +19,9 @@
             <td>{{ user.role }}</td>
             <td>{{ user.created_at }}</td>
             <td class="actions-cell">
-                <button class="outline small" onclick="toggleEditForm('{{ user.username }}')">Edit Role</button>
-                <button class="outline small" onclick="toggleEmailForm('{{ user.username }}')">Change Email</button>
-                <button class="outline small" onclick="togglePasswordForm('{{ user.username }}')">Change Password</button>
+                <button class="outline small" data-username="{{ user.username }}" onclick="toggleEditForm(this.dataset.username)">Edit Role</button>
+                <button class="outline small" data-username="{{ user.username }}" onclick="toggleEmailForm(this.dataset.username)">Change Email</button>
+                <button class="outline small" data-username="{{ user.username }}" onclick="togglePasswordForm(this.dataset.username)">Change Password</button>
                 {% if user.mfa_enabled %}
                 <a hx-get="/admin/mfa/setup?user={{ user.username }}&mode=show&confirm_overwrite=1"
                    hx-target="body"
@@ -34,7 +34,7 @@
                    class="outline small" role="button" style="display:inline-block;padding:4px 8px;font-size:0.8em">Setup MFA</a>
                 {% endif %}
                 {% if user.username != current_username %}
-                <button class="outline small danger" onclick="confirmDelete('{{ user.username }}')">Delete</button>
+                <button class="outline small danger" data-username="{{ user.username }}" onclick="confirmDelete(this.dataset.username)">Delete</button>
                 {% else %}
                 <button class="outline small" disabled title="Cannot delete your own account">Delete</button>
                 {% endif %}
@@ -59,7 +59,7 @@
                             </select>
 
                             <button type="submit" class="primary small">Update Role</button>
-                            <button type="button" class="secondary small" onclick="toggleEditForm('{{ user.username }}')">Cancel</button>
+                            <button type="button" class="secondary small" data-username="{{ user.username }}" onclick="toggleEditForm(this.dataset.username)">Cancel</button>
                         </div>
                     </form>
                 </article>
@@ -77,7 +77,7 @@
                             <input type="email" name="new_email" placeholder="user@example.com" value="{{ user.email if user.email else '' }}" autocomplete="email">
 
                             <button type="submit" class="primary small">Update Email</button>
-                            <button type="button" class="secondary small" onclick="toggleEmailForm('{{ user.username }}')">Cancel</button>
+                            <button type="button" class="secondary small" data-username="{{ user.username }}" onclick="toggleEmailForm(this.dataset.username)">Cancel</button>
                         </div>
                     </form>
                 </article>
@@ -98,7 +98,7 @@
                             <input type="password" name="confirm_password" placeholder="Confirm password" required autocomplete="new-password">
 
                             <button type="submit" class="primary small">Change Password</button>
-                            <button type="button" class="secondary small" onclick="togglePasswordForm('{{ user.username }}')">Cancel</button>
+                            <button type="button" class="secondary small" data-username="{{ user.username }}" onclick="togglePasswordForm(this.dataset.username)">Cancel</button>
                         </div>
                     </form>
                 </article>

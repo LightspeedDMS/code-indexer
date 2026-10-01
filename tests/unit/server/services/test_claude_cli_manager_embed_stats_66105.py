@@ -53,7 +53,10 @@ class TestCommitAndReindexEmbedStats:
                 job_id="meta-job-789",
             )
 
-        index_calls = [c for c in run_calls if c["cmd"] == ["cidx", "index"]]
+        # Upstream appends server-layout flags via append_server_layout_args(),
+        # so match the verb prefix rather than the exact argv (EVO-66105 asserts
+        # the embed-stats env, not the command's flag set).
+        index_calls = [c for c in run_calls if c["cmd"][:2] == ["cidx", "index"]]
         assert index_calls, f"expected a 'cidx index' call, got: {run_calls}"
         index_env = index_calls[0]["kwargs"].get("env")
         assert index_env is not None, "cidx index must receive a sanitized env"

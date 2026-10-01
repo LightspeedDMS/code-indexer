@@ -112,8 +112,11 @@
         <div class="node-metrics-carousel" id="nm-carousel" data-node-count="{{ node_metrics|length }}">
             {% for nm in node_metrics %}
             {% set ts_str = nm.timestamp %}
-            <div class="nm-slide" id="nm-slide-{{ loop.index0 }}" data-node-id="{{ nm.node_id }}" data-timestamp="{{ ts_str }}" {% if loop.index0 != 0 %}style="display:none"{% endif %}>
+            <div class="nm-slide" id="nm-slide-{{ loop.index0 }}" data-node-id="{{ nm.node_id }}" data-timestamp="{{ ts_str }}" data-server-version="{{ nm.server_version | default('') }}" {% if loop.index0 != 0 %}style="display:none"{% endif %}>
                 <span class="nm-stale-badge" id="nm-stale-{{ loop.index0 }}" style="display:none">stale</span>
+                {% if nm.server_version %}
+                <span class="nm-server-version" id="nm-server-version-{{ loop.index0 }}" title="Deployed version on {{ nm.node_id }}">v{{ nm.server_version }}</span>
+                {% endif %}
                 <div class="nm-slide-content">
                     <div class="nm-metrics-col">
                         <div class="system-metrics">

@@ -152,7 +152,7 @@ def test_storage_size_includes_all_files_not_just_binaries(
                 ctx = click.Context(cli)
                 ctx.obj = {"config_manager": config_manager}
 
-                _status_impl(ctx, force_docker=False)
+                _status_impl(ctx)
 
                 # Extract temporal index row from add_row calls
                 add_row_calls = mock_table.add_row.call_args_list

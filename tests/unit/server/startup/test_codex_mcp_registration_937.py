@@ -95,7 +95,7 @@ def _make_cred_manager_stub(client_id: str, client_secret: str) -> MagicMock:
     get_credential_by_client_id returns None to force credential generation.
     """
     stub = MagicMock()
-    stub.generate_credential.return_value = {
+    stub.generate_credential_audited.return_value = {
         "client_id": client_id,
         "client_secret": client_secret,
         "credential_id": secrets.token_urlsafe(8),

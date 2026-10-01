@@ -1139,6 +1139,46 @@ def _make_no_edit_side_effect():
 
 _SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
 
+# Fixed prefix ClaudeInvoker._build_claude_command always emits: the full cmd
+# is [*_CLAUDE_CLI_CMD_PREFIX, <shell_str>, os.devnull] -- prefix elements
+# plus exactly two more (the shell string and os.devnull).
+_CLAUDE_CLI_CMD_PREFIX = ["script", "-q", "-e", "-c"]
+_CLAUDE_CLI_CMD_LEN = len(_CLAUDE_CLI_CMD_PREFIX) + 2  # + <shell_str> + os.devnull
+
+
+def _claude_cli_calls(mock_run) -> list:
+    """Return cmd lists for every recorded call matching ClaudeInvoker's exact
+    Claude CLI invocation shape: ['script', '-q', '-e', '-c', <shell_str>,
+    os.devnull] (see _build_claude_command in claude_invoker.py).
+
+    Bug: patching subprocess.run here (via _SUBPROCESS_PATH) patches the
+    shared stdlib ``subprocess`` module globally -- ``dependency_map_analyzer
+    .subprocess`` IS the real ``subprocess`` module object, not a private
+    copy. Under full-suite load, an unrelated subprocess.run call from other
+    code (e.g. a background thread leaked by an unjoined scheduler test --
+    this suite has a confirmed instance in
+    test_refresh_scheduler_locking.py::test_refresh_lock_released_on_timeout,
+    deliberately excluded from fast-automation.sh for exactly this leak) can
+    land on the SAME mock after the real Claude CLI call, making
+    ``mock_run.call_args`` (the last-recorded call) reflect that unrelated
+    call instead. Asserting only on ``call_args`` is therefore flaky;
+    filtering ``call_args_list`` down to calls matching ClaudeInvoker's exact
+    command shape is robust to any such interleaving.
+    """
+    import os as _os
+
+    prefix_len = len(_CLAUDE_CLI_CMD_PREFIX)
+    return [
+        call.args[0]
+        for call in mock_run.call_args_list
+        if call.args
+        and call.args[0]
+        and len(call.args[0]) == _CLAUDE_CLI_CMD_LEN
+        and call.args[0][:prefix_len] == _CLAUDE_CLI_CMD_PREFIX
+        and call.args[0][-1] == _os.devnull
+    ]
+
+
 _EXISTING_DELTA = "# Domain Analysis: test\n\nOriginal delta content"
 _UPDATED_DELTA = "# Domain Analysis: test\n\nUpdated delta content with changes"
 _EXISTING_REFINEMENT = "# Domain Analysis: test\n\nOriginal refinement body"
@@ -1169,8 +1209,24 @@ class TestInvokeDeltaMergeFile:
             result = self._call(analyzer, tmp_path)
         assert result == _UPDATED_DELTA
 
-    def test_uses_dangerously_skip_permissions(self, analyzer, tmp_path):
-        """subprocess.run command must include --dangerously-skip-permissions flag."""
+    def test_uses_dangerously_skip_permissions_and_neutral_cwd_controls(
+        self, analyzer, tmp_path
+    ):
+        """subprocess.run command must include --dangerously-skip-permissions
+        (needed for the Edit tool to run non-interactively) and
+        --strict-mcp-config (so the account's other MCP servers stay out of
+        the session), and must NEVER include --restricted — delta merge
+        keeps its full command capability. See
+        test_claude_invoker_agent_isolation.py for the full suite.
+
+        Asserts across every recorded Claude CLI call (via _claude_cli_calls),
+        not mock_run.call_args (the last call). subprocess.run is patched at
+        the shared stdlib module level here, so an unrelated interleaved call
+        (e.g. from a background thread leaked by another test elsewhere in
+        the suite) can become the chronologically-last recorded call under
+        full-suite load, which would corrupt a last-call-only assertion even
+        though this test's own invocation behaved correctly.
+        """
         with patch(
             _SUBPROCESS_PATH,
             side_effect=_make_edit_side_effect(
@@ -1178,10 +1234,16 @@ class TestInvokeDeltaMergeFile:
             ),
         ) as mock_run:
             self._call(analyzer, tmp_path)
-        cmd = mock_run.call_args[0][0]
+        claude_calls = _claude_cli_calls(mock_run)
         # cmd is ['script', '-q', '-e', '-c', <shell_str>, '/dev/null']; the flag
         # lives inside the shell string at index 4, not as a direct list element.
-        assert "--dangerously-skip-permissions" in cmd[4]
+        assert claude_calls, (
+            f"No Claude CLI subprocess.run call recorded; "
+            f"got {mock_run.call_args_list!r}"
+        )
+        assert all("--dangerously-skip-permissions" in cmd[4] for cmd in claude_calls)
+        assert all("--strict-mcp-config" in cmd[4] for cmd in claude_calls)
+        assert all("--restricted" not in cmd[4] for cmd in claude_calls)
 
     @pytest.mark.parametrize("exception_cls", [RuntimeError, Exception])
     def test_cli_exception_returns_none_and_cleans_up(
@@ -1256,8 +1318,21 @@ class TestInvokeRefinementFile:
             result = self._call(analyzer, tmp_path)
         assert result == _REFINED_CONTENT
 
-    def test_uses_dangerously_skip_permissions_and_all_tools(self, analyzer, tmp_path):
-        """subprocess.run command includes --dangerously-skip-permissions; no --allowedTools restriction."""
+    def test_uses_dangerously_skip_permissions_and_neutral_cwd_controls(
+        self, analyzer, tmp_path
+    ):
+        """subprocess.run command includes --dangerously-skip-permissions and
+        --strict-mcp-config, and never includes --restricted — refinement
+        keeps its full command capability, same as delta merge. See
+        test_claude_invoker_agent_isolation.py for the full suite.
+
+        Asserts across every recorded Claude CLI call (via _claude_cli_calls),
+        not mock_run.call_args (the last call) -- see
+        test_uses_dangerously_skip_permissions_and_neutral_cwd_controls above
+        for why: subprocess.run is patched at the shared stdlib module level,
+        so an unrelated interleaved call can become the chronologically-last
+        recorded call under full-suite load.
+        """
         with patch(
             _SUBPROCESS_PATH,
             side_effect=_make_edit_side_effect(
@@ -1265,12 +1340,16 @@ class TestInvokeRefinementFile:
             ),
         ) as mock_run:
             self._call(analyzer, tmp_path)
-        cmd = mock_run.call_args[0][0]
+        claude_calls = _claude_cli_calls(mock_run)
         # cmd is ['script', '-q', '-e', '-c', <shell_str>, '/dev/null']; the flag
         # lives inside the shell string at index 4, not as a direct list element.
-        assert "--dangerously-skip-permissions" in cmd[4]
-        # Refinement uses allowed_tools=None → no MCP tool restriction passed
-        assert "mcp__cidx-local__search_code" not in cmd[4]
+        assert claude_calls, (
+            f"No Claude CLI subprocess.run call recorded; "
+            f"got {mock_run.call_args_list!r}"
+        )
+        assert all("--dangerously-skip-permissions" in cmd[4] for cmd in claude_calls)
+        assert all("--strict-mcp-config" in cmd[4] for cmd in claude_calls)
+        assert all("--restricted" not in cmd[4] for cmd in claude_calls)
 
     def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
         """When subprocess does not modify the file, returns None."""

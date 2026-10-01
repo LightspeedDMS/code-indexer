@@ -101,7 +101,7 @@ def _invoke_handler(
     Returns (response_or_exception, set_csrf_cookie_mock, templates_mock).
     HTTPException instances are caught and returned as the first element.
     """
-    from src.code_indexer.server.web.routes import golden_repo_details_partial
+    from code_indexer.server.web.routes import golden_repo_details_partial
 
     req = _make_request()
     session = _make_admin_session()
@@ -119,23 +119,23 @@ def _invoke_handler(
 
     with (
         patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=session,
         ),
         patch(
-            "src.code_indexer.server.web.routes._get_golden_repo_manager",
+            "code_indexer.server.web.routes._get_golden_repo_manager",
             return_value=mock_manager,
         ),
         patch(
-            "src.code_indexer.server.web.routes._get_repo_category_service",
+            "code_indexer.server.web.routes._get_repo_category_service",
             return_value=mock_category_service,
         ),
         patch(
-            "src.code_indexer.server.web.routes.get_csrf_token_from_cookie",
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie",
             return_value=csrf_token,
         ),
-        patch("src.code_indexer.server.web.routes.set_csrf_cookie", mock_set_csrf),
-        patch("src.code_indexer.server.web.routes.templates", mock_tmpl),
+        patch("code_indexer.server.web.routes.set_csrf_cookie", mock_set_csrf),
+        patch("code_indexer.server.web.routes.templates", mock_tmpl),
     ):
         try:
             response = golden_repo_details_partial(request=req, alias=alias)
@@ -160,12 +160,12 @@ class TestGoldenRepoDetailsPartialAuth:
         Instead it returns an inline HTML error fragment so htmx can swap it into
         the details cell without replacing the whole page with the login form.
         """
-        from src.code_indexer.server.web.routes import golden_repo_details_partial
+        from code_indexer.server.web.routes import golden_repo_details_partial
 
         req = _make_request()
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=None,
         ):
             result = golden_repo_details_partial(request=req, alias="any-alias")
@@ -182,7 +182,7 @@ class TestGoldenRepoDetailsPartialAuth:
 
 def _invoke_404_handler(alias: str):
     """Invoke handler with no repos registered; return the response."""
-    from src.code_indexer.server.web.routes import golden_repo_details_partial
+    from code_indexer.server.web.routes import golden_repo_details_partial
 
     req = _make_request()
     session = _make_admin_session()
@@ -192,11 +192,11 @@ def _invoke_404_handler(alias: str):
 
     with (
         patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=session,
         ),
         patch(
-            "src.code_indexer.server.web.routes._get_golden_repo_manager",
+            "code_indexer.server.web.routes._get_golden_repo_manager",
             return_value=mock_manager,
         ),
     ):
@@ -380,12 +380,12 @@ class TestGoldenRepoDetailsErrorFragments:
         The cell must show "Session expired" inline so the user can act on it
         without the login page HTML being swapped into the details cell.
         """
-        from src.code_indexer.server.web.routes import golden_repo_details_partial
+        from code_indexer.server.web.routes import golden_repo_details_partial
 
         req = _make_request()
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=None,
         ):
             response = golden_repo_details_partial(request=req, alias="any-alias")
@@ -411,7 +411,7 @@ class TestGoldenRepoDetailsErrorFragments:
         htmx swaps the fragment into the cell so the user sees "Repository not found"
         inline instead of an unhandled 404 JSON response.
         """
-        from src.code_indexer.server.web.routes import golden_repo_details_partial
+        from code_indexer.server.web.routes import golden_repo_details_partial
 
         req = _make_request()
         session = _make_admin_session()
@@ -422,11 +422,11 @@ class TestGoldenRepoDetailsErrorFragments:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=session,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -451,18 +451,18 @@ class TestGoldenRepoDetailsErrorFragments:
         The cell shows "Failed to load repository details" and a Retry button so the
         user can recover without a full page reload.
         """
-        from src.code_indexer.server.web.routes import golden_repo_details_partial
+        from code_indexer.server.web.routes import golden_repo_details_partial
 
         req = _make_request()
         session = _make_admin_session()
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=session,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_single_repo_enriched",
+                "code_indexer.server.web.routes._get_single_repo_enriched",
                 side_effect=RuntimeError("simulated internal error"),
             ),
         ):
@@ -504,10 +504,10 @@ class TestListPathDoesNotCallTemporalStatus:
         Verifies Finding 3: the temporal_status call must be removed from the list
         path and kept only in _get_single_repo_enriched (the details partial helper).
         """
-        from src.code_indexer.server.web.routes import _get_golden_repos_list
+        from code_indexer.server.web.routes import _get_golden_repos_list
 
         with patch(
-            "src.code_indexer.server.web.routes._load_temporal_status"
+            "code_indexer.server.web.routes._load_temporal_status"
         ) as mock_temporal:
             _get_golden_repos_list(backend_registry=None)
 

@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Tuple, cast
 
 from .password_manager import PasswordManager
+from ..services.audit_outcome import AuditActor, conforming_details, record_outcome
+
+
+class MCPCredentialOwnerNotFound(ValueError):
+    """The account a credential was requested for does not exist."""
 
 
 class MCPCredentialManager:
@@ -47,7 +52,7 @@ class MCPCredentialManager:
 
         user = self.user_manager.get_user(user_id)
         if not user:
-            raise ValueError(f"User not found: {user_id}")
+            raise MCPCredentialOwnerNotFound(f"User not found: {user_id}")
 
         # Generate client_id: mcp_{32 hex chars}
         random_bytes = secrets.token_hex(self.CLIENT_ID_LENGTH)
@@ -219,4 +224,78 @@ class MCPCredentialManager:
 
         return cast(
             bool, self.user_manager.delete_mcp_credential(user_id, credential_id)
+        )
+
+    # ------------------------------------------------------------------
+    # Audited entry points (every front door calls these).  Only the
+    # credential id and whether it belongs to the actor are recorded --
+    # never the client id, the secret or the free-text name.
+    # ------------------------------------------------------------------
+
+    def generate_credential_audited(
+        self, user_id: str, name: Optional[str] = None, *, actor: AuditActor
+    ) -> dict:
+        """:meth:`generate_credential`, recording ``mcp_credential_created``.
+
+        *actor* is the requesting user (for themselves, or an admin for
+        another user) or the MCP self-registration system component.
+        """
+        try:
+            credential = self.generate_credential(user_id, name)
+        except Exception:
+            self._record(actor, "mcp_credential_created", user_id, None, "failure")
+            raise
+        self._record(
+            actor,
+            "mcp_credential_created",
+            user_id,
+            credential["credential_id"],
+            "success",
+        )
+        return credential
+
+    def revoke_credential_audited(
+        self, user_id: str, credential_id: str, *, actor: str
+    ) -> bool:
+        """:meth:`revoke_credential`, recording ``mcp_credential_revoked``."""
+        try:
+            revoked = self.revoke_credential(user_id, credential_id)
+        except Exception:
+            self._record(actor, "mcp_credential_revoked", user_id, None, "failure")
+            raise
+        if not revoked:
+            self._record(actor, "mcp_credential_revoked", user_id, None, "failure")
+            return False
+        self._record(actor, "mcp_credential_revoked", user_id, credential_id, "success")
+        return True
+
+    @staticmethod
+    def _record(
+        actor: AuditActor,
+        action_type: str,
+        owner: str,
+        verified_credential_id: Optional[str],
+        outcome: str,
+    ) -> None:
+        """Record one row.
+
+        *verified_credential_id* is a persisted credential id this call
+        created or removed, or None (placeholder target, no details).
+        """
+        details = (
+            conforming_details(
+                action_type,
+                credential_id=verified_credential_id,
+                for_self=(isinstance(actor, str) and actor == owner),
+            )
+            if verified_credential_id is not None
+            else {}
+        )
+        record_outcome(
+            actor=actor,
+            action_type=action_type,
+            target_type="mcp_credential",
+            target_id=verified_credential_id,
+            outcome=outcome,
+            details=details,
         )

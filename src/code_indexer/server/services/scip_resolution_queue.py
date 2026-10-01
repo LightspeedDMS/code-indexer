@@ -204,7 +204,6 @@ class SCIPResolutionQueue:
                         "MCP-GENERAL-143",
                         f"Worker cancelled while processing {project.project_path}, "
                         "re-queuing project",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 await self._queue.put(project)
@@ -223,18 +222,16 @@ class SCIPResolutionQueue:
                     format_error_log(
                         "MCP-GENERAL-144",
                         f"Error processing project {project.project_path}: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
             else:
                 logger.error(
                     format_error_log(
                         "MCP-GENERAL-145",
                         f"Error before project retrieval: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
             if tracked_job_id and self._job_tracker is not None:
                 try:
@@ -352,9 +349,8 @@ class SCIPResolutionQueue:
                         format_error_log(
                             "MCP-GENERAL-146",
                             f"Error in worker loop: {e}",
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
+                        ),
+                        exc_info=True,
                     )
                     # Continue processing other projects
 

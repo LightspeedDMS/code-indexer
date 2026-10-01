@@ -17,6 +17,7 @@ from code_indexer.api_clients.base_client import (
     AuthenticationError,
     NetworkError,
 )
+from code_indexer.api_clients.network_error_handler import DNSResolutionError
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
 
 
@@ -159,8 +160,17 @@ class TestAdminAPIClientRealServer:
                     role="normal_user",
                 )
 
-            assert exc_info.value.status_code == 409
-            assert "conflict" in str(exc_info.value).lower()
+            # Bug #1725: real production returns 400 (not 409) for a
+            # duplicate username -- see inline_admin_users.py's create_user
+            # route, which converts UserManager.create_user()'s
+            # ValueError("User already exists: {username}") into
+            # HTTPException(400, str(e)). base_client.py's
+            # _authenticated_request() also intercepts this status centrally
+            # before create_user()'s own per-status branches ever run, so
+            # the client's actual raised message is the server's raw detail
+            # text, not create_user()'s "User creation conflict:" wording.
+            assert exc_info.value.status_code == 400
+            assert "already exists" in str(exc_info.value).lower()
 
         finally:
             admin_client.close()
@@ -340,7 +350,10 @@ class TestAdminAPIClientRealServer:
         )
 
         try:
-            with pytest.raises((NetworkError, APIClientError)):
+            # Bug #1725: an invalid hostname raises DNSResolutionError, a
+            # standalone Exception subclass (not NetworkError/APIClientError)
+            # -- see network_error_handler.py's _handle_connect_error.
+            with pytest.raises((NetworkError, APIClientError, DNSResolutionError)):
                 admin_client.create_user(
                     username="networkfail",
                     password="Pass123!",
@@ -754,7 +767,11 @@ class TestAdminAPIClientRealServer:
                     new_password="",
                 )
 
-            assert exc_info.value.status_code == 400
+            # Bug #1725 (supersedes #1720 Finding B): the fake now mirrors
+            # the real production model exactly (min_length=1 + complexity
+            # validator), so an empty password produces HTTP 422 (FastAPI's
+            # request-validation error), not the fake's prior fictional 400.
+            assert exc_info.value.status_code == 422
             assert "password" in str(exc_info.value).lower()
 
         finally:

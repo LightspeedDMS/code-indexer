@@ -377,14 +377,20 @@ class TestFileIdentifier:
             ["git", "config", "user.email", "test@example.com"], cwd=git_dir, check=True
         )
         subprocess.run(
-            ["git", "remote", "add", "origin", "https://github.com/user/evolution.git"],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/example-repo.git",
+            ],
             cwd=git_dir,
             check=True,
         )
 
         identifier_git = FileIdentifier(git_dir, config)
 
-        # Should extract "evolution" from git remote, NOT "v_1769727231" from directory
+        # Should extract "example-repo" from git remote, NOT "v_1769727231" from directory
         project_id_git = identifier_git.get_project_id()
-        assert project_id_git == "evolution"
+        assert project_id_git == "example-repo"
         assert project_id_git != "v-1769727231"  # Must NOT use directory name

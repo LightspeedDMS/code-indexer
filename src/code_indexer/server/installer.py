@@ -24,6 +24,9 @@ from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
 from .utils.ripgrep_installer import RipgrepInstaller
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +177,7 @@ cd "{self.home_dir}"
 
         Args:
             port: Server port
-            issuer_url: OAuth issuer URL (e.g., https://linner.ddns.net:8383)
+            issuer_url: OAuth issuer URL (e.g., https://cidx.example.com:8383)
             voyage_api_key: VoyageAI API key (WARNING: stored in plaintext in service file)
 
         Returns:
@@ -394,7 +397,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "GIT-GENERAL-038",
                     "npm not found - Claude CLI installation skipped",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             logger.info(
@@ -420,8 +422,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "GIT-GENERAL-039",
-                        f"Claude CLI installation failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
+                        "Claude CLI installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False
@@ -438,7 +440,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "GIT-GENERAL-040",
                         "Claude CLI installation failed: verification failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -448,7 +449,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "GIT-GENERAL-041",
                     "Claude CLI installation failed: timeout",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -457,7 +457,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "GIT-GENERAL-042",
                     f"Claude CLI installation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -508,7 +507,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-001",
                     "npm not found - SCIP indexers installation skipped",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             logger.info(
@@ -548,8 +546,8 @@ WantedBy=multi-user.target
                     logger.error(
                         format_error_log(
                             "MCP-GENERAL-002",
-                            f"{indexer_cmd} installation failed: {result.stderr}",
-                            extra={"correlation_id": get_correlation_id()},
+                            f"{indexer_cmd} installation failed: "
+                            f"{format_completed_process_diagnostic(result)}",
                         )
                     )
                     all_installed = False
@@ -566,7 +564,6 @@ WantedBy=multi-user.target
                         format_error_log(
                             "MCP-GENERAL-003",
                             f"{indexer_cmd} installation failed: verification failed",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     all_installed = False
@@ -576,7 +573,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "MCP-GENERAL-004",
                         f"{indexer_cmd} installation failed: timeout",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 all_installed = False
@@ -585,7 +581,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "MCP-GENERAL-005",
                         f"{indexer_cmd} installation failed: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 all_installed = False
@@ -657,7 +652,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-006",
                     ".NET SDK not found - scip-dotnet installation skipped",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             logger.info(
@@ -683,8 +677,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "MCP-GENERAL-007",
-                        f"scip-dotnet installation failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
+                        "scip-dotnet installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False
@@ -701,7 +695,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "MCP-GENERAL-008",
                         "scip-dotnet installation failed: verification failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -711,7 +704,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-009",
                     "scip-dotnet installation failed: timeout",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -720,7 +712,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-010",
                     f"scip-dotnet installation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -784,7 +775,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-011",
                     "Go SDK not found - scip-go installation skipped",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             logger.info(
@@ -810,8 +800,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "MCP-GENERAL-012",
-                        f"scip-go installation failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
+                        "scip-go installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False
@@ -828,7 +818,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "MCP-GENERAL-013",
                         "scip-go installation failed: verification failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -838,7 +827,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-014",
                     "scip-go installation failed: timeout",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -847,7 +835,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-015",
                     f"scip-go installation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -907,7 +894,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-016",
                     f"Coursier binary only available for x86_64, found {platform.machine()}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -944,7 +930,6 @@ WantedBy=multi-user.target
                     format_error_log(
                         "MCP-GENERAL-017",
                         "Coursier installation verification failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -954,7 +939,6 @@ WantedBy=multi-user.target
                 format_error_log(
                     "MCP-GENERAL-018",
                     f"Coursier installation failed: {e}",
-                    extra={"correlation_id": get_correlation_id(), "error": str(e)},
                 )
             )
             return False

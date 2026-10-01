@@ -106,3 +106,24 @@ def test_error_code_uniqueness():
     codes = list(ERROR_REGISTRY.keys())
     # Number of unique codes should equal total codes
     assert len(codes) == len(set(codes))
+
+
+def test_query_migrate_013_registered():
+    """Bug #1767 follow-up: QUERY-MIGRATE-013 (partial multi-repo search
+    failure, emitted by semantic_query_manager.py) must be registered in
+    ERROR_REGISTRY like every other QUERY-MIGRATE-* sibling, so it surfaces
+    with a description/severity/action in admin_logs_query output instead
+    of resolving to None."""
+    from code_indexer.server.error_codes import (
+        ERROR_REGISTRY,
+        Severity,
+        get_error_definition,
+    )
+
+    definition = get_error_definition("QUERY-MIGRATE-013")
+    assert definition is not None
+    assert definition.code == "QUERY-MIGRATE-013"
+    assert isinstance(definition.description, str) and definition.description
+    assert definition.severity == Severity.WARNING
+    assert isinstance(definition.action, str) and definition.action
+    assert ERROR_REGISTRY["QUERY-MIGRATE-013"] is definition

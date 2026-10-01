@@ -328,3 +328,72 @@ class TestLogsPostgresBackendLive:
     def test_close_is_noop(self, backend):
         """close() must not raise any exception."""
         backend.close()  # Should complete silently
+
+    def test_insert_log_and_query_logs_round_trip_trace_span(self, backend):
+        """Story #1676 AC2: LogsPostgresBackend must round-trip trace_id/
+        span_id through insert_log/query_logs. This is the exact backend
+        LogAggregatorService._query_via_backend dispatches to in cluster
+        mode -- a local-SQLite-only fix would leave this path silently
+        broken (the #1653/#1654/#1662 class of bug this story calls out)."""
+        ts = datetime.now(timezone.utc).isoformat()
+        backend.insert_log(
+            timestamp=ts,
+            level="ERROR",
+            source="test.source",
+            message="pg trace span round trip",
+            trace_id="a" * 32,
+            span_id="b" * 16,
+        )
+
+        results, total = backend.query_logs(limit=10, offset=0)
+
+        assert total == 1
+        assert results[0]["trace_id"] == "a" * 32
+        assert results[0]["span_id"] == "b" * 16
+
+    def test_insert_log_batch_round_trips_trace_span(self, backend):
+        """insert_log_batch's 12-tuple contract must round-trip trace_id/
+        span_id through the real PostgreSQL executemany path."""
+        ts = datetime.now(timezone.utc).isoformat()
+        success = backend.insert_log_batch(
+            [
+                (
+                    ts,
+                    "WARNING",
+                    "test.source",
+                    "pg batch trace span",
+                    None,  # correlation_id
+                    None,  # user_id
+                    None,  # request_path
+                    None,  # extra_data
+                    None,  # node_id
+                    None,  # alias
+                    "c" * 32,  # trace_id
+                    "d" * 16,  # span_id
+                )
+            ]
+        )
+        assert success is True
+
+        results, total = backend.query_logs(limit=10, offset=0)
+
+        assert total == 1
+        assert results[0]["trace_id"] == "c" * 32
+        assert results[0]["span_id"] == "d" * 16
+
+    def test_insert_log_without_trace_span_stores_null(self, backend):
+        """A caller that never passes trace_id/span_id (e.g. legacy code
+        predating this story) must store NULL, never raise."""
+        ts = datetime.now(timezone.utc).isoformat()
+        backend.insert_log(
+            timestamp=ts,
+            level="INFO",
+            source="test.source",
+            message="pg no trace context",
+        )
+
+        results, total = backend.query_logs(limit=10, offset=0)
+
+        assert total == 1
+        assert results[0]["trace_id"] is None
+        assert results[0]["span_id"] is None

@@ -63,7 +63,6 @@ def _walk_directory(
                         format_error_log(
                             "MCP-GENERAL-019",
                             f"Cannot access file {item}: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     continue
@@ -94,7 +93,6 @@ def _walk_directory(
                         format_error_log(
                             "MCP-GENERAL-020",
                             f"Cannot access item {item}: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     continue
@@ -103,7 +101,6 @@ def _walk_directory(
                 format_error_log(
                     "MCP-GENERAL-021",
                     f"Cannot access directory {directory}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -135,7 +132,6 @@ def _list_composite_files(
             format_error_log(
                 "MCP-GENERAL-022",
                 f"Failed to get discovered repos from {repo.path}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return []

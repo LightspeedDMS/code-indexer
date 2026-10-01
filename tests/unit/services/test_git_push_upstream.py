@@ -26,9 +26,31 @@ MOCK_CREDENTIAL = {
 
 @pytest.fixture
 def repo_dir(tmp_path):
-    """Create a minimal git repo directory for testing."""
-    git_dir = tmp_path / ".git"
-    git_dir.mkdir()
+    """Create a real git repository with a configured 'origin' remote.
+
+    validate_remote_name() (git_argv_safety.py) confirms the remote is
+    actually configured by running a real, unmocked `git remote` against
+    `repo_path` before git_push_with_pat ever reaches the mocked
+    run_git_command calls in these tests, so the fixture must be a real
+    repository, not merely a directory containing a `.git` folder, with
+    'origin' actually configured. The remote URL itself is never
+    contacted (git_push_with_pat's own `git remote get-url`/push calls
+    are mocked per test), so any well-formed placeholder URL is fine here.
+    """
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/owner/repo.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
     return tmp_path
 
 
@@ -54,6 +76,7 @@ class TestGitPushAutoDetectBranch:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
@@ -81,6 +104,7 @@ class TestGitPushAutoDetectBranch:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
@@ -112,6 +136,7 @@ class TestGitPushAutoDetectBranch:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             else:
@@ -144,6 +169,7 @@ class TestGitPushExplicitRefspecAndUpstream:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "push" in cmd:
@@ -173,6 +199,7 @@ class TestGitPushExplicitRefspecAndUpstream:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd:
@@ -213,6 +240,7 @@ class TestGitPushExplicitRefspecAndUpstream:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd:

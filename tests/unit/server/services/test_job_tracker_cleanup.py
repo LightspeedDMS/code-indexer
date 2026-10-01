@@ -31,13 +31,15 @@ def _insert_job_directly(db_path: str, job_id: str, status: str) -> None:
 class TestCleanupOrphanedJobs:
     """Tests for cleanup_orphaned_jobs_on_startup (AC6)."""
 
-    def test_cleanup_marks_running_as_failed(self, db_path):
+    def test_cleanup_marks_running_as_interrupted(self, db_path):
         """
-        cleanup_orphaned_jobs_on_startup marks running jobs as failed.
+        cleanup_orphaned_jobs_on_startup marks running jobs as interrupted.
 
         Given a 'running' job in SQLite (simulating a pre-restart state)
         When cleanup_orphaned_jobs_on_startup is called on a fresh tracker
-        Then the job status becomes 'failed'
+        Then the job status becomes 'interrupted' (Bug #1950: a restart
+        artifact, DISTINCT from 'failed', so /health's
+        get_failed_job_count() never counts it).
         """
         _insert_job_directly(db_path, "orphan-run-001", "running")
 
@@ -46,15 +48,15 @@ class TestCleanupOrphanedJobs:
 
         job = fresh_tracker.get_job("orphan-run-001")
         assert job is not None
-        assert job.status == "failed"
+        assert job.status == "interrupted"
 
-    def test_cleanup_marks_pending_as_failed(self, db_path):
+    def test_cleanup_marks_pending_as_interrupted(self, db_path):
         """
-        cleanup_orphaned_jobs_on_startup marks pending jobs as failed.
+        cleanup_orphaned_jobs_on_startup marks pending jobs as interrupted.
 
         Given a 'pending' job in SQLite (simulating a pre-restart state)
         When cleanup_orphaned_jobs_on_startup is called on a fresh tracker
-        Then the job status becomes 'failed'
+        Then the job status becomes 'interrupted' (Bug #1950), not 'failed'.
         """
         _insert_job_directly(db_path, "orphan-pend-001", "pending")
 
@@ -63,7 +65,7 @@ class TestCleanupOrphanedJobs:
 
         job = fresh_tracker.get_job("orphan-pend-001")
         assert job is not None
-        assert job.status == "failed"
+        assert job.status == "interrupted"
 
     def test_cleanup_sets_orphan_error_message(self, db_path):
         """

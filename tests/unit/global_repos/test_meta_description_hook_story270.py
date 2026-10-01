@@ -348,6 +348,131 @@ class TestOnRepoAddedTriggersRefresh:
         mock_refresh_scheduler.trigger_refresh_for_repo.assert_not_called()
 
 
+class TestOnRepoAddedPassesRefreshSchedulerToAtomicWrite:
+    """
+    Bug #1506 7th-pass review: atomic_write_description()'s cidx-meta write-lock
+    protection (added in the 6th-pass review) is inert on its real production
+    call path because on_repo_added() calls atomic_write_description() WITHOUT
+    forwarding the module-level _refresh_scheduler that IS configured and used
+    immediately afterward (trigger_refresh_for_repo). This class proves the fix:
+    the configured scheduler is genuinely threaded through, and a failed lock
+    acquisition propagates LifecycleLockUnavailableError out of on_repo_added()
+    (rather than being swallowed) -- matching the caller contract already
+    established in golden_repo_manager.py, which wraps both real on_repo_added()
+    call sites in a broad try/except Exception that logs and continues without
+    failing golden-repo registration.
+    """
+
+    def test_on_repo_added_passes_refresh_scheduler_to_atomic_write_description(
+        self, temp_golden_repos_dir, mock_refresh_scheduler
+    ):
+        """
+        on_repo_added() must call atomic_write_description() with
+        refresh_scheduler=<the configured module-level scheduler> so the
+        cidx-meta write-lock check genuinely engages on this real writer.
+        """
+        from code_indexer.global_repos.meta_description_hook import (
+            on_repo_added,
+            set_refresh_scheduler,
+        )
+
+        set_refresh_scheduler(mock_refresh_scheduler)
+
+        repo_name = "lock-wiring-repo"
+        clone_path = Path(temp_golden_repos_dir) / repo_name
+        clone_path.mkdir(parents=True)
+        (clone_path / "README.md").write_text("# Lock Wiring Repo")
+
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
+
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.atomic_write_description"
+            ) as mock_atomic_write,
+        ):
+            on_repo_added(
+                repo_name=repo_name,
+                repo_url="https://github.com/test/lock-wiring-repo",
+                clone_path=str(clone_path),
+                golden_repos_dir=temp_golden_repos_dir,
+            )
+
+        assert mock_atomic_write.call_count == 1
+        _, call_kwargs = mock_atomic_write.call_args
+        assert call_kwargs.get("refresh_scheduler") is mock_refresh_scheduler, (
+            "on_repo_added() must forward the configured module-level "
+            "_refresh_scheduler into atomic_write_description() so the "
+            "cidx-meta write-lock check actually engages on this real "
+            f"production writer. Got call: {mock_atomic_write.call_args!r}"
+        )
+
+    def test_on_repo_added_propagates_lock_unavailable_error_when_lock_held(
+        self, temp_golden_repos_dir
+    ):
+        """
+        When the cidx-meta write lock cannot be acquired (another writer
+        holds it), on_repo_added() must propagate LifecycleLockUnavailableError
+        rather than swallowing it -- the real callers in golden_repo_manager.py
+        already catch Exception broadly around on_repo_added() and log without
+        failing golden-repo registration, so propagation is the correct,
+        already-handled behavior.
+        """
+        from code_indexer.global_repos.lifecycle_batch_runner import (
+            LifecycleLockUnavailableError,
+        )
+        from code_indexer.global_repos.meta_description_hook import (
+            on_repo_added,
+            set_refresh_scheduler,
+        )
+
+        blocked_scheduler = MagicMock()
+        blocked_scheduler.acquire_write_lock.return_value = False
+        set_refresh_scheduler(blocked_scheduler)
+
+        repo_name = "lock-blocked-repo"
+        clone_path = Path(temp_golden_repos_dir) / repo_name
+        clone_path.mkdir(parents=True)
+        (clone_path / "README.md").write_text("# Lock Blocked Repo")
+
+        md_file = Path(temp_golden_repos_dir) / "cidx-meta" / f"{repo_name}.md"
+
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
+
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
+        ):
+            with pytest.raises(LifecycleLockUnavailableError):
+                on_repo_added(
+                    repo_name=repo_name,
+                    repo_url="https://github.com/test/lock-blocked-repo",
+                    clone_path=str(clone_path),
+                    golden_repos_dir=temp_golden_repos_dir,
+                )
+
+        assert not md_file.exists(), (
+            "Description file must NOT be written when the cidx-meta write "
+            "lock could not be acquired"
+        )
+        blocked_scheduler.trigger_refresh_for_repo.assert_not_called()
+
+
 class TestOnRepoRemovedTriggersRefresh:
     """
     Tests that on_repo_removed() triggers cidx-meta reindex via RefreshScheduler.

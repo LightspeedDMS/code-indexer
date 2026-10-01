@@ -31,11 +31,11 @@ def _patched_global_repo_env(rerank_meta: dict, fake_result):
     """
     with (
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_golden_repos_dir",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_golden_repos_dir",
             return_value="/fake/golden",
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._list_global_repos",
+            "code_indexer.server.mcp.handlers.search.repo_search._list_global_repos",
             return_value=[
                 {
                     "alias_name": "test-repo-global",
@@ -47,21 +47,23 @@ def _patched_global_repo_env(rerank_meta: dict, fake_result):
         patch(
             "code_indexer.global_repos.alias_manager.AliasManager"
         ) as mock_alias_mgr_cls,
-        patch("code_indexer.server.mcp.handlers._legacy._utils") as mock_utils,
         patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service",
+            "code_indexer.server.mcp.handlers.search.repo_search._utils"
+        ) as mock_utils,
+        patch(
+            "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
             return_value=_make_config_service_with_rerank(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_access_filtering_service",
+            "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
             return_value=None,
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_query_tracker",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_query_tracker",
             return_value=None,
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_wiki_enabled_repos",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_wiki_enabled_repos",
             return_value=set(),
         ),
         patch("pathlib.Path.exists", return_value=True),
@@ -239,11 +241,11 @@ class TestSearchCodeHandlerRerankingWiring:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers._legacy._get_golden_repos_dir",
+                "code_indexer.server.mcp.handlers.search.repo_search._get_golden_repos_dir",
                 return_value="/fake/golden",
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy._list_global_repos",
+                "code_indexer.server.mcp.handlers.search.repo_search._list_global_repos",
                 return_value=[
                     {
                         "alias_name": "test-repo-global",
@@ -255,21 +257,23 @@ class TestSearchCodeHandlerRerankingWiring:
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"
             ) as mock_alias_mgr_cls,
-            patch("code_indexer.server.mcp.handlers._legacy._utils") as mock_utils,
             patch(
-                "code_indexer.server.mcp.handlers._legacy.get_config_service",
+                "code_indexer.server.mcp.handlers.search.repo_search._utils"
+            ) as mock_utils,
+            patch(
+                "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
                 return_value=_make_config_service_with_rerank(),
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy._get_access_filtering_service",
+                "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy._get_query_tracker",
+                "code_indexer.server.mcp.handlers.search.repo_search._get_query_tracker",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy._get_wiki_enabled_repos",
+                "code_indexer.server.mcp.handlers.search.repo_search._get_wiki_enabled_repos",
                 return_value=set(),
             ),
             patch(
@@ -625,11 +629,11 @@ def _run_search_code_with_rerank_meta(rerank_meta: dict) -> dict:
 
     with (
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_golden_repos_dir",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_golden_repos_dir",
             return_value="/fake/golden",
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._list_global_repos",
+            "code_indexer.server.mcp.handlers.search.repo_search._list_global_repos",
             return_value=[
                 {
                     "alias_name": "test-repo-global",
@@ -641,21 +645,23 @@ def _run_search_code_with_rerank_meta(rerank_meta: dict) -> dict:
         patch(
             "code_indexer.global_repos.alias_manager.AliasManager"
         ) as mock_alias_mgr_cls,
-        patch("code_indexer.server.mcp.handlers._legacy._utils") as mock_utils,
         patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service",
+            "code_indexer.server.mcp.handlers.search.repo_search._utils"
+        ) as mock_utils,
+        patch(
+            "code_indexer.server.mcp.handlers.search.repo_search.get_config_service",
             return_value=_make_config_service_with_rerank(),
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_access_filtering_service",
+            "code_indexer.server.mcp.handlers.search._shared._get_access_filtering_service",
             return_value=None,
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_query_tracker",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_query_tracker",
             return_value=None,
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy._get_wiki_enabled_repos",
+            "code_indexer.server.mcp.handlers.search.repo_search._get_wiki_enabled_repos",
             return_value=set(),
         ),
         patch("pathlib.Path.exists", return_value=True),

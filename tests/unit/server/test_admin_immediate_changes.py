@@ -87,6 +87,7 @@ def test_client(group_manager, mock_admin_user):
     app.dependency_overrides[get_current_user] = lambda: mock_admin_user
     app.dependency_overrides[get_group_manager] = lambda: group_manager
     _bypass_elevation(app, groups_router)
+    _bypass_elevation(app, users_router)
 
     yield TestClient(app)
 

@@ -5,7 +5,8 @@ branch listing, health monitoring, and activity tracking capabilities.
 Following TDD methodology: Red -> Green -> Refactor
 """
 
-from unittest.mock import Mock, patch, AsyncMock
+import pytest
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -15,6 +16,22 @@ from code_indexer.api_clients.base_client import APIClientError, AuthenticationE
 
 class TestRepositoryInfoCommand:
     """TDD tests for cidx repos info command implementation."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on repos_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every repos_group invocation raises
+        DisabledCommandError before the mocked ReposAPIClient is ever reached.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Set up test environment for each test."""
@@ -44,7 +61,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_basic_display(
         self,
         mock_client_class,
@@ -81,7 +98,7 @@ class TestRepositoryInfoCommand:
         }
 
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(return_value=mock_repo_info)
+        mock_client.get_repository_info = Mock(return_value=mock_repo_info)
         mock_client_class.return_value = mock_client
 
         # Execute command
@@ -105,7 +122,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_with_branches_flag(
         self,
         mock_client_class,
@@ -157,7 +174,7 @@ class TestRepositoryInfoCommand:
         }
 
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(return_value=mock_repo_info)
+        mock_client.get_repository_info = Mock(return_value=mock_repo_info)
         mock_client_class.return_value = mock_client
 
         # Execute command with --branches flag
@@ -181,7 +198,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_with_health_flag(
         self,
         mock_client_class,
@@ -221,7 +238,7 @@ class TestRepositoryInfoCommand:
         }
 
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(return_value=mock_repo_info)
+        mock_client.get_repository_info = Mock(return_value=mock_repo_info)
         mock_client_class.return_value = mock_client
 
         # Execute command with --health flag
@@ -247,7 +264,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_with_activity_flag(
         self,
         mock_client_class,
@@ -304,7 +321,7 @@ class TestRepositoryInfoCommand:
         }
 
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(return_value=mock_repo_info)
+        mock_client.get_repository_info = Mock(return_value=mock_repo_info)
         mock_client_class.return_value = mock_client
 
         # Execute command with --activity flag
@@ -330,7 +347,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_all_flags_combined(
         self,
         mock_client_class,
@@ -347,7 +364,7 @@ class TestRepositoryInfoCommand:
         mock_load_credentials.return_value = self.mock_credentials
 
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(return_value={})
+        mock_client.get_repository_info = Mock(return_value={})
         mock_client_class.return_value = mock_client
 
         # Execute command with all flags
@@ -366,7 +383,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_handles_api_errors(
         self,
         mock_client_class,
@@ -382,7 +399,7 @@ class TestRepositoryInfoCommand:
 
         # Mock API error
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(
+        mock_client.get_repository_info = Mock(
             side_effect=APIClientError("Repository not found", 404)
         )
         mock_client_class.return_value = mock_client
@@ -400,7 +417,7 @@ class TestRepositoryInfoCommand:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_info_handles_authentication_errors(
         self,
         mock_client_class,
@@ -416,7 +433,7 @@ class TestRepositoryInfoCommand:
 
         # Mock authentication error
         mock_client = Mock()
-        mock_client.get_repository_info = AsyncMock(
+        mock_client.get_repository_info = Mock(
             side_effect=AuthenticationError("Invalid credentials")
         )
         mock_client_class.return_value = mock_client

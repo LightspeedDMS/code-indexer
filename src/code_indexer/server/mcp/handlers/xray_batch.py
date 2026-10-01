@@ -25,11 +25,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
-from . import _utils
+from . import _utils, xray_truncation
 from ._utils import _mcp_response, _parse_json_string_array
+from .xray import _lazy_singleton_app_or_none, _resolve_evaluator_code
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,35 +96,38 @@ def resolve_batch_evaluator(
     raw_code: str = (scan.get("evaluator_code") or "").strip()
     pattern_name: Optional[str] = scan.get("pattern_name") or None
 
-    if raw_code:
-        return (raw_code, None)
-
-    if pattern_name:
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
-
-        # Build a service that reads from the captured cidx_meta_path.
-        # Pass refresh_scheduler=None so no live scheduler dependency.
-        svc = XrayPatternService(cidx_meta_path, refresh_scheduler=None)
-        try:
-            evaluator_code, _ = svc.resolve_and_prepare_pattern(
-                repo_alias=repo_alias,
-                pattern_name=pattern_name,
-                pattern_params=scan.get("pattern_params") or None,
-            )
-            return (evaluator_code, None)
-        except ValueError as exc:
-            error_key = str(exc).split(":")[0]
-            return (
-                "",
-                {"error": error_key, "message": str(exc)},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                "",
-                {"error": "pattern_load_error", "message": str(exc)},
-            )
-
-    return (_DEFAULT_EVALUATOR_CODE, None)
+    # Keep batch pattern resolution on the same resolver as xray_search and
+    # xray_explore. The explicit cidx_meta_path preserves this helper's
+    # captured-worker-path contract while the shared resolver owns the
+    # ADR-001 legacy-mode check and all pattern lookup/error mapping.
+    params = {
+        "evaluator_code": raw_code or None,
+        "pattern_name": pattern_name,
+        "pattern_params": scan.get("pattern_params") or None,
+    }
+    try:
+        evaluator_code, error_response = _resolve_evaluator_code(
+            params,
+            repo_alias,
+            allow_default_evaluator=True,
+            expected_execution_mode="legacy",
+            cidx_meta_path=cidx_meta_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    if error_response is None:
+        return (evaluator_code, None)
+    try:
+        error_payload = json.loads(error_response["content"][0]["text"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    return ("", cast(Dict[str, Any], error_payload))
 
 
 # ---------------------------------------------------------------------------
@@ -125,58 +139,41 @@ def _truncate_xray_batch_result(
     result: Dict[str, Any],
     payload_cache: Any,
 ) -> Dict[str, Any]:
-    """Apply PayloadCache truncation to a batch result.
+    """Apply PayloadCache truncation to matches[]/errors[]/
+    evaluation_errors[] -- see xray_truncation.truncate_result_fields()
+    for the shared mechanics (Bug #1928: whole, unmodified entries per
+    cache page; each page its own PayloadCache row; inline budget =
+    payload_max_fetch_size_chars; no more fixed-3-entry cap or duplicate
+    preview field). Called from `_job_fn`, which already runs inside the
+    BackgroundJobManager worker thread pool -- off the event loop -- so
+    no additional offload is needed here (unlike xray_graph.py's `async
+    def` handlers).
 
-    Serializes matches[], errors[], and evaluation_errors[] as a single JSON
-    blob.  When oversized the full blob is stored in PayloadCache and the
-    response carries cache_handle + preview.  When small the full arrays are
-    returned inline.
+    When payload_cache is None, xray_truncation.truncate_result_fields()'s
+    own guard (Bug #1928 P3) returns a bounded, cache_unavailable=True
+    result rather than the full unbounded arrays.
 
-    When payload_cache is None the original result is returned unchanged.
+    Bug #1928 round 3 (P1): a page-set write failure (whole-entry pages
+    + the pages-v1 manifest, one atomic batch) raises PageSetStoreError
+    -- caught here and surfaced as an explicit error, never a
+    cache_handle pointing at data that was not durably written.
     """
-    if payload_cache is None:
-        return result
-
-    large_payload = json.dumps(
-        {
-            "matches": result.get("matches", []),
-            "errors": result.get("errors", []),
-            "evaluation_errors": result.get("evaluation_errors", []),
-        }
-    )
-
-    truncation = payload_cache.truncate_result(large_payload)
-
-    # Preserve all top-level scalar fields.
-    truncated: Dict[str, Any] = {
-        k: v
-        for k, v in result.items()
-        if k not in ("matches", "errors", "evaluation_errors")
-    }
-
-    if truncation.get("has_more"):
-        truncated["matches"] = result.get("matches", [])[:3]
-        truncated["errors"] = result.get("errors", [])[:3]
-        truncated["evaluation_errors"] = result.get("evaluation_errors", [])[:3]
-        truncated["matches_and_errors_preview"] = truncation["preview"]
-        truncated["cache_handle"] = truncation["cache_handle"]
-        truncated["has_more"] = True
-        truncated["total_size"] = truncation["total_size"]
-        truncated["truncated"] = True
-        truncated["fetch_tool_hint"] = (
-            f"Result truncated to first 3 entries; full result available at "
-            f"cache_handle '{truncation['cache_handle']}' — fetch via the "
-            f"`cidx_fetch_cached_payload` MCP tool with that handle."
+    try:
+        return xray_truncation.truncate_result_fields(
+            result, payload_cache, ["matches", "errors", "evaluation_errors"]
         )
-    else:
-        truncated["matches"] = result.get("matches", [])
-        truncated["errors"] = result.get("errors", [])
-        truncated["evaluation_errors"] = result.get("evaluation_errors", [])
-        truncated["cache_handle"] = None
-        truncated["has_more"] = False
-        truncated["truncated"] = False
-
-    return truncated
+    except xray_truncation.PageSetStoreError as exc:
+        logger.error("xray_search_batch truncation: page-set store failed: %s", exc)
+        # Bug #1928 final round (Opus P4.6): preserve the non-truncated
+        # metadata the batch run already produced -- only matches/errors/
+        # evaluation_errors are genuinely undeliverable (the write failed).
+        base_metadata = getattr(exc, "base_metadata", {})
+        return {
+            **base_metadata,
+            "success": False,
+            "error": "cache_store_failed",
+            "message": f"Failed to store the truncated result in cache: {exc}",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -185,12 +182,20 @@ def _truncate_xray_batch_result(
 
 
 def _get_background_job_manager() -> Any:
-    return _utils.app_module.background_job_manager
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # direct unconditional _utils.app_module.background_job_manager
+    # attribute access, which would otherwise permanently construct the
+    # process-wide app singleton as a side effect of merely reading it
+    # (byte-identical fix to xray.py's _get_background_job_manager()).
+    return _utils._lazy_module_attr_or_none("background_job_manager")
 
 
 def _get_cidx_meta_path() -> Path:
-    """Return the mutable cidx-meta base path."""
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return the mutable cidx-meta base path.
+
+    Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    """
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         raise RuntimeError(
             "cidx-meta path not available: golden_repo_manager not configured"
@@ -199,10 +204,29 @@ def _get_cidx_meta_path() -> Path:
 
 
 def _get_arm_and_grm() -> Tuple[Any, Any]:
-    """Return (activated_repo_manager, golden_repo_manager) or (None, None)."""
-    arm = getattr(_utils.app_module, "activated_repo_manager", None)
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return (activated_repo_manager, golden_repo_manager) or (None, None).
+
+    Bug #1709: safe lazy probes -- avoid PEP-562 construction side effect.
+    """
+    arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     return arm, grm
+
+
+def _get_access_filtering_service() -> Any:
+    """Return app.state.access_filtering_service, or None if not wired.
+
+    Probes via `_lazy_singleton_app_or_none()` (the
+    same side-effect-free helper Bug #1678/#1693/#1709 introduced for
+    every other app-state accessor in this file) instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side
+    effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
+    if app is None:
+        return None
+    return getattr(getattr(app, "state", None), "access_filtering_service", None)
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
@@ -215,8 +239,15 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
 
 
 def _get_xray_cell_limiter() -> Any:
-    """Return the xray cell concurrency limiter from app.state, or None if not wired."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell concurrency limiter from app.state, or None if not wired.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters in xray.py)
+    instead of a bare `getattr(_utils.app_module, "app", None)`, which
+    would otherwise permanently construct the process-wide app singleton
+    as a side effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(getattr(app, "state", None), "xray_cell_limiter", None)
@@ -240,6 +271,37 @@ def _await_job_result(
 # ---------------------------------------------------------------------------
 # Batch worker
 # ---------------------------------------------------------------------------
+
+
+def _resolve_batch_evaluators(
+    resolved_repos: List[Dict[str, Any]],
+    scans: List[Dict[str, Any]],
+    cidx_meta_path: Path,
+) -> Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]]:
+    """Pre-resolve resolve_batch_evaluator() for every (repo, scan) cell.
+
+    Bug #1784 review blocker (sizing-dimension mismatch): SharedIdentityCache
+    is keyed on resolved evaluator SOURCE TEXT, but resolve_batch_evaluator()
+    checks {repo-alias}/{name}.yaml BEFORE __any__/{name}.yaml — a
+    repo-scoped pattern override means one scan can resolve to a DIFFERENT
+    source per repo. Distinct sources can therefore reach
+    len(resolved_repos) x len(scans), not len(scans) alone. Resolving every
+    cell up front (cheap: a YAML file read, never a subprocess) lets the
+    caller (_run_xray_batch_job) size the identity cache to the ACTUAL
+    distinct-source count, and means the main execution loop never
+    re-resolves a cell it already resolved here.
+
+    Returns:
+        Dict keyed by (repository_alias, scan_index) -> (evaluator_code, err),
+        same (code, err) semantics as resolve_batch_evaluator().
+    """
+    resolved: Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]] = {}
+    for repo in resolved_repos:
+        for scan_index, scan in enumerate(scans):
+            resolved[(repo["alias"], scan_index)] = resolve_batch_evaluator(
+                scan, repo["alias"], cidx_meta_path
+            )
+    return resolved
 
 
 def _run_xray_batch_job(
@@ -281,6 +343,32 @@ def _run_xray_batch_job(
     cancelled = False
     deadline = time.monotonic() + timeout_seconds
 
+    # Bug #1784 review blocker: share ONE identity cache across the WHOLE
+    # batch operation instead of a fresh, empty cache per cell. Each cell
+    # constructs its own XRaySearchEngine/RustNativeBackend below, but the
+    # evaluator source is constant across every repo for a given scan
+    # (structural fact of the repos x scans matrix), so a batch-scoped
+    # shared cache collapses up to _MAX_REPOS x _MAX_SCANS identity
+    # subprocess calls down to the number of DISTINCT evaluator sources.
+    #
+    # Sizing-dimension-mismatch fix (final review round): "one entry per
+    # scan" is FALSE when repo-scoped pattern overrides exist --
+    # resolve_batch_evaluator() checks {repo-alias}/{name}.yaml BEFORE
+    # __any__/{name}.yaml, so a single scan can resolve to a DIFFERENT
+    # source per repo. Distinct sources can therefore reach
+    # len(resolved_repos) x len(scans), not len(scans) alone. Pre-resolving
+    # every cell up front and sizing to the ACTUAL distinct-source count
+    # (rather than guessing from scan count) guarantees no eviction can
+    # occur before every cell has been processed, regardless of how many
+    # repos carry their own pattern override.
+    resolved_evaluators = _resolve_batch_evaluators(
+        resolved_repos, scans, cidx_meta_path
+    )
+    distinct_sources = {
+        code for code, cell_err in resolved_evaluators.values() if cell_err is None
+    }
+    identity_cache = SharedIdentityCache(max_entries=max(1, len(distinct_sources)))
+
     outer_break = False
     for repo in resolved_repos:
         # Between-repo cancellation check.
@@ -307,10 +395,9 @@ def _run_xray_batch_job(
                 outer_break = True
                 break
 
-            # Resolve evaluator (pure, repo-scoped).
-            eval_code, err = resolve_batch_evaluator(
-                scan, repo["alias"], cidx_meta_path
-            )
+            # Evaluator already resolved up front by _resolve_batch_evaluators()
+            # (pure, repo-scoped) -- looked up here, never re-resolved.
+            eval_code, err = resolved_evaluators[(repo["alias"], scan_index)]
             if err is not None:
                 errors.append(
                     {
@@ -346,7 +433,7 @@ def _run_xray_batch_job(
                     if _jid:
                         bjm.register_child_process(_jid, proc)
 
-                cell = XRaySearchEngine().run(
+                cell = XRaySearchEngine(identity_cache=identity_cache).run(
                     repo_path=repo["path"],
                     driver_regex=scan["driver_regex"],
                     evaluator_code=eval_code,
@@ -447,6 +534,7 @@ def handle_xray_search_batch(
 
     1. Auth: query_repos permission required.
     2. Parse + validate inputs (hard-fail on structural/static errors).
+    2b. Repo-level access check — see below.
     3. Resolve repos (graceful-partial) with global-alias fallback.
     4. Submit ONE background job.
 
@@ -454,6 +542,8 @@ def handle_xray_search_batch(
         auth_required                  — unauthenticated or missing query_repos.
         alias_required                 — repository_alias missing or empty.
         scans_required                 — scans missing, not a list, or empty.
+        access_denied                  — caller lacks access to a requested repo.
+        access_control_unavailable     — access_filtering_service missing.
         too_many_repositories          — len(aliases) > 50.
         too_many_scans                 — len(scans) > 50.
         timeout_out_of_range           — timeout_seconds outside [10, 7200].
@@ -462,7 +552,21 @@ def handle_xray_search_batch(
         mutually_exclusive_params      — both evaluator_code and pattern_name set.
         xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
         no_repositories_resolved       — all aliases unresolvable.
+
+    The REST route POST /api/xray/search/batch
+    (routes/xray_routes.py) calls this handler function DIRECTLY,
+    bypassing mcp/protocol.py's handle_tools_call() dispatch layer
+    entirely -- which is where _check_repository_access() normally runs
+    for the genuine MCP xray_search_batch tool call. This handler is
+    therefore the ONLY place that can enforce repo-level access for the
+    REST front door; the check below is redundant-but-harmless for the
+    real MCP tool call (the dispatcher already denies first, so a
+    genuinely unauthorized MCP call never reaches here at all).
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth
     # ------------------------------------------------------------------
@@ -512,6 +616,22 @@ def handle_xray_search_batch(
         return _mcp_response(
             {"error": "alias_required", "message": "repository_alias is required"}
         )
+
+    # ------------------------------------------------------------------
+    # 2b. Repo-level access check — UNCONDITIONAL,
+    #     BEFORE scan validation, repo resolution, or job submission. The
+    #     REST route calls this handler directly (bypassing the MCP
+    #     dispatcher's own _check_repository_access()), so this is the
+    #     ONLY enforcement point for that front door. Never skipped:
+    #     access_filtering_service missing fails closed, it does not
+    #     bypass the check.
+    # ------------------------------------------------------------------
+    try:
+        require_repo_access(_get_access_filtering_service(), user.username, aliases)
+    except RepoAccessDeniedError as e:
+        return _mcp_response({"error": "access_denied", "message": str(e)})
+    except AccessFilteringServiceUnavailableError as e:
+        return _mcp_response({"error": "access_control_unavailable", "message": str(e)})
 
     # Validate scans.
     if raw_scans is None or not isinstance(raw_scans, list) or len(raw_scans) == 0:
@@ -703,7 +823,11 @@ def handle_xray_search_batch(
             bjm=bjm,
             progress_callback=progress_callback,
         )
-        payload_cache = getattr(getattr(_utils.app_module, "app", None), "state", None)
+        # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
+        # bare getattr(_utils.app_module, "app", None), which would
+        # otherwise permanently construct the process-wide app singleton
+        # as a side effect of merely reading it.
+        payload_cache = getattr(_lazy_singleton_app_or_none(), "state", None)
         payload_cache = (
             getattr(payload_cache, "payload_cache", None) if payload_cache else None
         )

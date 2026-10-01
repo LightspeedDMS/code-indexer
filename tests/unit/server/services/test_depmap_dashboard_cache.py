@@ -197,6 +197,74 @@ class TestClaimJobSlot:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TestSetJobSlot (Bug #1620 code review: CAS-based re-pointing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSetJobSlot:
+    """
+    set_job_slot(job_id, expected_current) is a compare-and-swap used to
+    re-point an already-claimed slot to BackgroundJobManager's real
+    returned job id (Bug #1620 secondary defect: submit_job mints its own
+    job_id, ignoring any id the caller pre-generated).
+
+    Code review hardening: unlike a plain unconditional upsert, the swap
+    only applies when the slot currently holds expected_current -- if a
+    concurrent request already changed the slot (e.g. cleared it as a
+    perceived zombie, or completed a real result), set_job_slot must not
+    clobber that state. It logs a WARNING and no-ops instead.
+    """
+
+    def test_creates_row_when_none_exists_and_expected_is_none(self, backend):
+        result = backend.set_job_slot("job-real", expected_current=None)
+        assert result is True
+        assert backend.get_cached()["job_id"] == "job-real"
+
+    def test_repoints_when_expected_matches(self, backend):
+        seed_claimed(backend, "job-placeholder")
+        result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+        assert result is True
+        assert backend.get_cached()["job_id"] == "job-real"
+
+    def test_repoint_preserves_other_fields(self, backend):
+        seed_cached(backend)
+        seed_claimed(backend, "job-placeholder")
+        before = backend.get_cached()
+
+        result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+
+        assert result is True
+        after = backend.get_cached()
+        assert after["job_id"] == "job-real"
+        assert after["result_json"] == before["result_json"]
+        assert after["computed_at"] == before["computed_at"]
+        assert after["last_failure_message"] == before["last_failure_message"]
+        assert after["last_failure_at"] == before["last_failure_at"]
+
+    def test_noop_and_returns_false_when_expected_mismatches(self, backend):
+        seed_claimed(backend, "job-placeholder")
+        result = backend.set_job_slot("job-real", expected_current="some-other-job-id")
+        assert result is False
+        # Slot must remain exactly as it was -- no clobbering.
+        assert backend.get_cached()["job_id"] == "job-placeholder"
+
+    def test_noop_when_slot_cleared_concurrently(self, backend):
+        """Reproduces the code-review race: slot cleared between claim and set."""
+        seed_claimed(backend, "job-placeholder")
+        backend.clear_job_slot()  # simulates a concurrent zombie-detection clear
+
+        result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+
+        assert result is False
+        assert backend.get_cached()["job_id"] is None
+
+    def test_noop_when_no_row_and_expected_not_none(self, backend):
+        result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+        assert result is False
+        assert backend.get_cached() is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TestMarkJobFailed
 # ─────────────────────────────────────────────────────────────────────────────
 

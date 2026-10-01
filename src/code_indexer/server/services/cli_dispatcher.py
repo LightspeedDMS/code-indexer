@@ -22,14 +22,38 @@ When codex is None, the effective weight is always 0.0 (Claude only, no selectio
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import Optional
 
+from code_indexer.server.services.claude_invoker import ClaudeInvoker
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     IntelligenceCliInvoker,
     InvocationResult,
 )
+
+logger = logging.getLogger(__name__)
+
+# Flows in this set carry a safety model that lives entirely inside the
+# concrete ClaudeInvoker class (its restricted --allowedTools/--permission-
+# mode policy in _build_claude_command), NOT in the generic
+# IntelligenceCliInvoker protocol. A deployment-supplied CIDX_CLI_INVOKER
+# plugin (see cli_invoker_plugin.py) implements only that protocol and
+# carries none of it. No plugin ships in this repo or is installed by
+# scripts/install-cidx-server.sh or the auto-updater today, but the
+# mechanism is real and reachable via an env var, so dispatch() refuses to
+# run these flows through anything that is not the known, restricted
+# ClaudeInvoker -- fail closed rather than silently trusting an unrecognized
+# invoker with the log database and Bash.
+_FLOWS_REQUIRING_KNOWN_INVOKER = frozenset({"self_monitoring_scan"})
+
+# Flows in this set run on Claude only: Codex never receives them, at any
+# codex_weight, and a Claude failure on one of them never fails over to
+# Codex. This is an owner decision distinct from the invoker-identity guard
+# above (which governs what "Claude" must be for these flows); the same
+# flow name lives in both sets today, but the two checks are independent.
+_CLAUDE_ONLY_FLOWS = frozenset({"self_monitoring_scan"})
 
 
 class CliDispatcher:
@@ -93,6 +117,47 @@ class CliDispatcher:
             raise ValueError(
                 f"CliDispatcher.dispatch: max_turns must be int >= 0, got {max_turns!r}"
             )
+
+        if flow in _FLOWS_REQUIRING_KNOWN_INVOKER and not isinstance(
+            self.claude, ClaudeInvoker
+        ):
+            error_msg = (
+                f"CliDispatcher: refusing to run flow {flow!r} through a "
+                "non-standard CLI invoker (e.g. a CIDX_CLI_INVOKER plugin) -- "
+                "this flow's safety depends on ClaudeInvoker's own restricted "
+                "permission policy, which a plugin invoker does not carry. "
+                "Failing closed rather than running it unrestricted."
+            )
+            logger.error(error_msg)
+            return InvocationResult(
+                success=False,
+                output="",
+                error=error_msg,
+                cli_used="none",
+                was_failover=False,
+                failure_class=FailureClass.RETRYABLE_ON_OTHER,
+            )
+
+        # Owner decision: these flows run on Claude only. Codex never
+        # receives them regardless of codex_weight, and a Claude failure
+        # never fails over to Codex -- only the same-invoker retry applies
+        # (at most one retry, on RETRYABLE_ON_SAME, same as the general
+        # failover path below).
+        if flow in _CLAUDE_ONLY_FLOWS:
+            for _attempt in range(2):
+                result = self.claude.invoke(
+                    flow=flow,
+                    cwd=cwd,
+                    prompt=prompt,
+                    timeout=timeout,
+                    max_turns=max_turns,
+                )
+                if (
+                    result.success
+                    or result.failure_class != FailureClass.RETRYABLE_ON_SAME
+                ):
+                    return result
+            return result
 
         # When codex is absent, bypass selection entirely.
         if self.codex is None:

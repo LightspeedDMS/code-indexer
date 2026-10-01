@@ -13,7 +13,7 @@ import tempfile
 from unittest.mock import patch, MagicMock
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import (
+from code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
 )
 
@@ -33,10 +33,10 @@ class TestFTSParameterWiring:
         """Create SemanticQueryManager instance with mocked dependencies."""
         with (
             patch(
-                "src.code_indexer.server.query.semantic_query_manager.ActivatedRepoManager"
+                "code_indexer.server.query.semantic_query_manager.ActivatedRepoManager"
             ) as mock_activated_manager,
             patch(
-                "src.code_indexer.server.query.semantic_query_manager.BackgroundJobManager"
+                "code_indexer.server.query.semantic_query_manager.BackgroundJobManager"
             ) as mock_job_manager,
         ):
             # Configure activated repo manager mock

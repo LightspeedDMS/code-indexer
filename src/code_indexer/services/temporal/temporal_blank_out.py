@@ -27,8 +27,33 @@ from .temporal_collection_naming import (
     get_temporal_collections,
 )
 from .temporal_structure_marker import is_v2_structure
+from ...storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from ...storage.sqlite_chunk_store import chunk_store_has_real_data
 
 logger = logging.getLogger(__name__)
+
+
+def _has_chunks_db_real_data(coll_path: Path) -> bool:
+    """Return True iff `coll_path` is a CHUNKS_DB-layout collection with at
+    least one real committed chunk row (Issue #1459 AC1/AC5).
+
+    Routes exclusively through the canonical `resolve_chunk_layout` resolver
+    -- never an independent flag/file check. A CHUNKS_DB collection's real
+    data lives in `chunks.db`, invisible to the `hnsw_index.bin` /
+    `vector_*.json` presence checks the other two conditions rely on.
+
+    Issue #1459 remediation Finding 3: uses `chunk_store_has_real_data`
+    with `on_error="raise"` -- a corrupt chunks.db here must propagate
+    loudly rather than being silently treated as "no data, proceed", since
+    this feeds directly into `_is_shared_bookkeeping_directory`'s
+    hard-delete decision (Messi Rule #13 Anti-Silent-Failure). This is
+    deliberately DIFFERENT from the read-only reporting surfaces
+    (golden_repo_manager.py, repository_health_aggregator.py), which use
+    the default `on_error="treat_absent"` to degrade gracefully instead.
+    """
+    if resolve_chunk_layout(coll_path) != ChunkLayout.CHUNKS_DB:
+        return False
+    return chunk_store_has_real_data(coll_path / "chunks.db", on_error="raise")
 
 
 def _is_shared_bookkeeping_directory(name: str, coll_path: Path) -> bool:
@@ -43,7 +68,8 @@ def _is_shared_bookkeeping_directory(name: str, coll_path: Path) -> bool:
     (both share the bare name, neither has a v2 marker); only DATA PRESENCE
     can. The bookkeeping directory never holds vector data -- a genuine
     legacy monolith always does (either a monolithic `hnsw_index.bin` or
-    nested `vector_*.json` files in a quantization-style shard layout).
+    nested `vector_*.json` files in a quantization-style shard layout, or
+    -- Issue #1459 -- real committed rows in a consolidated `chunks.db`).
 
     Args:
         name: Collection directory basename (as returned by
@@ -59,6 +85,8 @@ def _is_shared_bookkeeping_directory(name: str, coll_path: Path) -> bool:
     if (coll_path / "hnsw_index.bin").exists():
         return False
     if next(coll_path.rglob("vector_*.json"), None) is not None:
+        return False
+    if _has_chunks_db_real_data(coll_path):
         return False
     return True
 

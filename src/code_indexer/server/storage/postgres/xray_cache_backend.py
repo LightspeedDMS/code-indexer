@@ -4,15 +4,37 @@ Stores compiled .so blobs in PostgreSQL so all cluster nodes share the same
 compiled evaluator cache, avoiding per-node recompilation.
 
 Table: xray_evaluator_cache
-  source_hash   TEXT PRIMARY KEY  — SHA-256 of the raw evaluator source
+  source_hash   TEXT PRIMARY KEY  — opaque cache identity (see below)
   rustc_version TEXT NOT NULL     — rustc version string (ABI guard)
   so_bytes      BYTEA NOT NULL    — compiled .so content
   compiled_at   TIMESTAMPTZ       — when the .so was compiled
   compile_ms    BIGINT            — compilation time in milliseconds
 
-TTL is enforced at the SQL level: fetch() passes a cutoff timestamp in the
-WHERE clause so stale rows are never returned without a separate cleanup pass.
-_cleanup_expired() is called lazily from store() to delete rows past TTL.
+TTL is enforced ON READ ONLY: fetch() passes a cutoff timestamp in the WHERE
+clause so a stale row can never be SERVED, regardless of whether it has been
+physically deleted yet. Deletion itself is LAZY -- _cleanup_expired() is
+called only as a side effect of store(), so an idle cluster (no new
+evaluator ever compiled) leaves expired rows sitting in the table
+indefinitely; nothing proactively sweeps them. This is a correctness/
+capacity distinction, not just phrasing: "ages out via TTL" would wrongly
+imply automatic deletion. Adding a scheduled cleanup pass is a legitimate
+future improvement but is explicitly out of scope here (Bug #1784 review
+MINOR-4) -- this docstring exists only to describe current behavior
+accurately.
+
+Bug #1784: `source_hash` is treated by this module purely as an OPAQUE TEXT
+key — no schema change was needed to fix the bug. The VALUE callers pass is
+the composite cache identity (sha256(assembled_source) + XRAY_ABI_VERSION +
+rustc_version), computed once in Rust (xray-core's compute_cache_identity /
+cache_identity_info) and obtained by RustNativeBackend via
+`xray-cli --print-cache-identity` — never independently re-derived here or
+in Python. This is deliberate: an ABI-2 node and an ABI-3 node compiling the
+identical raw evaluator source now produce DIFFERENT identity values and
+occupy different rows instead of overwriting each other via
+`ON CONFLICT (source_hash) DO UPDATE`, so old and new nodes coexist safely
+for the whole rolling-restart window — old rows can never be SERVED to a
+node computing the new identity (TTL-on-read, see above), though they are
+only physically deleted the next time some node calls store().
 
 All PostgreSQL exceptions are caught and logged at WARNING level — callers
 always receive None (fetch) or a silent no-op (store) on failure so that

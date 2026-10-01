@@ -58,6 +58,8 @@ class _TrackingLogsBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         if self._block_seconds > 0:
             time.sleep(self._block_seconds)
@@ -75,18 +77,34 @@ class _TrackingLogsBackend:
                     "extra_data": extra_data,
                     "node_id": node_id,
                     "alias": alias,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
                 }
             )
 
     def insert_log_batch(self, items: List[Any]) -> None:
-        """Batch insert: expand each 10-tuple and delegate to insert_log.
+        """Batch insert: expand each 12-tuple and delegate to insert_log.
 
         Preserves per-call tracking semantics so existing assertions on
         len(calls) and call_thread_names remain valid after Issue #1241
-        switched _writer_loop to call insert_log_batch instead of insert_log.
+        switched _writer_loop to call insert_log_batch instead of insert_log,
+        and after Story #1676 AC2 appended trace_id/span_id to the tuple.
         """
         for item in items:
-            (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+            (
+                ts,
+                lvl,
+                src,
+                msg,
+                cid,
+                uid,
+                rpath,
+                extra,
+                nid,
+                alias,
+                trace_id,
+                span_id,
+            ) = item
             self.insert_log(
                 timestamp=ts,
                 level=lvl,
@@ -98,6 +116,8 @@ class _TrackingLogsBackend:
                 extra_data=extra,
                 node_id=nid,
                 alias=alias,
+                trace_id=trace_id,
+                span_id=span_id,
             )
 
     def query_logs(self, *args: Any, **kwargs: Any):  # pragma: no cover
@@ -429,9 +449,23 @@ def test_writer_thread_guard_prevents_recursive_requeue(tmp_path: Path) -> None:
                 handler_holder[0].emit(rec)
 
         def insert_log_batch(self, items: List[Any]) -> None:
-            """Expand batch to insert_log calls (Issue #1241 protocol update)."""
+            """Expand batch to insert_log calls (Issue #1241 protocol update;
+            Story #1676 AC2 appended trace_id/span_id to the tuple)."""
             for item in items:
-                (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+                (
+                    ts,
+                    lvl,
+                    src,
+                    msg,
+                    cid,
+                    uid,
+                    rpath,
+                    extra,
+                    nid,
+                    alias,
+                    trace_id,
+                    span_id,
+                ) = item
                 self.insert_log(
                     timestamp=ts,
                     level=lvl,
@@ -443,6 +477,8 @@ def test_writer_thread_guard_prevents_recursive_requeue(tmp_path: Path) -> None:
                     extra_data=extra,
                     node_id=nid,
                     alias=alias,
+                    trace_id=trace_id,
+                    span_id=span_id,
                 )
 
         def query_logs(self, *a: Any, **kw: Any):  # pragma: no cover

@@ -183,6 +183,88 @@ def test_claim_job_slot_after_set_result_returns_none(
 
 
 # ---------------------------------------------------------------------------
+# set_job_slot (Bug #1620 code review: CAS-based re-pointing)
+#
+# This is the PRODUCTION cache backend -- _get_dashboard_cache_backend()
+# constructs FilesystemDashboardCacheBackend exclusively, so this coverage
+# closes the BLOCKING gap where set_job_slot's real production execution
+# path had zero test coverage (only the SQLite backend was tested).
+# ---------------------------------------------------------------------------
+
+
+def test_set_job_slot_creates_row_when_none_exists_and_expected_is_none(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """No cache file yet + expected_current=None -> creates the row."""
+    result = backend.set_job_slot("job-real", expected_current=None)
+    assert result is True
+    cached = backend.get_cached()
+    assert cached is not None
+    assert cached["job_id"] == "job-real"
+
+
+def test_set_job_slot_repoints_when_expected_matches(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """Occupied slot + matching expected_current -> re-points and returns True."""
+    backend.claim_job_slot("job-placeholder")
+    result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+    assert result is True
+    assert backend.get_cached()["job_id"] == "job-real"
+
+
+def test_set_job_slot_repoint_preserves_other_fields(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """A successful re-point must not disturb result_json/computed_at/failure fields."""
+    backend.set_result('{"data": "existing"}')
+    backend.claim_job_slot("job-placeholder")
+    before = backend.get_cached()
+
+    result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+
+    assert result is True
+    after = backend.get_cached()
+    assert after["job_id"] == "job-real"
+    assert after["result_json"] == before["result_json"]
+    assert after["computed_at"] == before["computed_at"]
+    assert after["last_failure_message"] == before["last_failure_message"]
+    assert after["last_failure_at"] == before["last_failure_at"]
+
+
+def test_set_job_slot_noop_and_returns_false_when_expected_mismatches(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """Occupied slot + mismatched expected_current -> no-op, returns False."""
+    backend.claim_job_slot("job-placeholder")
+    result = backend.set_job_slot("job-real", expected_current="some-other-job-id")
+    assert result is False
+    assert backend.get_cached()["job_id"] == "job-placeholder"
+
+
+def test_set_job_slot_noop_when_slot_cleared_concurrently(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """Reproduces the code-review race: slot cleared between claim and set."""
+    backend.claim_job_slot("job-placeholder")
+    backend.clear_job_slot()  # simulates a concurrent zombie-detection clear
+
+    result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+
+    assert result is False
+    assert backend.get_cached()["job_id"] is None
+
+
+def test_set_job_slot_noop_when_no_row_and_expected_not_none(
+    backend: FilesystemDashboardCacheBackend,
+) -> None:
+    """No cache file yet + non-None expected_current -> returns False, no row created."""
+    result = backend.set_job_slot("job-real", expected_current="job-placeholder")
+    assert result is False
+    assert backend.get_cached() is None
+
+
+# ---------------------------------------------------------------------------
 # clear_job_slot_for_retry
 # ---------------------------------------------------------------------------
 

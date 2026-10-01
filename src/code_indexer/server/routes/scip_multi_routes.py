@@ -16,8 +16,8 @@ All endpoints require JWT authentication and support:
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
-from typing import Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Optional, Dict, Any, List
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
@@ -26,6 +26,11 @@ from ..auth.user_manager import User
 from ..multi.scip_models import SCIPMultiRequest, SCIPMultiResponse
 from ..multi.scip_multi_service import SCIPMultiService
 from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,47 @@ router = APIRouter(prefix="/api/scip/multi", tags=["scip-multi"])
 
 # Initialize SCIP multi-service
 _scip_multi_service: Optional[SCIPMultiService] = None
+
+
+def _enforce_repo_access(
+    access_filtering_service: Optional[Any],
+    username: str,
+    aliases: List[str],
+) -> None:
+    """Enforce repo-level access for every repository in a SCIP multi-repo request.
+
+    The /api/scip/multi/* family (Story #677) authorizes every requested
+    golden repo against the caller's group grants via AccessFilteringService
+    before any symbol definition/references/dependency/dependents/callchain
+    analysis, matching the singular-repo scip_queries.py router (Story #704).
+    Delegates the actual access decision to the shared
+    require_repo_access() guard (same semantics as the MCP dispatcher's
+    _check_repository_access() and scip_queries.py's own fix) and shapes
+    the result into this route family's HTTPException conventions.
+
+    Called UNCONDITIONALLY, before SCIPMultiService executes any query,
+    so the check can never be silently skipped and no repo is queried
+    before every requested alias is proven accessible (no silent partial
+    results).
+
+    Raises:
+        HTTPException 403: caller lacks access to one of the requested
+            aliases (checked in order).
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    try:
+        require_repo_access(access_filtering_service, username, aliases)
+    except RepoAccessDeniedError as e:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "access_denied", "detail": str(e)},
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "access_control_unavailable", "detail": str(e)},
+        )
 
 
 def get_scip_multi_service() -> SCIPMultiService:
@@ -108,6 +154,8 @@ def _apply_multi_scip_truncation(
 @router.post("/definition", response_model=SCIPMultiResponse)
 def multi_repository_definition(
     request: SCIPMultiRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -118,6 +166,7 @@ def multi_repository_definition(
     Performs parallel definition lookup across specified repositories with:
     - Authentication enforcement (JWT token required)
     - Request validation (Pydantic models)
+    - Repo-level access enforcement
     - Timeout handling (30s default per repo)
     - Partial failure support (some repos succeed, others fail)
     - Result aggregation with repository attribution
@@ -171,10 +220,14 @@ def multi_repository_definition(
     - No SCIP index → error in `errors` field, other repos succeed
     - Invalid symbol → 422 Unprocessable Entity
     - Authentication failure → 401 Unauthorized
+    - Caller lacks access to a requested repo → 403 Forbidden
     - Unexpected error → 500 Internal Server Error
 
     Args:
         request: SCIP multi-request with repositories and symbol
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service for the
+            repo-level access check below.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -182,9 +235,15 @@ def multi_repository_definition(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)
@@ -240,6 +299,8 @@ def multi_repository_definition(
 @router.post("/references", response_model=SCIPMultiResponse)
 def multi_repository_references(
     request: SCIPMultiRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -250,6 +311,7 @@ def multi_repository_references(
     Performs parallel references lookup across specified repositories with:
     - Authentication enforcement (JWT token required)
     - Request validation (Pydantic models)
+    - Repo-level access enforcement
     - Timeout handling (30s default per repo)
     - Partial failure support (some repos succeed, others fail)
     - Result aggregation with repository attribution
@@ -269,6 +331,8 @@ def multi_repository_references(
 
     Args:
         request: SCIP multi-request with repositories, symbol, and optional limit
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -276,9 +340,15 @@ def multi_repository_references(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)
@@ -334,6 +404,8 @@ def multi_repository_references(
 @router.post("/dependencies", response_model=SCIPMultiResponse)
 def multi_repository_dependencies(
     request: SCIPMultiRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -344,6 +416,7 @@ def multi_repository_dependencies(
     Performs parallel dependency analysis across specified repositories with:
     - Authentication enforcement (JWT token required)
     - Request validation (Pydantic models)
+    - Repo-level access enforcement
     - Timeout handling (30s default per repo)
     - Partial failure support (some repos succeed, others fail)
     - Result aggregation with repository attribution
@@ -363,6 +436,8 @@ def multi_repository_dependencies(
 
     Args:
         request: SCIP multi-request with repositories, symbol, and optional max_depth
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -370,9 +445,15 @@ def multi_repository_dependencies(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)
@@ -428,6 +509,8 @@ def multi_repository_dependencies(
 @router.post("/dependents", response_model=SCIPMultiResponse)
 def multi_repository_dependents(
     request: SCIPMultiRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -438,6 +521,7 @@ def multi_repository_dependents(
     Performs parallel dependents analysis across specified repositories with:
     - Authentication enforcement (JWT token required)
     - Request validation (Pydantic models)
+    - Repo-level access enforcement
     - Timeout handling (30s default per repo)
     - Partial failure support (some repos succeed, others fail)
     - Result aggregation with repository attribution
@@ -457,6 +541,8 @@ def multi_repository_dependents(
 
     Args:
         request: SCIP multi-request with repositories, symbol, and optional max_depth
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -464,9 +550,15 @@ def multi_repository_dependents(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)
@@ -522,6 +614,8 @@ def multi_repository_dependents(
 @router.post("/callchain", response_model=SCIPMultiResponse)
 def multi_repository_callchain(
     request: SCIPMultiRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -532,6 +626,7 @@ def multi_repository_callchain(
     Performs parallel call chain tracing across specified repositories with:
     - Authentication enforcement (JWT token required)
     - Request validation (Pydantic models)
+    - Repo-level access enforcement
     - Timeout handling (30s default per repo)
     - Partial failure support (some repos succeed, others fail)
     - Result aggregation with repository attribution
@@ -554,6 +649,8 @@ def multi_repository_callchain(
 
     Args:
         request: SCIP multi-request with repositories, from_symbol, and to_symbol
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -561,9 +658,15 @@ def multi_repository_callchain(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)

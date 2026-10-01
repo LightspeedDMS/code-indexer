@@ -24,13 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJob,
     BackgroundJobManager,
     JobStatus,
 )
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 _MAX_CONCURRENT_JOBS = 10
 _ADMIN_USERNAME = "admin"

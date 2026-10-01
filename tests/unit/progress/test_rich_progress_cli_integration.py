@@ -71,7 +71,7 @@ class TestRichProgressCLIIntegration:
 
         # Test that the integrated display includes the concurrent files
         # In the new architecture, create a slot tracker with the file data
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,
@@ -252,7 +252,7 @@ class TestRichProgressCLIIntegration:
         assert isinstance(display, Table), "Should return Rich Table object"
 
         # Check that concurrent files were properly processed using new slot tracker API
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,

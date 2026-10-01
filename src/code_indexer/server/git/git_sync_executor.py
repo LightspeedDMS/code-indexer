@@ -216,9 +216,8 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-025",
                         f"Pre-pull clearing failed (non-blocking): {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         if not validation.can_pull:
@@ -425,7 +424,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-026",
                     f"Repository validation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             validation_errors.append(f"Validation error: {str(e)}")
@@ -495,7 +493,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-027",
                     f"Backup creation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return BackupResult(
@@ -557,7 +554,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-028",
                         "SSH passphrase support requires proper credential management",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -586,7 +582,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-029",
                     f"Git pull failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise
@@ -646,7 +641,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-030",
                     f"Could not get changed files: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -667,7 +661,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-031",
                     f"Could not count commits: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return 0
@@ -695,20 +688,38 @@ class GitSyncExecutor:
             # Get configuration for this repository
             config_manager = ConfigManager.create_with_backtrack(self.repository_path)
             config = config_manager.load()
+            # Server context: indexed files stay inside the repository root
+            # (no `cidx` subprocess here, so the spawn-seam flags do not apply).
+            config.confine_to_codebase_root()
 
             # Initialize required services (similar to CLI approach).
             # Bug #899: pass http_client_factory from app.state so FaultInjectingSyncTransport
             # can intercept indexing-time embedding HTTP calls when fault injection is active.
             # app.state.http_client_factory is guaranteed set by lifespan on every startup path.
-            from ...app import app as _app
+            # Bug #1575 Part C review incidental fix: this module's package
+            # is code_indexer.server.git, so reaching code_indexer.server.app
+            # requires exactly 2 leading dots, not 3 (3 dots resolved to the
+            # nonexistent code_indexer.app, confirmed via direct import --
+            # previously unreachable since this class/method is documented
+            # as never externally instantiated in production today).
+            from ..app import app as _app
+            from ..utils.registry_factory import is_postgres_storage_mode
 
             embedding_provider = EmbeddingProviderFactory.create(
                 config, http_client_factory=_app.state.http_client_factory
             )
             # Initialize vector store (Story #505 - FilesystemVectorStore)
             index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
+            # Bug #1575 Part C review fix (Defect 3a bypass 2): thread the
+            # postgres/cluster-mode signal, matching
+            # FilesystemBackend.get_vector_store_client()'s existing
+            # pattern -- otherwise this in-process indexing trigger
+            # silently defaults the epoch-sync mechanism to enabled
+            # regardless of storage mode.
             vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(config.codebase_dir)
+                base_path=index_dir,
+                project_root=Path(config.codebase_dir),
+                hnsw_sync_epoch_enabled=not is_postgres_storage_mode(),
             )
 
             # Health checks
@@ -717,7 +728,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-032",
                         "Embedding provider health check failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -727,7 +737,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-033",
                         "Vector store client health check failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -744,6 +753,10 @@ class GitSyncExecutor:
             )
 
             # Execute incremental smart indexing
+            # This runs server-side against a tenant/committer
+            # -writable repo, so resume state must not be trusted. No `cidx`
+            # subprocess is spawned here, so this is passed directly rather
+            # than via the append_server_layout_args() seam.
             stats = smart_indexer.smart_index(
                 force_full=False,  # Incremental indexing after git changes
                 reconcile_with_database=False,
@@ -752,6 +765,7 @@ class GitSyncExecutor:
                 safety_buffer_seconds=60,
                 vector_thread_count=config.voyage_ai.parallel_requests,
                 detect_deletions=False,
+                trust_resume_state=False,
             )
 
             # Check if indexing was successful
@@ -766,7 +780,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-034",
                         "Internal CIDX indexing was cancelled or failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -776,9 +789,8 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-035",
                     f"Internal CIDX indexing failed: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return False
 
@@ -799,7 +811,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-036",
                         f"Backup path does not exist: {backup_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -845,7 +856,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-037",
                     f"Backup restoration failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False

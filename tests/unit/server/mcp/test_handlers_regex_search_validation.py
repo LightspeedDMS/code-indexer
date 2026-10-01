@@ -165,6 +165,7 @@ class TestRegexSearchInputValidation:
         mock_result.matches = []
         mock_result.total_matches = 0
         mock_result.truncated = False
+        mock_result.read_capped = False
         mock_result.search_engine = "test"
         mock_result.search_time_ms = 100
 
@@ -214,6 +215,7 @@ class TestRegexSearchInputValidation:
         mock_result.matches = []
         mock_result.total_matches = 0
         mock_result.truncated = False
+        mock_result.read_capped = False
         mock_result.search_engine = "test"
         mock_result.search_time_ms = 100
 

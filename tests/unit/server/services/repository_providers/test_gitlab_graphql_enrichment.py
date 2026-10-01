@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 import httpx
 
-from src.code_indexer.server.services.repository_providers.gitlab_provider import (
+from code_indexer.server.services.repository_providers.gitlab_provider import (
     GitLabProvider,
 )
-from src.code_indexer.server.models.auto_discovery import DiscoveredRepository
+from code_indexer.server.models.auto_discovery import DiscoveredRepository
 
 
 @pytest.fixture

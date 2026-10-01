@@ -11,8 +11,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.models.api_models import (
+from code_indexer.server.app import create_app
+from code_indexer.server.models.api_models import (
     SemanticSearchResponse,
     SearchResultItem,
 )
@@ -450,8 +450,9 @@ def get_users():
             f"/api/repositories/{repo_id}/search", json=search_request, headers=headers
         )
 
-        # Should return 404 for non-existent repository (or 403 if auth fails first)
-        assert response.status_code in [403, 404]
+        # Should return 404 for non-existent repository (or 401/403 if auth
+        # fails first -- RFC 9728 returns 401 for missing credentials).
+        assert response.status_code in [401, 403, 404]
 
     def test_semantic_search_unauthorized_access(self, client):
         """Test semantic search endpoint without authentication."""

@@ -79,13 +79,17 @@ class TestMultiIndexQueryServiceCohereDetection:
 
         assert service.will_query_multimodal() is True
 
-    def test_get_multimodal_provider_creates_cohere_client_when_cohere_collection_exists(
+    def test_get_multimodal_provider_creates_cohere_client_for_cohere_model_name(
         self, project_root, mock_vector_store, mock_embedding_provider
     ):
-        """_get_multimodal_provider creates CohereMultimodalClient when embed-v4.0-multimodal dir exists."""
-        cohere_dir = project_root / ".code-indexer" / "index" / COHERE_MULTIMODAL_MODEL
-        cohere_dir.mkdir(parents=True)
+        """_get_multimodal_provider(COHERE_MULTIMODAL_MODEL) creates CohereMultimodalClient.
 
+        Bug #1483: provider selection is now keyed by the explicit model_name
+        argument, never by which collection(s) happen to exist on disk — the
+        caller (the per-collection query loop) supplies the model_name it is
+        about to search, so there is no separate "detect on disk" decision
+        that could disagree.
+        """
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
@@ -99,17 +103,17 @@ class TestMultiIndexQueryServiceCohereDetection:
             mock_cohere_instance = Mock()
             mock_cohere_cls.return_value = mock_cohere_instance
 
-            provider = service._get_multimodal_provider()
+            provider = service._get_multimodal_provider(COHERE_MULTIMODAL_MODEL)
 
             assert mock_cohere_cls.called, (
                 "CohereMultimodalClient should be instantiated"
             )
             assert provider is mock_cohere_instance
 
-    def test_get_multimodal_provider_falls_back_to_voyage_when_no_cohere_collection(
+    def test_get_multimodal_provider_creates_voyage_client_for_voyage_model_name(
         self, project_root, mock_vector_store, mock_embedding_provider
     ):
-        """_get_multimodal_provider falls back to VoyageMultimodalClient when no Cohere collection."""
+        """_get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL) creates VoyageMultimodalClient."""
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
@@ -123,17 +127,18 @@ class TestMultiIndexQueryServiceCohereDetection:
             mock_voyage_instance = Mock()
             mock_voyage_cls.return_value = mock_voyage_instance
 
-            provider = service._get_multimodal_provider()
+            provider = service._get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL)
 
             assert mock_voyage_cls.called, (
-                "VoyageMultimodalClient should be instantiated as fallback"
+                "VoyageMultimodalClient should be instantiated"
             )
             assert provider is mock_voyage_instance
 
-    def test_get_multimodal_provider_is_cached_after_first_call(
+    def test_get_multimodal_provider_is_cached_per_model_after_first_call(
         self, project_root, mock_vector_store, mock_embedding_provider
     ):
-        """_get_multimodal_provider returns same instance on subsequent calls (lazy init)."""
+        """_get_multimodal_provider(model_name) returns same instance on
+        subsequent calls with the SAME model_name (lazy init, cached per key)."""
         service = MultiIndexQueryService(
             project_root=project_root,
             vector_store=mock_vector_store,
@@ -146,16 +151,23 @@ class TestMultiIndexQueryServiceCohereDetection:
         ) as mock_voyage_cls:
             mock_voyage_cls.return_value = Mock()
 
-            provider1 = service._get_multimodal_provider()
-            provider2 = service._get_multimodal_provider()
+            provider1 = service._get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL)
+            provider2 = service._get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL)
 
             assert provider1 is provider2
             assert mock_voyage_cls.call_count == 1, "Should only instantiate once"
 
-    def test_get_multimodal_provider_prefers_cohere_over_voyage_when_both_exist(
+    def test_get_multimodal_provider_resolves_independently_per_model_when_both_exist(
         self, project_root, mock_vector_store, mock_embedding_provider
     ):
-        """_get_multimodal_provider creates CohereMultimodalClient when both collections exist."""
+        """Bug #1483 regression guard: when BOTH multimodal collections exist
+        on disk, requesting the provider for EACH model_name must return the
+        CORRECT, matching provider for that model — never a single shared
+        "winner" that silently overrides the other's requests. This is the
+        exact disagreement that used to cause a dimension mismatch (Cohere
+        provider embedding a query later searched against the Voyage
+        collection, or vice versa).
+        """
         (project_root / ".code-indexer" / "index" / COHERE_MULTIMODAL_MODEL).mkdir(
             parents=True
         )
@@ -178,12 +190,16 @@ class TestMultiIndexQueryServiceCohereDetection:
                 "code_indexer.services.voyage_multimodal.VoyageMultimodalClient"
             ) as mock_voyage_cls,
         ):
-            mock_cohere_cls.return_value = Mock()
-            mock_voyage_cls.return_value = Mock()
+            mock_cohere_instance = Mock()
+            mock_voyage_instance = Mock()
+            mock_cohere_cls.return_value = mock_cohere_instance
+            mock_voyage_cls.return_value = mock_voyage_instance
 
-            service._get_multimodal_provider()
+            cohere_provider = service._get_multimodal_provider(COHERE_MULTIMODAL_MODEL)
+            voyage_provider = service._get_multimodal_provider(VOYAGE_MULTIMODAL_MODEL)
 
-            assert mock_cohere_cls.called, "Cohere should take precedence"
-            assert not mock_voyage_cls.called, (
-                "VoyageAI should not be used when Cohere collection exists"
-            )
+            assert cohere_provider is mock_cohere_instance
+            assert voyage_provider is mock_voyage_instance
+            assert cohere_provider is not voyage_provider
+            assert mock_cohere_cls.called
+            assert mock_voyage_cls.called

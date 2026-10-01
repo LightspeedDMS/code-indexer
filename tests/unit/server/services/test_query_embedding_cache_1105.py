@@ -97,6 +97,81 @@ class TestQueryEmbeddingCacheSqliteBackend:
         result = backend.lookup("missing", "voyage-ai", "voyage-code-3", 4)
         assert result is None
 
+    def test_upsert_returns_true_on_success(self, tmp_path: Path) -> None:
+        """Bug #1536: upsert() must report success/failure via return value
+        so record_miss_or_shadow's write_failures_since_start() counter is
+        accurate without relying solely on a raised exception."""
+        backend = self._make_backend(tmp_path)
+        vec = _make_vec(4, 1.0)
+        t = time.time()
+        result = backend.upsert(
+            "k1", "voyage-ai", "voyage-code-3", 4, _encode_vec(vec), t, t
+        )
+        assert result is True
+
+    def test_upsert_returns_false_and_does_not_raise_on_backend_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Bug #1536: SQLiteQueryEmbeddingCacheBackend must fail open at the
+        backend layer too (consistent with QueryEmbeddingCachePostgresBackend's
+        already-fail-open contract), signaling failure via `False` rather than
+        letting an OperationalError (e.g. a busy-timeout lock) propagate raw."""
+        backend = self._make_backend(tmp_path)
+        from unittest.mock import patch
+
+        with patch.object(
+            backend._conn_manager,
+            "execute_atomic",
+            side_effect=RuntimeError("database is locked"),
+        ):
+            result = backend.upsert(
+                "k1",
+                "voyage-ai",
+                "voyage-code-3",
+                4,
+                _encode_vec(_make_vec()),
+                0.0,
+                0.0,
+            )
+        assert result is False
+
+    def test_upsert_failure_logs_with_traceback(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Codex review of Bug #1536: the fail-open swallow in upsert() must
+        preserve the diagnostic traceback (exc_info=True) that reached
+        operators before this change, or a genuine programming defect
+        (e.g. sqlite3.ProgrammingError from a parameter-binding bug) becomes
+        a counted, traceback-less non-event indistinguishable from an
+        expected operational failure (busy-timeout/lock contention)."""
+        backend = self._make_backend(tmp_path)
+
+        with patch.object(
+            backend._conn_manager,
+            "execute_atomic",
+            side_effect=RuntimeError("database is locked"),
+        ):
+            with caplog.at_level("WARNING"):
+                result = backend.upsert(
+                    "k1",
+                    "voyage-ai",
+                    "voyage-code-3",
+                    4,
+                    _encode_vec(_make_vec()),
+                    0.0,
+                    0.0,
+                )
+
+        assert result is False
+        matching = [r for r in caplog.records if "upsert failed" in r.getMessage()]
+        assert len(matching) == 1
+        record = matching[0]
+        assert record.exc_info is not None, (
+            "upsert() failure log must capture exc_info so the traceback "
+            "of a genuine programming defect survives; message-only "
+            "logging silently discards it."
+        )
+
     def test_upsert_is_idempotent(self, tmp_path: Path) -> None:
         backend = self._make_backend(tmp_path)
         vec1 = _make_vec(4, 1.0)
@@ -416,6 +491,133 @@ class TestQueryEmbeddingCacheFailOpen:
         vec = _make_vec(4, 1.0)
         # Should not raise
         cache.record_miss_or_shadow(key, qualifier, vec)
+
+
+# ---------------------------------------------------------------------------
+# Bug #1536: write-failure observability counter.
+#
+# record_miss_or_shadow's fail-open swallow left a persistent cache-write
+# failure with ZERO operator-visible signal beyond a buried WARNING log line.
+# write_failures_since_start() makes that condition countable (and, via the
+# new OTEL gauge, observable) without changing fail-open correctness: the
+# caller still never sees an exception, and the live embedding vector is
+# still returned/used exactly as before.
+# ---------------------------------------------------------------------------
+
+
+class TestQueryEmbeddingCacheWriteFailureCounter:
+    """Bug #1536: a silent record_miss_or_shadow write failure must be counted."""
+
+    def test_write_failures_starts_at_zero(self, tmp_path: Path) -> None:
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
+        backend = MagicMock()
+        backend.total_entries.return_value = 0
+        cache = QueryEmbeddingCache(backend=backend, enabled=True, voyage_mode="on")
+        assert cache.write_failures_since_start() == 0
+
+    def test_successful_write_does_not_increment_counter(self, tmp_path: Path) -> None:
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+        from code_indexer.server.storage.sqlite_backends import (
+            QueryEmbeddingCacheSqliteBackend,
+        )
+
+        backend = QueryEmbeddingCacheSqliteBackend(str(tmp_path / "qec_ok.db"))
+        cache = QueryEmbeddingCache(backend=backend, enabled=True, voyage_mode="on")
+        provider = MagicMock()
+        provider.get_provider_name.return_value = "voyage-ai"
+        provider.get_current_model.return_value = "voyage-code-3"
+        provider.get_model_info.return_value = {"dimensions": 4}
+
+        key = cache.build_key("hello world", config_digest="testdigest")
+        qualifier = cache.qualifier(provider)
+        cache.record_miss_or_shadow(key, qualifier, _make_vec(4, 1.0))
+        assert cache.write_failures_since_start() == 0
+
+    def test_backend_raising_on_upsert_increments_counter(self, tmp_path: Path) -> None:
+        """Mirrors test_upsert_fail_open_on_db_error's raising backend: the
+        exception must still be swallowed (no raise to the caller) AND now
+        counted so a persistent failure is operator-visible."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
+        bad_backend = MagicMock()
+        bad_backend.upsert.side_effect = RuntimeError("DB down")
+        bad_backend.total_entries.return_value = 0
+
+        cache = QueryEmbeddingCache(
+            backend=bad_backend,
+            enabled=True,
+            voyage_mode="shadow",
+            cohere_mode="shadow",
+        )
+        provider_mock = MagicMock()
+        provider_mock.get_provider_name.return_value = "voyage-ai"
+        provider_mock.get_current_model.return_value = "voyage-code-3"
+        provider_mock.get_model_info.return_value = {"dimensions": 4}
+
+        key = cache.build_key("test", config_digest="testdigest")
+        qualifier = cache.qualifier(provider_mock)
+        vec = _make_vec(4, 1.0)
+        # Must not raise (existing fail-open contract, unchanged).
+        cache.record_miss_or_shadow(key, qualifier, vec)
+        assert cache.write_failures_since_start() == 1
+
+    def test_backend_returning_false_from_upsert_increments_counter(
+        self, tmp_path: Path
+    ) -> None:
+        """Bug #1536: a backend that fails open INTERNALLY (catches its own
+        exception, e.g. QueryEmbeddingCachePostgresBackend) signals the
+        failure via a False return rather than raising. That must ALSO be
+        counted -- the counter must not silently under-report on the
+        PostgreSQL/cluster deployment path (never assume SQLite-only)."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
+        backend = MagicMock()
+        backend.upsert.return_value = False
+        backend.total_entries.return_value = 0
+
+        cache = QueryEmbeddingCache(backend=backend, enabled=True, voyage_mode="on")
+        provider_mock = MagicMock()
+        provider_mock.get_provider_name.return_value = "voyage-ai"
+        provider_mock.get_current_model.return_value = "voyage-code-3"
+        provider_mock.get_model_info.return_value = {"dimensions": 4}
+
+        key = cache.build_key("test false", config_digest="testdigest")
+        qualifier = cache.qualifier(provider_mock)
+        cache.record_miss_or_shadow(key, qualifier, _make_vec(4, 1.0))
+        assert cache.write_failures_since_start() == 1
+
+    def test_lookup_failure_does_not_affect_write_failure_counter(
+        self, tmp_path: Path
+    ) -> None:
+        """The counter is write-scoped: a lookup-side fail-open (already
+        covered by TestQueryEmbeddingCacheFailOpen) must never move it."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
+        bad_backend = MagicMock()
+        bad_backend.lookup.side_effect = RuntimeError("DB down")
+        bad_backend.total_entries.return_value = 0
+
+        cache = QueryEmbeddingCache(backend=bad_backend, enabled=True, voyage_mode="on")
+        provider_mock = MagicMock()
+        provider_mock.get_provider_name.return_value = "voyage-ai"
+        provider_mock.get_current_model.return_value = "voyage-code-3"
+        provider_mock.get_model_info.return_value = {"dimensions": 4}
+
+        key = cache.build_key("test", config_digest="testdigest")
+        qualifier = cache.qualifier(provider_mock)
+        cache.lookup(key, qualifier)
+        assert cache.write_failures_since_start() == 0
 
 
 # ---------------------------------------------------------------------------

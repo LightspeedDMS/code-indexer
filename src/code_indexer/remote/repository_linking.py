@@ -22,6 +22,7 @@ from ..api_clients.repository_linking_client import (
     ActivationError,
 )
 from ..api_clients.base_client import NetworkError
+from ..config import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -1072,8 +1073,7 @@ def store_repository_link(project_root: Path, repository_link: RepositoryLink) -
         )
 
         # Write updated configuration
-        with open(config_path, "w") as f:
-            json.dump(config_data, f, indent=2)
+        write_json_atomic(config_path, config_data, indent=2)
 
         logger.info(
             f"Stored repository link for '{repository_link.alias}' to {config_path}"

@@ -360,6 +360,9 @@ _NOOP_EXECUTE_STEPS: dict = {
     "_ensure_systemd_claude_path": True,
     "_ensure_rust_toolchain": True,
     "_calculate_auto_update_hash": "fixed-hash-1392",
+    # Bug #1722: _ensure_cli_dependencies_synced performs a real
+    # `pip install -e .` subprocess call when left unpatched.
+    "_ensure_cli_dependencies_synced": True,
 }
 
 

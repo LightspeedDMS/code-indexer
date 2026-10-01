@@ -8,11 +8,27 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
+from code_indexer.server.repositories.user_dir_permissions import (
+    ensure_activated_user_dir,
+)
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.server.storage.shared.snapshot_manager import (
+    _ensure_source_tree_readable_for_clone,
+)
+from code_indexer.server.storage.shared.clone_backend import (
+    CloneDestinationExistsError,
+)
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_called_process_error_diagnostic,
+    format_completed_process_diagnostic,
+)
+from code_indexer.config import write_json_atomic
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 
 import json
 import os
@@ -20,21 +36,24 @@ import shutil
 import subprocess
 import logging
 import time
+import uuid
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Tuple, Union
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.shared.clone_backend import CloneBackend
 from pydantic import BaseModel
 
-from .golden_repo_manager import GoldenRepoManager
+from .golden_repo_manager import GoldenRepoManager, GoldenRepoError
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
 from ...config import GitServiceConfig
+from ...services.git_hook_manager import GitHookManager
 
 
 def _dict_row_factory() -> Any:
@@ -49,7 +68,6 @@ def _dict_row_factory() -> Any:
 # compatibility with tests/callers that patch the manager namespace.
 from .deactivation_helpers import (  # noqa: F401, E402 — re-export at original helper location for patch compat
     _fd_anchored_phase1_rename,
-    _fd_anchored_rmtree,
     _predeactivation_leak_scan_enabled,
     _safe_purge_trash_entry,
 )
@@ -63,6 +81,39 @@ class ActivatedRepoError(Exception):
 
 class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
+
+    pass
+
+
+# Timeout (seconds) for the lightweight git subprocess calls
+# compute_sync_status runs (diff/rev-parse). Matches the pre-existing 30s
+# convention already used throughout this module for comparable
+# single-command git calls (get_current_branch, sync_with_golden_repository's
+# diff step) -- not made independently configurable, consistent with this
+# project's "no settings to gate a fix" convention (CLAUDE.md).
+_SYNC_STATUS_GIT_TIMEOUT_SECONDS = 30
+
+# Cap on how many conflicted paths are named in conflict_details, mirroring
+# sync_with_golden_repository's existing "first 10 for response size" cap.
+_MAX_REPORTED_CONFLICT_PATHS = 10
+
+
+class ActivatedRepoCloneNotStartedError(ActivatedRepoError):
+    """Bug #1618: raised by `_clone_with_copy_on_write`'s two pre-clone
+    guard branches (an in-flight refresh detected via
+    `check_refresh_not_in_progress`, or a failed `acquire_write_lock`) --
+    both of which fail BEFORE `self._clone_backend.create_clone_at_path(...)`
+    is ever reached, so no clone was attempted and no orphan directory can
+    possibly exist.
+
+    `_do_activate_repository`'s clone-phase exception handler distinguishes
+    this from a genuine (post-clone-attempt) `ActivatedRepoError` so it can
+    skip the Bug #1349 orphan-cleanup bounded retry loop entirely --
+    running that loop here would burn ~12s of real time.sleep() waiting for
+    a clone that could never materialize, and its exhaustion WARNING
+    ("a late-materializing async clone may still be in flight") would be
+    definitionally false.
+    """
 
     pass
 
@@ -244,6 +295,12 @@ class ActivatedRepoManager:
         # Bug #1203: injected index manager for branch-delta reindex on
         # non-default branch activations/switches/syncs. None = skip reindex.
         self._index_manager = index_manager
+        # Story #1458 AC13: server's QueryTracker, wired post-hoc via
+        # set_query_tracker() (mirrors set_connection_pool). None (CLI/
+        # solo, or not-yet-wired server startup) makes the deactivation
+        # drain a no-op -- the SAME fail-open contract
+        # wait_for_activated_repo_query_drain already has for a None tracker.
+        self._query_tracker: Any = None
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -255,6 +312,52 @@ class ActivatedRepoManager:
         self.logger.info(
             "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
         )
+
+    def uses_shared_metadata_stores(self) -> bool:
+        """Whether BOTH metadata stores this manager exposes are the SHARED
+        (cross-node) ones rather than this node's own local files (Bug #1533).
+
+        Two INDEPENDENT stores are involved, and half wired is not wired:
+
+        1. Activation metadata -- this manager's own PostgreSQL connection
+           pool (``set_connection_pool``). Without it, reads hit node-local
+           JSON files that are empty for repos activated on any other node,
+           and an empty read is indistinguishable from "this repo is not
+           activated".
+        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend,
+           which must BE the shared one (``has_shared_metadata_backend()``),
+           not merely something that was injected. Without it, a lineage
+           lookup that correctly resolves the golden alias STILL fails on the
+           golden lookup with GoldenRepoNotFoundError ("Loaded 0 golden repos
+           from SQLite"), which ``load_golden_temporal_config`` swallows
+           fail-open -- silently degrading temporal embedder selection.
+
+        Both halves check CAPABILITY, never mere presence: a pool object that
+        cannot hand out connections, or a node-local SQLite backend that
+        happened to be injected, would each let a miswired cluster node read
+        node-local state -- the exact bug class this guard exists to close.
+
+        Callers whose correctness depends on the cluster-wide view must treat
+        False as "I cannot answer", never as a negative answer.
+        """
+        # `callable`, not `hasattr`: a pool exposing `connection` as a plain
+        # (non-callable) attribute cannot hand out connections, so presence
+        # alone does not establish the capability being checked for.
+        if self._pool is None:
+            return False
+        if not callable(getattr(self._pool, "connection", None)):
+            return False
+        return self.golden_repo_manager.has_shared_metadata_backend() is True
+
+    def set_query_tracker(self, query_tracker: Any) -> None:
+        """Wire the server's QueryTracker (Story #1458 AC13).
+
+        Used by the deactivation drain (_do_deactivate_single /
+        _do_deactivate_composite) to wait for an in-flight, same-worker-
+        process activated-repo query to release its refcount before the
+        trashed clone's consolidated chunks.db is physically purged.
+        """
+        self._query_tracker = query_tracker
 
     def set_shared_repos_dir(self, shared_dir: str) -> None:
         """Set NFS shared directory for activated repo clones in cluster mode."""
@@ -301,6 +404,121 @@ class ActivatedRepoManager:
             pass
 
     # ------------------------------------------------------------------
+    # Path-traversal defense in depth
+    # ------------------------------------------------------------------
+    #
+    # Independent of any username validation applied at account-creation
+    # time (UserManager.create_user/create_oidc_user) --
+    # a legacy row created before that validation shipped can still carry
+    # an unsafe username, and this layer must contain it regardless.
+    # EVERY path built from (username, user_alias) in this class routes
+    # through _safe_user_dir / _safe_user_scoped_path, never a bare
+    # os.path.join(self.activated_repos_dir, username, ...).
+
+    @staticmethod
+    def _is_safe_path_component(value: Optional[str]) -> bool:
+        """Structural single-path-component safety check.
+
+        Rejects the exact OS-special components ('.', '..'), embedded path
+        separators, and NUL bytes. Deliberately NOT a character allow-list
+        (that job belongs to account-creation-time validation) -- this is
+        the narrower, independent check that a realpath-based containment
+        verification alone cannot fully replace (e.g. a NUL byte raises
+        ValueError deep inside os.path functions rather than silently
+        misbehaving).
+
+        Also rejects RESERVED_ACTIVATED_REPOS_DIR_NAMES (the same shared
+        constant validate_username_path_safe() uses at account-creation
+        time). The invariant: a per-user directory built by
+        _safe_user_dir is never a server-owned entry of activated_repos_dir
+        (e.g. '.trash'), for any stored username.
+        """
+        if not value:
+            return False
+        if value in (".", ".."):
+            return False
+        if value in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+            return False
+        if os.sep in value:
+            return False
+        if os.altsep and os.altsep in value:
+            return False
+        if "\x00" in value:
+            return False
+        return True
+
+    def _safe_user_dir(self, username: str) -> str:
+        """Return ``activated_repos_dir/<username>``, verified to be a
+        single safe path component that realpath-resolves to a DIRECT
+        CHILD of ``activated_repos_dir``.
+
+        Raises:
+            ActivatedRepoError: If username is unsafe, or the resulting
+                path does not resolve strictly inside activated_repos_dir.
+        """
+        if not self._is_safe_path_component(username):
+            raise ActivatedRepoError(
+                f"Unsafe username for activated-repo path: {username!r}"
+            )
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        try:
+            user_dir_real = os.path.realpath(user_dir)
+        except ValueError as e:
+            # e.g. embedded NUL byte reaching the OS layer despite the
+            # structural check above (defense in depth).
+            raise ActivatedRepoError(
+                f"Unsafe username for activated-repo path: {username!r}"
+            ) from e
+        # self.activated_repos_dir is itself realpath'd at assignment time
+        # (__init__ / set_shared_repos_dir), so a direct-child comparison
+        # via dirname is exact and catches '.', '..', and symlink escapes
+        # alike -- os.path.realpath(join(base, '.')) == base, whose dirname
+        # is never base (except the filesystem root).
+        if os.path.dirname(user_dir_real) != self.activated_repos_dir:
+            raise ActivatedRepoError(
+                f"Username resolves outside activated-repos root: {username!r}"
+            )
+        return user_dir
+
+    def _safe_user_scoped_path(self, username: str, *parts: str) -> str:
+        """Return ``activated_repos_dir/<username>/<parts...>``, verified
+        via realpath to lie strictly under the per-user directory returned
+        by :meth:`_safe_user_dir`.
+
+        Covers BOTH halves of the (username, user_alias) pair -- a
+        user_alias containing '../'
+        is caught here exactly the same way an unsafe username is caught
+        in ``_safe_user_dir``.
+
+        Raises:
+            ActivatedRepoError: If username is unsafe, or the joined path
+                (including any of *parts*) escapes the per-user directory.
+        """
+        user_dir = self._safe_user_dir(username)
+        if not parts:
+            return user_dir
+        if not all(parts):
+            raise ActivatedRepoError(
+                f"Unsafe empty path component for activated repo: username={username!r}"
+            )
+        candidate = os.path.join(user_dir, *parts)
+        try:
+            candidate_real = os.path.realpath(candidate)
+            user_dir_real = os.path.realpath(user_dir)
+        except ValueError as e:
+            raise ActivatedRepoError(
+                f"Unsafe activated-repo path for username={username!r}"
+            ) from e
+        if candidate_real != user_dir_real and not candidate_real.startswith(
+            user_dir_real + os.sep
+        ):
+            raise ActivatedRepoError(
+                "Unsafe activated-repo path escapes user directory "
+                f"(username={username!r}, parts={parts!r})"
+            )
+        return candidate
+
+    # ------------------------------------------------------------------
     # Dual-mode metadata helpers (Bug #587)
     # ------------------------------------------------------------------
 
@@ -330,6 +548,11 @@ class ActivatedRepoManager:
                 "ssh_key_used",
                 "is_composite",
                 "wiki_enabled",
+                # Story #1458 AC11: activation_id has its own dedicated
+                # column (backward-compatible ADD COLUMN migration) --
+                # excluded here so it is never double-stuffed into the
+                # generic metadata_json catch-all blob.
+                "activation_id",
             )
         }
         with self._pool.connection() as conn:
@@ -337,8 +560,8 @@ class ActivatedRepoManager:
                 "INSERT INTO activated_repos "
                 "(username, user_alias, golden_repo_alias, repo_path, current_branch, "
                 "activated_at, last_accessed, git_committer_email, ssh_key_used, "
-                "is_composite, wiki_enabled, metadata_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "is_composite, wiki_enabled, activation_id, metadata_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (username, user_alias) DO UPDATE SET "
                 "golden_repo_alias = EXCLUDED.golden_repo_alias, "
                 "repo_path = EXCLUDED.repo_path, "
@@ -348,6 +571,7 @@ class ActivatedRepoManager:
                 "ssh_key_used = EXCLUDED.ssh_key_used, "
                 "is_composite = EXCLUDED.is_composite, "
                 "wiki_enabled = EXCLUDED.wiki_enabled, "
+                "activation_id = EXCLUDED.activation_id, "
                 "metadata_json = EXCLUDED.metadata_json",
                 (
                     username,
@@ -361,6 +585,7 @@ class ActivatedRepoManager:
                     metadata.get("ssh_key_used") or None,
                     metadata.get("is_composite", False),
                     metadata.get("wiki_enabled", False),
+                    metadata.get("activation_id"),
                     json.dumps(extra) if extra else None,
                 ),
             )
@@ -379,16 +604,18 @@ class ActivatedRepoManager:
         metadata: dict,
     ) -> None:
         """Save metadata to JSON file (standalone mode)."""
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        os.makedirs(user_dir, exist_ok=True)
-        metadata_path = os.path.join(user_dir, f"{user_alias}_metadata.json")
+        user_dir = self._safe_user_dir(username)
+        ensure_activated_user_dir(user_dir)
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
+        )
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2, default=str)
 
     def _load_metadata_file(self, username: str, user_alias: str) -> Optional[dict]:
         """Load metadata from JSON file (standalone mode)."""
-        metadata_path = os.path.join(
-            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
         )
         if not os.path.exists(metadata_path):
             return None
@@ -425,16 +652,32 @@ class ActivatedRepoManager:
             "ssh_key_used": row.get("ssh_key_used"),
             "is_composite": bool(row.get("is_composite", False)),
             "wiki_enabled": bool(row.get("wiki_enabled", False)),
+            # Story #1458 AC11: dedicated column, NULL for any row inserted
+            # before this migration -- degrades gracefully to None.
+            "activation_id": row.get("activation_id"),
         }
         metadata_json = row.get("metadata_json")
         if metadata_json:
-            extra = (
-                metadata_json
-                if isinstance(metadata_json, dict)
-                else json.loads(metadata_json)
-            )
-            result.update(extra)
+            extra = parse_json_column(metadata_json, dict, "metadata_json")
+            if extra:
+                result.update(extra)
         return result
+
+    def get_activation_id(self, username: str, user_alias: str) -> Optional[str]:
+        """Return the persisted per-activation UUID token for this
+        activated repo, or None (Story #1458 AC11).
+
+        None covers three cases uniformly: the repo is not activated at
+        all, its metadata predates this story's field (JSON file with no
+        "activation_id" key, or a PG row with a NULL column), or the field
+        is present but empty -- callers must always treat None as "no
+        clone-generation token available" and fall back to the pure
+        path-derived cache key (see FilesystemVectorStore.activation_id).
+        """
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            return None
+        return metadata.get("activation_id")
 
     def _delete_metadata(self, username: str, user_alias: str) -> None:
         """Delete activated repo metadata (PG or JSON file)."""
@@ -445,8 +688,8 @@ class ActivatedRepoManager:
 
     def _delete_metadata_file(self, username: str, user_alias: str) -> None:
         """Delete metadata JSON file (standalone mode)."""
-        metadata_path = os.path.join(
-            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        metadata_path = self._safe_user_scoped_path(
+            username, f"{user_alias}_metadata.json"
         )
         if os.path.exists(metadata_path):
             os.remove(metadata_path)
@@ -469,7 +712,7 @@ class ActivatedRepoManager:
 
     def _list_user_repos_fs(self, username: str) -> List[dict]:
         """List activated repos for a user from filesystem (standalone mode)."""
-        user_dir = os.path.join(self.activated_repos_dir, username)
+        user_dir = self._safe_user_dir(username)
         if not os.path.exists(user_dir):
             return []
         repos = []
@@ -480,13 +723,28 @@ class ActivatedRepoManager:
                     with open(metadata_path) as f:
                         repo_data = json.load(f)
                     user_alias = repo_data.get("user_alias", "")
-                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_dir = self._safe_user_scoped_path(username, user_alias)
                     if os.path.exists(repo_dir):
                         repo_data.setdefault("username", username)
                         repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
                         "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
+                except ActivatedRepoError as e:
+                    # This is
+                    # well-formed JSON -- the metadata file is NOT corrupted.
+                    # Its stored user_alias failed the path-safety
+                    # containment check (a legacy row predating
+                    # account-creation-time username validation,
+                    # or on-disk tampering). A distinct message avoids
+                    # misdiagnosing a security rejection as data corruption.
+                    self.logger.warning(
+                        "Skipping metadata file %s: user_alias failed "
+                        "path-safety check: %s",
                         metadata_path,
                         e,
                     )
@@ -512,6 +770,9 @@ class ActivatedRepoManager:
             return []
         all_repos: List[dict] = []
         for username in os.listdir(self.activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(self.activated_repos_dir, username)
             if not os.path.isdir(user_dir):
                 continue
@@ -523,13 +784,26 @@ class ActivatedRepoManager:
                     with open(metadata_path) as f:
                         repo_data = json.load(f)
                     user_alias = repo_data.get("user_alias", "")
-                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_dir = self._safe_user_scoped_path(username, user_alias)
                     repo_data.setdefault("username", username)
                     repo_data["path_exists"] = os.path.exists(repo_dir)
                     all_repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
                         "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
+                except ActivatedRepoError as e:
+                    # See
+                    # _list_user_repos_fs's identical split for the full
+                    # rationale -- this is well-formed JSON whose
+                    # user_alias failed the path-safety containment check,
+                    # not a corrupted file.
+                    self.logger.warning(
+                        "Skipping metadata file %s: user_alias failed "
+                        "path-safety check: %s",
                         metadata_path,
                         e,
                     )
@@ -666,8 +940,10 @@ class ActivatedRepoManager:
             branch_name = golden_repo.default_branch
 
         # Check if repository already activated for this user
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Raises ActivatedRepoError synchronously, here,
+        # for an unsafe username/user_alias -- BEFORE the background job
+        # below is ever submitted.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         if (
             os.path.exists(repo_dir)
@@ -787,10 +1063,13 @@ class ActivatedRepoManager:
             )
 
             # Step 2: Create base directory structure
-            user_dir = os.path.join(self.activated_repos_dir, username)
-            os.makedirs(user_dir, exist_ok=True)
+            # Validates BEFORE any directory is
+            # created -- an unsafe username/user_alias raises here.
+            composite_path_str = self._safe_user_scoped_path(username, user_alias)
+            user_dir = self._safe_user_dir(username)
+            ensure_activated_user_dir(user_dir)
 
-            composite_path = Path(user_dir) / user_alias
+            composite_path = Path(composite_path_str)
 
             # Check if already exists
             if composite_path.exists():
@@ -910,6 +1189,11 @@ class ActivatedRepoManager:
             # Step 6: Create metadata file with discovered repos
             update_progress(95, "Creating composite repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): a dedicated, guaranteed-unique
+            # per-activation UUID -- activated_at alone is second-resolution
+            # and collision-prone within one clock tick, insufficient as a
+            # per-clone generation/identity token on its own.
+            activation_id = str(uuid.uuid4())
 
             # Get discovered repos from proxy config
             discovered_repos = proxy_config.get_repositories()
@@ -923,6 +1207,7 @@ class ActivatedRepoManager:
                 "discovered_repos": discovered_repos,
                 "activated_at": activated_at,
                 "last_accessed": activated_at,
+                "activation_id": activation_id,
             }
 
             try:
@@ -1040,6 +1325,10 @@ class ActivatedRepoManager:
             return matching_repos
 
         for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
             user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
             if not os.path.isdir(user_repos_dir):
                 continue
@@ -1100,10 +1389,28 @@ class ActivatedRepoManager:
         # 404 when the dir was gone, with no front-door cleanup path.
         # _load_metadata() dispatches to PG (cluster) or JSON file (solo) and is
         # the single source of truth for both modes.
+        #
+        # Bug #1514: the mirror-image gap.  An activation that fails AFTER
+        # creating the on-disk clone but BEFORE writing the metadata
+        # registration row leaves an orphan directory with no registry
+        # entry.  _do_deactivate_repository (the background-job worker)
+        # already has correct orphan-cleanup logic for exactly this case
+        # (Bug #1030 Fix A: no metadata, dir exists -> remove dir, return
+        # success), but it was unreachable through this front door, which
+        # used to raise "not found" whenever metadata was absent -- with
+        # no regard for whether an on-disk directory still existed.  Only
+        # a request with NEITHER metadata NOR an on-disk directory is a
+        # genuine 404; when a directory exists, route through the same
+        # background-job path so the existing worker-side cleanup runs.
+        # get_activated_repo_path() is the same pre-existing, already-used
+        # path-construction primitive _do_deactivate_repository's own
+        # orphan branch relies on -- no new path-handling logic is added.
         if self._load_metadata(username, user_alias) is None:
-            raise ActivatedRepoError(
-                f"Activated repository '{user_alias}' not found for user '{username}'"
-            )
+            repo_dir = self.get_activated_repo_path(username, user_alias)
+            if not os.path.exists(repo_dir):
+                raise ActivatedRepoError(
+                    f"Activated repository '{user_alias}' not found for user '{username}'"
+                )
 
         # Submit background job
         job_id = self.background_job_manager.submit_job(
@@ -1148,8 +1455,8 @@ class ActivatedRepoManager:
         # Validate branch name for security
         self._validate_branch_name(branch_name)
 
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         if (
@@ -1159,6 +1466,12 @@ class ActivatedRepoManager:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
+
+        # Bug #1514: self-heal the activated repo's OWN stale-path
+        # post-checkout hook BEFORE any of this method's checkout paths
+        # (remote-tracking switch, local switch, or create-branch
+        # checkout) can trigger it.
+        self._ensure_branch_hook_self_heal(repo_dir)
 
         try:
             # Step 1: Determine if we should attempt to fetch from remote
@@ -1183,7 +1496,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {e.stderr}. "
+                        f"Git fetch failed for repository '{user_alias}': {format_called_process_error_diagnostic(e)}. "
                         f"Attempting local branch switching as fallback."
                     )
 
@@ -1253,7 +1566,7 @@ class ActivatedRepoManager:
                         )
                     except subprocess.CalledProcessError as e:
                         self.logger.warning(
-                            f"Failed to create branch '{branch_name}': {e.stderr}"
+                            f"Failed to create branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
                         )
 
                 except subprocess.TimeoutExpired:
@@ -1343,8 +1656,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         if (
@@ -1386,6 +1699,300 @@ class ActivatedRepoManager:
             except Exception:
                 raise GitOperationError(f"Failed to get current branch: {str(e)}")
 
+    def _detect_conflict_paths(
+        self, repo_dir: str, username: str, user_alias: str
+    ) -> Tuple[Optional[bool], Optional[str]]:
+        """Detect real git merge conflicts (unmerged paths) in *repo_dir*.
+
+        Uses `git diff --name-only --diff-filter=U` instead of a full
+        `git status --porcelain` worktree scan -- it skips enumerating
+        untracked-file directories (git diff still lstats tracked files),
+        measured ~2x faster locally, and the gap widens on `hard` NFSv3
+        cow-storage, where directory enumeration is far more exposed to a
+        wedged mount than a targeted tracked-file check.
+
+        Returns:
+            (has_conflicts, conflict_details):
+            - (True, details): confirmed real unmerged paths -- details
+              names them (capped at _MAX_REPORTED_CONFLICT_PATHS).
+            - (False, None): confirmed no unmerged paths.
+            - (None, None): could NOT be determined -- the probe itself
+              failed (subprocess timeout/OSError, or git exited
+              non-zero). Callers MUST treat this as "unknown", NEVER as
+              "confirmed clean": on a `hard` NFSv3 mount this path fires
+              on a wedged mount (CLAUDE.md documents it as able to block
+              FOREVER), exactly when a fabricated "synced" would be most
+              misleading.
+        """
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=_SYNC_STATUS_GIT_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self.logger.warning(
+                "Failed to check for unmerged paths for '%s'/'%s': %s",
+                username,
+                user_alias,
+                e,
+            )
+            return None, None
+
+        if diff_result.returncode != 0:
+            self.logger.warning(
+                "git diff --diff-filter=U failed for '%s'/'%s' (exit %s): %s",
+                username,
+                user_alias,
+                diff_result.returncode,
+                format_completed_process_diagnostic(diff_result),
+            )
+            return None, None
+
+        unmerged_paths = [line for line in diff_result.stdout.splitlines() if line]
+        if not unmerged_paths:
+            return False, None
+
+        details = "Unmerged paths: " + ", ".join(
+            unmerged_paths[:_MAX_REPORTED_CONFLICT_PATHS]
+        )
+        return True, details
+
+    def _rev_parse_ref(
+        self, repo_path: str, ref: str, username: str, user_alias: str
+    ) -> Optional[str]:
+        """Resolve *ref* to a commit SHA in *repo_path*, or None on a miss.
+
+        Only logs on a genuine infrastructure failure (timeout/OSError) --
+        a plain non-zero returncode is an expected "miss" when a caller is
+        probing multiple candidate refs (e.g. refs/heads then
+        refs/remotes/origin fallback); the caller logs once if ALL
+        candidates miss.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", ref],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=_SYNC_STATUS_GIT_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self.logger.warning(
+                "Failed to rev-parse '%s' in '%s' for '%s'/'%s': %s",
+                ref,
+                repo_path,
+                username,
+                user_alias,
+                e,
+            )
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _resolve_golden_repo_path_or_warn(
+        self, golden_repo_alias: str, username: str, user_alias: str
+    ) -> Optional[str]:
+        """Resolve the golden repo's actual clone path, WARNING on any miss.
+
+        Two failure modes handled: (1) get_golden_repo() returns None
+        (repo unregistered) -- it always reads the shared storage backend
+        directly (SQLite solo / PostgreSQL cluster), never the per-worker
+        golden_repos in-memory cache Bug #1314 guards against, so this is
+        already cluster-safe without a separate cache-aware resolver; (2)
+        get_actual_repo_path() raises GoldenRepoNotFoundError (a
+        GoldenRepoError) when the DB row exists but the on-disk clone is
+        missing (Bug #1317 registry-orphan state) -- NEVER let this
+        escape uncaught.
+        """
+        golden_repo = self.golden_repo_manager.get_golden_repo(golden_repo_alias)
+        if golden_repo is None:
+            self.logger.warning(
+                "Golden repo '%s' not found while computing sync status for '%s'/'%s'",
+                golden_repo_alias,
+                username,
+                user_alias,
+            )
+            return None
+        try:
+            return self.golden_repo_manager.get_actual_repo_path(golden_repo_alias)
+        except (GoldenRepoError, ValueError) as e:
+            self.logger.warning(
+                "Could not resolve golden repo path for '%s' while "
+                "computing sync status for '%s'/'%s': %s",
+                golden_repo_alias,
+                username,
+                user_alias,
+                e,
+            )
+            return None
+
+    def _resolve_golden_head_commit(
+        self,
+        golden_repo_alias: Optional[str],
+        current_branch: str,
+        username: str,
+        user_alias: str,
+    ) -> Optional[str]:
+        """Resolve the golden repository's HEAD commit for *current_branch*.
+
+        Golden repos are plain clones exposing exactly ONE local head
+        (their default branch, e.g. master/main -- verified live: 17 of
+        18 golden repos on the dev server have a single local head);
+        every OTHER tracked branch lives only under refs/remotes/origin/*.
+        Tries refs/heads/{branch} first, falls back to
+        refs/remotes/origin/{branch} -- without the fallback, every
+        activated repo on a non-default branch (a first-class supported
+        flow, see CLAUDE.md's Bug #1203 section) could never resolve a
+        golden commit. Reads the commit directly via `git rev-parse`
+        rather than `git fetch` -- cheaper and non-mutating.
+
+        Returns:
+            The commit SHA, or None (WARNING logged on every degrade
+            path) when the golden repo/path/branch cannot be resolved.
+            Callers MUST treat None as "cannot verify" -- never fabricate
+            "synced".
+        """
+        if not golden_repo_alias:
+            self.logger.warning(
+                "No single golden_repo_alias for '%s'/'%s' (composite repo?); "
+                "sync status cannot be computed",
+                username,
+                user_alias,
+            )
+            return None
+
+        golden_repo_path = self._resolve_golden_repo_path_or_warn(
+            golden_repo_alias, username, user_alias
+        )
+        if golden_repo_path is None:
+            return None
+
+        for ref in (
+            f"refs/heads/{current_branch}",
+            f"refs/remotes/origin/{current_branch}",
+        ):
+            commit = self._rev_parse_ref(golden_repo_path, ref, username, user_alias)
+            if commit is not None:
+                return commit
+
+        self.logger.warning(
+            "Could not resolve golden branch '%s' (tried refs/heads and "
+            "refs/remotes/origin) for '%s'/'%s'",
+            current_branch,
+            username,
+            user_alias,
+        )
+        return None
+
+    @staticmethod
+    def _sync_result(
+        current_branch: str,
+        sync_status: Optional[str],
+        has_conflicts: bool,
+        conflict_details: Optional[str],
+        last_sync_time: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "current_branch": current_branch,
+            "sync_status": sync_status,
+            "has_conflicts": has_conflicts,
+            "conflict_details": conflict_details,
+            "last_sync_time": last_sync_time,
+        }
+
+    def compute_sync_status(self, username: str, user_alias: str) -> Dict[str, Any]:
+        """
+        Compute REAL sync status for an activated repository (Bug #1740 /
+        Bug #1743), replacing the previous facade that read
+        ``metadata.get("sync_status")`` -- a key nothing ever wrote.
+
+        Classification: "conflict" (real git unmerged paths, see
+        _detect_conflict_paths), "needs_sync" (activated HEAD != golden
+        branch HEAD), "synced" (HEAD commits match), or None ("unknown"
+        -- sync status could not be verified: unresolvable activated
+        HEAD, golden repo, or golden branch commit). A WARNING is logged
+        on every unverifiable path. This NEVER falls back to "synced" --
+        fabricating a claim the server cannot substantiate would
+        reproduce #1740's exact original symptom. Read-only inspection
+        must never crash, but "never crash" means "report unknown", not
+        "report good".
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+
+        Returns:
+            Dict with keys: current_branch, sync_status, has_conflicts,
+            conflict_details, last_sync_time. Note: has_conflicts is
+            False whenever sync_status is None -- that combination means
+            "not confirmed conflicted" (the probe couldn't determine
+            anything), not "confirmed clean".
+
+        Raises:
+            ActivatedRepoError: If the activated repository is not found
+        """
+        metadata = self._load_metadata(username, user_alias)
+        # Consolidated into the single shared
+        # containment helper (this used to be a bespoke inline realpath
+        # check -- the ONLY containment check that existed anywhere in
+        # this class before this change).
+        try:
+            repo_dir = self._safe_user_scoped_path(username, user_alias)
+        except ActivatedRepoError:
+            raise ActivatedRepoError(
+                f"Invalid repository alias '{user_alias}' for user '{username}'"
+            )
+        if metadata is None or not os.path.exists(repo_dir):
+            raise ActivatedRepoError(
+                f"Activated repository '{user_alias}' not found for user '{username}'"
+            )
+
+        current_branch = metadata.get("current_branch") or "main"
+        last_sync_time = metadata.get("last_accessed")
+
+        has_conflicts, conflict_details = self._detect_conflict_paths(
+            repo_dir, username, user_alias
+        )
+        if has_conflicts is None:
+            # The probe itself could not determine anything (timeout,
+            # OSError, or non-zero exit -- already WARNING-logged inside
+            # _detect_conflict_paths). NEVER treat this as "confirmed no
+            # conflicts" -- report unknown, don't fabricate synced/needs_sync.
+            return self._sync_result(current_branch, None, False, None, last_sync_time)
+        if has_conflicts:
+            return self._sync_result(
+                current_branch, "conflict", True, conflict_details, last_sync_time
+            )
+
+        activated_head = self._rev_parse_ref(repo_dir, "HEAD", username, user_alias)
+        if activated_head is None:
+            self.logger.warning(
+                "Could not resolve activated HEAD for '%s'/'%s'; sync status "
+                "cannot be verified",
+                username,
+                user_alias,
+            )
+            return self._sync_result(current_branch, None, False, None, last_sync_time)
+
+        golden_head = self._resolve_golden_head_commit(
+            metadata.get("golden_repo_alias"),
+            current_branch,
+            username,
+            user_alias,
+        )
+        sync_status = (
+            None
+            if golden_head is None
+            else ("synced" if activated_head == golden_head else "needs_sync")
+        )
+        return self._sync_result(
+            current_branch, sync_status, False, None, last_sync_time
+        )
+
     def sync_with_golden_repository(
         self, username: str, user_alias: str
     ) -> Dict[str, Any]:
@@ -1408,8 +2015,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git sync operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         repo_data = self._load_metadata(username, user_alias)
@@ -1582,8 +2189,8 @@ class ActivatedRepoManager:
             ActivatedRepoError: If repository not found
             GitOperationError: If git operations fail
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_dir = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         repo_data = self._load_metadata(username, user_alias)
@@ -1610,7 +2217,7 @@ class ActivatedRepoManager:
                     repo_dir, fmt="%(refname:short)", timeout=30
                 )
             except subprocess.CalledProcessError as e:
-                raise GitOperationError(f"Failed to list local branches: {e.stderr}")
+                raise GitOperationError(f"Failed to list local branches: {format_called_process_error_diagnostic(e)}")
 
             # Get list of remote branches
             remote_branches = []
@@ -1748,8 +2355,8 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If metadata loading or refresh fails
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_path = os.path.join(user_dir, user_alias)
+        # Realpath-containment verified here.
+        repo_path = self._safe_user_scoped_path(username, user_alias)
 
         # Check if repository exists
         metadata = self._load_metadata(username, user_alias)
@@ -1795,8 +2402,12 @@ class ActivatedRepoManager:
 
         Returns:
             Absolute path to the activated repository directory
+
+        Raises:
+            ActivatedRepoError: If username/user_alias is unsafe or the
+                resulting path escapes activated_repos_dir.
         """
-        return os.path.join(self.activated_repos_dir, username, user_alias)
+        return self._safe_user_scoped_path(username, user_alias)
 
     def get_wiki_enabled(self, username: str, user_alias: str) -> bool:
         """Check if wiki is enabled for an activated repo (read-only, no side effects).
@@ -2012,12 +2623,18 @@ class ActivatedRepoManager:
             update_progress(20, "Validating golden repository")
 
             # Create user directory structure
-            user_dir = os.path.join(self.activated_repos_dir, username)
-            os.makedirs(user_dir, exist_ok=True)
+            # Validated BEFORE any directory is
+            # created or cloned into -- this is the exact clone destination
+            # an unsafe username/user_alias pair would otherwise
+            # target (username='..' + user_alias='golden-repos' resolving
+            # one level too high).
+            activated_repo_path = self._safe_user_scoped_path(username, user_alias)
+            user_dir = self._safe_user_dir(username)
+            # The CoW daemon (a different OS user, reached via the service
+            # group) must be able to create the clone inside this directory.
+            ensure_activated_user_dir(user_dir)
 
             update_progress(30, "Creating user directory structure")
-
-            activated_repo_path = os.path.join(user_dir, user_alias)
 
             # Clone repository with CoW (use canonical path for versioned repos)
             golden_repo_actual_path = self.golden_repo_manager.get_actual_repo_path(
@@ -2031,6 +2648,18 @@ class ActivatedRepoManager:
                     cancel_check=cancel_check,
                     golden_repo_alias=golden_repo_alias,
                 )
+            except ActivatedRepoCloneNotStartedError:
+                # Bug #1618: the clone step was never reached (write-lock
+                # acquisition failed, or a refresh was already in flight for
+                # this golden repo) -- no clone backend call happened, so no
+                # orphan directory can possibly exist. Re-raise immediately
+                # WITHOUT invoking the Bug #1349 cleanup grace loop below:
+                # running it here would waste ~12s of real time.sleep() and
+                # log a definitionally-false "late-materializing async
+                # clone" WARNING. This except clause must stay ABOVE the
+                # broader `except ActivatedRepoError:` below since this is a
+                # subtype of it.
+                raise
             except ActivatedRepoError:
                 # Bug #1345/#1349: a cancel (or any other failure) during the
                 # CLONE phase must not leave an orphaned partial clone
@@ -2079,7 +2708,7 @@ class ActivatedRepoManager:
                     # rename-to-trash path does not apply.
                     shutil.rmtree(activated_repo_path, ignore_errors=True)
                     raise GitOperationError(
-                        f"Failed to switch to branch '{branch_name}': {e.stderr}"
+                        f"Failed to switch to branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
                     )
                 update_progress(80, f"Successfully switched to branch '{branch_name}'")
             else:
@@ -2115,7 +2744,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Failed to set git config user.email: {e.stderr}"
+                        f"Failed to set git config user.email: {format_called_process_error_diagnostic(e)}"
                     )
 
                 # Set git config user.name (generic for all CIDX users)
@@ -2125,7 +2754,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"Failed to set git config user.name: {e.stderr}"
+                        f"Failed to set git config user.name: {format_called_process_error_diagnostic(e)}"
                     )
 
                 self.logger.info(
@@ -2162,6 +2791,10 @@ class ActivatedRepoManager:
             # Create metadata file
             update_progress(90, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): see the composite-activation
+            # site above for the full rationale -- same dedicated,
+            # guaranteed-unique per-activation UUID token.
+            activation_id = str(uuid.uuid4())
             metadata = {
                 "username": username,
                 "user_alias": user_alias,
@@ -2171,6 +2804,7 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
                 "git_committer_email": git_committer_email,
                 "ssh_key_used": ssh_key_used,
+                "activation_id": activation_id,
             }
 
             self._save_metadata(username, user_alias, metadata)
@@ -2252,7 +2886,11 @@ class ActivatedRepoManager:
                 # fd-anchored rename-then-purge so orphan cleanup is also
                 # TOCTOU-immune.  If the directory is already gone (ENOENT on
                 # opening the username fd or the rename), absorb silently.
-                repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
+                # Realpath-containment verified here
+                # too -- a legacy unsafe-username row must not have its
+                # orphan-cleanup existence check act on/report a path
+                # outside activated_repos_dir.
+                repo_dir = self._safe_user_scoped_path(username, user_alias)
                 if os.path.exists(repo_dir):
                     trash_root = os.path.join(self.activated_repos_dir, ".trash")
                     try:
@@ -2351,8 +2989,8 @@ class ActivatedRepoManager:
         }
 
         try:
-            user_dir = os.path.join(self.activated_repos_dir, username)
-            repo_dir = os.path.join(user_dir, user_alias)
+            # Realpath-containment verified here.
+            repo_dir = self._safe_user_scoped_path(username, user_alias)
 
             # Story #1032 AC6: pre-flight leak scan is OFF by default — runs only
             # when ops flips the bootstrap flag during incident investigation.
@@ -2396,7 +3034,34 @@ class ActivatedRepoManager:
             if os.path.exists(repo_dir):
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier -- mark this path quiescing BEFORE the drain
+                # wait even starts, so a NEW query arriving after this
+                # point is refused by track_activated_repo_query()
+                # rather than racing the drain-then-rename sequence
+                # (drain observes zero -> a late query starts anyway ->
+                # rename proceeds -> the query reads a path that's
+                # already gone). Cleared in the finally below on every
+                # exit path so a later reactivation at this same path is
+                # never permanently and incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(repo_dir)
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 5): the
+                    # bounded drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it. The prior
+                    # ordering (rename first, drain second) let the rename
+                    # yank repo_dir out from under an in-flight reader
+                    # before the drain even started checking for
+                    # stragglers -- exactly the race this drain exists to
+                    # prevent. Keyed by the ORIGINAL, pre-rename repo_dir
+                    # -- the SAME path-key format _search_activated_repo's
+                    # QueryTracker wiring uses. Fail-open when
+                    # self._query_tracker is None (never blocks
+                    # deactivation).
+                    wait_for_activated_repo_query_drain(self._query_tracker, repo_dir)
+
                     # Phase 1: fd-anchored atomic rename into .trash.
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
@@ -2427,6 +3092,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: slow recursive delete via fd-anchored helper.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2476,6 +3142,14 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure) -- a
+                    # later reactivation at this same path must never be
+                    # permanently and incorrectly refused because a prior
+                    # deactivation attempt left it marked.
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(repo_dir)
 
             # Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use the explicit
@@ -2623,7 +3297,30 @@ class ActivatedRepoManager:
             if repo_path.exists():
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier, mirroring _do_deactivate_single exactly --
+                # mark this path quiescing BEFORE the drain wait even
+                # starts. Cleared in the finally below on every exit
+                # path so a later reactivation is never permanently and
+                # incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(str(repo_path))
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 6,
+                    # matches Claude's independent finding): the bounded
+                    # drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it --
+                    # matching _do_deactivate_single's already-fixed
+                    # ordering exactly (a PRIOR version of this comment
+                    # falsely claimed this call site already mirrored
+                    # that ordering; it only mirrored the drain
+                    # mechanics, not the sequencing). Keyed by the
+                    # ORIGINAL, pre-rename repo_path.
+                    wait_for_activated_repo_query_drain(
+                        self._query_tracker, str(repo_path)
+                    )
+
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
                         username=username,
@@ -2659,6 +3356,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: fd-anchored recursive delete.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2709,6 +3407,11 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure).
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(str(repo_path))
 
             # Step 4: Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use explicit
@@ -2835,7 +3538,8 @@ class ActivatedRepoManager:
             else:
                 # Non-fatal - services might not be running
                 self.logger.debug(
-                    f"Service stop returned non-zero exit code (likely not running): {result.stderr}"
+                    "Service stop returned non-zero exit code (likely not running): "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
         except subprocess.TimeoutExpired:
@@ -3050,6 +3754,14 @@ class ActivatedRepoManager:
             ActivatedRepoError: If CoW clone or git setup fails, the write
                 lock cannot be acquired, or a refresh is already in flight
                 for golden_repo_alias.
+            ActivatedRepoCloneNotStartedError:
+                If the clone backend refused an
+                already-existing DIRECTORY destination
+                (CloneDestinationExistsError). dest_path was NEVER touched
+                by this call, so it is re-raised as this Bug #1618 subtype
+                instead of falling into the generic except-Exception
+                cleanup below, which would otherwise shutil.rmtree a
+                pre-existing directory this call never created.
         """
         scheduler = (
             getattr(self.golden_repo_manager, "_refresh_scheduler", None)
@@ -3066,7 +3778,11 @@ class ActivatedRepoManager:
             try:
                 scheduler.check_refresh_not_in_progress(golden_repo_alias)
             except DuplicateJobError as e:
-                raise ActivatedRepoError(
+                # Bug #1618: this branch runs BEFORE any clone is attempted --
+                # use the distinct subtype so the caller's cleanup handler
+                # can skip the Bug #1349 orphan-cleanup grace loop, which is
+                # meaningless here (no clone, no possible orphan directory).
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot activate golden repository '{golden_repo_alias}': "
                     f"a refresh is currently in progress for it ({e}). "
                     "Retry activation once the refresh completes."
@@ -3080,7 +3796,10 @@ class ActivatedRepoManager:
             if not scheduler.acquire_write_lock(
                 golden_repo_alias, owner_name="activation_clone"
             ):
-                raise ActivatedRepoError(
+                # Bug #1618: this branch also runs BEFORE any clone is
+                # attempted -- same distinct subtype/rationale as the
+                # DuplicateJobError branch above.
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot clone golden repository '{golden_repo_alias}': "
                     "write lock is already held by another writer. "
                     "Retry activation once it completes."
@@ -3114,6 +3833,21 @@ class ActivatedRepoManager:
                 if rc is not None
                 else self._COW_CLONE_TIMEOUT_DEFAULT
             )
+            # Issue #1511 (second call site): the CoW daemon runs as a
+            # different OS user (on a different host) than the process that
+            # wrote the golden-repo's index files, which commonly end up at
+            # restrictive mode 600 from that writer's ambient umask --
+            # causing `cp --reflink=auto -a` to fail with "Permission
+            # denied" for every activation clone attempt. The original
+            # #1511 fix only wired this preflight into
+            # VersionedSnapshotManager._create_clone_backend_snapshot
+            # (refresh/snapshot creation); activation calls
+            # create_clone_at_path directly and never went through that
+            # path, so the failure reproduced live on staging. Gated
+            # identically by class name (LocalCloneBackend / OntapCloneBackend
+            # are intentionally left untouched).
+            if type(self._clone_backend).__name__ == "CowDaemonBackend":
+                _ensure_source_tree_readable_for_clone(source_path)
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
@@ -3126,6 +3860,15 @@ class ActivatedRepoManager:
                 f"CoW clone successful: {source_path} -> {dest_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+            # Issue #1546 AC5: ownership-loss checkpoint immediately
+            # after the (potentially very long) CoW clone completes --
+            # detects the write lock is no longer legitimately held
+            # before any further git manipulation continues under it.
+            if scheduler is not None:
+                scheduler.raise_if_write_lock_ownership_lost(
+                    golden_repo_alias, owner_name="activation_clone"
+                )
 
             # Step 2: Detect and convert bare repositories (Story #636)
             # Golden repos are stored as bare, but activated repos need working trees
@@ -3154,7 +3897,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
-                        f"Failed to set core.bare=false: {e.stderr}"
+                        f"Failed to set core.bare=false: {format_called_process_error_diagnostic(e)}"
                     )
 
                 # Move git internals to .git subdirectory
@@ -3188,7 +3931,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
-                        f"git checkout -f HEAD failed (non-fatal): {e.stderr}"
+                        f"git checkout -f HEAD failed (non-fatal): {format_called_process_error_diagnostic(e)}"
                     )
 
                 self.logger.info(
@@ -3217,7 +3960,7 @@ class ActivatedRepoManager:
                 except subprocess.CalledProcessError as e:
                     self.logger.warning(
                         "git config core.checkStat=minimal failed (non-fatal): "
-                        f"{e.stderr}"
+                        f"{format_called_process_error_diagnostic(e)}"
                     )
 
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
@@ -3287,7 +4030,8 @@ class ActivatedRepoManager:
 
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"cidx fix-config failed (non-fatal): {result.stderr}"
+                        "cidx fix-config failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
             # Step 4: Configure git structure if this is a git repository
@@ -3296,6 +4040,20 @@ class ActivatedRepoManager:
 
             return True
 
+        except CloneDestinationExistsError as e:
+            # The destination
+            # already existed as a DIRECTORY before this call ever ran --
+            # _reject_existing_directory_destination inside the clone
+            # backend raises this BEFORE any `cp`/daemon call is made, so
+            # dest_path was never touched by this attempt and must never be
+            # deleted. Re-raise as the existing Bug #1618 subtype (rather
+            # than falling into the generic `except Exception` below, which
+            # would shutil.rmtree it) so the caller's clone-phase handler
+            # (_do_activate_repository's `except ActivatedRepoCloneNotStartedError:
+            # raise`) also skips the Bug #1349 orphan-cleanup grace loop --
+            # neither the rmtree nor the ~12s grace loop apply to a
+            # pre-existing directory this call never created.
+            raise ActivatedRepoCloneNotStartedError(str(e)) from e
         except subprocess.TimeoutExpired:
             # Bug #1285 follow-up: a timed-out CoW clone must not leak the
             # partial dest_path directory (measured 15-21GB per timed-out
@@ -3358,7 +4116,7 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 self.logger.warning(
-                    f"Could not verify git remotes for {dest_path}: {e.stderr}"
+                    f"Could not verify git remotes for {dest_path}: {format_called_process_error_diagnostic(e)}"
                 )
 
             # Fetch from origin to ensure all remote branches are available
@@ -3366,7 +4124,7 @@ class ActivatedRepoManager:
                 self._git_backend.fetch(dest_path, "origin", timeout=60)
             except subprocess.CalledProcessError as e:
                 self.logger.warning(
-                    f"Could not fetch from origin in {dest_path}: {e.stderr}"
+                    f"Could not fetch from origin in {dest_path}: {format_called_process_error_diagnostic(e)}"
                 )
 
         except subprocess.TimeoutExpired:
@@ -3408,7 +4166,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as set_url_error:
                     raise ActivatedRepoError(
-                        f"Failed to update {remote_name} remote: {set_url_error.stderr}"
+                        f"Failed to update {remote_name} remote: {format_called_process_error_diagnostic(set_url_error)}"
                     )
             else:
                 raise ActivatedRepoError(
@@ -3470,7 +4228,7 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 raise ActivatedRepoError(
-                    f"Failed to fetch from golden remote: {e.stderr}"
+                    f"Failed to fetch from golden remote: {format_called_process_error_diagnostic(e)}"
                 )
 
             # Step 5: Verify git structure is working
@@ -3484,7 +4242,8 @@ class ActivatedRepoManager:
 
             if result.returncode != 0:
                 raise ActivatedRepoError(
-                    f"Git repository structure invalid: {result.stderr}"
+                    "Git repository structure invalid: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
             self.logger.info(
@@ -3588,7 +4347,7 @@ class ActivatedRepoManager:
                         )
                     except subprocess.CalledProcessError as e:
                         raise ActivatedRepoError(
-                            f"Failed to remove existing golden remote: {e.stderr}"
+                            f"Failed to remove existing golden remote: {format_called_process_error_diagnostic(e)}"
                         )
 
                 # Rename origin to golden
@@ -3598,7 +4357,7 @@ class ActivatedRepoManager:
                     )
                 except subprocess.CalledProcessError as e:
                     raise ActivatedRepoError(
-                        f"Failed to rename origin to golden: {e.stderr}"
+                        f"Failed to rename origin to golden: {format_called_process_error_diagnostic(e)}"
                     )
 
                 # Add new origin pointing to GitHub
@@ -3736,6 +4495,49 @@ class ActivatedRepoManager:
             extra={"correlation_id": get_correlation_id()},
         )
 
+    def _ensure_branch_hook_self_heal(self, repo_dir: Union[str, Path]) -> None:
+        """
+        Bug #1514: self-heal the activated repo's OWN post-checkout git
+        hook, in-place, before any `git checkout` runs against it.
+
+        A CoW clone of an activated repository copies
+        `.git/hooks/post-checkout` byte-for-byte from the golden repo's
+        own clone -- if that hook predates the #1514 dynamic-path fix (or
+        was itself inherited from yet another machine), it bakes in a
+        stale, install-time absolute path that dereferences to the WRONG
+        machine's metadata.json. `GitHookManager.ensure_hook_installed()`
+        already implements the self-heal (remove + reinstall with the
+        dynamic-path implementation) for the CLI indexing flow
+        (`smart_indexer.py`) -- this method reuses that SAME primitive for
+        the activation / branch-switch flow, which never gave it a chance
+        to run because the stale hook fires on the very FIRST checkout,
+        before any indexing has ever touched the activated repo's own
+        copy.
+
+        This is a best-effort repair: it must NEVER raise or abort
+        activation/branch-switch on failure, mirroring
+        `smart_indexer.py`'s own try/except-and-warn pattern around
+        `ensure_hook_installed()`.
+
+        Args:
+            repo_dir: Path (or path-like string) to the ACTIVATED repo's
+                own clone directory -- never the golden repo's path.
+        """
+        if not repo_dir:
+            self.logger.warning("Skipping git hook self-heal: repo_dir is empty/None")
+            return
+        try:
+            metadata_file = Path(repo_dir) / ".code-indexer" / "metadata.json"
+            git_hook_manager = GitHookManager(
+                repo_path=Path(repo_dir), metadata_file=metadata_file
+            )
+            git_hook_manager.ensure_hook_installed()
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to self-heal git hook for activated repo at '{repo_dir}': {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def _validate_branch_name(self, branch_name: str) -> None:
         """
         Validate branch name for security.
@@ -3861,7 +4663,7 @@ class ActivatedRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 self.logger.debug(
-                    f"Failed to switch to remote tracking branch '{branch_name}': {e.stderr}"
+                    f"Failed to switch to remote tracking branch '{branch_name}': {format_called_process_error_diagnostic(e)}"
                 )
                 return False
 
@@ -3991,6 +4793,10 @@ class ActivatedRepoManager:
             return matching_repos
 
         for user_dir_name in os.listdir(self.activated_repos_dir):
+            if user_dir_name in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username --
+                # skip it rather than treat it as a user directory.
+                continue
             user_repos_dir = os.path.join(self.activated_repos_dir, user_dir_name)
             if not os.path.isdir(user_repos_dir):
                 continue
@@ -4128,8 +4934,7 @@ class ActivatedRepoManager:
             config_data["voyage_ai"] = {"model": "voyage-code-3"}
 
             # Write updated config
-            with open(config_file, "w") as f:
-                json.dump(config_data, f, indent=2)
+            write_json_atomic(config_file, config_data, indent=2)
 
             self.logger.info(
                 f"Updated composite config with FilesystemVectorStore for {composite_path}"

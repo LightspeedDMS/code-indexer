@@ -198,28 +198,37 @@ def456	refs/heads/develop
 class TestRemoteBranchService:
     """Tests for RemoteBranchService class functionality."""
 
-    def test_fetch_branches_success(self):
-        """Test successful branch fetching from a public repository."""
+    def test_fetch_branches_success(self, remote_git_repo_dir):
+        """Test successful branch fetching from a real local repository.
+
+        Bug #1572: was a live `github.com` call; now a real local bare git
+        repo (no mocks, no network) built by the `remote_git_repo_dir`
+        fixture in conftest.py.
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
         )
 
         service = RemoteBranchService()
 
-        # Use a well-known public repo that won't change frequently
-        result = service.fetch_remote_branches(
-            clone_url="https://github.com/octocat/Hello-World.git"
-        )
+        result = service.fetch_remote_branches(clone_url=remote_git_repo_dir)
 
         assert result.success is True
         assert isinstance(result.branches, list)
         assert len(result.branches) > 0
         assert result.error is None
-        # Hello-World repo should have master or main
+        # The fixture repo's default branch is "main"
         assert any(b in result.branches for b in ["master", "main"])
 
-    def test_fetch_branches_filters_issue_tracker_patterns(self):
-        """Test that fetched branches are filtered for issue-tracker patterns."""
+    def test_fetch_branches_filters_issue_tracker_patterns(self, remote_git_repo_dir):
+        """Test that fetched branches are filtered for issue-tracker patterns.
+
+        Bug #1572: was a live `github.com` call; now a real local bare git
+        repo that deliberately includes "SCM-1234" and
+        "feature/SCM-1234-hotfix" branches, so this exercises the real
+        filtering pipeline end-to-end rather than trivially passing on a
+        result with no issue-tracker branches to filter.
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
             ISSUE_TRACKER_PATTERN,
@@ -227,10 +236,7 @@ class TestRemoteBranchService:
 
         service = RemoteBranchService()
 
-        # The result should not contain issue-tracker pattern branches
-        result = service.fetch_remote_branches(
-            clone_url="https://github.com/octocat/Hello-World.git"
-        )
+        result = service.fetch_remote_branches(clone_url=remote_git_repo_dir)
 
         assert result.success is True
         # Verify no UPPERCASE issue-tracker patterns in result
@@ -240,42 +246,57 @@ class TestRemoteBranchService:
                 f"Branch '{branch}' should have been filtered (matches issue-tracker pattern)"
             )
 
-    def test_fetch_branches_invalid_url_returns_error(self):
-        """Test that invalid/inaccessible URLs return error."""
+    def test_fetch_branches_invalid_url_returns_error(self, non_git_repo_dir):
+        """Test that invalid/inaccessible URLs return error.
+
+        Bug #1572: was a live call against a nonexistent GitHub repo, whose
+        failure behaviour depended on DNS/GitHub. Now points at a real local
+        directory that is definitively not a git repository, so `git
+        ls-remote` fails deterministically with zero network involvement.
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
         )
 
         service = RemoteBranchService()
 
-        result = service.fetch_remote_branches(
-            clone_url="https://github.com/nonexistent-user-xyz/nonexistent-repo-xyz.git"
-        )
+        result = service.fetch_remote_branches(clone_url=non_git_repo_dir)
 
         assert result.success is False
         assert result.branches == []
         assert result.error is not None
         assert len(result.error) > 0
 
-    def test_fetch_branches_returns_default_branch_info(self):
-        """Test that fetch result includes default branch if detectable."""
+    def test_fetch_branches_returns_default_branch_info(self, remote_git_repo_dir):
+        """Test that fetch result includes default branch if detectable.
+
+        Bug #1572: was a live `github.com` call; now a real local bare git
+        repo whose HEAD symref deterministically points at "main".
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
         )
 
         service = RemoteBranchService()
 
-        result = service.fetch_remote_branches(
-            clone_url="https://github.com/octocat/Hello-World.git"
-        )
+        result = service.fetch_remote_branches(clone_url=remote_git_repo_dir)
 
         assert result.success is True
         # Default branch should be detected
         assert result.default_branch is not None
         assert result.default_branch in result.branches
 
-    def test_fetch_branches_with_credentials_github(self):
-        """Test branch fetching with GitHub token credentials."""
+    def test_fetch_branches_with_credentials_github(self, remote_git_repo_dir):
+        """Test branch fetching with GitHub token credentials.
+
+        Bug #1572: was a live `github.com` call; now a real local bare git
+        repo. `credentials=None` here (as before the fix) means
+        `_build_effective_url` returns the URL unchanged regardless of
+        target, so this conversion does not weaken the assertions -- the
+        test never exercised credential-embedding to begin with (that is
+        covered, untouched, by `TestBuildEffectiveUrl` in the credentials
+        test file).
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
         )
@@ -284,7 +305,7 @@ class TestRemoteBranchService:
 
         # Should work even with None credentials for public repos
         result = service.fetch_remote_branches(
-            clone_url="https://github.com/octocat/Hello-World.git",
+            clone_url=remote_git_repo_dir,
             platform="github",
             credentials=None,
         )
@@ -292,8 +313,13 @@ class TestRemoteBranchService:
         assert result.success is True
         assert len(result.branches) > 0
 
-    def test_fetch_multiple_repos(self):
-        """Test fetching branches for multiple repositories."""
+    def test_fetch_multiple_repos(self, remote_git_repo_dir, non_git_repo_dir):
+        """Test fetching branches for multiple repositories.
+
+        Bug #1572: was two live `github.com` calls (one succeeding, one
+        failing); now one real local bare git repo (success) and one real
+        local non-git directory (deterministic failure), with zero network.
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
             BranchFetchRequest,
@@ -303,11 +329,11 @@ class TestRemoteBranchService:
 
         requests = [
             BranchFetchRequest(
-                clone_url="https://github.com/octocat/Hello-World.git",
+                clone_url=remote_git_repo_dir,
                 platform="github",
             ),
             BranchFetchRequest(
-                clone_url="https://github.com/nonexistent-user-xyz/nonexistent-repo-xyz.git",
+                clone_url=non_git_repo_dir,
                 platform="github",
             ),
         ]
@@ -317,15 +343,10 @@ class TestRemoteBranchService:
         assert len(results) == 2
 
         # First repo should succeed
-        assert results["https://github.com/octocat/Hello-World.git"].success is True
+        assert results[remote_git_repo_dir].success is True
 
         # Second repo should fail gracefully
-        assert (
-            results[
-                "https://github.com/nonexistent-user-xyz/nonexistent-repo-xyz.git"
-            ].success
-            is False
-        )
+        assert results[non_git_repo_dir].success is False
 
 
 class TestBranchFetchResult:

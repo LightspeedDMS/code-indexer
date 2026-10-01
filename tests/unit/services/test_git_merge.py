@@ -3,6 +3,9 @@ Unit tests for GitOperationsService merge_branch, _parse_conflicts, and
 _check_if_binary_conflict methods (Story #388).
 
 Tests use real git repos with tmp_path fixtures to avoid mocking.
+
+Bug #1578: also covers a genuine non-fast-forward, conflict-free merge
+regression (TestMergeBranchNonFastForward below).
 """
 
 import subprocess
@@ -91,6 +94,40 @@ class TestMergeBranchClean:
         assert result["success"] is True
         assert result["conflicts"] == []
         assert "merge_summary" in result
+
+    def test_clean_merge_using_previous_ref_shorthand(self, tmp_path: Path) -> None:
+        """`source_branch="-"` is git's own `git merge -` shorthand for
+        the branch just switched away from -- not an option."""
+        _create_test_repo(tmp_path)
+        service = _get_service()
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True,
+            capture_output=True,
+        )
+        (tmp_path / "feature.txt").write_text("feature content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feature commit"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Switch back to master; "-" now refers to "feature".
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "master"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = service.merge_branch(tmp_path, "-")
+
+        assert result["success"] is True
+        assert result["conflicts"] == []
+        assert (tmp_path / "feature.txt").exists()
 
     def test_clean_merge_already_up_to_date(self, tmp_path: Path) -> None:
         """Merging a branch already merged returns success=True."""
@@ -239,8 +276,15 @@ class TestMergeBranchBinaryDetection:
 class TestMergeBranchErrors:
     """Tests for error conditions in merge_branch."""
 
-    def test_invalid_branch_raises_git_error(self, tmp_path: Path) -> None:
-        """Merging a nonexistent branch raises GitCommandError."""
+    def test_invalid_branch_raises_git_command_error(self, tmp_path: Path) -> None:
+        """Merging a nonexistent branch raises GitCommandError.
+
+        merge_branch()'s validate_revision() call checks only a leading
+        '-' and control characters -- it does not resolve source_branch
+        itself, so a name that never resolves to a revision reaches the
+        `git merge` subprocess unchanged and surfaces as that subprocess's
+        own failure, exactly as it did with no validation at all.
+        """
         _create_test_repo(tmp_path)
         service = _get_service()
 
@@ -450,3 +494,104 @@ class TestCheckIfBinaryConflict:
 
         result = service._check_if_binary_conflict(tmp_path, "nonexistent.bin")
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #1578 regression: genuine non-fast-forward, conflict-free merge
+# ---------------------------------------------------------------------------
+
+
+class TestMergeBranchNonFastForward:
+    """Regression tests for a real non-fast-forward merge (Bug #1578).
+
+    Unlike TestMergeBranchClean.test_clean_merge_succeeds (which merges a
+    feature branch that never diverged from master, so git fast-forwards
+    the branch pointer with NO merge commit and thus NO editor invocation),
+    these tests force BOTH branches to diverge with independent commits so
+    git must create a real merge commit that needs an automatic commit
+    message.
+
+    Empirical investigation for #1578 established that `git merge` only
+    actually invokes an interactive editor when BOTH stdin AND stdout are
+    real ttys -- a condition GitOperationsService.merge_branch() can never
+    reach, because run_git_command()'s capture_output=True always pipes
+    stdout. This test therefore passes both before and after the
+    build_non_interactive_git_env() fix; it is kept as a real, non-mocked
+    correctness regression test for the non-fast-forward merge path itself
+    (success=True, a genuine 2-parent merge commit exists), with the
+    ambient editor variables explicitly stripped so that guarantee holds
+    independent of whatever GIT_EDITOR the calling shell happens to export.
+    The genuinely discriminating regression test for the shared-helper fix
+    is test_env_prevents_terminal_dumb_editor_failure_on_commit_finalization
+    in tests/unit/server/git/test_git_subprocess_env.py, which drives a
+    `git rebase --continue` commit finalization -- an operation that fails
+    immediately with "Terminal is dumb, but EDITOR unset" regardless of tty
+    state, unlike `git merge`.
+    """
+
+    @pytest.mark.timeout(30)
+    def test_non_fast_forward_clean_merge_completes_without_hanging(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A real non-fast-forward, conflict-free merge must complete cleanly.
+
+        Bounded with a 30s pytest-timeout as a safety net. Ambient
+        GIT_EDITOR/GIT_SEQUENCE_EDITOR/EDITOR/VISUAL are stripped so this
+        proves merge_branch's own correctness rather than inheriting a
+        working editor from the calling shell's environment.
+        """
+        for var in ("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "VISUAL"):
+            monkeypatch.delenv(var, raising=False)
+
+        _create_test_repo(tmp_path)
+
+        # Diverge: create feature branch with its own commit.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True,
+            capture_output=True,
+        )
+        (tmp_path / "feature.txt").write_text("feature content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feature commit"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Diverge master too, with an independent, non-conflicting commit,
+        # so master is no longer an ancestor-free fast-forward target.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "master"],
+            check=True,
+            capture_output=True,
+        )
+        (tmp_path / "master_only.txt").write_text("master-only content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "master-only commit"],
+            check=True,
+            capture_output=True,
+        )
+
+        service = _get_service()
+        result = service.merge_branch(tmp_path, "feature")
+
+        assert result["success"] is True
+        assert result["conflicts"] == []
+
+        # A real merge commit must exist: HEAD now has 2 parents.
+        parents = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-list", "--parents", "-n", "1", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        # Format: "<commit> <parent1> <parent2>"
+        assert len(parents.split()) == 3, (
+            f"Expected HEAD to be a merge commit with 2 parents, got: {parents!r}"
+        )

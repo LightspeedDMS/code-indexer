@@ -4,7 +4,8 @@ Tests for change-password and reset-password commands with comprehensive coverag
 of interactive prompts, validation, error handling, and authentication state management.
 """
 
-from unittest.mock import Mock, patch, AsyncMock, call
+import pytest
+from unittest.mock import Mock, patch, call
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -15,6 +16,15 @@ from code_indexer.api_clients.base_client import APIClientError
 
 class TestPasswordChangeCommand:
     """Test change-password command functionality."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on auth_change_password."""
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Set up test fixtures."""
@@ -35,17 +45,25 @@ class TestPasswordChangeCommand:
         """Test interactive password prompts for change-password command."""
         # Setup mocks
         mock_client = Mock(spec=AuthAPIClient)
-        mock_client.change_password = AsyncMock(return_value={"status": "success"})
-        mock_client.close = AsyncMock()
+        mock_client.change_password = Mock(return_value={"status": "success"})
+        mock_client.close = Mock()
         mock_client.credentials = {"username": "testuser", "password": "testpass"}
         mock_create_client.return_value = mock_client
 
         # Mock password inputs
         mock_getpass.side_effect = ["current_pass", "new_pass123!", "new_pass123!"]
 
-        # Mock authentication check
+        # Mock authentication check and project configuration
         with patch("code_indexer.cli._check_authentication_state", return_value=True):
-            self.runner.invoke(auth_group, ["change-password"])
+            with patch(
+                "code_indexer.mode_detection.command_mode_detector.find_project_root",
+                return_value=Path("/fake/project"),
+            ):
+                with patch(
+                    "code_indexer.remote.config.load_remote_configuration",
+                    return_value={"server_url": "http://fake-server"},
+                ):
+                    self.runner.invoke(auth_group, ["change-password"])
 
         # Verify interactive prompts were called
         expected_calls = [
@@ -64,7 +82,7 @@ class TestPasswordChangeCommand:
         """Test password policy validation failure scenarios."""
         # Setup mocks
         mock_client = Mock(spec=AuthAPIClient)
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
         mock_client.credentials = {"username": "testuser", "password": "testpass"}
         mock_create_client.return_value = mock_client
 
@@ -104,7 +122,7 @@ class TestPasswordChangeCommand:
         """Test password confirmation mismatch handling."""
         # Setup mocks
         mock_client = Mock(spec=AuthAPIClient)
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
         mock_client.credentials = {"username": "testuser", "password": "testpass"}
         mock_create_client.return_value = mock_client
 
@@ -160,8 +178,8 @@ class TestPasswordChangeCommand:
         """Test successful password change flow."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.change_password = AsyncMock(return_value={"status": "success"})
-        mock_client.close = AsyncMock()
+        mock_client.change_password = Mock(return_value={"status": "success"})
+        mock_client.close = Mock()
         mock_client.credentials = {"username": "testuser", "password": "testpass"}
         mock_create_client.return_value = mock_client
 
@@ -198,10 +216,10 @@ class TestPasswordChangeCommand:
         """Test password change with server error."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.change_password = AsyncMock(
+        mock_client.change_password = Mock(
             side_effect=APIClientError("Current password is incorrect", 400)
         )
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
         mock_client.credentials = {"username": "testuser", "password": "testpass"}
         mock_create_client.return_value = mock_client
 
@@ -223,7 +241,7 @@ class TestPasswordChangeCommand:
                         return_value={"server_url": "http://fake-server"},
                     ):
                         # Mock client close method to avoid async issues
-                        mock_client.close = AsyncMock()
+                        mock_client.close = Mock()
                         self.runner.invoke(auth_group, ["change-password"])
 
         # Verify error message
@@ -234,6 +252,15 @@ class TestPasswordChangeCommand:
 
 class TestPasswordResetCommand:
     """Test reset-password command functionality."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on auth_reset_password."""
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Set up test fixtures."""
@@ -253,8 +280,8 @@ class TestPasswordResetCommand:
         """Test password reset with username parameter."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.reset_password = AsyncMock(return_value={"status": "success"})
-        mock_client.close = AsyncMock()
+        mock_client.reset_password = Mock(return_value={"status": "success"})
+        mock_client.close = Mock()
         mock_create_client.return_value = mock_client
 
         # Mock project configuration
@@ -287,8 +314,8 @@ class TestPasswordResetCommand:
         """Test password reset with interactive username prompt."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.reset_password = AsyncMock(return_value={"status": "success"})
-        mock_client.close = AsyncMock()
+        mock_client.reset_password = Mock(return_value={"status": "success"})
+        mock_client.close = Mock()
         mock_create_client.return_value = mock_client
         mock_prompt.return_value = "interactive_user"
 
@@ -315,10 +342,10 @@ class TestPasswordResetCommand:
         """Test password reset with server error."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.reset_password = AsyncMock(
+        mock_client.reset_password = Mock(
             side_effect=APIClientError("Username not found", 404)
         )
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
         mock_create_client.return_value = mock_client
 
         # Mock project configuration
@@ -347,8 +374,8 @@ class TestPasswordResetCommand:
         """Test that reset instructions are displayed after successful request."""
         # Setup mocks - create a mock client that avoids real implementation
         mock_client = Mock()
-        mock_client.reset_password = AsyncMock(return_value={"status": "success"})
-        mock_client.close = AsyncMock()
+        mock_client.reset_password = Mock(return_value={"status": "success"})
+        mock_client.close = Mock()
         mock_create_client.return_value = mock_client
 
         # Mock project configuration

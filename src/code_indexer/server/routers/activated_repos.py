@@ -174,6 +174,39 @@ def _get_background_job_manager():
     return manager
 
 
+def _resolve_golden_repo_alias_for_activated_repo(
+    activated_manager, username: str, user_alias: str
+) -> Optional[str]:
+    """Resolve the underlying golden repo alias for an activated repo.
+
+    GitHub Issue #1459 AC4: the resolver-aware temporal-status helper needs
+    the golden repo's BARE alias (never the activated repo's own
+    user_alias) to build the sister-location pointer namespace. Reuses the
+    `golden_repo_alias` field ActivatedRepoManager.get_repository() already
+    tracks.
+
+    Returns None if the activated repo cannot be found or has no tracked
+    golden_repo_alias (e.g. a composite repo with no single backing golden
+    repo) -- callers must treat None as "cannot resolve sister-location
+    temporal data for this repo", not raise.
+    """
+    try:
+        metadata = activated_manager.get_repository(username, user_alias, touch=False)
+    except Exception as exc:
+        logger.warning(
+            "Failed to resolve golden_repo_alias for activated repo "
+            "'%s' (user '%s'): %s",
+            user_alias,
+            username,
+            exc,
+        )
+        return None
+    if not metadata:
+        return None
+    golden_alias = metadata.get("golden_repo_alias")
+    return golden_alias if isinstance(golden_alias, str) and golden_alias else None
+
+
 def _check_index_status(index_path: Path, index_type: str) -> IndexStatus:
     """
     Check the status of a specific index.
@@ -304,10 +337,19 @@ async def get_indexes_status(
         fts_path = index_dir.parent / "tantivy_index"
         indexes.append(_check_index_status(fts_path, "fts"))
 
-        # Temporal index (any provider-aware or legacy temporal collection)
+        # Temporal index (any provider-aware or legacy temporal collection).
+        # Local-clone scan preserved as the baseline (regression safety);
+        # then resolver-aware detection (GitHub Issue #1459 AC4) overrides
+        # with the resolved sister-location hnsw_index.bin when temporal
+        # data has relocated per Story #1457 -- routes through the SAME
+        # TemporalShardResolver/catalog mechanism the query path uses,
+        # never a parallel sister-root scan.
         from code_indexer.services.temporal.temporal_collection_naming import (
             LEGACY_TEMPORAL_COLLECTION,
             is_temporal_collection as _is_temporal,
+        )
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
         )
 
         temporal_hnsw = next(
@@ -320,6 +362,22 @@ async def get_indexes_status(
             ),
             index_dir / LEGACY_TEMPORAL_COLLECTION / "hnsw_index.bin",
         )
+
+        golden_repo_alias_for_temporal = _resolve_golden_repo_alias_for_activated_repo(
+            activated_manager, target_username, user_alias
+        )
+        if golden_repo_alias_for_temporal:
+            golden_repos_dir = (
+                Path(activated_manager.activated_repos_dir).parent / "golden-repos"
+            )
+            temporal_status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=golden_repo_alias_for_temporal,
+                legacy_index_path=index_dir,
+            )
+            if temporal_status.is_queryable and temporal_status.resolved_path:
+                temporal_hnsw = temporal_status.resolved_path / "hnsw_index.bin"
+
         indexes.append(_check_index_status(temporal_hnsw, "temporal"))
 
         # SCIP index
@@ -375,6 +433,51 @@ async def trigger_reindex(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to start reindex job
     """
+    # Story #1457 AC12 remaining gap (2026-07-24 re-review, Codex round 4):
+    # the None-default case already excludes "temporal" (below), but an
+    # EXPLICITLY-provided index_types list must be validated against an
+    # explicit allowlist -- a bare `"temporal" in request.index_types`
+    # case-sensitive membership check was trivially bypassed by a case
+    # variant ("Temporal") and silently accepted any other typo'd/garbage
+    # value. Reject loudly on ANY unsupported entry, BEFORE any manager
+    # call or job submission -- mirrors add_index_type's existing
+    # route-level validation intent, generalized to a full list.
+    #
+    # 2026-07-24 round-5 re-review (Codex): a validate-one/use-another bug
+    # -- entries were previously lowercased ONLY for the allowlist check,
+    # while the raw unnormalized request.index_types was reused below for
+    # the actual job submission and response body. Build ONE normalized
+    # (lowercased) list HERE and use that SAME list everywhere downstream
+    # -- never the raw request value again after this point. An empty
+    # list ([]) is also rejected -- it would otherwise submit a
+    # meaningless job with nothing to index.
+    normalized_index_types: Optional[List[str]] = None
+    if request.index_types is not None:
+        normalized_index_types = [t.lower() for t in request.index_types]
+        _valid_reindex_types = {"semantic", "fts", "scip"}
+        if not normalized_index_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "index_types must not be empty. Must contain one or "
+                    f"more of: {', '.join(sorted(_valid_reindex_types))}."
+                ),
+            )
+        _invalid_types = [
+            t for t in normalized_index_types if t not in _valid_reindex_types
+        ]
+        if _invalid_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid index type(s) {_invalid_types}. Must be one "
+                    f"of: {', '.join(sorted(_valid_reindex_types))}. "
+                    "Temporal indexing is never supported for activated "
+                    "repositories -- temporal data is owned exclusively by "
+                    "the golden repo's shared sister location."
+                ),
+            )
+
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()
@@ -393,25 +496,45 @@ async def trigger_reindex(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Determine which index types to reindex
-        index_types = request.index_types
+        # Determine which index types to reindex. Story #1457 round-5
+        # re-review (Codex): use the NORMALIZED list built and validated
+        # above -- never the raw request.index_types again.
+        index_types = normalized_index_types
         if index_types is None:
-            # Default to all existing indexes
-            index_types = ["semantic", "fts", "temporal", "scip"]
+            # Default to all existing indexes. Story #1457 AC12
+            # (2026-07-23 code review HIGH #10): "temporal" is EXCLUDED
+            # here -- temporal data is owned exclusively by the golden
+            # repo's shared sister location and is never built locally
+            # for an activated repo (activated_repo_index_manager.py's
+            # trigger_reindex rejects it unconditionally); defaulting to
+            # include it here contradicted that manager-level rejection.
+            index_types = ["semantic", "fts", "scip"]
 
-        # Submit reindex job
-        def reindex_job():
-            """Background job to reindex repository."""
-            # This would call the actual reindex logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+        # Bug #1472: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Wire the job to the REAL indexing
+        # pipeline instead of inventing a new one: ActivatedRepoIndexManager
+        # (server/services/activated_repo_index_manager.py) is the existing,
+        # already-tested entry point that spawns real `cidx index` / `cidx
+        # index --fts` / `cidx scip generate` subprocesses per index type
+        # (see TestJobExecution in test_activated_repo_index_manager.py) and
+        # is already reused this same way by the sibling
+        # /api/v1/repos/{alias}/reindex endpoint in routers/indexing.py.
+        # The already-normalized/validated `index_types` built above is
+        # threaded straight through -- never re-derived.
+        from code_indexer.server.services.activated_repo_index_manager import (
+            ActivatedRepoIndexManager,
+        )
 
-        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
-        job_id = job_manager.submit_job(
-            "reindex_activated_repo",
-            reindex_job,
-            submitter_username=current_user.username,
+        index_manager_service = ActivatedRepoIndexManager(
+            background_job_manager=job_manager,
+            activated_repo_manager=activated_manager,
+        )
+        job_id = index_manager_service.trigger_reindex(
             repo_alias=user_alias,
+            index_types=index_types,
+            clear=False,
+            username=current_user.username,
         )
 
         return ReindexResponse(
@@ -468,8 +591,11 @@ async def add_index_type(
         HTTPException 404: Repository not found
         HTTPException 500: Failed to start add index job
     """
-    # Validate index type
-    valid_index_types = ["semantic", "fts", "temporal", "scip"]
+    # Validate index type. Story #1457 AC12 (2026-07-23 code review
+    # HIGH #10): "temporal" is EXCLUDED -- temporal data is owned
+    # exclusively by the golden repo's shared sister location and is
+    # never built locally for an activated repo.
+    valid_index_types = ["semantic", "fts", "scip"]
     if index_type not in valid_index_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -494,19 +620,27 @@ async def add_index_type(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit add index job
-        def add_index_job():
-            """Background job to add index type."""
-            # This would call the actual add index logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing indexing pipeline
+        # (ActivatedRepoIndexManager, already reused above by trigger_reindex
+        # and by the sibling /api/v1/repos/{alias}/reindex endpoint) instead
+        # of inventing a new mechanism. "Adding" a single index type is
+        # semantically a reindex scoped to that one type.
+        from code_indexer.server.services.activated_repo_index_manager import (
+            ActivatedRepoIndexManager,
+        )
 
-        # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
-        job_id = job_manager.submit_job(
-            "add_index_activated_repo",
-            add_index_job,
-            submitter_username=current_user.username,
+        index_manager_service = ActivatedRepoIndexManager(
+            background_job_manager=job_manager,
+            activated_repo_manager=activated_manager,
+        )
+        job_id = index_manager_service.trigger_reindex(
             repo_alias=user_alias,
+            index_types=[index_type],
+            clear=False,
+            username=current_user.username,
         )
 
         return AddIndexResponse(
@@ -677,12 +811,42 @@ async def sync_repository(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit sync job
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing entry point --
+        # ActivatedRepoManager.sync_with_golden_repository -- the same
+        # method the sibling synchronous PUT /api/repos/{user_alias}/sync
+        # route (routers/inline_repos.py) already calls directly, rather
+        # than inventing a new sync mechanism. When the caller requests
+        # reindex=True, chain a REAL follow-up reindex through the same
+        # ActivatedRepoIndexManager.trigger_reindex entry point used by
+        # trigger_reindex/add_index_type above -- this submits its OWN
+        # job-tracked background job (dashboard/admin UI visibility per
+        # CLAUDE.md's background-jobs mandate) rather than doing the
+        # indexing work inline/untracked.
         def sync_job():
-            """Background job to sync repository."""
-            # This would call the actual sync logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+            """Background job to sync repository with its golden repository."""
+            sync_result = activated_manager.sync_with_golden_repository(
+                username=current_user.username,
+                user_alias=user_alias,
+            )
+            if request.reindex:
+                from code_indexer.server.services.activated_repo_index_manager import (
+                    ActivatedRepoIndexManager,
+                )
+
+                index_manager_service = ActivatedRepoIndexManager(
+                    background_job_manager=job_manager,
+                    activated_repo_manager=activated_manager,
+                )
+                sync_result["reindex_job_id"] = index_manager_service.trigger_reindex(
+                    repo_alias=user_alias,
+                    index_types=["semantic", "fts", "scip"],
+                    clear=False,
+                    username=current_user.username,
+                )
+            return sync_result
 
         # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(
@@ -778,12 +942,26 @@ async def switch_branch(
                 detail=f"Activated repository '{user_alias}' not found",
             )
 
-        # Submit branch switch job
+        # Bug #1473: the submitted job used to be a literal no-op closure
+        # (`pass`) -- the endpoint returned a genuine job_id and HTTP 202
+        # while silently doing nothing. Same defect class as #1472's
+        # trigger_reindex fix: wire to the REAL existing entry point --
+        # ActivatedRepoManager.switch_branch -- the same method the sibling
+        # synchronous PUT /api/repos/{user_alias}/branch route
+        # (routers/inline_repos.py) already calls directly, rather than
+        # inventing a new branch-switch mechanism. switch_branch() already
+        # performs the Bug #1203 branch-aware delta reindex internally when
+        # switching to a non-default branch, so this docstring's "triggers
+        # a reindex" claim is satisfied by the real method itself -- no
+        # separate reindex call needed here.
         def switch_branch_job():
-            """Background job to switch branch."""
-            # This would call the actual branch switch logic
-            # For now, just a placeholder that the job manager can execute
-            pass
+            """Background job to switch branch for an activated repository."""
+            return activated_manager.switch_branch(
+                username=current_user.username,
+                user_alias=user_alias,
+                branch_name=request.branch_name,
+                create=False,
+            )
 
         # AC8 (Story #311): fixed submit_job signature (was using wrong kwargs)
         job_id = job_manager.submit_job(

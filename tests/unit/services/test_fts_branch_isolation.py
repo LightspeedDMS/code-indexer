@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 from unittest.mock import MagicMock, Mock
 
+import pytest
+
 
 from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 
@@ -29,6 +31,36 @@ def _make_content_points(file_paths: List[str]) -> List[Dict[str, Any]]:
             }
         )
     return points
+
+
+def _configure_content_points_mock(
+    processor: HighThroughputProcessor, content_points: List[Dict[str, Any]]
+) -> None:
+    """Bug #1575 Part A: configure the vector_store_client mock's
+    distinct_content_paths()/fetch_points_for_paths() -- the primitives
+    hide_files_not_in_branch_thread_safe() now calls -- to behave as if
+    ``content_points`` were stored, replacing the retired
+    scroll_points()-based _fetch_all_content_points() mock configuration.
+    """
+    all_paths = {
+        point["payload"]["path"]
+        for point in content_points
+        if "path" in point.get("payload", {})
+    }
+    processor.vector_store_client.distinct_content_paths.return_value = all_paths
+
+    def _fetch_points_for_paths(
+        _collection_name, paths, _subdirectory=None, *, self_heal=False
+    ):
+        return [
+            point
+            for point in content_points
+            if point.get("payload", {}).get("path") in paths
+        ]
+
+    processor.vector_store_client.fetch_points_for_paths.side_effect = (
+        _fetch_points_for_paths
+    )
 
 
 def _make_processor(tmp_path: Path) -> HighThroughputProcessor:
@@ -65,10 +97,7 @@ class TestFTSBranchIsolationDeletesDocuments:
         # files_to_hide = file_c.py, file_d.py
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -101,10 +130,7 @@ class TestFTSBranchIsolationDeletesDocuments:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -144,10 +170,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         # Should not raise when fts_manager=None
@@ -171,10 +194,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_payload_only.return_value = None
 
         processor.hide_files_not_in_branch_thread_safe(
@@ -199,10 +219,7 @@ class TestFTSBranchIsolationNoOpsWhenNoFilesToHide:
         current_files = ["file_a.py", "file_b.py"]  # All files visible
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -230,10 +247,7 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]  # 3 files to hide
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -271,10 +285,7 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -294,6 +305,47 @@ class TestFTSBranchIsolationErrorHandling:
         # The key requirement is: NO EXCEPTION propagated
         # (verified by the fact that we reach this assertion)
         # We just verify the function completed without raising
+
+
+class TestBranchHideFailureIsExplicit:
+    """Amendment 2c: a self-heal/fetch failure during branch-isolation
+    hiding must reach the indexing caller as a failure. A log alone cannot
+    prevent a successful-looking run because every caller discards the
+    boolean result of hide_files_not_in_branch_thread_safe()."""
+
+    def test_fetch_failure_propagates_and_logs_skipped_isolation(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        processor = _make_processor(tmp_path)
+
+        all_files = ["file_a.py", "file_b.py", "file_c.py"]
+        current_files = ["file_a.py"]
+
+        content_points = _make_content_points(all_files)
+        _configure_content_points_mock(processor, content_points)
+        processor.vector_store_client.fetch_points_for_paths.side_effect = RuntimeError(
+            "simulated fetch failure"
+        )
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError, match="simulated fetch failure"):
+                processor.hide_files_not_in_branch_thread_safe(
+                    branch="feature-branch",
+                    current_files=current_files,
+                    collection_name="test_collection",
+                    fts_manager=None,
+                )
+
+        assert any(
+            "skip" in record.message.lower()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ), (
+            "the failure log must explicitly state that branch isolation "
+            "was skipped, in addition to propagating the failure"
+        )
 
 
 class TestFTSParameterSignature:

@@ -5,9 +5,8 @@ Tests the real-time progress display system that provides single-line progress b
 updates with speed metrics, current operation display, and estimated time remaining.
 """
 
-import pytest
 from pathlib import Path
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
 from code_indexer.remote.polling import JobPollingEngine, JobStatus, PollingConfig
 from code_indexer.api_clients.base_client import CIDXRemoteAPIClient
@@ -321,8 +320,7 @@ class TestRealtimeProgressDisplay:
         # All threads should have completed without errors
         assert progress_callback.call_count == 10
 
-    @pytest.mark.asyncio
-    async def test_real_time_updates_during_polling_loop(self):
+    def test_real_time_updates_during_polling_loop(self):
         """Test real-time progress updates during actual polling loop."""
         api_client = Mock(spec=CIDXRemoteAPIClient)
         progress_callback = Mock()
@@ -358,7 +356,7 @@ class TestRealtimeProgressDisplay:
             },
         ]
 
-        api_client.get_job_status = AsyncMock(side_effect=status_responses)
+        api_client.get_job_status = Mock(side_effect=status_responses)
 
         engine = JobPollingEngine(
             api_client,
@@ -367,7 +365,7 @@ class TestRealtimeProgressDisplay:
         )
 
         # Start polling and let it run through all status updates
-        final_status = await engine.start_polling("test-123")
+        final_status = engine.start_polling("test-123")
 
         # Should have made progress updates for each status response
         assert progress_callback.call_count >= 3

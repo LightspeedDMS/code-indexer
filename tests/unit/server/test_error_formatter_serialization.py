@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-from src.code_indexer.server.middleware.error_formatters import (
+from code_indexer.server.middleware.error_formatters import (
     _serialize_value_for_json,
 )
 

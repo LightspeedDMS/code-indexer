@@ -21,7 +21,7 @@ class TestTokenDecryptionFailureHandling:
         When get_token is called
         Then it should return None instead of crashing
         """
-        from src.code_indexer.server.services.ci_token_manager import CITokenManager
+        from code_indexer.server.services.ci_token_manager import CITokenManager
 
         server_dir = tmp_path / ".cidx-server"
         server_dir.mkdir()
@@ -51,7 +51,7 @@ class TestTokenDecryptionFailureHandling:
         When get_token is called
         Then it should return None (not raise ValueError)
         """
-        from src.code_indexer.server.services.ci_token_manager import CITokenManager
+        from code_indexer.server.services.ci_token_manager import CITokenManager
 
         server_dir = tmp_path / ".cidx-server"
         server_dir.mkdir()

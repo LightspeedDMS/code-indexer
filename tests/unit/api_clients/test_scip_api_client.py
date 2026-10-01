@@ -246,8 +246,33 @@ class TestSCIPAPIClientImpact:
     """Test SCIPAPIClient.impact() method."""
 
     @pytest.mark.asyncio
-    async def test_impact_caps_depth_at_10(self, scip_client):
-        """Test impact() caps depth at 10 even when higher value passed."""
+    async def test_impact_rejects_depth_above_cap(self, scip_client):
+        """impact() must reject (not silently clamp) a depth above the
+        [1, 10] cap -- symmetric with callchain()'s existing
+        max_depth-above-cap rejection (Bug #1639, mirroring Bug #1603's
+        remediation for SCIPAPIClient.callchain)."""
+        with pytest.raises(ValueError, match="depth"):
+            scip_client.impact(
+                symbol="Config",
+                repository_alias="test-repo",
+                depth=15,
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("depth", [0, -5])
+    async def test_impact_rejects_depth_below_minimum(self, scip_client, depth):
+        """impact() must also reject a non-positive depth loudly -- there
+        was previously NO lower-bound check at all (Bug #1639)."""
+        with pytest.raises(ValueError, match="depth"):
+            scip_client.impact(
+                symbol="Config",
+                repository_alias="test-repo",
+                depth=depth,
+            )
+
+    @pytest.mark.asyncio
+    async def test_impact_passes_valid_depth_unchanged(self, scip_client):
+        """Sanity: an in-range depth is passed through unchanged."""
         mock_response = {"results": {}, "metadata": {}, "errors": {}}  # type: ignore[var-annotated]
 
         mock_request = MagicMock(
@@ -257,11 +282,11 @@ class TestSCIPAPIClientImpact:
             result = scip_client.impact(
                 symbol="Config",
                 repository_alias="test-repo",
-                depth=15,  # Should be capped to 10
+                depth=5,
             )
             assert isinstance(result, dict)
             payload = mock_request.call_args[1]["json"]
-            assert payload["max_depth"] == 10  # Capped at 10
+            assert payload["max_depth"] == 5
 
 
 class TestSCIPAPIClientCallchain:
@@ -285,9 +310,22 @@ class TestSCIPAPIClientCallchain:
                 from_symbol="main",
                 to_symbol="process_request",
                 repository_alias="test-repo",
-                max_depth=10,
+                max_depth=3,
             )
             assert isinstance(result, dict)
+
+    @pytest.mark.asyncio
+    async def test_callchain_rejects_max_depth_above_cap(self, scip_client):
+        """callchain() must reject (not silently clamp) a max_depth above
+        the [1, 3] cap -- symmetric with the existing max_depth < 1
+        rejection (Bug #1603 code review Priority 4 / O2)."""
+        with pytest.raises(ValueError, match="max_depth"):
+            scip_client.callchain(
+                from_symbol="main",
+                to_symbol="process_request",
+                repository_alias="test-repo",
+                max_depth=4,
+            )
 
     @pytest.mark.asyncio
     async def test_callchain_validates_empty_from_symbol(self, scip_client):

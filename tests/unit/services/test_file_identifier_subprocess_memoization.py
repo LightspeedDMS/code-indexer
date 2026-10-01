@@ -15,7 +15,7 @@ import os
 from typing import Dict, List, NamedTuple
 from unittest.mock import MagicMock, patch
 
-from src.code_indexer.services.file_identifier import FileIdentifier
+from code_indexer.services.file_identifier import FileIdentifier
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ class TestFileIdentifierSubprocessMemoization:
         call_log: List[list] = []
 
         with patch(
-            "src.code_indexer.services.file_identifier.run_git_command",
+            "code_indexer.services.file_identifier.run_git_command",
             side_effect=_make_fake_runner(call_log),
         ):
             identifier.get_file_metadata(file_a)
@@ -146,7 +146,7 @@ class TestFileIdentifierSubprocessMemoization:
         expected_commit = "cafebabecafebabecafebabecafebabe12345678"
 
         with patch(
-            "src.code_indexer.services.file_identifier.run_git_command",
+            "code_indexer.services.file_identifier.run_git_command",
             side_effect=_make_fake_runner(
                 call_log, branch=expected_branch, commit=expected_commit
             ),

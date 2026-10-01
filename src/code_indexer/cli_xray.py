@@ -14,6 +14,8 @@ from typing import Optional
 
 import click
 
+from code_indexer.xray.sandbox import validate_rust_evaluator
+
 
 # ---------------------------------------------------------------------------
 # xray group
@@ -186,12 +188,14 @@ def xray_search(
     # ------------------------------------------------------------------
     from code_indexer.xray.search_engine import XRaySearchEngine
 
-    engine = XRaySearchEngine()
+    # Local CLI: the user's own checkout -- follow symlinks wherever they
+    # point (server-side callers keep the confined default).
+    engine = XRaySearchEngine(confine_to_repo_root=False)
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem
     # ------------------------------------------------------------------
-    validation = engine.sandbox.validate(evaluator_code)
+    validation = validate_rust_evaluator(evaluator_code)
     if not validation.ok:
         click.echo(
             f"Error: evaluator validation failed: {validation.reason}",
@@ -457,12 +461,14 @@ def xray_explore(
     # ------------------------------------------------------------------
     from code_indexer.xray.search_engine import XRaySearchEngine
 
-    engine = XRaySearchEngine()
+    # Local CLI: the user's own checkout -- follow symlinks wherever they
+    # point (server-side callers keep the confined default).
+    engine = XRaySearchEngine(confine_to_repo_root=False)
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem
     # ------------------------------------------------------------------
-    validation = engine.sandbox.validate(evaluator_code)
+    validation = validate_rust_evaluator(evaluator_code)
     if not validation.ok:
         click.echo(
             f"Error: evaluator validation failed: {validation.reason}",

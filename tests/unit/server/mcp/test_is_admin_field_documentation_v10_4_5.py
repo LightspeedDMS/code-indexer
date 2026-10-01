@@ -48,11 +48,11 @@ def _make_user(
     )
 
 
-def _make_bjm() -> BackgroundJobManager:
+def _make_bjm(background_job_manager_factory) -> BackgroundJobManager:
     """In-memory BackgroundJobManager — no SQLite, no disk I/O."""
     from code_indexer.server.utils.config_manager import ServerResourceConfig
 
-    return BackgroundJobManager(resource_config=ServerResourceConfig())
+    return background_job_manager_factory(resource_config=ServerResourceConfig())
 
 
 def _noop_job(progress_callback: Any) -> Dict[str, Any]:
@@ -65,7 +65,9 @@ def _noop_job(progress_callback: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_xray_search_job_result_is_admin_field_is_false_for_admin_user():
+def test_xray_search_job_result_is_admin_field_is_false_for_admin_user(
+    background_job_manager_factory,
+):
     """xray_search job submitted by an ADMIN user has is_admin=False.
 
     is_admin is a job-priority opt-in flag — it is NOT the submitter's role.
@@ -74,7 +76,7 @@ def test_xray_search_job_result_is_admin_field_is_false_for_admin_user():
     behaviour so that is_admin=False cannot be misread as "user is not admin".
     """
     admin_user = _make_user("admin@example.com", UserRole.ADMIN)
-    bjm = _make_bjm()
+    bjm = _make_bjm(background_job_manager_factory)
 
     # Submit as if coming from an xray_search handler (is_admin not passed -> defaults False)
     job_id = bjm.submit_job(

@@ -13,9 +13,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from src.code_indexer.server.services.search_service import SemanticSearchService
-from src.code_indexer.server.models.api_models import SemanticSearchRequest
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.server.services.search_service import SemanticSearchService
+from code_indexer.server.models.api_models import SemanticSearchRequest
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 @pytest.mark.slow
@@ -91,7 +91,7 @@ class TestSearchServiceFilesystemParameters:
 
         with patch.object(FilesystemVectorStore, "search", tracked_search):
             with patch(
-                "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
                 return_value=mock_embedding_service,
             ):
                 search_request = SemanticSearchRequest(

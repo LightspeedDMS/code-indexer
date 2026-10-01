@@ -16,12 +16,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.mark.e2e
@@ -263,9 +263,9 @@ class TestActivatedRepoConfigCreation:
 
         This is the integration test verifying the fix works end-to-end.
         """
-        from src.code_indexer.backends.backend_factory import BackendFactory
-        from src.code_indexer.backends.filesystem_backend import FilesystemBackend
-        from src.code_indexer.config import ConfigManager
+        from code_indexer.backends.backend_factory import BackendFactory
+        from code_indexer.backends.filesystem_backend import FilesystemBackend
+        from code_indexer.config import ConfigManager
 
         username = "testuser"
         golden_repo_alias = "test-repo"

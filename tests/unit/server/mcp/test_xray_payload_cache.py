@@ -13,8 +13,10 @@ Mocking strategy:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -24,14 +26,21 @@ from unittest.mock import MagicMock, patch
 
 class _FakePayloadCacheConfig:
     preview_size_chars: int = 200
+    # Large enough that every fixture in this file fits in a SINGLE cache
+    # page (multi-page pagination is exhaustively covered by
+    # test_xray_truncation_byte_budget_1928.py's real-SQLite-cache tests).
+    max_fetch_size_chars: int = 1_000_000
 
 
 class _FakePayloadCache:
     """Minimal fake PayloadCache with the same truncate_result contract."""
 
-    def __init__(self, preview_size_chars: int = 200) -> None:
+    def __init__(
+        self, preview_size_chars: int = 200, max_fetch_size_chars: int = 1_000_000
+    ) -> None:
         self.config = _FakePayloadCacheConfig()
         self.config.preview_size_chars = preview_size_chars
+        self.config.max_fetch_size_chars = max_fetch_size_chars
         self._stored: Dict[str, str] = {}
         self._counter = 0
 
@@ -110,6 +119,62 @@ def _import_helper():
     from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
 
     return _truncate_xray_result
+
+
+_LARGE_CACHE_TTL_SECONDS = 900
+_LARGE_CACHE_CLEANUP_INTERVAL_SECONDS = 60
+
+
+def _make_real_cache(db_path, max_fetch_size_chars: int):
+    """A REAL, on-disk PayloadCache. Bug #1928 rework: the shared
+    xray_truncation.truncate_result_fields() calls PayloadCache.store_batch()
+    (Bug #1181 one-transaction-per-batch pattern, one row per page) plus
+    store() for a small pages-v1 manifest row -- _FakePayloadCache (which
+    only implements store()/truncate_result()) no longer exercises the
+    real code path, so TestTruncateXrayResultLarge* uses a real cache like
+    the rest of the Bug #1928 suite
+    (tests/unit/server/mcp/test_xray_truncation_*_1928.py). There is now a
+    SINGLE budget (max_fetch_size_chars) -- the old preview_size_chars/
+    max_fetch_size_chars split is gone."""
+    from code_indexer.server.cache.payload_cache import (
+        PayloadCache,
+        PayloadCacheConfig,
+    )
+
+    config = PayloadCacheConfig(
+        preview_size_chars=max_fetch_size_chars,
+        max_fetch_size_chars=max_fetch_size_chars,
+        cache_ttl_seconds=_LARGE_CACHE_TTL_SECONDS,
+        cleanup_interval_seconds=_LARGE_CACHE_CLEANUP_INTERVAL_SECONDS,
+    )
+    cache = PayloadCache(db_path=db_path, config=config)
+    cache.initialize()
+    return cache
+
+
+@pytest.fixture
+def large_cache_factory(tmp_path):
+    """Factory fixture: build a REAL PayloadCache + MagicMock app (whose
+    app.state.payload_cache is that real cache) for a given
+    max_fetch_size_chars, guaranteeing cache.close() teardown for every
+    cache built -- shared by all TestTruncateXrayResultLarge* classes to
+    avoid repeating the cache/mock/patch/cleanup boilerplate per test."""
+    created: List[Any] = []
+
+    def _make(max_fetch_size_chars: int):
+        db_path = tmp_path / f"payload_cache_{len(created)}.db"
+        cache = _make_real_cache(db_path, max_fetch_size_chars)
+        created.append(cache)
+        mock_state = MagicMock()
+        mock_state.payload_cache = cache
+        mock_app = MagicMock()
+        mock_app.state = mock_state
+        return cache, mock_app
+
+    yield _make
+
+    for cache in created:
+        cache.close()
 
 
 # ---------------------------------------------------------------------------
@@ -203,17 +268,12 @@ class TestTruncateXrayResultSmall:
 # ---------------------------------------------------------------------------
 
 
-class TestTruncateXrayResultLarge:
-    """Large results return preview + cache_handle with first 3 matches inline."""
+class TestTruncateXrayResultLargeMarkers:
+    """Large results set the cache_handle/has_more/truncated markers."""
 
-    def test_large_result_returns_cache_handle(self):
+    def test_large_result_returns_cache_handle(self, large_cache_factory):
         """Large combined payload produces a non-None cache_handle."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
+        _cache, mock_app = large_cache_factory(200)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -222,16 +282,11 @@ class TestTruncateXrayResultLarge:
             result = helper(_make_large_result())
 
         assert result.get("cache_handle") is not None
-        assert result["cache_handle"].startswith("fake-handle-")
+        assert isinstance(result["cache_handle"], str) and result["cache_handle"]
 
-    def test_large_result_has_more_true(self):
+    def test_large_result_has_more_true(self, large_cache_factory):
         """Large result must have has_more=True."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
+        _cache, mock_app = large_cache_factory(200)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -241,14 +296,9 @@ class TestTruncateXrayResultLarge:
 
         assert result["has_more"] is True
 
-    def test_large_result_truncated_true(self):
+    def test_large_result_truncated_true(self, large_cache_factory):
         """Large result must have truncated=True."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
+        _cache, mock_app = large_cache_factory(200)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -258,21 +308,18 @@ class TestTruncateXrayResultLarge:
 
         assert result["truncated"] is True
 
-    def test_large_result_includes_total_size(self):
-        """Large result includes total_size of the full combined payload."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
 
+class TestTruncateXrayResultLargeDataIntegrity:
+    """No-data-loss contract: total_pages present, full payload
+    round-trips whole through the cache, and the removed dual preview
+    field is gone."""
+
+    def test_large_result_includes_total_pages(self, large_cache_factory):
+        """Bug #1928: the removed `total_size` field is replaced by
+        `total_pages` -- a positive count of the independently-fetchable
+        cache pages holding the full result."""
+        _cache, mock_app = large_cache_factory(200)
         large = _make_large_result()
-        expected_payload = json.dumps(
-            {
-                "matches": large["matches"],
-                "evaluation_errors": large["evaluation_errors"],
-            }
-        )
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -280,23 +327,18 @@ class TestTruncateXrayResultLarge:
             helper = _import_helper()
             result = helper(large)
 
-        assert result["total_size"] == len(expected_payload)
+        assert isinstance(result["total_pages"], int)
+        assert result["total_pages"] >= 1
 
-    def test_large_result_stores_full_payload_in_cache(self):
-        """The stored cache entry contains the full matches+errors JSON."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
+    def test_large_result_stores_full_payload_in_cache(self, large_cache_factory):
+        """The cached pages round-trip (via xray_truncation.fetch_cached_page,
+        concatenated in page order) to the full, original
+        matches[]/evaluation_errors[] arrays -- whole and unmodified, per
+        the Bug #1928 no-data-loss contract."""
+        from code_indexer.server.mcp.handlers import xray_truncation as xt
 
+        cache, mock_app = large_cache_factory(200)
         large = _make_large_result()
-        expected_payload = json.dumps(
-            {
-                "matches": large["matches"],
-                "evaluation_errors": large["evaluation_errors"],
-            }
-        )
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -304,17 +346,57 @@ class TestTruncateXrayResultLarge:
             helper = _import_helper()
             result = helper(large)
 
-        handle = result["cache_handle"]
-        assert fake_cache._stored[handle] == expected_payload
+        cache_handle = result["cache_handle"]
+        all_matches: list = []
+        all_errors: list = []
+        page_num = 1
+        max_pages_safety = 200
+        for _ in range(max_pages_safety):
+            fetched = xt.fetch_cached_page(cache, cache_handle, page_num)
+            parsed = json.loads(fetched["content"])
+            all_matches.extend(parsed.get("matches", []))
+            all_errors.extend(parsed.get("evaluation_errors", []))
+            if not fetched["has_more"]:
+                break
+            page_num += 1
+        else:
+            raise AssertionError(
+                f"pagination did not terminate within {max_pages_safety} pages"
+            )
 
-    def test_large_result_first_3_matches_inline(self):
-        """Large result includes only the first 3 matches inline."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
+        assert all_matches == large["matches"]
+        assert all_errors == large["evaluation_errors"]
 
+    def test_large_result_does_not_include_preview_string(self, large_cache_factory):
+        """Bug #1928: the duplicated matches_and_errors_preview field is
+        removed -- one representation of inline findings, not two."""
+        _cache, mock_app = large_cache_factory(200)
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module",
+            **{"app": mock_app},
+        ):
+            helper = _import_helper()
+            result = helper(_make_large_result())
+
+        assert "matches_and_errors_preview" not in result
+
+
+class TestTruncateXrayResultLargeWholeEntryPrefix:
+    """Inline matches/errors are a genuine byte-budget-driven whole-entry
+    prefix, never a fixed count -- and non-array metadata survives."""
+
+    def test_large_result_matches_are_a_whole_entry_prefix_not_a_fixed_count(
+        self, large_cache_factory
+    ):
+        """Bug #1928: inline matches are governed by the byte budget (a
+        whole-entry prefix that itself fits the budget), never a fixed
+        count of 3. budget=800 (rather than this file's usual 200) keeps
+        each match entry (~234 chars) fitting VERBATIM, so this test
+        exercises ordinary multi-entry packing -- not the
+        separately-tested single-oversized-entry adaptive shrink, which
+        200 would trigger even for just the first match alone."""
+        budget = 800
+        _cache, mock_app = large_cache_factory(budget)
         large = _make_large_result(n_matches=20)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
@@ -323,54 +405,66 @@ class TestTruncateXrayResultLarge:
             helper = _import_helper()
             result = helper(large)
 
-        assert len(result["matches"]) == 3
-        assert result["matches"] == large["matches"][:3]
+        n_inline = len(result["matches"])
+        assert 0 < n_inline < len(large["matches"])
+        assert result["matches"] == large["matches"][:n_inline]
+        inline_size = len(
+            json.dumps(
+                {
+                    "matches": result["matches"],
+                    "evaluation_errors": result["evaluation_errors"],
+                }
+            )
+        )
+        assert inline_size <= budget
 
-    def test_large_result_first_3_errors_inline(self):
-        """Large result includes only the first 3 evaluation_errors inline."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
-        large = _make_large_result()
+    def test_large_result_errors_are_a_whole_entry_prefix_not_a_fixed_count(
+        self, large_cache_factory
+    ):
+        """Same whole-entry-prefix-within-budget contract for
+        evaluation_errors[], using a fixture (1 small match + 10 errors)
+        sized so errors genuinely get a partial (not empty, not full)
+        prefix -- with the default 20-match fixture, matches alone
+        consume the whole budget before any error is ever reached, which
+        would make an errors partial-fill assertion vacuous."""
+        budget = 500
+        _cache, mock_app = large_cache_factory(budget)
+        result_in: Dict[str, Any] = {
+            "matches": [_make_match("only.py", "x" * 10)],
+            "evaluation_errors": [_make_error(f"err_{i}.py") for i in range(10)],
+            "files_processed": 1,
+            "files_total": 1,
+            "elapsed_seconds": 0.1,
+        }
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
         ):
             helper = _import_helper()
-            result = helper(large)
+            result = helper(result_in)
 
-        assert len(result["evaluation_errors"]) == 3
-        assert result["evaluation_errors"] == large["evaluation_errors"][:3]
+        assert result["truncated"] is True, (
+            "fixture premise: this result must actually need truncation"
+        )
+        n_inline = len(result["evaluation_errors"])
+        assert 0 < n_inline < len(result_in["evaluation_errors"]), (
+            "fixture must produce a genuine partial (not empty, not full) "
+            "errors prefix to meaningfully exercise the budget"
+        )
+        assert result["evaluation_errors"] == result_in["evaluation_errors"][:n_inline]
+        inline_size = len(
+            json.dumps(
+                {
+                    "matches": result["matches"],
+                    "evaluation_errors": result["evaluation_errors"],
+                }
+            )
+        )
+        assert inline_size <= budget
 
-    def test_large_result_includes_preview_string(self):
-        """Large result includes matches_and_errors_preview field."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
-        with patch(
-            "code_indexer.server.mcp.handlers._utils.app_module",
-            **{"app": mock_app},
-        ):
-            helper = _import_helper()
-            result = helper(_make_large_result())
-
-        assert "matches_and_errors_preview" in result
-        assert len(result["matches_and_errors_preview"]) <= 200
-
-    def test_large_result_preserves_metadata_fields(self):
+    def test_large_result_preserves_metadata_fields(self, large_cache_factory):
         """Large result preserves files_processed, files_total, elapsed_seconds."""
-        fake_cache = _FakePayloadCache(preview_size_chars=200)
-        mock_state = MagicMock()
-        mock_state.payload_cache = fake_cache
-        mock_app = MagicMock()
-        mock_app.state = mock_state
-
+        _cache, mock_app = large_cache_factory(200)
         large = _make_large_result()
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
@@ -390,15 +484,23 @@ class TestTruncateXrayResultLarge:
 
 
 class TestTruncateXrayResultCacheUnavailable:
-    """When payload_cache is absent from app.state, full result is returned."""
+    """Bug #1928 round 3 (P3, Codex): when payload_cache is unavailable,
+    the result must still be BOUNDED (never returned in full) -- flagged
+    cache_unavailable=True so a caller can tell "genuinely small" apart
+    from "cache was down"."""
 
-    def test_cache_unavailable_returns_full_result(self):
-        """No payload_cache on app.state: full result dict returned unchanged."""
+    def test_cache_unavailable_bounds_a_large_result(self):
+        """No payload_cache on app.state: a large result is bounded, not
+        returned in full."""
         mock_state = MagicMock(spec=[])  # no payload_cache attribute
         mock_app = MagicMock()
         mock_app.state = mock_state
 
-        large = _make_large_result()
+        # n_matches=40 (~8500 chars serialized) reliably exceeds the
+        # 5000-char default fallback budget the cache-unavailable
+        # degrade path uses -- the class default of 20 (~4600 chars)
+        # does not.
+        large = _make_large_result(n_matches=40)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -406,16 +508,23 @@ class TestTruncateXrayResultCacheUnavailable:
             helper = _import_helper()
             result = helper(large)
 
-        assert result == large
+        assert result["cache_unavailable"] is True
+        assert result["truncated"] is True
+        assert result["cache_handle"] is None
+        assert len(result["matches"]) < len(large["matches"]), (
+            "cache-unavailable degrade must still BOUND the result -- "
+            "returning everything defeats the whole truncation contract"
+        )
 
-    def test_cache_none_returns_full_result(self):
-        """payload_cache=None on app.state: full result dict returned unchanged."""
+    def test_cache_none_bounds_a_large_result(self):
+        """payload_cache=None on app.state: same bounded degrade as a
+        missing attribute."""
         mock_state = MagicMock()
         mock_state.payload_cache = None
         mock_app = MagicMock()
         mock_app.state = mock_state
 
-        large = _make_large_result()
+        large = _make_large_result(n_matches=40)
         with patch(
             "code_indexer.server.mcp.handlers._utils.app_module",
             **{"app": mock_app},
@@ -423,10 +532,15 @@ class TestTruncateXrayResultCacheUnavailable:
             helper = _import_helper()
             result = helper(large)
 
-        assert result == large
+        assert result["cache_unavailable"] is True
+        assert result["truncated"] is True
+        assert result["cache_handle"] is None
+        assert len(result["matches"]) < len(large["matches"])
 
-    def test_cache_unavailable_does_not_mutate_input(self):
-        """When cache unavailable, the returned dict is the same object (no copy)."""
+    def test_cache_unavailable_returns_a_new_dict_not_the_input_object(self):
+        """The bounded degrade response is assembled fresh, not the same
+        object as the input (unlike the pre-Bug-#1928-round-3 behavior,
+        which returned the input dict unchanged/identity-equal)."""
         mock_state = MagicMock(spec=[])
         mock_app = MagicMock()
         mock_app.state = mock_state
@@ -440,4 +554,6 @@ class TestTruncateXrayResultCacheUnavailable:
             helper = _import_helper()
             result = helper(large)
 
-        assert id(result) == large_id
+        assert id(result) != large_id
+        # The original input itself must remain unmutated.
+        assert "cache_unavailable" not in large

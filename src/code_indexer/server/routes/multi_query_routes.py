@@ -8,7 +8,7 @@ Implements AC1: REST endpoint for multi-repository search.
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional, Dict, List, Any
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
@@ -22,8 +22,53 @@ from ..multi import (
     MultiSearchResponse,
 )
 from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _enforce_repo_access(
+    access_filtering_service: Optional[Any],
+    username: str,
+    aliases: List[str],
+) -> None:
+    """Enforce repo-level access for every repository in a multi-repo request.
+
+    /api/query/multi authorizes every alias listed in `repositories` against
+    the caller's group grants via AccessFilteringService before any
+    semantic, FTS, regex, or temporal (git-history) search (all four
+    search modalities, inherently multi-repo by design). Delegates the
+    actual access decision to the shared require_repo_access() guard
+    (same semantics as the MCP dispatcher's _check_repository_access())
+    and shapes the result into this route's HTTPException conventions.
+
+    Called UNCONDITIONALLY, before MultiSearchService.search() executes,
+    so the check can never be silently skipped and no repo is searched
+    before every requested alias is proven accessible (no silent partial
+    results).
+
+    Raises:
+        HTTPException 403: caller lacks access to one of the requested
+            aliases (checked in order).
+        HTTPException 500: access_filtering_service is unavailable --
+            fails closed rather than skipping the check.
+    """
+    try:
+        require_repo_access(access_filtering_service, username, aliases)
+    except RepoAccessDeniedError as e:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "access_denied", "detail": str(e)},
+        )
+    except AccessFilteringServiceUnavailableError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "access_control_unavailable", "detail": str(e)},
+        )
 
 
 def _apply_multi_truncation(
@@ -91,6 +136,8 @@ def get_multi_search_service() -> MultiSearchService:
 @router.post("/multi", response_model=MultiSearchResponse)
 def multi_repository_query(
     request: MultiSearchRequest,
+    *,
+    http_request: Request,
     user: User = Depends(get_current_user),
 ) -> MultiSearchResponse:
     """
@@ -165,10 +212,15 @@ def multi_repository_query(
     - Repository not found → error in `errors` field, other repos succeed
     - Invalid query → 422 Unprocessable Entity
     - Authentication failure → 401 Unauthorized
+    - Caller lacks access to a requested repo → 403 Forbidden
     - Unexpected error → 500 Internal Server Error
 
     Args:
         request: Multi-search request with repositories, query, and filters
+        http_request: The real FastAPI Request (required, keyword-only) --
+            used to resolve app.state.access_filtering_service for the
+            repo-level access check below. FastAPI injects it for every
+            genuine HTTP call automatically.
         user: Authenticated user (injected by dependency)
 
     Returns:
@@ -176,9 +228,22 @@ def multi_repository_query(
 
     Raises:
         HTTPException: 401 if authentication fails
+        HTTPException: 403 if the caller lacks access to a requested repo
         HTTPException: 422 if request validation fails
         HTTPException: 500 if unexpected error occurs
     """
+    # ------------------------------------------------------------------
+    # Repo-level access check — UNCONDITIONAL,
+    # BEFORE any search execution, for every repository in the request
+    # regardless of search_type. Never skipped: access_filtering_service
+    # missing fails closed (500) inside _enforce_repo_access, it does not
+    # bypass the check.
+    # ------------------------------------------------------------------
+    access_filtering_service = getattr(
+        http_request.app.state, "access_filtering_service", None
+    )
+    _enforce_repo_access(access_filtering_service, user.username, request.repositories)
+
     try:
         # Bug #350: Track REST API call in metrics
         api_metrics_service.increment_other_api_call(username=user.username)

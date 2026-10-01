@@ -15,6 +15,7 @@ Acceptance criteria covered here:
 - Indexing timeout on source raises RuntimeError
 """
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -484,6 +485,84 @@ class TestScipIndexingInIndexSource:
             "cidx scip generate must NOT be called from _create_snapshot(). "
             f"Got calls: {scip_calls}"
         )
+
+    def test_scip_failure_surfaces_command_exit_code_and_stdout(
+        self, scheduler, registry, source_repo, tmp_path, monkeypatch
+    ):
+        """A real failing SCIP child must retain all of its diagnostics."""
+        registry.register_global_repo(
+            "scip-failure-test",
+            "scip-failure-test-global",
+            "git@github.com:org/repo.git",
+            str(source_repo),
+            enable_scip=True,
+        )
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        cidx = bin_dir / "cidx"
+        cidx.write_text(
+            "#!/bin/sh\nprintf 'real scip child diagnostic on stdout\\n'\nexit 17\n"
+        )
+        cidx.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        def mock_popen_progress(**kwargs):
+            (source_repo / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+            return 50
+
+        with patch(
+            "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+            return_value=(0, 0),
+        ):
+            with patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+                side_effect=mock_popen_progress,
+            ):
+                with pytest.raises(
+                    RuntimeError,
+                    match=(
+                        r"cidx scip generate.*17.*real scip child diagnostic on stdout"
+                    ),
+                ):
+                    scheduler._index_source(
+                        alias_name="scip-failure-test-global",
+                        source_path=str(source_repo),
+                    )
+
+    def test_fix_config_failure_surfaces_command_and_output(
+        self, scheduler, source_repo, tmp_path, monkeypatch
+    ):
+        """Refresh snapshot failures must retain fix-config diagnostics too.
+
+        Uses a real failing child process (a fake `cidx` executable on PATH),
+        not a hand-crafted CalledProcessError, so this proves the real
+        subprocess.run(capture_output=True) plumbing actually captures
+        stdout/stderr for this call site -- not just that the message
+        formatter is correct given a fabricated exception object.
+        """
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        cidx = bin_dir / "cidx"
+        cidx.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1 $2" = "fix-config --force" ]; then\n'
+            "  printf 'fix-config stdout diagnostic\\n'\n"
+            "  exit 23\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        cidx.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"cidx fix-config --force.*23.*fix-config stdout diagnostic",
+        ):
+            scheduler._create_snapshot(
+                alias_name="fix-config-failure-global",
+                source_path=str(source_repo),
+            )
 
 
 # ---------------------------------------------------------------------------

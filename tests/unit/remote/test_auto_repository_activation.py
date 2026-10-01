@@ -5,7 +5,7 @@ following TDD principles with comprehensive coverage of acceptance criteria.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 
 from code_indexer.remote.repository_linking import (
     RepositoryType,
@@ -72,8 +72,7 @@ class TestAutoRepositoryActivator:
         assert hasattr(activator, "_confirm_activation")
         assert hasattr(activator, "_display_activation_success")
 
-    @pytest.mark.asyncio
-    async def test_auto_activate_golden_repository_success(
+    def test_auto_activate_golden_repository_success(
         self, auto_activator, golden_repository_match, mock_project_context
     ):
         """Test successful auto-activation of golden repository."""
@@ -85,7 +84,7 @@ class TestAutoRepositoryActivator:
         auto_activator._generate_user_alias = MagicMock(
             return_value="test-project-feature-api-client"
         )
-        auto_activator._ensure_unique_alias = AsyncMock(
+        auto_activator._ensure_unique_alias = MagicMock(
             return_value=expected_user_alias
         )
 
@@ -103,13 +102,13 @@ class TestAutoRepositoryActivator:
             usage_limits={"daily_queries": 1000, "concurrent_queries": 10},
         )
 
-        auto_activator.repository_client.activate_repository = AsyncMock(
+        auto_activator.repository_client.activate_repository = MagicMock(
             return_value=mock_activated_repo
         )
         auto_activator._display_activation_success = MagicMock()
 
         # Execute auto-activation
-        result = await auto_activator.auto_activate_golden_repository(
+        result = auto_activator.auto_activate_golden_repository(
             golden_repository_match, mock_project_context
         )
 
@@ -135,8 +134,7 @@ class TestAutoRepositoryActivator:
         )
         auto_activator._display_activation_success.assert_called_once_with(result)
 
-    @pytest.mark.asyncio
-    async def test_auto_activate_golden_repository_user_cancellation(
+    def test_auto_activate_golden_repository_user_cancellation(
         self, auto_activator, golden_repository_match, mock_project_context
     ):
         """Test auto-activation when user cancels confirmation."""
@@ -145,13 +143,13 @@ class TestAutoRepositoryActivator:
         auto_activator._generate_user_alias = MagicMock(
             return_value="test-project-feature-api-client"
         )
-        auto_activator._ensure_unique_alias = AsyncMock(
+        auto_activator._ensure_unique_alias = MagicMock(
             return_value="test-project-feature-api-client-20240115"
         )
 
         # Execute auto-activation and expect cancellation exception
         with pytest.raises(UserCancelledActivationError) as exc_info:
-            await auto_activator.auto_activate_golden_repository(
+            auto_activator.auto_activate_golden_repository(
                 golden_repository_match, mock_project_context
             )
 
@@ -160,8 +158,7 @@ class TestAutoRepositoryActivator:
         # Verify activation was not attempted
         auto_activator.repository_client.activate_repository.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_auto_activate_golden_repository_activation_failure(
+    def test_auto_activate_golden_repository_activation_failure(
         self, auto_activator, golden_repository_match, mock_project_context
     ):
         """Test auto-activation when repository activation fails."""
@@ -170,18 +167,18 @@ class TestAutoRepositoryActivator:
         auto_activator._generate_user_alias = MagicMock(
             return_value="test-project-feature-api-client"
         )
-        auto_activator._ensure_unique_alias = AsyncMock(
+        auto_activator._ensure_unique_alias = MagicMock(
             return_value="test-project-feature-api-client-20240115"
         )
 
         # Mock activation failure
-        auto_activator.repository_client.activate_repository = AsyncMock(
+        auto_activator.repository_client.activate_repository = MagicMock(
             side_effect=ActivationError("Repository activation failed: quota exceeded")
         )
 
         # Execute auto-activation and expect activation exception
         with pytest.raises(RepositoryActivationError) as exc_info:
-            await auto_activator.auto_activate_golden_repository(
+            auto_activator.auto_activate_golden_repository(
                 golden_repository_match, mock_project_context
             )
 
@@ -261,23 +258,21 @@ class TestAutoRepositoryActivator:
         assert "." not in result
         assert "_" not in result
 
-    @pytest.mark.asyncio
-    async def test_ensure_unique_alias_no_conflicts(self, auto_activator):
+    def test_ensure_unique_alias_no_conflicts(self, auto_activator):
         """Test alias uniqueness when no conflicts exist."""
         # Mock no existing repositories
-        auto_activator.repository_client.list_user_repositories = AsyncMock(
+        auto_activator.repository_client.list_user_repositories = MagicMock(
             return_value=[]
         )
 
         base_alias = "test-project-feature-api-client"
-        result = await auto_activator._ensure_unique_alias(base_alias)
+        result = auto_activator._ensure_unique_alias(base_alias)
 
         # Should return the original alias with timestamp
         assert result.startswith(base_alias)
         assert len(result) > len(base_alias)  # Should have timestamp appended
 
-    @pytest.mark.asyncio
-    async def test_ensure_unique_alias_with_conflicts(self, auto_activator):
+    def test_ensure_unique_alias_with_conflicts(self, auto_activator):
         """Test alias uniqueness when conflicts exist."""
         base_alias = "test-project-feature-api-client"
         conflicting_timestamp = "20240115"
@@ -297,11 +292,11 @@ class TestAutoRepositoryActivator:
             usage_limits={},
         )
 
-        auto_activator.repository_client.list_user_repositories = AsyncMock(
+        auto_activator.repository_client.list_user_repositories = MagicMock(
             return_value=[existing_repo]
         )
 
-        result = await auto_activator._ensure_unique_alias(base_alias)
+        result = auto_activator._ensure_unique_alias(base_alias)
 
         # Should return different alias to avoid conflict
         assert result != conflicting_alias
@@ -412,8 +407,7 @@ class TestAutoRepositoryActivatorIntegration:
         except RepositoryLinkingError:
             pass  # Should inherit from RepositoryLinkingError
 
-    @pytest.mark.asyncio
-    async def test_auto_activation_with_exact_branch_matcher_integration(
+    def test_auto_activation_with_exact_branch_matcher_integration(
         self, mock_repository_client, mock_project_context
     ):
         """Test auto-activation integration with ExactBranchMatcher when only golden repositories match."""
@@ -440,7 +434,7 @@ class TestAutoRepositoryActivatorIntegration:
             "access_level": "read",
         }
 
-        discovery_response = AsyncMock()
+        discovery_response = MagicMock()
         # Set up the proper structure that the code expects
         discovery_response.golden_repositories = [MagicMock(**golden_repo_match)]
         discovery_response.activated_repositories = []  # Empty list - only golden repos
@@ -469,7 +463,7 @@ class TestAutoRepositoryActivatorIntegration:
             )
 
             # Execute exact branch matching - should trigger auto-activation
-            result = await exact_matcher.find_exact_branch_match(
+            result = exact_matcher.find_exact_branch_match(
                 mock_project_context, "https://github.com/test/repo.git"
             )
 
@@ -483,8 +477,7 @@ class TestAutoRepositoryActivatorIntegration:
             )  # User alias
             assert result.branch == "feature/test-branch"
 
-    @pytest.mark.asyncio
-    async def test_auto_activation_with_branch_fallback_matcher_integration(
+    def test_auto_activation_with_branch_fallback_matcher_integration(
         self, mock_repository_client, mock_project_context
     ):
         """Test auto-activation integration with BranchFallbackMatcher when only golden repositories match."""
@@ -514,7 +507,7 @@ class TestAutoRepositoryActivatorIntegration:
             "access_level": "read",
         }
 
-        discovery_response = AsyncMock()
+        discovery_response = MagicMock()
         # Set up the proper structure that the code expects
         discovery_response.golden_repositories = [MagicMock(**golden_repo_match)]
         discovery_response.activated_repositories = []  # Empty list - only golden repos
@@ -543,7 +536,7 @@ class TestAutoRepositoryActivatorIntegration:
             )
 
             # Execute exact branch matching - should fail exact match but succeed with fallback + auto-activation
-            result = await exact_matcher.find_exact_branch_match(
+            result = exact_matcher.find_exact_branch_match(
                 mock_project_context, "https://github.com/test/repo.git"
             )
 
@@ -581,8 +574,7 @@ class TestAutoRepositoryActivatorErrorHandling:
         project_path.mkdir()
         return project_path
 
-    @pytest.mark.asyncio
-    async def test_auto_activate_network_error_handling(
+    def test_auto_activate_network_error_handling(
         self, auto_activator, mock_project_context
     ):
         """Test auto-activation handles network errors gracefully."""
@@ -605,15 +597,15 @@ class TestAutoRepositoryActivatorErrorHandling:
         # Mock user confirmation as accepted
         auto_activator._confirm_activation = MagicMock(return_value=True)
         auto_activator._generate_user_alias = MagicMock(return_value="test-alias")
-        auto_activator._ensure_unique_alias = AsyncMock(return_value="test-alias-123")
+        auto_activator._ensure_unique_alias = MagicMock(return_value="test-alias-123")
 
         # Mock network error during activation
-        auto_activator.repository_client.activate_repository = AsyncMock(
+        auto_activator.repository_client.activate_repository = MagicMock(
             side_effect=NetworkError("Connection timeout")
         )
 
         with pytest.raises(RepositoryActivationError) as exc_info:
-            await auto_activator.auto_activate_golden_repository(
+            auto_activator.auto_activate_golden_repository(
                 golden_match, mock_project_context
             )
 
@@ -622,8 +614,7 @@ class TestAutoRepositoryActivatorErrorHandling:
             or "connection" in str(exc_info.value).lower()
         )
 
-    @pytest.mark.asyncio
-    async def test_auto_activate_api_client_error_handling(
+    def test_auto_activate_api_client_error_handling(
         self, auto_activator, mock_project_context
     ):
         """Test auto-activation handles various API client errors gracefully."""
@@ -646,15 +637,15 @@ class TestAutoRepositoryActivatorErrorHandling:
         # Mock user confirmation as accepted
         auto_activator._confirm_activation = MagicMock(return_value=True)
         auto_activator._generate_user_alias = MagicMock(return_value="test-alias")
-        auto_activator._ensure_unique_alias = AsyncMock(return_value="test-alias-123")
+        auto_activator._ensure_unique_alias = MagicMock(return_value="test-alias-123")
 
         # Mock API client error during activation
-        auto_activator.repository_client.activate_repository = AsyncMock(
+        auto_activator.repository_client.activate_repository = MagicMock(
             side_effect=APIClientError("Invalid API response")
         )
 
         with pytest.raises(RepositoryActivationError) as exc_info:
-            await auto_activator.auto_activate_golden_repository(
+            auto_activator.auto_activate_golden_repository(
                 golden_match, mock_project_context
             )
 

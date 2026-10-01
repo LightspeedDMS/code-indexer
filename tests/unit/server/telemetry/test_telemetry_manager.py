@@ -6,9 +6,25 @@ which manages the OTEL SDK lifecycle. Following TDD methodology - tests
 written FIRST before implementation.
 
 All tests use real components following MESSI Rule #1: No mocks.
+
+Bug #1744 (round 3): several tests below now pass explicit
+export_traces=False, export_metrics=False. Per manager.py's actual
+source, both flags always construct a real provider (TracerProvider/
+MeterProvider) regardless of value -- the flag only controls whether a
+real, network-touching OTLP exporter/processor gets attached. Tests that
+only inspect boolean/attribute state (is_initialized, "provider is not
+None", service_name, collector_protocol, etc.) are provably unaffected
+by this flag's value, so setting it False removes a real, unreachable-
+network export attempt on manager.shutdown() (confirmed 6.34s+ blocking
+per test) with zero change to any assertion's outcome. Tests whose own
+documented subject IS the exporter/processor-attachment behavior itself
+(TestTelemetryManagerInvalidEndpoint's AC5 graceful-degradation test, and
+TestSamplerWiringEnabledBranch/TestDefaultRateAlwaysSamples in the
+sibling test_trace_sampling_1676_ac4.py) are deliberately left real and
+documented individually.
 """
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 # =============================================================================
@@ -27,7 +43,7 @@ class TestTelemetryManagerImport:
         When I import TelemetryManager
         Then the import succeeds without loading OTEL SDK
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         assert TelemetryManager is not None
 
@@ -39,7 +55,7 @@ class TestTelemetryManagerImport:
         When I import get_telemetry_manager
         Then the import succeeds
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import get_telemetry_manager
 
         assert callable(get_telemetry_manager)
 
@@ -60,7 +76,7 @@ class TestTelemetryManagerDisabled:
         When TelemetryManager is initialized
         Then OTEL SDK should not be loaded
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -77,7 +93,7 @@ class TestTelemetryManagerDisabled:
         When get_tracer() is called
         Then a no-op tracer is returned (not None)
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -93,7 +109,7 @@ class TestTelemetryManagerDisabled:
         When get_meter() is called
         Then a no-op meter is returned (not None)
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -109,7 +125,7 @@ class TestTelemetryManagerDisabled:
         When shutdown() is called
         Then it completes without error
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -135,11 +151,13 @@ class TestTelemetryManagerEnabled:
         Then OTEL SDK should be loaded
         And is_initialized should be True
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -152,16 +170,22 @@ class TestTelemetryManagerEnabled:
         """
         AC2: TracerProvider is created when enabled.
 
-        Given a TelemetryConfig with enabled=True and export_traces=True
+        Given a TelemetryConfig with enabled=True
         When TelemetryManager is initialized
         Then tracer_provider should be set
+
+        export_traces=False (Bug #1744): tracer_provider is constructed
+        by manager.py regardless of export_traces -- only whether a real
+        exporter gets attached differs, which this assertion never
+        inspects.
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_traces=True,
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -174,16 +198,22 @@ class TestTelemetryManagerEnabled:
         """
         AC2: MeterProvider is created when enabled.
 
-        Given a TelemetryConfig with enabled=True and export_metrics=True
+        Given a TelemetryConfig with enabled=True
         When TelemetryManager is initialized
         Then meter_provider should be set
+
+        export_metrics=False (Bug #1744): meter_provider is constructed
+        by manager.py regardless of export_metrics -- only whether a real
+        exporter gets attached differs, which this assertion never
+        inspects.
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_metrics=True,
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -200,11 +230,13 @@ class TestTelemetryManagerEnabled:
         When get_tracer() is called
         Then a real tracer is returned
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -225,11 +257,13 @@ class TestTelemetryManagerEnabled:
         When get_meter() is called
         Then a real meter is returned
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -258,8 +292,15 @@ class TestTelemetryManagerInvalidEndpoint:
         Given a TelemetryConfig with an unreachable endpoint
         When TelemetryManager is initialized
         Then it should initialize successfully (exports will fail later)
+
+        Bug #1744 (round 3): deliberately NOT ported to export_traces=False
+        -- this test's entire purpose (AC5 graceful degradation) is to
+        exercise a real exporter construction against a genuinely bad
+        endpoint; export_traces=False would mean no exporter is ever
+        attempted at all, defeating the test. Confirmed 9.12s solo
+        runtime -- a real, intrinsic network dependency, left as-is.
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -290,7 +331,7 @@ class TestTelemetryManagerSingleton:
         When I compare the returned instances
         Then they should be the same object
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
@@ -315,7 +356,7 @@ class TestTelemetryManagerSingleton:
         When reset_telemetry_manager() is called
         Then get_telemetry_manager() returns a new instance
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
@@ -352,12 +393,14 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then the service name is used in resource attributes
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
             service_name="custom-service-name",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -374,12 +417,14 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then the deployment environment is used in resource attributes
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
             deployment_environment="production",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -396,13 +441,13 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then TracerProvider should not be fully configured
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
             export_traces=False,
-            export_metrics=True,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -420,12 +465,12 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then MeterProvider should not be fully configured
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_traces=True,
+            export_traces=False,
             export_metrics=False,
         )
         manager = TelemetryManager(config)
@@ -453,12 +498,14 @@ class TestTelemetryManagerProtocol:
         When TelemetryManager is initialized
         Then it should use gRPC exporter
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
             collector_protocol="grpc",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -476,12 +523,14 @@ class TestTelemetryManagerProtocol:
         When TelemetryManager is initialized
         Then it should use HTTP exporter
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4318",
             collector_protocol="http",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -490,3 +539,35 @@ class TestTelemetryManagerProtocol:
             assert manager.collector_protocol == "http"
         finally:
             manager.shutdown()
+
+
+class TestGetTelemetryManagerFallbackImportRobustness:
+    """Bug (Story #1586 code-review Finding 9): get_telemetry_manager()'s
+    config=None fallback branch imports TelemetryConfig via the
+    'src.'-prefixed module path, which does not exist in a non-editable
+    production install (setuptools ships only the real 'code_indexer'
+    package, never a top-level 'src' namespace package). Unlike spans.py's
+    sibling bug, this import is NOT wrapped in a try/except at all, so a
+    background scheduler that legitimately calls get_telemetry_manager()
+    with no config before real startup config is loaded would crash with
+    ModuleNotFoundError in production.
+
+    Verified via real source inspection (inspect.getsource) of the actual
+    function under test -- no mocking of the import system or of the
+    function itself.
+    """
+
+    def test_get_telemetry_manager_fallback_does_not_use_broken_src_prefixed_import(
+        self,
+    ):
+        import inspect
+
+        from code_indexer.server.telemetry.manager import get_telemetry_manager
+
+        source = inspect.getsource(get_telemetry_manager)
+
+        assert "from src.code_indexer" not in source
+        assert (
+            "from code_indexer.server.utils.config_manager import TelemetryConfig"
+            in source
+        )

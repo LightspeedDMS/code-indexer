@@ -47,7 +47,7 @@ class ProcessTraceResult:
     hash_update: Optional[Dict[str, Any]] = None
     # Rename info (to be queued for Phase 2 finalize)
     rename_info: Optional[Tuple[str, str, str, str, str, str]] = None
-    # Per-user repo folder name (e.g. "langfuse_Claude_Code_seba_battig"); set when
+    # Per-user repo folder name (e.g. "langfuse_Claude_Code_jane_doe"); set when
     # trace was written (new or updated). Used by sync_project() to trigger per-user
     # refresh instead of non-existent project-level alias.
     repo_folder_name: Optional[str] = None
@@ -410,7 +410,7 @@ class LangfuseTraceSyncService:
 
         Returns:
             Set[str] of per-user repo folder names that received writes (new or updated
-            traces), e.g. {"langfuse_Claude_Code_seba_battig", "langfuse_Claude_Code_no_user"}.
+            traces), e.g. {"langfuse_Claude_Code_jane_doe", "langfuse_Claude_Code_no_user"}.
             Used by sync_project() to trigger per-user-repo refresh via RefreshScheduler.
             Returns empty set when no traces were written (unchanged or no traces fetched).
         """
@@ -636,7 +636,7 @@ class LangfuseTraceSyncService:
 
         is_new = trace_id not in trace_hashes
 
-        # Per-user repo folder name (e.g. "langfuse_Claude_Code_seba_battig").
+        # Per-user repo folder name (e.g. "langfuse_Claude_Code_jane_doe").
         # dest_folder is golden-repos/{folder_name}/{session_id}/, so parent.name is the
         # per-user repo folder name that RefreshScheduler tracks in its registry.
         repo_folder_name = dest_folder.parent.name

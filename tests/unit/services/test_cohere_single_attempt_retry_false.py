@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from src.code_indexer.services.cohere_embedding import CohereEmbeddingProvider
-from src.code_indexer.config import CohereConfig
+from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+from code_indexer.config import CohereConfig
 
 
 # ---------------------------------------------------------------------------

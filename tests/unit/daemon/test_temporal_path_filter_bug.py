@@ -25,7 +25,7 @@ except ImportError:
     sys.modules["rpyc.utils.server"] = MagicMock()
     rpyc = sys.modules["rpyc"]
 
-from src.code_indexer.daemon.service import CIDXDaemonService
+from code_indexer.daemon.service import CIDXDaemonService
 
 
 class TestTemporalPathFilterBug(TestCase):
@@ -103,9 +103,12 @@ class TestTemporalPathFilterBug(TestCase):
                 TemporalSearchResults,
             )
 
-            # Mock dependencies
+            # Mock dependencies.
+            # Bug #1718: exposed_query_temporal() now calls
+            # ConfigManager.load_verified_config() directly instead of
+            # create_with_backtrack().
             with patch(
-                "code_indexer.config.ConfigManager.create_with_backtrack"
+                "code_indexer.config.ConfigManager.load_verified_config"
             ) as mock_config:
                 with patch(
                     "code_indexer.backends.backend_factory.BackendFactory.create"

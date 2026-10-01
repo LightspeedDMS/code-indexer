@@ -34,7 +34,19 @@ class PasswordChangeConcurrencyProtection:
         if lock_dir:
             self.lock_dir = Path(lock_dir)
         else:
-            server_dir = Path.home() / ".cidx-server" / "locks"
+            # Bug #1778: honor CIDX_SERVER_DATA_DIR so an isolated/test
+            # server instance never leaks lock files into the real
+            # ~/.cidx-server/ directory. Falls back to
+            # Path.home()/.cidx-server, matching the established pattern
+            # used across ~10+ other server-mode modules (Bug #1776).
+            server_dir = (
+                Path(
+                    os.environ.get(
+                        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                    )
+                )
+                / "locks"
+            )
             self.lock_dir = server_dir
 
         self.lock_dir.mkdir(parents=True, exist_ok=True)

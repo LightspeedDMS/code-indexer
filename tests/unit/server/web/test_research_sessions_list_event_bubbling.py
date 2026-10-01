@@ -225,11 +225,22 @@ class TestResearchSessionsListEventBubbling:
             sessions=sample_sessions, active_session_id="session-1-id"
         )
 
-        # Verify renameSession is called with session data
+        # renameSession is called with the values read from data-* attributes
+        # on the button, not embedded directly as JS string literals -- the
+        # handler's argument must equal the rendered value regardless of
+        # what characters the session name contains. Verify both the call
+        # shape and that the attributes carry the correct values.
+        assert (
+            "renameSession(this.dataset.sessionId, this.dataset.sessionName)" in html
+        ), (
+            "renameSession must be called with the dataset accessors, not raw embedded values"
+        )
         for session in sample_sessions:
-            expected_call = f"renameSession('{session['id']}', '{session['name']}')"
-            assert expected_call in html, (
-                f"renameSession must be called with correct parameters for {session['name']}"
+            assert f'data-session-id="{session["id"]}"' in html, (
+                f"data-session-id must carry {session['id']!r}"
+            )
+            assert f'data-session-name="{session["name"]}"' in html, (
+                f"data-session-name must carry {session['name']!r}"
             )
 
     def test_delete_button_has_hx_confirm(self, jinja_env, sample_sessions):

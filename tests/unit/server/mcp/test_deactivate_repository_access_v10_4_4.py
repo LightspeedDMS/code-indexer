@@ -25,7 +25,7 @@ from code_indexer.server.auth.user_manager import User, UserRole
 
 
 def _make_user(
-    username: str = "Seba.Battig@lightspeeddms.com",
+    username: str = "Jane.Doe@example.com",
     role: UserRole = UserRole.NORMAL_USER,
 ) -> User:
     return User(
@@ -64,7 +64,7 @@ class TestDeactivateRepositoryOwnerAccess:
         This is the exact symptom from staging: owner gets 'Access denied'
         because user_alias 'test-v10-4-3-cidxmeta' is not a golden alias.
         """
-        user = _make_user("Seba.Battig@lightspeeddms.com", UserRole.NORMAL_USER)
+        user = _make_user("Jane.Doe@example.com", UserRole.NORMAL_USER)
         access_service = _make_access_service(
             is_admin=False,
             accessible_repos={"cidx-meta"},  # only golden aliases here
@@ -97,7 +97,7 @@ class TestDeactivateRepositoryOwnerAccess:
         """access_service.get_accessible_repos must NOT be called for
         deactivate_repository — the owner-enforcement allowlist causes an
         early return before the access check runs."""
-        user = _make_user("Seba.Battig@lightspeeddms.com", UserRole.NORMAL_USER)
+        user = _make_user("Jane.Doe@example.com", UserRole.NORMAL_USER)
         access_service = _make_access_service(
             is_admin=False,
             accessible_repos=set(),  # empty — would cause denial if checked
@@ -118,7 +118,7 @@ class TestDeactivateRepositoryOwnerAccess:
         """search_code with a user_alias not in accessible_repos must still raise.
 
         The deactivate_repository exemption must be narrowly scoped."""
-        user = _make_user("Seba.Battig@lightspeeddms.com", UserRole.NORMAL_USER)
+        user = _make_user("Jane.Doe@example.com", UserRole.NORMAL_USER)
         access_service = _make_access_service(
             is_admin=False,
             accessible_repos={"cidx-meta"},  # user_alias not in here

@@ -47,7 +47,8 @@ class ExceptionLogger:
 
         Args:
             project_root: Root directory of the project
-                         Note: Ignored in server mode (always uses ~/.cidx-server/logs)
+                         Note: Ignored in server mode (uses CIDX_SERVER_DATA_DIR
+                         env var when set, else ~/.cidx-server/logs)
             mode: Operating mode - "cli", "daemon", or "server"
 
         Returns:
@@ -61,8 +62,19 @@ class ExceptionLogger:
         pid = os.getpid()
 
         if mode == "server":
-            # Server mode: ~/.cidx-server/logs/
-            log_dir = Path.home() / ".cidx-server" / "logs"
+            # Server mode: honor CIDX_SERVER_DATA_DIR (Bug #1776) so an
+            # isolated/test server instance never leaks log files into the
+            # real ~/.cidx-server/ directory. Falls back to
+            # Path.home()/.cidx-server, matching the established pattern
+            # used across ~10+ other server-mode modules (e.g.
+            # health_service.py, diagnostics_service.py,
+            # research_assistant_service.py).
+            server_data_dir = Path(
+                os.environ.get(
+                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                )
+            )
+            log_dir = server_data_dir / "logs"
         else:
             # CLI/Daemon mode: <project>/.code-indexer/
             log_dir = project_root / ".code-indexer"

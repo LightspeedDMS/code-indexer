@@ -216,6 +216,14 @@ class QueryEmbeddingCache:
         # bound, matching post-prune reality cheaply with no DB call on the exporter
         # thread.
         self._cached_total: int = 0
+        # Bug #1536: process-local counter of record_miss_or_shadow write
+        # failures (backend raised OR returned False). Fail-open writes were
+        # otherwise silent beyond a buried WARNING log line -- no operator-
+        # visible signal existed (Messi #13 anti-silent-failure). Exposed via
+        # write_failures_since_start() and the matching OTEL gauge
+        # (cidx.cache.embedding.write_failures). Never resets except on
+        # process restart -- a rising value across scrapes IS the signal.
+        self._write_failures: int = 0
         # Bug #1181 Perf Fix #2: async/coalescing last_used touch buffer.
         # Keys: (cache_key, provider, model, dimension); values: latest timestamp.
         # Guarded by _touch_buffer_lock for thread safety.
@@ -547,7 +555,7 @@ class QueryEmbeddingCache:
 
             blob: bytes = np.asarray(embedding, dtype="<f4").tobytes()
             now = time.time()
-            self._backend.upsert(
+            write_ok = self._backend.upsert(
                 cache_key,
                 qualifier.provider,
                 qualifier.model,
@@ -556,6 +564,19 @@ class QueryEmbeddingCache:
                 now,
                 now,
             )
+            # Bug #1536: some backends fail open INTERNALLY (catch their own
+            # exception, e.g. QueryEmbeddingCachePostgresBackend) and signal
+            # failure via a `False` return instead of raising. Backends
+            # written before this fix return None (implicit success) — only
+            # an explicit `False` counts as a failure here, so every existing
+            # backend/test-double stays byte-identical.
+            if write_ok is False:
+                self._write_failures += 1
+                logger.warning(
+                    "query_embedding_cache: upsert failed (fail-open, "
+                    "backend reported failure)",
+                )
+                return
             # Story #1109 (S5): update cheap memo after the write, CLAMPED to the
             # resolved cap so it matches post-prune reality (prune evicts down to the
             # cap; the real count never exceeds it, so the memo must not drift past it).
@@ -563,6 +584,7 @@ class QueryEmbeddingCache:
                 self._cached_total + 1, self._resolve_max_entries()
             )
         except Exception:
+            self._write_failures += 1
             logger.warning(
                 "query_embedding_cache: upsert failed (fail-open)",
                 exc_info=True,
@@ -578,6 +600,27 @@ class QueryEmbeddingCache:
                 "query_embedding_cache: prune_to_max failed (fail-open)",
                 exc_info=True,
             )
+
+    def write_failures_since_start(self) -> int:
+        """Return the count of ``record_miss_or_shadow`` write failures since
+        process start (Bug #1536).
+
+        A "failure" is either the backend's ``upsert()`` raising, or (for a
+        backend that fails open internally, e.g.
+        ``QueryEmbeddingCachePostgresBackend``) returning ``False``. This is
+        the ONLY operator-visible signal for a persistent cache-write
+        failure beyond the buried per-event WARNING log line — used as the
+        ``cidx.cache.embedding.write_failures`` OTEL gauge callback so a
+        rising value across scrapes is observable without grepping logs.
+
+        Never resets except on process restart (Messi #13 anti-silent-
+        failure: a transient blip and a stuck, permanently-failing backend
+        must be distinguishable from the trend, not silently reset away).
+
+        Returns:
+            int — current count (>= 0).
+        """
+        return self._write_failures
 
     def cached_total_entries(self) -> int:
         """Return the cheap memoized entry count — NO backend call.

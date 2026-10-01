@@ -656,10 +656,13 @@ class TestDeleteVoyageaiKey:
             response = client.delete("/api/api-keys/voyageai")
 
         assert response.status_code == 200
-        # Verify save_config was called on the config_service (not config_manager)
-        mock_cs.return_value.save_config.assert_called_once()
-        saved_config = mock_cs.return_value.save_config.call_args[0][0]
-        assert saved_config.claude_integration_config.voyageai_api_key == ""
+        # Persisted as ONE audited provider-key change applied to a candidate.
+        change = mock_cs.return_value.apply_audited_change
+        change.assert_called_once()
+        assert change.call_args[1]["action_type"] == "provider_api_key_cleared"
+        assert change.call_args[1]["target_id"] == "voyageai"
+        change.call_args[0][0](cfg)
+        assert cfg.claude_integration_config.voyageai_api_key == ""
 
     def test_delete_voyageai_key_requires_auth(self, unauthenticated_client):
         """Without auth the endpoint rejects the request."""
@@ -802,9 +805,13 @@ class TestSaveCohereKey:
                 json={"api_key": VALID_COHERE_KEY},
             )
 
-        mock_cs.return_value.save_config.assert_called_once()
-        saved_config = mock_cs.return_value.save_config.call_args[0][0]
-        assert saved_config.claude_integration_config.cohere_api_key == VALID_COHERE_KEY
+        # Persisted as ONE audited provider-key change applied to a candidate.
+        change = mock_cs.return_value.apply_audited_change
+        change.assert_called_once()
+        assert change.call_args[1]["action_type"] == "provider_api_key_set"
+        assert change.call_args[1]["target_id"] == "cohere"
+        change.call_args[0][0](cfg)
+        assert cfg.claude_integration_config.cohere_api_key == VALID_COHERE_KEY
 
     def test_save_cohere_key_requires_auth(self, unauthenticated_client):
         """Without auth the endpoint rejects the request."""
@@ -1023,10 +1030,13 @@ class TestDeleteCohereKey:
             response = client.delete("/api/api-keys/cohere")
 
         assert response.status_code == 200
-        # Verify save_config was called on the config_service
-        mock_cs.return_value.save_config.assert_called_once()
-        saved_config = mock_cs.return_value.save_config.call_args[0][0]
-        assert saved_config.claude_integration_config.cohere_api_key == ""
+        # Persisted as ONE audited provider-key change applied to a candidate.
+        change = mock_cs.return_value.apply_audited_change
+        change.assert_called_once()
+        assert change.call_args[1]["action_type"] == "provider_api_key_cleared"
+        assert change.call_args[1]["target_id"] == "cohere"
+        change.call_args[0][0](cfg)
+        assert cfg.claude_integration_config.cohere_api_key == ""
 
     def test_delete_cohere_key_no_claude_json_step(self, client):
         """DELETE cohere does NOT touch ~/.claude.json (unlike Anthropic)."""

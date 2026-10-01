@@ -4,8 +4,18 @@ PostgreSQL backend for refresh token storage (Story #515).
 Drop-in replacement for RefreshTokenSqliteBackend using psycopg v3 sync connections
 via ConnectionPool.  Satisfies the RefreshTokenBackend Protocol (protocols.py).
 
-Tables are created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for new deployments.
+Schema (`token_families`, `refresh_tokens` tables and their indexes) is
+owned entirely by the SQL migrations
+(storage/postgres/migrations/sql/025_runtime_only_tables.sql,
+049_backend_indexes_1697.sql) -- this backend does NOT create or alter any
+table. `service_init.py` always runs `MigrationRunner` before
+`StorageFactory.create_backends()` constructs this class, so schema is
+guaranteed present by the time any instance exists (Issue #1697, mirroring
+Bug #1655/#1662: a previous self-heal `CREATE TABLE IF NOT EXISTS` here was
+dead code in every real deployment -- removed rather than kept as a second,
+drift-prone copy of the schema; its one index not already mirrored by a
+migration, idx_token_expires, was moved to 049_backend_indexes_1697.sql
+first so no coverage gap was introduced).
 """
 
 from __future__ import annotations
@@ -29,64 +39,15 @@ class RefreshTokenPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the schema exists.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create token_families and refresh_tokens tables and indexes if they do not already exist."""
-        with self._pool.connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS token_families (
-                    family_id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_used_at TEXT NOT NULL,
-                    is_revoked BOOLEAN DEFAULT FALSE,
-                    revocation_reason TEXT
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_family_username ON token_families (username)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_family_revoked ON token_families (is_revoked)"
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS refresh_tokens (
-                    token_id TEXT PRIMARY KEY,
-                    family_id TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    token_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    is_used BOOLEAN DEFAULT FALSE,
-                    used_at TEXT,
-                    parent_token_id TEXT,
-                    FOREIGN KEY (family_id) REFERENCES token_families (family_id)
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_token_family ON refresh_tokens (family_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_token_username ON refresh_tokens (username)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_token_hash ON refresh_tokens (token_hash)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_token_expires ON refresh_tokens (expires_at)"
-            )
-            conn.commit()
 
     def create_token_family(
         self, family_id: str, username: str, created_at: str, last_used_at: str

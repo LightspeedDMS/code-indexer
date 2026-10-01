@@ -31,8 +31,8 @@ class TestResearchAssistantClaude:
     @pytest.fixture
     def research_service(self, temp_db):
         """Create ResearchAssistantService with temporary database."""
-        from src.code_indexer.server.storage.database_manager import DatabaseSchema
-        from src.code_indexer.server.services.research_assistant_service import (
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.services.research_assistant_service import (
             ResearchAssistantService,
         )
 

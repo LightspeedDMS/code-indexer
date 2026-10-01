@@ -55,7 +55,6 @@ _NORMAL_USER_BASE = frozenset(
 _POWER_USER_BASE = frozenset(
     {
         "repository:write",
-        "delegate_open",
     }
 )
 

@@ -303,11 +303,15 @@ class TestCallerLayersThreadKwarg:
         )
 
     def test_mcp_handler_search_threads_kwarg(self):
-        source = _read_source("server/mcp/handlers/search.py")
+        # Issue #1935: handlers/search.py was split into the handlers/search/
+        # package; the coalesced_query_embedding() calls that thread this
+        # kwarg now live in handlers/search/memory_retrieval.py.
+        source = _read_source("server/mcp/handlers/search/memory_retrieval.py")
         assert _has_kwarg_in_call(
             source, "coalesced_query_embedding", "no_embedding_cache_shortcut"
         ), (
-            "handlers/search.py must pass no_embedding_cache_shortcut= to coalesced_query_embedding"
+            "handlers/search/memory_retrieval.py must pass no_embedding_cache_shortcut= "
+            "to coalesced_query_embedding"
         )
 
     def test_temporal_search_service_threads_kwarg(self):
@@ -869,9 +873,20 @@ class TestTemporalEntryPointValueFlow:
         import code_indexer.proxy.config_manager as config_mod
         import code_indexer.backends.backend_factory as backend_mod
 
+        from code_indexer.config import CohereConfig, VoyageAIConfig
+
+        # Mirrors the real Config shape read on the server temporal path:
+        # voyage_ai / cohere are always-present sub-models (default_factory)
+        # and daemon defaults to None.
         class _FakeConfig:
-            voyage_ai = type("V", (), {"api_key": "k", "model": "voyage-code-3"})()
-            cohere = None
+            voyage_ai = VoyageAIConfig()
+            cohere = CohereConfig()
+            daemon = None
+            confined_to_codebase_root = False
+
+            def confine_to_codebase_root(self) -> None:
+                # Mirrors Config: the server seam marks server context.
+                self.confined_to_codebase_root = True
 
         class _FakeCM:
             @classmethod
@@ -879,6 +894,13 @@ class TestTemporalEntryPointValueFlow:
                 return cls()
 
             def get_config(self):
+                return _FakeConfig()
+
+            # Bug #1690: reconstruct_temporal_backend now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
                 return _FakeConfig()
 
         monkeypatch.setattr(config_mod, "ConfigManager", _FakeCM)
@@ -892,7 +914,20 @@ class TestTemporalEntryPointValueFlow:
 
         class _FakeFactory:
             @staticmethod
-            def create(config, project_root, hnsw_cache=None, memory_governor=None):
+            def create(
+                config,
+                project_root,
+                hnsw_cache=None,
+                memory_governor=None,
+                # Bug #1529: reconstruct_temporal_backend now also forwards
+                # index_dir (temporal's fixed outside-the-repo location).
+                # **kwargs keeps this stub from breaking on the real
+                # factory's other optional params (activation_id,
+                # use_chunks_db_for_new_collections) as well -- an unfaithful
+                # stub signature is what made this a test-only failure.
+                index_dir=None,
+                **kwargs,
+            ):
                 return _FakeBackend()
 
         monkeypatch.setattr(backend_mod, "BackendFactory", _FakeFactory)
@@ -953,8 +988,20 @@ class TestTemporalEntryPointValueFlow:
         import code_indexer.config as config_mod2
         import code_indexer.storage.filesystem_vector_store as fvs_mod
 
+        from code_indexer.config import CohereConfig, VoyageAIConfig
+
+        # Mirrors the real Config shape read on the server temporal path:
+        # voyage_ai / cohere are always-present sub-models (default_factory)
+        # and daemon defaults to None.
         class _FakeConfig:
-            pass
+            voyage_ai = VoyageAIConfig()
+            cohere = CohereConfig()
+            daemon = None
+            confined_to_codebase_root = False
+
+            def confine_to_codebase_root(self) -> None:
+                # Mirrors Config: the server seam marks server context.
+                self.confined_to_codebase_root = True
 
         class _FakeCM:
             @classmethod
@@ -962,6 +1009,13 @@ class TestTemporalEntryPointValueFlow:
                 return cls()
 
             def get_config(self):
+                return _FakeConfig()
+
+            # Bug #1690: _search_temporal_sync now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
                 return _FakeConfig()
 
         monkeypatch.setattr(config_mod2, "ConfigManager", _FakeCM)
@@ -980,8 +1034,17 @@ class TestTemporalEntryPointValueFlow:
         service.config = _FakeMSSConfig()
         service.hnsw_index_cache = None  # attribute read at multi_search_service.py:538
 
+        # Bug #1529: the temporal read path resolves its (fixed, outside-the-
+        # repo-tree) data location from the golden repo's own coordinates. This
+        # stub previously returned a bare tmp_path, which is not structurally a
+        # golden-repo clone, so no location could be derived. Return a real
+        # golden-repo-shaped path -- <...>/golden-repos/<alias> -- exactly as
+        # the production _get_repository_path does.
+        _golden_clone = tmp_path / "golden-repos" / "myrepo"
+        _golden_clone.mkdir(parents=True, exist_ok=True)
+
         def _fake_get_repo_path(repo_id):
-            return str(tmp_path)
+            return str(_golden_clone)
 
         service._get_repository_path = _fake_get_repo_path
 
@@ -1152,6 +1215,7 @@ class TestValueFlowTemporalDispatch:
 
         class _FakeVectorStore:
             project_root = "/fake/root"
+            base_path = "/fake/root"
 
         dispatch_mod.execute_temporal_query_with_fusion(
             config=object(),

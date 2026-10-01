@@ -64,10 +64,9 @@ class TestCreateFileEndpoint:
 
         try:
             with patch(
-                "code_indexer.server.routers.files.FileCRUDService"
-            ) as MockService:
+                "code_indexer.server.routers.files.file_crud_service"
+            ) as mock_service:
                 # Mock service response
-                mock_service = MockService.return_value
                 mock_service.create_file.return_value = {
                     "success": True,
                     "file_path": "src/test.py",
@@ -119,9 +118,8 @@ class TestCreateFileEndpoint:
 
         try:
             with patch(
-                "code_indexer.server.routers.files.FileCRUDService"
-            ) as MockService:
-                mock_service = MockService.return_value
+                "code_indexer.server.routers.files.file_crud_service"
+            ) as mock_service:
                 mock_service.create_file.side_effect = PermissionError(
                     "Cannot modify .git/ directory"
                 )
@@ -144,9 +142,8 @@ class TestCreateFileEndpoint:
 
         try:
             with patch(
-                "code_indexer.server.routers.files.FileCRUDService"
-            ) as MockService:
-                mock_service = MockService.return_value
+                "code_indexer.server.routers.files.file_crud_service"
+            ) as mock_service:
                 mock_service.create_file.side_effect = FileExistsError(
                     "File already exists"
                 )
@@ -185,9 +182,8 @@ class TestCreateFileEndpoint:
 
         try:
             with patch(
-                "code_indexer.server.routers.files.FileCRUDService"
-            ) as MockService:
-                mock_service = MockService.return_value
+                "code_indexer.server.routers.files.file_crud_service"
+            ) as mock_service:
                 mock_service.create_file.side_effect = FileNotFoundError(
                     "Repository not found"
                 )

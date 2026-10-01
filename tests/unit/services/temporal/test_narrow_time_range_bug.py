@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 
@@ -67,7 +67,7 @@ class TestNarrowTimeRangeBug(unittest.TestCase):
         diff_types = None  # NO filter
         author = None  # NO filter
 
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 

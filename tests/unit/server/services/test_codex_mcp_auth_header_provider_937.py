@@ -341,7 +341,7 @@ class TestMCPSelfRegistrationDirectHeader:
         # there is no admin user. get_or_create_credentials() catches this and
         # returns None, so build_header_from_stored_credentials() must return None.
         mock_cred_manager = MagicMock()
-        mock_cred_manager.generate_credential.side_effect = ValueError(
+        mock_cred_manager.generate_credential_audited.side_effect = ValueError(
             "User not found: admin"
         )
 

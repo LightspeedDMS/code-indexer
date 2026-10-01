@@ -552,13 +552,13 @@ class TestSanitizeFtsQuery:
     def test_sanitize_fts_query_colon_replaced_with_space(self):
         """Colon replaced with space to prevent Tantivy field reference interpretation.
 
-        'com.cdk.recreation:SomeClass' causes Tantivy ValueError 'Field does not exist'
+        'com.example.app:SomeClass' causes Tantivy ValueError 'Field does not exist'
         because Tantivy interprets field:value syntax. Colon must become a space.
         """
         from code_indexer.services.tantivy_index_manager import sanitize_fts_query
 
-        result = sanitize_fts_query("com.cdk.recreation:SomeClass")
-        assert result == "com.cdk.recreation SomeClass"
+        result = sanitize_fts_query("com.example.app:SomeClass")
+        assert result == "com.example.app SomeClass"
 
     def test_sanitize_fts_query_double_colon_replaced(self):
         """Double colon (C++ scope resolution) replaced with spaces.
@@ -613,11 +613,11 @@ class TestSanitizeFtsQuery:
         """Mixed special characters in a realistic code identifier are all sanitized."""
         from code_indexer.services.tantivy_index_manager import sanitize_fts_query
 
-        result = sanitize_fts_query("com.cdk:Class(method)")
+        result = sanitize_fts_query("com.example:Class(method)")
         assert ":" not in result
         assert "(" not in result
         assert ")" not in result
-        assert "com.cdk" in result
+        assert "com.example" in result
 
     def test_sanitize_fts_query_safe_chars_preserved(self):
         """Dot, tilde, asterisk are safe and must NOT be removed.

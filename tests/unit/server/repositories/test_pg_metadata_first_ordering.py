@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, List
 from unittest.mock import MagicMock, patch
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 
@@ -91,7 +91,7 @@ class TestMetadataDeletedBeforePhase2Single:
             manager = _make_manager(tmp)
             metadata = _seed_single_repo(manager, "alice", "single-repo")
 
-            import src.code_indexer.server.repositories.activated_repo_manager as arm
+            import code_indexer.server.repositories.activated_repo_manager as arm
 
             real_phase1 = arm._fd_anchored_phase1_rename
             real_phase2 = arm._safe_purge_trash_entry
@@ -127,7 +127,7 @@ class TestMetadataDeletedBeforePhase2Composite:
             manager = _make_manager(tmp)
             metadata = _seed_composite_repo(manager, "bob", "composite-repo")
 
-            import src.code_indexer.server.repositories.activated_repo_manager as arm
+            import code_indexer.server.repositories.activated_repo_manager as arm
 
             real_phase1 = arm._fd_anchored_phase1_rename
             real_phase2 = arm._safe_purge_trash_entry
@@ -166,7 +166,7 @@ class TestPhase2NeverRunsBeforeMetadataDelete:
             manager = _make_manager(tmp)
             metadata = _seed_single_repo(manager, "alice", "single-repo")
 
-            import src.code_indexer.server.repositories.activated_repo_manager as arm
+            import code_indexer.server.repositories.activated_repo_manager as arm
 
             real_meta = manager._delete_metadata
             real_phase2 = arm._safe_purge_trash_entry

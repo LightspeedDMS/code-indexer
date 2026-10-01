@@ -1,0 +1,164 @@
+{
+  "chunk_chars": 4096,
+  "target_chunks_per_commit": 36,
+  "worst_case_capped_threshold": 180,
+  "total_commits": 20,
+  "total_chunks": 612,
+  "total_head_chunks": 20,
+  "achieved_head_ratio": 0.032679738562091505,
+  "max_acceptable_achieved_head_ratio": 0.1,
+  "chunk_count_min": 18,
+  "chunk_count_max": 36,
+  "per_quarter": {
+    "2024Q1": {
+      "commits": 10,
+      "chunks": 252
+    },
+    "2024Q3": {
+      "commits": 10,
+      "chunks": 360
+    }
+  },
+  "per_commit": [
+    {
+      "hash": "b999f95",
+      "timestamp": 1704124800,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "8034962",
+      "timestamp": 1706889600,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "23156ba",
+      "timestamp": 1709481600,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "eadbf24",
+      "timestamp": 1704384000,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "223231d",
+      "timestamp": 1707148800,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "714225b",
+      "timestamp": 1709740800,
+      "quarter": "2024Q1",
+      "chunk_count": 18,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "6e6e435",
+      "timestamp": 1704643200,
+      "quarter": "2024Q1",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "5d07bba",
+      "timestamp": 1707408000,
+      "quarter": "2024Q1",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "ca8f162",
+      "timestamp": 1710000000,
+      "quarter": "2024Q1",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "8fd6137",
+      "timestamp": 1704902400,
+      "quarter": "2024Q1",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "4b8e54e",
+      "timestamp": 1719846000,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "d65997d",
+      "timestamp": 1722610800,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "eb8c1d8",
+      "timestamp": 1725375600,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "0d71bda",
+      "timestamp": 1720105200,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "1758471",
+      "timestamp": 1722870000,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "1f78012",
+      "timestamp": 1725634800,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "12de1dc",
+      "timestamp": 1720364400,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "4371c61",
+      "timestamp": 1723129200,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "ee83749",
+      "timestamp": 1725894000,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    },
+    {
+      "hash": "185cd11",
+      "timestamp": 1720623600,
+      "quarter": "2024Q3",
+      "chunk_count": 36,
+      "head_chunk_count": 1
+    }
+  ]
+}

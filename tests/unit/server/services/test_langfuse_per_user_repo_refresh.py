@@ -4,7 +4,7 @@ Unit tests for per-user-repo write-lock and refresh bug fix.
 The bug: sync_project() acquires write lock and triggers refresh at the PROJECT level
 using alias "langfuse_{project}" and trigger "langfuse_{project}-global".
 These repo aliases DO NOT EXIST in RefreshScheduler - per-user repos do:
-  - langfuse_Claude_Code_seba_battig_lightspeeddms_com
+  - langfuse_Claude_Code_jane_doe_example_com
   - langfuse_Claude_Code_no_user
   - langfuse_Claude_Code_unknown
 
@@ -70,8 +70,8 @@ class TestSyncProjectTriggersPerUserRefresh:
     ):
         """trigger_refresh_for_repo must be called with per-user repo alias, not project alias.
 
-        When a sync writes traces for user 'seba.battig@lightspeeddms.com',
-        the refresh must target 'langfuse_Claude_Code_seba_battig_lightspeeddms_com-global',
+        When a sync writes traces for user 'jane.doe@example.com',
+        the refresh must target 'langfuse_Claude_Code_jane_doe_example_com-global',
         NOT 'langfuse_Claude_Code-global'.
         """
         service, mock_scheduler = tmp_service
@@ -82,7 +82,7 @@ class TestSyncProjectTriggersPerUserRefresh:
         mock_client.fetch_observations.return_value = []
 
         # One trace from a specific user
-        traces_page1 = [_make_trace("trace-001", "seba.battig@lightspeeddms.com")]
+        traces_page1 = [_make_trace("trace-001", "jane.doe@example.com")]
         mock_client.fetch_traces_page.side_effect = [
             traces_page1,
             [],
@@ -106,7 +106,7 @@ class TestSyncProjectTriggersPerUserRefresh:
             )
 
         # The per-user repo alias MUST be used for refresh
-        expected_alias = "langfuse_Claude_Code_seba.battig_lightspeeddms.com-global"
+        expected_alias = "langfuse_Claude_Code_jane.doe_example.com-global"
         trigger_aliases = [
             mock_scheduler.trigger_refresh_for_repo.call_args_list[i][0][0]
             for i in range(len(mock_scheduler.trigger_refresh_for_repo.call_args_list))

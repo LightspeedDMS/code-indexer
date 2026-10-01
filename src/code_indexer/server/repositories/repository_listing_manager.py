@@ -6,7 +6,11 @@ Handles both golden repositories and user activated repositories.
 """
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.validation.user_validation import RESERVED_ACTIVATED_REPOS_DIR_NAMES
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 import os
 import subprocess
@@ -45,6 +49,17 @@ class RepositoryListingManager:
         Args:
             golden_repo_manager: Golden repository manager instance
             activated_repo_manager: Activated repository manager instance
+
+        Raises:
+            ValueError: If activated_repo_manager is not provided. Bug #1683:
+                this previously fell back to a bare, unwired
+                `ActivatedRepoManager()` -- its constructor hardcodes
+                `Path.home()/".cidx-server"/"data"` and ignores
+                `CIDX_SERVER_DATA_DIR`, silently reading the WRONG per-node
+                store instead of the shared, DI-wired singleton. The sole
+                production construction site (startup/service_init.py)
+                always passes an explicit, properly-wired manager, so this
+                fails loudly rather than silently constructing a wrong one.
         """
         if golden_repo_manager is None:
             from pathlib import Path
@@ -56,8 +71,14 @@ class RepositoryListingManager:
             golden_repo_manager = GoldenRepoManager(
                 data_dir=data_dir, resource_config=resource_config
             )
+        if activated_repo_manager is None:
+            raise ValueError(
+                "activated_repo_manager must be provided; RepositoryListingManager "
+                "must not construct its own -- a bare ActivatedRepoManager() bypasses "
+                "the shared DI wiring (connection pool / storage_mode) (Bug #1683)."
+            )
         self.golden_repo_manager = golden_repo_manager
-        self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager()
+        self.activated_repo_manager = activated_repo_manager
         self.logger = logging.getLogger(__name__)
 
     def list_available_repositories(
@@ -271,7 +292,8 @@ class RepositoryListingManager:
 
             if result.returncode != 0:
                 raise RepositoryListingError(
-                    f"Failed to get branches for repository {alias}: {result.stderr}"
+                    "Failed to get branches for repository "
+                    f"{alias}: {format_completed_process_diagnostic(result)}"
                 )
 
             # Parse branch names from ls-remote output
@@ -287,16 +309,20 @@ class RepositoryListingManager:
         except subprocess.TimeoutExpired:
             logger.warning(
                 format_error_log(
-                    "REPO-MIGRATE-003", "Git ls-remote timed out for repository {alias}"
+                    "REPO-MIGRATE-003",
+                    "Git ls-remote timed out for repository",
+                    alias=alias,
                 ),
                 extra=get_log_extra("REPO-MIGRATE-003"),
             )
             return [golden_repo["default_branch"]]
-        except Exception:
+        except Exception as e:
             logger.warning(
                 format_error_log(
                     "REPO-MIGRATE-004",
-                    "Failed to get branches for repository {alias}: {e}",
+                    "Failed to get branches for repository",
+                    alias=alias,
+                    error=str(e),
                 ),
                 extra=get_log_extra("REPO-MIGRATE-004"),
             )
@@ -362,6 +388,9 @@ class RepositoryListingManager:
             return 0
 
         for username in os.listdir(activated_repos_dir):
+            if username in RESERVED_ACTIVATED_REPOS_DIR_NAMES:
+                # A server-owned entry (e.g. '.trash'), not a username.
+                continue
             user_dir = os.path.join(activated_repos_dir, username)
             if not os.path.isdir(user_dir):
                 continue

@@ -31,7 +31,7 @@ class TestSqliteForeignKeyEnforcement:
         After the fix, the insert should raise sqlite3.IntegrityError.
         """
         # Import here to get fresh module state
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 
@@ -73,7 +73,7 @@ class TestSqliteForeignKeyEnforcement:
         This test should FAIL before the fix because FK is not enforced.
         After the fix, the insert should raise sqlite3.IntegrityError.
         """
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 
@@ -107,7 +107,7 @@ class TestSqliteForeignKeyEnforcement:
 
         This directly tests the fix - the pragma should be enabled.
         """
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 
@@ -140,7 +140,7 @@ class TestSqliteForeignKeyEnforcement:
         Note: The current schema doesn't define ON DELETE CASCADE, so this
         test verifies that the delete is BLOCKED when FK is enforced.
         """
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 
@@ -174,7 +174,7 @@ class TestSqliteForeignKeyEnforcement:
         Since PRAGMA foreign_keys must be set per-connection, each new
         connection should have it enabled.
         """
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 
@@ -206,7 +206,7 @@ class TestSqliteForeignKeyEnforcement:
 
         Without an index, these queries perform full table scans.
         """
-        from src.code_indexer.server.services.group_access_manager import (
+        from code_indexer.server.services.group_access_manager import (
             GroupAccessManager,
         )
 

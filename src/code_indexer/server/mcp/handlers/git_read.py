@@ -28,8 +28,15 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
+from code_indexer.server.services.git_argv_safety import GitArgumentValidationError
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
@@ -49,6 +56,25 @@ from ._utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _argument_rejected(
+    tool: str, repository_alias: Any, exc: GitArgumentValidationError
+) -> Dict[str, Any]:
+    """Log a rejected git argument as the REST routes do and return the error.
+
+    A value refused by git argv validation is a client input error: it is
+    logged at WARNING with the validation message and no traceback.
+    """
+    logger.warning(
+        "Invalid %s request for %s: %s",
+        tool,
+        repository_alias,
+        exc,
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return _mcp_response({"success": False, "error": str(exc)})  # type: ignore[no-any-return]
+
 
 # ---------------------------------------------------------------------------
 # Forward references to helpers that remain in _legacy.py (shared with other
@@ -261,7 +287,6 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-058",
                     f"Omni-git-log failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -423,6 +448,8 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_log", repository_alias, e)
     except Exception as e:
         logger.exception(
             f"Error in git_log: {e}", extra={"correlation_id": get_correlation_id()}
@@ -522,6 +549,8 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_show_commit", repository_alias, e)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
@@ -600,6 +629,8 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
             }
         )
 
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_file_at_revision", repository_alias, e)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
@@ -756,6 +787,8 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         payload = _build_git_blame_response(result, lines, len(lines), _handler_utils)
         return _mcp_response(payload)
 
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_blame", repository_alias, e)
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})
     except Exception as e:
@@ -821,7 +854,6 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 format_error_log(
                     "MCP-GENERAL-059",
                     f"Omni-git-search failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -876,6 +908,10 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_commits tool - search commit messages."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from . import _utils
 
     leg = _get_legacy()
@@ -995,6 +1031,10 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from . import _utils
 
     leg = _get_legacy()
@@ -1192,7 +1232,6 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-063",
                 f"git_status failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1256,7 +1295,6 @@ def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-069",
                 f"git_fetch failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1325,7 +1363,6 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-074",
                 f"git_branch_list failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1393,7 +1430,6 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-217",
                 f"git_conflict_status failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1504,7 +1540,6 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-078",
                 f"git_diff failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1518,6 +1553,8 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     except FileNotFoundError as e:
         return _mcp_response({"success": False, "error": str(e)})
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_diff", repository_alias, e)
     except Exception as e:
         logger.exception(
             f"Unexpected error in git_diff: {e}",
@@ -1624,7 +1661,6 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-079",
                 f"git_log failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1638,6 +1674,8 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     except FileNotFoundError as e:
         return _mcp_response({"success": False, "error": str(e)})
+    except GitArgumentValidationError as e:
+        return _argument_rejected("git_log", repository_alias, e)
     except Exception as e:
         logger.exception(
             f"Unexpected error in git_log: {e}",

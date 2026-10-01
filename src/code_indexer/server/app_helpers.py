@@ -23,7 +23,6 @@ from typing import Any, Callable, Dict, List, Optional, cast
 from .models.repos import ComponentRepoInfo, CompositeRepositoryDetails
 from .models.activated_repository import ActivatedRepository
 from .logging_utils import format_error_log
-from .middleware.correlation import get_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +207,6 @@ def _apply_rest_semantic_truncation(
             format_error_log(
                 "APP-GENERAL-001",
                 f"Failed to batch-store code_snippets in REST API: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         for idx in large_indices:
@@ -276,7 +274,6 @@ def _apply_rest_fts_truncation(
                 format_error_log(
                     "APP-GENERAL-002",
                     f"Failed to batch-store FTS snippets in REST API: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             for idx in snippet_large_indices:
@@ -315,7 +312,6 @@ def _apply_rest_fts_truncation(
                 format_error_log(
                     "APP-GENERAL-003",
                     f"Failed to batch-store FTS match_texts in REST API: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             for idx in match_large_indices:

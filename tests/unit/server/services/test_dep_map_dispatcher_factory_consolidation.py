@@ -80,6 +80,7 @@ def test_factory_forwards_soft_timeout_to_claude_invoker():
     MockClaudeInvoker.assert_called_once_with(
         analysis_model="opus",
         soft_timeout_seconds=120,
+        log_db_path=None,
     )
 
 
@@ -109,6 +110,7 @@ def test_factory_none_soft_timeout_omits_kwarg():
 
     MockClaudeInvoker.assert_called_once_with(
         analysis_model="sonnet",
+        log_db_path=None,
     )
 
 

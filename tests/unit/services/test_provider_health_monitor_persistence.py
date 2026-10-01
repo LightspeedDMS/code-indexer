@@ -9,21 +9,35 @@ Flock behavioral test design:
   `m.sinbin()`. Construction only reads the file (no lock taken); so once
   `about_to_sinbin` is set, the very next file operation is the LOCK_EX
   acquire inside `_persist_to_file`. This gives the main process a
-  deterministic signal to release the child's lock without any sleeps.
+  deterministic signal for WHEN to release the child's lock -- no sleep is
+  needed for THAT handshake. TestFlockUsed additionally proves the writer
+  is still genuinely blocked right before release using TWO zero-sleep
+  signals (Bug #1823 H4 fix, replacing a prior fixed-duration
+  time.sleep()+is_set() timing guess that only proved "not finished yet"):
+  (1) an fd-verified `fcntl.flock(LOCK_EX)` reachability check confirming
+  the writer's OWN lock request targets the exact expected sidecar lock
+  file, and (2) an independent non-blocking flock probe against that same
+  file, which must fail with EACCES/EAGAIN while the child still holds
+  it -- an OS-enforced advisory-lock guarantee, not a timing assumption.
+  See that class's own docstring for the full mechanism.
 """
 
+import errno
 import fcntl
 import json
 import logging
 import multiprocessing
 import multiprocessing.synchronize
+import os
 import threading
 import time
+import unittest.mock
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+import code_indexer.utils.file_locking as file_locking_module
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 
@@ -52,10 +66,29 @@ def _lock_holder(
     ready_event: multiprocessing.synchronize.Event,
     release_event: multiprocessing.synchronize.Event,
 ) -> None:
-    """Child process: acquire LOCK_EX on path, signal ready, wait for release."""
+    """Child process: acquire LOCK_EX on the SIDECAR lock file
+    (``path.name + ".lock"``), signal ready, wait for release.
+
+    Bug #1823 root-cause fix: ``ProviderHealthMonitor._persist_to_file()``
+    (the method this test exists to verify) locks a stable sidecar file
+    via ``path.parent / (path.name + ".lock")`` -- NEVER the state file
+    (``path``) itself, specifically so the locked inode is never swapped
+    out from under a held lock by ``os.replace()``'s atomic rename. The
+    state file is only ever locked (LOCK_SH, non-contending) by
+    ``_load_from_file()`` during construction. Locking ``path`` here (the
+    original, pre-#1823 version of this helper) made construction --
+    NOT the write path this test claims to verify -- the accidental
+    synchronization point, costing a real ~10s wall-clock wait for the
+    child's own full timeout before the lock was ever released (confirmed
+    via instrumented reproduction, Bug #1823 investigation). Locking the
+    sidecar instead makes ``m.sinbin()`` (which calls ``_persist_to_file``)
+    genuinely block on this held lock, matching the test's documented
+    intent, and removes the accidental construction-time stall entirely.
+    """
     path = Path(path_str)
     path.write_text("{}", encoding="utf-8")
-    fd = open(path, "r+")
+    lock_path = path.parent / (path.name + ".lock")
+    fd = open(lock_path, "a")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         ready_event.set()
@@ -255,13 +288,37 @@ class TestCorruptedPersistenceFile:
 class TestFlockUsed:
     """Verify flock semantics via real lock-contention with deterministic synchronization.
 
+    Bug #1823 root-cause fix: `_lock_holder` now locks the SIDECAR
+    `.lock` file (matching `_persist_to_file`'s actual `lock_path`)
+    instead of the state file itself, which only the non-contending
+    `LOCK_SH` read path touches. The pre-fix version made monitor
+    CONSTRUCTION -- not the write path this test claims to verify -- the
+    accidental synchronization point, costing a real ~10s wall-clock wait
+    for the child's own timeout on every run.
+
     Synchronization design:
       - The writer thread sets `about_to_sinbin` immediately before calling
         `m.sinbin()`. Construction only reads the already-present `{}` file
         (no LOCK_EX taken in __init__). So once `about_to_sinbin` fires, the
         next file I/O is the LOCK_EX acquisition inside `_persist_to_file()`.
-      - This gives the main thread a deterministic signal to release the child
-        lock without any sleeps.
+      - Bug #1823 H4: two ZERO-SLEEP signals, together proving the writer
+        thread is STILL genuinely blocked right before release, replacing
+        a prior fixed-duration time.sleep()+is_set() timing guess that
+        only proved "not finished yet" (confirmed vacuous via a
+        monkeypatched no-op flock experiment during the original Bug
+        #1823 investigation):
+          1. `entering_flock` -- the real (never-faked) `fcntl.flock`
+             call is instrumented to resolve its `fd` argument via
+             `/proc/self/fd` and confirm it targets the EXACT expected
+             sidecar lock file, proving reachability of the correct
+             resource (not just "some LOCK_EX call happened somewhere" --
+             a "wrong resource" break was confirmed to slip past a
+             fd-agnostic version of this check).
+          2. An independent non-blocking `fcntl.flock(LOCK_EX | LOCK_NB)`
+             probe against that same file from the main thread, which
+             MUST fail with EACCES/EAGAIN while the child still holds the
+             lock -- an OS-enforced advisory-lock guarantee, not a timing
+             assumption.
     """
 
     def test_monitor_write_completes_after_lock_released(self, tmp_path: Path) -> None:
@@ -308,22 +365,107 @@ class TestFlockUsed:
                     write_error.append(exc)
                     write_done.set()
 
-            t = threading.Thread(target=do_sinbin, daemon=True)
-            t.start()
+            # Bug #1823 (H4): entering_flock proves the writer thread
+            # genuinely REACHED and invoked the real (never-faked)
+            # fcntl.flock(LOCK_EX) call AGAINST THE EXACT EXPECTED
+            # sidecar lock file -- not merely that some LOCK_EX call
+            # happened somewhere. Resolving `fd` via
+            # /proc/self/fd (Linux-only, matches this project's
+            # environment) closes a discrimination gap found while
+            # building this fix: a broken write path that takes a real
+            # LOCK_EX on the WRONG file (never contending with the
+            # child's held lock) would fire a fd-agnostic check but
+            # complete near-instantly regardless -- fd verification
+            # makes entering_flock itself the reachability proof for the
+            # CORRECT resource, and a future regression that drops the
+            # acquisition entirely, OR targets the wrong file, makes
+            # entering_flock never fire, failing the `wait(timeout=5)`
+            # below loudly instead of passing vacuously.
+            lock_path = path.parent / (path.name + ".lock")
+            expected_lock_realpath = os.path.realpath(str(lock_path))
+            entering_flock = threading.Event()
+            real_flock = file_locking_module.fcntl.flock
 
-            # Wait deterministically for writer to reach the sinbin call boundary.
-            assert about_to_sinbin.wait(timeout=5), (
-                "Writer thread did not signal about_to_sinbin within 5s"
-            )
+            def _instrumented_flock(fd: int, operation: int) -> None:
+                if operation == fcntl.LOCK_EX:
+                    try:
+                        resolved = os.path.realpath(os.readlink(f"/proc/self/fd/{fd}"))
+                    except OSError:
+                        resolved = None
+                    if resolved == expected_lock_realpath:
+                        entering_flock.set()
+                real_flock(fd, operation)
 
-            # Writer is at (or just past) the sinbin call — release child LOCK_EX.
-            release_event.set()
+            with unittest.mock.patch.object(
+                file_locking_module.fcntl,
+                "flock",
+                side_effect=_instrumented_flock,
+            ):
+                t = threading.Thread(target=do_sinbin, daemon=True)
+                t.start()
 
-            completed = write_done.wait(timeout=5)
-            assert completed, (
-                "Monitor write did not complete within 5s after lock release"
-            )
-            assert not write_error, f"Monitor write raised: {write_error[0]}"
+                # Wait deterministically for writer to reach the sinbin call boundary.
+                assert about_to_sinbin.wait(timeout=5), (
+                    "Writer thread did not signal about_to_sinbin within 5s"
+                )
+                assert entering_flock.wait(timeout=5), (
+                    "Writer thread never reached a real fcntl.flock(LOCK_EX) "
+                    "call against the expected sidecar lock file within 5s "
+                    "-- the flock acquisition is missing (or targets the "
+                    "wrong resource) in the write path"
+                )
+
+                # Bug #1823 (H4): replaces the prior time.sleep()+is_set()
+                # timing guess -- which only proved "not finished yet" and
+                # could pass vacuously under gate load -- with a
+                # ZERO-SLEEP, deterministic check: an independent
+                # non-blocking flock probe against the SAME sidecar lock
+                # file the write path locks. The child process still
+                # holds LOCK_EX (release_event has not been set yet), so
+                # this probe MUST fail with EACCES/EAGAIN -- an
+                # OS-enforced advisory-lock guarantee, not a timing
+                # assumption. Combined with entering_flock above (proving
+                # the writer's IDENTICAL LOCK_EX request against the
+                # IDENTICAL file has already been issued), the probe
+                # failing logically guarantees the writer's own request
+                # cannot have succeeded either, making
+                # `not write_done.is_set()` a necessary consequence
+                # rather than a scheduling guess.
+                with open(lock_path, "a", encoding="utf-8") as probe_fh:
+                    try:
+                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                            raise
+                        lock_still_exclusively_held = True
+                    else:
+                        fcntl.flock(probe_fh.fileno(), fcntl.LOCK_UN)
+                        lock_still_exclusively_held = False
+
+                assert lock_still_exclusively_held, (
+                    "Non-blocking probe acquired the sidecar lock before "
+                    "the child was released -- the child process released "
+                    "its LOCK_EX earlier than this test expects "
+                    "(test-setup invariant violated, not evidence about "
+                    "the write path)"
+                )
+                assert not write_done.is_set(), (
+                    "Monitor write completed while the sidecar lock file "
+                    "was still exclusively held (confirmed via an "
+                    "independent non-blocking flock probe, AND the writer "
+                    "had already reached its own flock(LOCK_EX) request) "
+                    "-- _persist_to_file() is not genuinely blocking on "
+                    "the sidecar lock file (flock regression)"
+                )
+
+                # Writer is genuinely still blocked on the held lock — release child LOCK_EX.
+                release_event.set()
+
+                completed = write_done.wait(timeout=5)
+                assert completed, (
+                    "Monitor write did not complete within 5s after lock release"
+                )
+                assert not write_error, f"Monitor write raised: {write_error[0]}"
 
             data = json.loads(path.read_text(encoding="utf-8"))
             assert "voyage-reranker" in data, (

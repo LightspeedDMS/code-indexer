@@ -73,7 +73,6 @@ class DeploymentLock:
                         format_error_log(
                             "GIT-GENERAL-001",
                             f"Invalid PID in lock file: {pid_str}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     self.lock_file.unlink()
@@ -100,7 +99,6 @@ class DeploymentLock:
                     format_error_log(
                         "GIT-GENERAL-002",
                         f"Error reading lock file: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 raise
@@ -124,7 +122,6 @@ class DeploymentLock:
                 format_error_log(
                     "GIT-GENERAL-003",
                     f"Cannot create lock file (proceeding without lock): {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return True
@@ -149,7 +146,6 @@ class DeploymentLock:
                 format_error_log(
                     "GIT-GENERAL-004",
                     f"Error removing lock file: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 

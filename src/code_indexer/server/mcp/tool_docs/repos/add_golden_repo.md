@@ -2,8 +2,8 @@
 name: add_golden_repo
 category: repos
 required_permission: manage_golden_repos
-tl_dr: Register a new repository for indexing (ASYNC operation).
-slim_description: "Register a repository for indexing by URL and alias with optional temporal history."
+tl_dr: '[ADMIN ONLY] Register a new repository for indexing (ASYNC operation). Requires MCP elevation when enforcement is on.'
+slim_description: "[ADMIN ONLY] Register a repository for indexing by URL and alias with optional temporal history. Requires MCP elevation (TOTP step-up) when enforcement is on."
 inputSchema:
   type: object
   properties:
@@ -69,3 +69,9 @@ WORKFLOW: (1) Call add_golden_repo(url, alias), (2) Poll get_job_statistics() un
 NAMING: Use descriptive aliases; '-global' suffix added automatically. NAMING WARNING: Avoid aliases that already end in '-global' as this creates confusing double-suffixed names like 'myrepo-global-global'.
 
 TEMPORAL: Set enable_temporal=true to index git history for time-based searches. Indexing time ranges from seconds (small repos) to hours (very large repos). Monitor progress with get_job_statistics.
+
+ELEVATION: Matches the REST (POST /api/admin/golden-repos) and Web twins: requires the admin role and, when elevation enforcement is on, an active elevation window (call `elevate_session` first; MCP-credential and OAuth callers are elevated automatically).
+
+ERRORS:
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)

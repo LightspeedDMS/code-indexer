@@ -219,3 +219,62 @@ def test_push_raises_on_bad_remote(tmp_path):
     bad_remote = str(tmp_path / "nonexistent" / "repo.git")
     with pytest.raises(RuntimeError, match="push rejected by remote"):
         CidxMetaBackupBootstrap().bootstrap(str(repo_path), bad_remote)
+
+
+def test_git_helper_defaults_git_editor_env(tmp_path, monkeypatch):
+    """Bug #1500 (defense-in-depth): _git() must default GIT_EDITOR=true so
+    any future rebase/merge step added to bootstrap's git usage cannot block
+    on an interactive editor in the non-interactive systemd job context --
+    mirroring the fix applied to CidxMetaBackupSync._git() for the exact
+    "Terminal is dumb, but EDITOR unset" failure hit by cidx-meta-global's
+    scheduled refresh sync path.
+    """
+    import subprocess
+    from unittest.mock import patch
+
+    from code_indexer.server.services.cidx_meta_backup.bootstrap import (
+        CidxMetaBackupBootstrap,
+    )
+
+    monkeypatch.delenv("GIT_EDITOR", raising=False)
+
+    captured_env: dict[str, str] = {}
+
+    def _fake_run(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    with patch(
+        "code_indexer.server.services.cidx_meta_backup.bootstrap.subprocess.run",
+        side_effect=_fake_run,
+    ):
+        CidxMetaBackupBootstrap()._git(str(tmp_path), "status", check=False)
+
+    assert captured_env["GIT_EDITOR"] == "true"
+
+
+def test_git_helper_preserves_operator_configured_git_editor(tmp_path, monkeypatch):
+    """setdefault semantics: an operator-configured GIT_EDITOR must never be
+    silently overridden by the Bug #1500 default."""
+    import subprocess
+    from unittest.mock import patch
+
+    from code_indexer.server.services.cidx_meta_backup.bootstrap import (
+        CidxMetaBackupBootstrap,
+    )
+
+    monkeypatch.setenv("GIT_EDITOR", "nano")
+
+    captured_env: dict[str, str] = {}
+
+    def _fake_run(*args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    with patch(
+        "code_indexer.server.services.cidx_meta_backup.bootstrap.subprocess.run",
+        side_effect=_fake_run,
+    ):
+        CidxMetaBackupBootstrap()._git(str(tmp_path), "status", check=False)
+
+    assert captured_env["GIT_EDITOR"] == "nano"

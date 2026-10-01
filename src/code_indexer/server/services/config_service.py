@@ -6,6 +6,7 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.config import write_json_atomic
 
 import copy
 import json
@@ -15,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -25,7 +27,6 @@ from typing import (
     runtime_checkable,
 )
 
-from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
@@ -33,6 +34,7 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
+from ..utils.host_validation import normalize_server_host
 from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
@@ -42,6 +44,28 @@ from ..auto_update.deployment_executor import (
 from .db_outage_throttle import DbOutageThrottle
 
 logger = logging.getLogger(__name__)
+
+
+class BootstrapFileNotWritten(RuntimeError):
+    """The runtime configuration was committed; config.json was not rewritten.
+
+    The change IS published (the DB row and the live config hold it); only
+    the bootstrap file write failed.  The original error is ``__cause__``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "runtime configuration saved, but the bootstrap config file was not written"
+        )
+
+
+@dataclass
+class _ChangeAttempt:
+    """Pre-image and candidate of one configuration change (for its audit row)."""
+
+    before: Optional[ServerConfig] = None
+    after: Optional[ServerConfig] = None
+    published: bool = False
 
 
 @dataclass
@@ -82,6 +106,90 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
         "tick_interval_minutes": sweep.tick_interval_minutes,
         "operating_hours_start_utc": sweep.operating_hours_start_utc,
         "operating_hours_end_utc": sweep.operating_hours_end_utc,
+    }
+
+
+def _indexing_watchdog_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return indexing_watchdog settings dict from ServerConfig (Issue #1530)."""
+    watchdog = config.indexing_watchdog_config
+    assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "stale_activity_timeout_seconds": watchdog.stale_activity_timeout_seconds,
+    }
+
+
+def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return fleet_migration settings dict from ServerConfig (Story
+    #1458, Epic #1454, round-6 item #10).
+
+    Surfaces both fields of FleetMigrationConfig for the Web UI Config
+    screen, mirroring Story #1397's HNSWOrphanRepairSweepConfig pattern
+    exactly. `enabled` defaults to False -- this scheduler deletes real
+    on-disk chunk data, so an explicit operator opt-in is required.
+    """
+    fm = config.fleet_migration_config
+    assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": fm.enabled,
+        "tick_interval_minutes": fm.tick_interval_minutes,
+        "canary_gate_enabled": fm.canary_gate_enabled,
+    }
+
+
+def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_legacy_migration settings dict from ServerConfig
+    (Issue #1548).
+
+    Deliberately its own config section -- see
+    TemporalLegacyMigrationConfig's docstring for why it must never be
+    folded back into the unrelated fleet_migration section.
+    """
+    tlm = config.temporal_legacy_migration_config
+    assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "relocation_enabled": tlm.relocation_enabled,
+        "cleanup_authorized": tlm.cleanup_authorized,
+    }
+
+
+def _content_limits_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return content_limits settings dict from ServerConfig (Story #32,
+    Issue #1750).
+
+    Surfaces all 6 fields of ContentLimitsConfig for the Web UI Config
+    screen. Was previously defined nowhere and never wired into
+    get_all_settings(), so the admin Config page's Content Limits section
+    always displayed compiled-in defaults regardless of the real persisted
+    state (routes.py's _get_current_config() silently fell back to
+    asdict(ContentLimitsConfig()) on every read).
+    """
+    cl = config.content_limits_config
+    assert cl is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "chars_per_token": cl.chars_per_token,
+        "file_content_max_tokens": cl.file_content_max_tokens,
+        "git_diff_max_tokens": cl.git_diff_max_tokens,
+        "git_log_max_tokens": cl.git_log_max_tokens,
+        "search_result_max_tokens": cl.search_result_max_tokens,
+        "cache_ttl_seconds": cl.cache_ttl_seconds,
+    }
+
+
+def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return alias_lock settings dict from ServerConfig (Issue #1546
+    Phase 2).
+
+    Surfaces AliasLockConfig's single field for the Web UI Config screen,
+    mirroring `_fleet_migration_settings`'s pattern. `db_backed_enabled`
+    defaults to True (Issue #1546 Phase 3 -- proven correct on a live
+    3-node staging cluster). The flag remains available as an emergency
+    rollback to the old file-based WriteLockManager mechanism, e.g. for a
+    fleet with nodes still mid-rollout to the new code.
+    """
+    alc = config.alias_lock_config
+    assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "db_backed_enabled": alc.db_backed_enabled,
     }
 
 
@@ -244,7 +352,7 @@ class ConfigService:
                            Defaults to ~/.cidx-server
             config_manager: Optional pre-built ServerConfigManager instance.
                           When provided, server_dir_path is ignored for config
-                          loading (but still used for ClaudeDelegationManager).
+                          loading.
                           Primarily useful for unit tests.
         """
         if config_manager is not None:
@@ -252,7 +360,6 @@ class ConfigService:
         else:
             self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
-        self._delegation_manager = ClaudeDelegationManager(server_dir_path)
         # Story #578: Unified DB for runtime config (SQLite or PG)
         self._pool: Any = None  # PG pool (set via set_connection_pool for cluster)
         self._sqlite_db_path: Optional[str] = None  # SQLite path (solo mode)
@@ -301,9 +408,21 @@ class ConfigService:
             self._strip_config_file_to_bootstrap()
             # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config defaults
             # to SQLite on first boot after upgrade (key absent from legacy row).
+            #
+            # Issue #1546 Phase 3 promotion follow-up: this MUST save the
+            # CURRENT merged config (self.get_config(), which already
+            # reflects any in-place fix _merge_runtime_config just made and
+            # persisted -- e.g. the alias-lock promotion below), never the
+            # STALE pre-merge `runtime` dict captured above. Re-saving that
+            # stale dict here would silently clobber a write
+            # _merge_runtime_config already made to the DB row moments
+            # earlier.
             if "lifecycle_analysis_config" not in runtime:
-                runtime["lifecycle_analysis_config"] = asdict(LifecycleAnalysisConfig())
-                self._save_runtime_to_sqlite(runtime)
+                current_runtime_dict = self._extract_runtime_dict(self.get_config())
+                current_runtime_dict["lifecycle_analysis_config"] = asdict(
+                    LifecycleAnalysisConfig()
+                )
+                self._save_runtime_to_sqlite(current_runtime_dict)
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
@@ -384,10 +503,6 @@ class ConfigService:
             self._reload_thread.join(timeout=5)
             logger.info("ConfigService: config reload thread stopped")
 
-    def get_delegation_manager(self) -> ClaudeDelegationManager:
-        """Get the Claude Delegation manager for config operations."""
-        return self._delegation_manager
-
     def load_config(self) -> ServerConfig:
         """
         Load configuration from file + DB merge, or file-only if no DB yet.
@@ -396,42 +511,73 @@ class ConfigService:
         from config.json and merges runtime from DB. Otherwise reads full
         config from file (pre-migration or early bootstrap).
 
+        Bug #1801: holds `_config_update_lock` (same lock as
+        update_settings_atomic(), reentrant-safe) for the whole
+        read-merge-publish sequence so a concurrent get_config() caller
+        (e.g. a leaked SystemMetricsCollector thread) can never observe
+        self._config is None mid-update and clobber a just-applied write
+        back to bootstrap defaults.
+
         Returns:
             ServerConfig object with current settings
         """
-        config = self.config_manager.load_config()
-        if config is None:
-            config = self.config_manager.create_default_config()
-            self.config_manager.save_config(config)
+        with self._config_update_lock:
+            config = self.config_manager.load_config()
+            if config is None:
+                config = self.config_manager.create_default_config()
+                self.config_manager.save_config(config)
 
-        # If runtime DB is available, merge runtime from DB on top of the
-        # bootstrap config.  Pass bootstrap config as base_config so that
-        # self._config is NOT published until after the full merge completes
-        # (Bug #998: prevents concurrent get_config() from seeing transient
-        # bootstrap defaults during the merge window).
-        if self._pool is not None:
-            self._load_runtime_from_pg(base_config=config)
-        elif self._sqlite_db_path:
-            runtime = self._load_runtime_from_sqlite()
-            if runtime:
-                self._merge_runtime_config(runtime, base_config=config)
+            # If runtime DB is available, merge runtime from DB on top of
+            # the bootstrap config.  Pass bootstrap config as base_config
+            # so that self._config is NOT published until after the full
+            # merge completes (Bug #998: prevents concurrent get_config()
+            # from seeing transient bootstrap defaults during the merge
+            # window).
+            if self._pool is not None:
+                self._load_runtime_from_pg(base_config=config)
+            elif self._sqlite_db_path:
+                runtime = self._load_runtime_from_sqlite()
+                if runtime:
+                    self._merge_runtime_config(runtime, base_config=config)
+                else:
+                    self._config = config
             else:
                 self._config = config
-        else:
-            self._config = config
 
-        assert self._config is not None  # All branches above set self._config
-        return self._config
+            assert self._config is not None  # All branches above set self._config
+            return self._config
 
     def get_config(self) -> ServerConfig:
         """
         Get current configuration, loading if necessary.
 
+        Bug #1889: double-checked locking. The cheap `self._config is None`
+        check runs lock-free on the hot (already-loaded) path, but the slow
+        (first-load) path re-checks INSIDE `_config_update_lock` before
+        calling load_config(). Without the inner check, two threads racing
+        this method on a freshly-constructed instance (e.g. a leaked
+        SystemMetricsCollector background thread calling get_config_service()
+        concurrently with a test's own first access) could both observe
+        `self._config is None` and both call load_config() -- which (Bug
+        #1801) unconditionally re-parses config.json and republishes a
+        BRAND NEW ServerConfig object on every call. The second, redundant
+        call silently detaches self._config from whichever object an
+        earlier caller already captured and is about to mutate, discarding
+        that caller's in-memory changes. The inner check makes the second
+        thread observe the first thread's already-published config and
+        skip load_config() entirely -- but that protection is scoped to
+        this method's own lazy-init race. It does NOT protect any other
+        direct load_config() caller: an explicit load_config() call made
+        from elsewhere still always parses config.json and publishes a
+        brand new ServerConfig object, exactly as before.
+
         Returns:
             ServerConfig object
         """
         if self._config is None:
-            self.load_config()
+            with self._config_update_lock:
+                if self._config is None:
+                    self.load_config()
         assert self._config is not None  # load_config() always sets self._config
         return self._config
 
@@ -635,9 +781,11 @@ class ConfigService:
                 "service_name": config.telemetry_config.service_name,
                 "export_traces": config.telemetry_config.export_traces,
                 "export_metrics": config.telemetry_config.export_metrics,
+                "export_logs": config.telemetry_config.export_logs,
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
                 "deployment_environment": config.telemetry_config.deployment_environment,
+                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
@@ -692,8 +840,6 @@ class ConfigService:
                     else 5
                 ),
             },
-            # Claude Delegation configuration (Story #721)
-            "claude_delegation": self._get_delegation_settings(),
             # Story #3 - Configuration Consolidation: Migrated settings
             "search_limits": {
                 "max_result_size_mb": config.search_limits_config.max_result_size_mb,
@@ -751,6 +897,8 @@ class ConfigService:
             "web_security": {
                 # Story #683 AC2: csrf_max_age_seconds removed (dead field).
                 "web_session_timeout_seconds": config.web_security_config.web_session_timeout_seconds,
+                # Hotfix: gate for unauthenticated POST /auth/register.
+                "self_registration_enabled": config.web_security_config.self_registration_enabled,
             },
             # Story #683 AC3: "auth" section removed (AuthConfig deleted entirely).
             # Story #25/29 - Multi-search limits configuration (includes omni settings)
@@ -793,6 +941,14 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            # Issue #1530 - Indexing-subprocess activity watchdog configuration
+            "indexing_watchdog": _indexing_watchdog_settings(config),
+            "fleet_migration": _fleet_migration_settings(config),
+            # Issue #1548 / Issue #1749: Legacy temporal shard relocation
+            # configuration -- was defined but never wired into this dict.
+            "temporal_legacy_migration": _temporal_legacy_migration_settings(config),
+            "alias_lock": _alias_lock_settings(config),
+            "content_limits": _content_limits_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -957,26 +1113,6 @@ class ConfigService:
 
         return settings
 
-    def _get_delegation_settings(self) -> Dict[str, Any]:
-        """Get Claude Delegation settings for display (credential masked)."""
-        delegation_config = self._delegation_manager.load_config()
-        if delegation_config is None:
-            delegation_config = ClaudeDelegationConfig()
-
-        return {
-            "function_repo_alias": delegation_config.function_repo_alias,
-            "claude_server_url": delegation_config.claude_server_url,
-            "claude_server_username": delegation_config.claude_server_username,
-            "claude_server_credential_type": delegation_config.claude_server_credential_type,
-            "is_configured": delegation_config.is_configured,
-            "cidx_callback_url": delegation_config.cidx_callback_url,  # Story #720
-            "skip_ssl_verify": delegation_config.skip_ssl_verify,  # Allow self-signed certs for E2E
-            "guardrails_enabled": delegation_config.guardrails_enabled,  # Story #457
-            "delegation_guardrails_repo": delegation_config.delegation_guardrails_repo,  # Story #457
-            "delegation_default_engine": delegation_config.delegation_default_engine,  # Story #459
-            "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
-        }
-
     def _apply_setting(
         self, config: ServerConfig, category: str, key: str, value: Any
     ) -> bool:
@@ -988,13 +1124,11 @@ class ConfigService:
         to a CANDIDATE copy of the config, never the live object directly.
         Every branch below is unchanged from the pre-#1400 dispatch.
 
+        Every category, "indexing" included, is applied to `config` only;
+        publishing is the caller's job (_change_config).
+
         Returns:
-            True if `config` was mutated and should participate in the
-            standard validate-then-publish flow. False for the "indexing"
-            category, a pre-existing special case that persists itself
-            internally (_update_indexing_setting) against the live config
-            and must not be re-validated/re-published by the generic
-            atomic flow.
+            True (kept for call-site compatibility).
 
         Raises:
             ValueError: If category or key is invalid, or value fails
@@ -1061,6 +1195,18 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Issue #1530 - Indexing-subprocess activity watchdog configuration
+        elif category == "indexing_watchdog":
+            self._update_indexing_watchdog_setting(config, key, value)
+        # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
+        elif category == "fleet_migration":
+            self._update_fleet_migration_setting(config, key, value)
+        # Issue #1548 - Legacy temporal shard relocation Web UI configuration
+        elif category == "temporal_legacy_migration":
+            self._update_temporal_legacy_migration_setting(config, key, value)
+        # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+        elif category == "alias_lock":
+            self._update_alias_lock_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -1069,10 +1215,7 @@ class ConfigService:
             self._update_xray_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
-            self._update_indexing_setting(key, value)
-            # _update_indexing_setting saves config internally, so the
-            # caller must skip the normal validate-then-publish flow.
-            return False
+            self._update_indexing_setting(config, key, value)
         # Story #323 - Wiki metadata fields configuration
         elif category == "wiki":
             self._update_wiki_setting(config, key, value)
@@ -1107,22 +1250,74 @@ class ConfigService:
         # Story #1404 - Global temporal indexing floor date configuration
         elif category == "temporal_indexing":
             self._update_temporal_indexing_setting(config, key, value)
+        elif category == "content_limits":
+            self._update_content_limits_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
         return True
 
     def _log_applied_updates(self, updates: Sequence[Tuple[str, str, Any]]) -> None:
-        """Log every non-"indexing" update after a successful atomic publish."""
-        for category, key, value in updates:
+        """Log every non-"indexing" update after a successful atomic publish.
+
+        Names only: a value may be a secret (client secret, provider key,
+        project key), so it never reaches the operational log.
+        """
+        for category, key, _value in updates:
             if category == "indexing":
                 continue
             logger.info(
-                "Updated setting %s.%s to %s",
+                "Updated setting %s.%s",
                 category,
                 key,
-                value,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _change_config(
+        self,
+        mutate: Callable[[ServerConfig], Optional[ServerConfig]],
+        before_publish: Optional[Callable[[ServerConfig], None]],
+        attempt: "_ChangeAttempt",
+    ) -> None:
+        """The ONE publish path for a configuration change.
+
+        Under the update lock: deep-copy the live config into a CANDIDATE,
+        let *mutate* change it (or return a replacement), validate the
+        candidate, run *before_publish* against the candidate, then publish
+        it.  Anything raising before the publish leaves the live config
+        untouched; a failed publish restores the previous live config.  Once
+        the runtime row is committed the change is published, even if the
+        bootstrap file write then fails (:class:`BootstrapFileNotWritten`).
+        *attempt* receives the pre-image and the candidate (for auditing).
+        """
+        with self._config_update_lock:
+            live = self.get_config()
+            candidate = copy.deepcopy(live)
+            attempt.before, attempt.after = live, candidate
+            replacement = mutate(candidate)
+            if replacement is not None:
+                candidate = replacement
+                attempt.after = candidate
+            self.config_manager.validate_config(candidate, previous_host=live.host)
+            if before_publish is not None:
+                before_publish(candidate)
+            try:
+                self.save_config(candidate)
+            except BootstrapFileNotWritten:
+                attempt.published = True
+                raise
+            except Exception:
+                self._config = live
+                raise
+            attempt.published = True
+
+    def _updates_mutator(
+        self, updates: Sequence[Tuple[str, str, Any]]
+    ) -> Callable[[ServerConfig], None]:
+        def _mutate(candidate: ServerConfig) -> None:
+            for category, key, value in updates:
+                self._apply_setting(candidate, category, key, value)
+
+        return _mutate
 
     def update_settings_atomic(
         self, updates: Sequence[Tuple[str, str, Any]]
@@ -1132,31 +1327,98 @@ class ConfigService:
 
         Story #1400 CRITICAL 6: validate a deep-copied CANDIDATE and publish
         atomically only on full success, so a rejected update can never
-        leave the shared live config mutated in place. The "indexing"
-        category is a pre-existing special case that self-persists against
-        the live config, independent of this batch's atomicity.
+        leave the shared live config mutated in place.  Unaudited: front
+        doors use :meth:`update_settings_audited`.
 
         Raises:
             ValueError: invalid category/key, or the candidate fails
                 config_manager.validate_config.
         """
-        with self._config_update_lock:
-            live = self.get_config()
-            candidate = copy.deepcopy(live)
-            has_candidate_updates = False
-            for category, key, value in updates:
-                if category == "indexing":
-                    self._apply_setting(live, category, key, value)
-                    continue
-                if self._apply_setting(candidate, category, key, value):
-                    has_candidate_updates = True
+        if updates:
+            self._change_config(self._updates_mutator(updates), None, _ChangeAttempt())
+            self._log_applied_updates(updates)
+        return self.get_config()
 
-            if has_candidate_updates:
-                self.config_manager.validate_config(candidate)
-                self.save_config(candidate)
-                self._log_applied_updates(updates)
+    def apply_audited_change(
+        self,
+        mutate: Callable[[ServerConfig], Optional[ServerConfig]],
+        *,
+        actor: str,
+        target_id: str,
+        action_type: str = "config_changed",
+        change_kind: str = "update",
+        before_publish: Optional[Callable[[ServerConfig], None]] = None,
+    ) -> ServerConfig:
+        """Apply one configuration change for *actor* and record ONE row.
 
-            return self.get_config()
+        The single audited entry point every human configuration write goes
+        through (see :meth:`_change_config` for the publish semantics).
+        ``success`` names the changed keys (values only for allowlisted
+        non-secret scalars); a change that raises records ``failure`` with
+        the attempted key names, publishes nothing, and re-raises.  For the
+        provider-key action types *target_id* is the provider.
+        """
+        from code_indexer.server.services.config_change_audit import (
+            CHANGE_KINDS,
+            CONFIG_ACTIONS,
+            record_config_outcome,
+        )
+
+        if action_type not in CONFIG_ACTIONS or change_kind not in CHANGE_KINDS:
+            raise ValueError("unsupported audited configuration change")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("an audited configuration change requires an actor")
+        attempt = _ChangeAttempt()
+        try:
+            # Re-raises BootstrapFileNotWritten after marking the change
+            # published, so the caller still sees the file-write error.
+            self._change_config(mutate, before_publish, attempt)
+        finally:
+            # Success exactly when published: a normal save, or a committed
+            # runtime row whose bootstrap file write then failed.
+            record_config_outcome(
+                actor=actor,
+                action_type=action_type,
+                target_id=target_id,
+                change_kind=change_kind,
+                before=attempt.before,
+                after=attempt.after,
+                outcome="success" if attempt.published else "failure",
+                provider=target_id,
+            )
+        return self.get_config()
+
+    def update_settings_audited(
+        self,
+        updates: Sequence[Tuple[str, str, Any]],
+        *,
+        actor: str,
+        before_publish: Optional[Callable[[ServerConfig], None]] = None,
+    ) -> ServerConfig:
+        """:meth:`update_settings_atomic` for a front door, recording one row.
+
+        The row's target is the updated category, or ``*`` when the batch
+        spans several.
+        """
+        categories = {category for category, _key, _value in updates}
+        target = categories.pop() if len(categories) == 1 else "*"
+        result = self.apply_audited_change(
+            self._updates_mutator(updates),
+            actor=actor,
+            target_id=target,
+            before_publish=before_publish,
+        )
+        self._log_applied_updates(updates)
+        return result
+
+    def reset_to_defaults_audited(self, *, actor: str) -> ServerConfig:
+        """Replace the configuration with the defaults; record one row."""
+        return self.apply_audited_change(
+            lambda _candidate: self.config_manager.create_default_config(),
+            actor=actor,
+            target_id="*",
+            change_kind="reset_to_defaults",
+        )
 
     def update_setting(
         self, category: str, key: str, value: Any, skip_validation: bool = False
@@ -1180,7 +1442,9 @@ class ConfigService:
     ) -> None:
         """Update a server setting."""
         if key == "host":
-            config.host = str(value)
+            # Strip once; the stripped value is what is validated and stored.
+            # An unchanged host is not re-validated (only a change is).
+            config.host = normalize_server_host(str(value), current_host=config.host)
         elif key == "port":
             config.port = int(value)
         elif key == "workers":
@@ -1755,24 +2019,47 @@ class ConfigService:
         config.elevation_max_age_seconds = max_age
         return original
 
-    def _rollback_totp_elevation(
+    def _totp_elevation_mutator(
+        self, enabled: bool, idle_timeout_seconds: int, max_age_seconds: int
+    ) -> Callable[[ServerConfig], None]:
+        """Validate the final tuple (Fix #1) and stage it on the candidate."""
+
+        def _mutate(candidate: ServerConfig) -> None:
+            self._validate_totp_elevation_tuple(
+                enabled, idle_timeout_seconds, max_age_seconds
+            )
+            self._apply_totp_elevation_to_config(
+                candidate, enabled, idle_timeout_seconds, max_age_seconds
+            )
+
+        return _mutate
+
+    def update_totp_elevation_audited(
         self,
-        config: "ServerConfig",
-        original: tuple,
-        exc: Exception,
+        enabled: bool,
+        idle_timeout_seconds: int,
+        max_age_seconds: int,
+        session_manager: Optional["ElevationManagerProtocol"] = None,
+        *,
+        actor: str,
     ) -> None:
-        """Restore original totp_elevation values and log the failure."""
-        config.elevation_enforcement_enabled = original[0]
-        config.elevation_idle_timeout_seconds = original[1]
-        config.elevation_max_age_seconds = original[2]
-        logger.error(
-            "totp_elevation atomic save failed; rolled back to "
-            "enabled=%s idle=%ds max_age=%ds. Error: %s",
-            original[0],
-            original[1],
-            original[2],
-            exc,
-            extra={"correlation_id": get_correlation_id()},
+        """:meth:`update_totp_elevation_atomic` for a front door (one row)."""
+        try:
+            self.apply_audited_change(
+                self._totp_elevation_mutator(
+                    enabled, idle_timeout_seconds, max_age_seconds
+                ),
+                actor=actor,
+                target_id="totp_elevation",
+            )
+        except BootstrapFileNotWritten:
+            # Published: the live session manager must follow the new values.
+            self._after_totp_elevation_publish(
+                enabled, idle_timeout_seconds, max_age_seconds, session_manager
+            )
+            raise
+        self._after_totp_elevation_publish(
+            enabled, idle_timeout_seconds, max_age_seconds, session_manager
         )
 
     def update_totp_elevation_atomic(
@@ -1785,22 +2072,37 @@ class ConfigService:
         """Atomically validate, save, and hot-reload totp_elevation (Bug #943).
 
         Fix #1: validates the final tuple so idle > old_max_age is not rejected.
-        Fix #3: rolls back all 3 in-memory fields on save failure.
+        Fix #3: the change is staged on a candidate copy, so a failed save
+        leaves the live config untouched.
         Fix #2: calls session_manager.update_timeouts() only when provided.
         Logs INFO on success so operators can confirm hot-reload occurred.
         """
-        self._validate_totp_elevation_tuple(
-            enabled, idle_timeout_seconds, max_age_seconds
-        )
-        config = self.get_config()
-        original = self._apply_totp_elevation_to_config(
-            config, enabled, idle_timeout_seconds, max_age_seconds
-        )
         try:
-            self.save_config(config)
-        except Exception as exc:
-            self._rollback_totp_elevation(config, original, exc)
-            raise  # MESSI Rule 13 — propagate, never swallow
+            self._change_config(
+                self._totp_elevation_mutator(
+                    enabled, idle_timeout_seconds, max_age_seconds
+                ),
+                None,
+                _ChangeAttempt(),
+            )
+        except BootstrapFileNotWritten:
+            # Published: the live session manager must follow the new values.
+            self._after_totp_elevation_publish(
+                enabled, idle_timeout_seconds, max_age_seconds, session_manager
+            )
+            raise
+        self._after_totp_elevation_publish(
+            enabled, idle_timeout_seconds, max_age_seconds, session_manager
+        )
+
+    def _after_totp_elevation_publish(
+        self,
+        enabled: bool,
+        idle_timeout_seconds: int,
+        max_age_seconds: int,
+        session_manager: Optional["ElevationManagerProtocol"],
+    ) -> None:
+        """Hot-reload the live session manager and log the new values."""
         if session_manager is not None:
             session_manager.update_timeouts(idle_timeout_seconds, max_age_seconds)
         logger.info(
@@ -2022,12 +2324,16 @@ class ConfigService:
             telemetry.export_traces = value in ["true", True, "True", "1"]
         elif key == "export_metrics":
             telemetry.export_metrics = value in ["true", True, "True", "1"]
+        elif key == "export_logs":
+            telemetry.export_logs = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_enabled":
             telemetry.machine_metrics_enabled = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_interval_seconds":
             telemetry.machine_metrics_interval_seconds = int(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
+        elif key == "trace_sample_rate":
+            telemetry.trace_sample_rate = float(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
 
@@ -2465,6 +2771,8 @@ class ConfigService:
         assert web_security is not None  # Guaranteed by ServerConfig.__post_init__
         if key == "web_session_timeout_seconds":
             web_security.web_session_timeout_seconds = int(value)
+        elif key == "self_registration_enabled":
+            web_security.self_registration_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown web security setting: {key}")
 
@@ -2562,6 +2870,66 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
 
+    def _update_fleet_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a fleet_migration setting (Story #1458, Epic #1454,
+        round-6 item #10).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the
+        Web UI submits an explicit "true"/"false" string (boolean
+        <select>, not a checkbox), so `_parse_bool("false")` must persist
+        False rather than silently no-op, mirroring Story #1397's own
+        "enabled-checkbox trap" fix exactly. `tick_interval_minutes` is a
+        plain integer.
+        """
+        fm = config.fleet_migration_config
+        assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            fm.enabled = _parse_bool(value)
+        elif key == "tick_interval_minutes":
+            fm.tick_interval_minutes = int(value)
+        elif key == "canary_gate_enabled":
+            fm.canary_gate_enabled = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown fleet_migration setting: {key}")
+
+    def _update_temporal_legacy_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_legacy_migration setting (Issue #1548).
+
+        Both fields are booleans coerced via the shared `_parse_bool`
+        helper, mirroring `_update_fleet_migration_setting`'s `enabled`
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        tlm = config.temporal_legacy_migration_config
+        assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "relocation_enabled":
+            tlm.relocation_enabled = _parse_bool(value)
+        elif key == "cleanup_authorized":
+            tlm.cleanup_authorized = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown temporal_legacy_migration setting: {key}")
+
+    def _update_alias_lock_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an alias_lock setting (Issue #1546 Phase 2).
+
+        `db_backed_enabled` is coerced via the shared `_parse_bool`
+        helper, mirroring `_update_temporal_legacy_migration_setting`'s
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        alc = config.alias_lock_config
+        assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "db_backed_enabled":
+            alc.db_backed_enabled = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown alias_lock setting: {key}")
+
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -2587,6 +2955,17 @@ class ConfigService:
             sweep.operating_hours_end_utc = int(value)
         else:
             raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
+    def _update_indexing_watchdog_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an indexing_watchdog setting (Issue #1530)."""
+        watchdog = config.indexing_watchdog_config
+        assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "stale_activity_timeout_seconds":
+            watchdog.stale_activity_timeout_seconds = float(value)
+        else:
+            raise ValueError(f"Unknown indexing_watchdog setting: {key}")
 
     def _update_search_timeouts_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2640,6 +3019,33 @@ class ConfigService:
             es.retention_days = int(value)
         else:
             raise ValueError(f"Unknown embedding_stats setting: {key}")
+
+    def _update_content_limits_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a content_limits setting (Story #32, Issue #1753).
+
+        All 6 fields are plain integers. Range validation happens later in
+        config_manager.validate_config(), called by update_setting()/
+        update_settings_atomic() after this method returns (unless
+        skip_validation=True for batch updates).
+        """
+        cl = config.content_limits_config
+        assert cl is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "chars_per_token":
+            cl.chars_per_token = int(value)
+        elif key == "file_content_max_tokens":
+            cl.file_content_max_tokens = int(value)
+        elif key == "git_diff_max_tokens":
+            cl.git_diff_max_tokens = int(value)
+        elif key == "git_log_max_tokens":
+            cl.git_log_max_tokens = int(value)
+        elif key == "search_result_max_tokens":
+            cl.search_result_max_tokens = int(value)
+        elif key == "cache_ttl_seconds":
+            cl.cache_ttl_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown content_limits setting: {key}")
 
     def _update_temporal_indexing_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2696,6 +3102,7 @@ class ConfigService:
             ValueError: If any setting fails validation
         """
         config = self.get_config()
+        previous_host = config.host
 
         for category, category_settings in settings.items():
             for key, value in category_settings.items():
@@ -2713,7 +3120,7 @@ class ConfigService:
                     self._update_claude_cli_setting(config, key, value)
 
         # Validate and save
-        self.config_manager.validate_config(config)
+        self.config_manager.validate_config(config, previous_host=previous_host)
         self.save_config(config)
         logger.info(
             "Saved all settings", extra={"correlation_id": get_correlation_id()}
@@ -2723,16 +3130,20 @@ class ConfigService:
         """Get the path to the configuration file."""
         return str(self.config_manager.config_file_path)
 
-    def _update_indexing_setting(self, key: str, value: Any) -> None:
+    def _update_indexing_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
         """
-        Update an indexing setting (Story #223 - AC4).
+        Update an indexing setting on *config* (Story #223 - AC4).
 
         Handles both list and comma-separated string input for indexable_extensions.
-        Normalizes extensions to ensure leading dot and lowercase.
-        Saves config to disk immediately.
+        Normalizes extensions to ensure leading dot and lowercase.  Like every
+        other category, the change is applied to *config* only; the caller
+        (_change_config) validates and publishes it.
 
         Args:
-            key: Setting key (only 'indexable_extensions' is supported)
+            config: The candidate configuration to update
+            key: Setting key
             value: New value (list or comma-separated string)
 
         Raises:
@@ -2751,7 +3162,6 @@ class ConfigService:
                     f"Invalid value for {field_name}: must be a valid integer"
                 )
 
-        config = self.get_config()
         indexing = config.indexing_config
         if indexing is None:
             from ..utils.config_manager import IndexingConfig
@@ -2762,7 +3172,6 @@ class ConfigService:
         # Story #1158 - AC1: Embedding API parallelism (required, clamped [1, 32])
         if key in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
             setattr(indexing, key, _clamp_parallel(value, key))
-            self.save_config(config)
             logger.info(
                 "Updated indexing.%s to %d",
                 key,
@@ -2777,7 +3186,6 @@ class ConfigService:
                 indexing.temporal_parallel_requests = None
             else:
                 indexing.temporal_parallel_requests = _clamp_parallel(value, key)
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_parallel_requests to %s",
                 indexing.temporal_parallel_requests,
@@ -2796,8 +3204,16 @@ class ConfigService:
                 embedders = [v.strip() for v in str(value).split(",") if v.strip()]
             if not embedders:
                 raise ValueError("temporal_embedders must not be empty")
+            # Story #1457 AC6 (round-13 Codex N13-1) defense-in-depth: reject
+            # a colliding embedder set HERE, at the Web UI Config Screen
+            # submission boundary, rather than silently persisting it and
+            # only failing later inside a background index run.
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                validate_embedder_slug_uniqueness,
+            )
+
+            validate_embedder_slug_uniqueness(embedders)
             indexing.temporal_embedders = embedders
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_embedders to %s",
                 indexing.temporal_embedders,
@@ -2815,7 +3231,6 @@ class ConfigService:
                     f"temporal_embedders {indexing.temporal_embedders!r}"
                 )
             indexing.temporal_active_embedder = active
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_active_embedder to %s",
                 indexing.temporal_active_embedder,
@@ -2835,7 +3250,6 @@ class ConfigService:
                     "temporal_aggregation_chunk_chars must be a positive integer"
                 )
             indexing.temporal_aggregation_chunk_chars = chars
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_aggregation_chunk_chars to %d",
                 indexing.temporal_aggregation_chunk_chars,
@@ -2846,7 +3260,6 @@ class ConfigService:
         # Story #1412: golden/server temporal all-branches gate (default OFF).
         if key == "temporal_all_branches_enabled":
             indexing.temporal_all_branches_enabled = _parse_bool(value)
-            self.save_config(config)
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
@@ -2885,7 +3298,6 @@ class ConfigService:
                 normalized.append(ext)
 
         indexing.indexable_extensions = normalized
-        self.save_config(config)
         logger.info(
             "Updated indexing.indexable_extensions with %d extensions",
             len(normalized),
@@ -2922,8 +3334,7 @@ class ConfigService:
                 with open(cidx_config_path, "r") as f:
                     repo_config = json.load(f)
                 repo_config["file_extensions"] = cli_exts
-                with open(cidx_config_path, "w") as f:
-                    json.dump(repo_config, f, indent=2)
+                write_json_atomic(cidx_config_path, repo_config, indent=2)
                 logger.info("Cascaded file_extensions to %s", alias)
             except Exception as e:
                 logger.warning("Could not cascade extensions to %s: %s", alias, e)
@@ -2952,8 +3363,7 @@ class ConfigService:
             with open(cidx_config_path, "r") as f:
                 repo_config = json.load(f)
             repo_config["file_extensions"] = cli_exts
-            with open(cidx_config_path, "w") as f:
-                json.dump(repo_config, f, indent=2)
+            write_json_atomic(cidx_config_path, repo_config, indent=2)
             logger.info("Seeded file_extensions from server config for %s", repo_path)
         except Exception as e:
             logger.warning("Could not seed extensions for %s: %s", repo_path, e)
@@ -2995,8 +3405,7 @@ class ConfigService:
             added = server_exts_bare - current_exts_bare
             removed = current_exts_bare - server_exts_bare
             repo_config["file_extensions"] = [ext.lstrip(".") for ext in server_exts]
-            with open(cidx_config_path, "w") as f:
-                json.dump(repo_config, f, indent=2)
+            write_json_atomic(cidx_config_path, repo_config, indent=2)
             logger.info(
                 "Synced drifted file_extensions for %s (%d added, %d removed)",
                 repo_path,
@@ -3692,6 +4101,80 @@ class ConfigService:
         new_config = self.config_manager._dict_to_server_config(full_dict)
         self._config = new_config  # Atomic reference swap
 
+        # Issue #1546 Phase 3 promotion follow-up: must run AFTER self._config
+        # is published above, since persisting the promotion (if needed) may
+        # call materialize_launch_config() / self.get_config(), which must
+        # observe the freshly merged config, not a stale prior one.
+        self._apply_alias_lock_db_backed_promotion(new_config, runtime_dict)
+
+    def _apply_alias_lock_db_backed_promotion(
+        self, config: "ServerConfig", raw_runtime_dict: dict
+    ) -> None:
+        """One-time promotion of alias_lock_config.db_backed_enabled to True.
+
+        Issue #1546 Phase 3 changed AliasLockConfig.db_backed_enabled's
+        dataclass DEFAULT from False to True, but runtime config is
+        persisted as a full JSON blob and merged OVER that default on load
+        (this method's caller, _merge_runtime_config). A deployment with a
+        pre-Phase-3 stored `alias_lock_config` section therefore silently
+        keeps the old False value forever -- confirmed inert on a live
+        3-node staging cluster (all three nodes still used file-based
+        locking after upgrading to the release that flipped the default).
+
+        Promotes exactly ONCE per deployment. The discriminator is the RAW
+        stored dict (`raw_runtime_dict`), never the reconstructed
+        dataclass:
+
+        - A stored "alias_lock_config" section that is missing the
+          "db_backed_enabled_promoted" key can only have been written by
+          code that predates this migration -- every save since (
+          update_setting, save_config, or this method's own write below)
+          always serializes the full AliasLockConfig dataclass via
+          asdict(), which always includes that field. This is the ONLY
+          case that triggers a promotion + write.
+        - A stored section that already carries the key -- even with
+          db_backed_enabled=False -- is left untouched forever, whether
+          that False is this method's own past promotion having since been
+          rolled back by an operator, or an operator's very first explicit
+          choice on a fresh (already-default-True) deployment.
+        - No "alias_lock_config" section at all (never touched, not even
+          by Phase 2's toggle) needs no action: ServerConfig.__post_init__
+          already constructs a fresh AliasLockConfig() with the modern
+          default (True) in that case.
+        """
+        alc = config.alias_lock_config
+        if alc is None or alc.db_backed_enabled_promoted:
+            return
+        raw_alc = raw_runtime_dict.get("alias_lock_config")
+        if not (
+            isinstance(raw_alc, dict) and "db_backed_enabled_promoted" not in raw_alc
+        ):
+            return
+
+        alc.db_backed_enabled = True
+        alc.db_backed_enabled_promoted = True
+
+        if self._pool is not None:
+            self._save_runtime_to_pg(config)
+        elif self._sqlite_db_path is not None:
+            self._save_runtime_to_sqlite(self._extract_runtime_dict(config))
+        else:
+            # No runtime DB attached yet (bootstrap/file-only mode). The
+            # in-memory promotion still applies for this process; a later
+            # initialize_runtime_db()/set_connection_pool() call re-enters
+            # this exact merge path once a DB is attached, and persists it
+            # then.
+            return
+
+        logger.warning(
+            "ConfigService: promoted alias_lock.db_backed_enabled to True "
+            "(Issue #1546 Phase 3 one-time migration). The stored runtime "
+            "config predated the promoted default. This will not run "
+            "again for this deployment -- any future operator choice, "
+            "including an explicit rollback to False, is preserved from "
+            "here on."
+        )
+
     def save_config(self, config: ServerConfig) -> None:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.
 
@@ -3711,16 +4194,24 @@ class ConfigService:
         # stale cached value from before this save.
         self._config = config
 
+        if self._pool is None and self._sqlite_db_path is None:
+            self.config_manager.save_config(config)
+            return
         if self._pool is not None:
             self._save_runtime_to_pg(config)
-            file_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(file_dict)
-        elif self._sqlite_db_path is not None:
-            self._save_runtime_to_sqlite(runtime_dict)
-            file_dict = self._extract_bootstrap_dict(config)
-            self.config_manager.save_config_dict(file_dict)
         else:
-            self.config_manager.save_config(config)
+            self._save_runtime_to_sqlite(runtime_dict)
+        # The runtime row is committed: the change is published from here on.
+        try:
+            self.config_manager.save_config_dict(self._extract_bootstrap_dict(config))
+        except Exception as exc:
+            logger.error(
+                "Runtime configuration committed but the bootstrap config file "
+                "was not written (%s)",
+                type(exc).__name__,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            raise BootstrapFileNotWritten() from exc
 
 
 # Global service instance

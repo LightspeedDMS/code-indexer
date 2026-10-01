@@ -66,14 +66,18 @@ class TestBug2NoExceptionHandling:
         with open(source_file, "r") as f:
             source_lines = f.readlines()
 
-        # Find the worker function (around line 529-921; upper bound widened
+        # Find the worker function (around line 529-1106; upper bound widened
         # for growth -- Bug #1378 added a module-level progress-wrapping
         # helper + comments above _index_one_embedder, shifting worker()
-        # from line 870 to line 921)
+        # from line 870 to line 921; Bug #1575 Part C's cleanup pass
+        # extracted _index_one_embedder's per-shard body into two new
+        # helper methods (_finalize_shard_end_indexing,
+        # _run_shard_indexing_pass) to wire in abort_indexing() on shard
+        # failure, shifting worker() from line 921 to line 1106)
         worker_start_line = None
         for i, line in enumerate(source_lines):
             # More flexible search - look for def worker() near expected location
-            if "def worker():" in line and i > 500 and i < 1100:
+            if "def worker():" in line and i > 500 and i < 1200:
                 # Verify next few lines have worker-related content
                 next_lines = "".join(source_lines[i : i + 10])
                 if (

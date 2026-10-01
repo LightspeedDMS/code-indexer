@@ -164,6 +164,27 @@ For production clusters, restrict which directories can be cloned by setting `al
 
 Clone requests with a `source_path` not under any listed root will be rejected with HTTP 400 `PATH_NOT_ALLOWED`.
 
+### Daemon User and the Service Group
+
+Two OS users write into each per-user activation directory `activated-repos/<user>/`:
+
+| Actor | Runs as | Needs on `activated-repos/<user>/` | Why |
+|-------|---------|-------------------------------------|-----|
+| cidx-server | the service user | owner rwx | creates the directory, writes `<alias>_metadata.json` |
+| CoW daemon | its own OS user (the `User=` of the `cow-storage-daemon` unit) | write + search via the group | creates the clone `<user>/<alias>` (REST `POST /api/v1/clones`) and removes it on deactivation |
+
+cidx-server creates the directory with an explicit mode `2775` (owner rwx, group rwx plus setgid, others r-x; never world-writable) and sets its group to the service user's primary group, independent of the process umask and of any setgid parent. The daemon reaches it through its configured `service_group`, so:
+
+- `service_group` must be exactly the cidx service user's primary group (the group every new user directory carries; a supplementary group is not enough). Nothing sets this automatically: the daemon's own installer takes `--service-group` from the operator. A mismatch is reported loudly by both tools below, naming both groups.
+- The daemon's OS user must be a member of `service_group`, and the running daemon must have been started after the membership existed (supplementary groups are fixed at process start).
+
+The daemon user is taken from the unit's `User=` (falling back to the running daemon's real uid) and must be an existing, non-root account with a conservative name; if it cannot be determined safely, the step logs an ERROR and makes no change. Automation runs on the daemon host (the node where `/etc/cow-storage-daemon/config.json` exists); every other node is a no-op:
+
+- Fresh install: `scripts/install-cidx-server.sh` (`ensure_cow_daemon_service_group_membership`, cow-daemon backend only) runs `usermod -aG <service_group> <daemon-user>` when the membership is missing, and restarts `cow-storage-daemon` when the running daemon does not carry the group's gid. It fails loudly on an unreadable config, a missing or unknown `service_group`, or a group mismatch.
+- Already-deployed hosts: the auto-updater (`DeploymentExecutor._ensure_cow_daemon_user_in_service_group`) applies the same checks and changes, logging an ERROR and skipping on any problem (including a daemon config that exists but cannot be read or stat-ed). After one convergence it is a read-only check.
+
+Per-user directories created by an older server (mode `0755`, or a group other than the service user's primary group) are repaired to `2775` with the primary group the next time the server touches them, for example on the next activation attempt for that user. Directories owned by another user are left as they are.
+
 ---
 
 ## Step 2: Configure NFS
@@ -499,6 +520,7 @@ All endpoints are prefixed with `/api/v1`. Authentication via `Authorization: Be
 | Clone creation fails | Source path not allowed | Add directory to `allowed_source_roots` in daemon config. |
 | Clone creation fails | Source path does not exist | Verify golden repo is cloned at the expected path on the daemon host. |
 | Job stuck in `pending` | Daemon overloaded | Check daemon logs: `sudo journalctl -u cow-storage-daemon -n 50`. |
+| New users cannot activate any repo (`Permission denied` creating the clone); existing users still work | Daemon user not in its `service_group`, or daemon not restarted since | See [Daemon User and the Service Group](#daemon-user-and-the-service-group); the next auto-update converges it. |
 
 ### NFS Issues
 

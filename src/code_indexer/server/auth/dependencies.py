@@ -5,17 +5,23 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from code_indexer.server.middleware.audit_request_context import (
+    AUTH_METHOD_JWT,
+    AUTH_METHOD_MCP_CREDENTIAL,
+    AUTH_METHOD_OAUTH_TOKEN,
+    AUTH_METHOD_WEB_SESSION,
+    note_auth_method,
+)
+from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from functools import wraps
 from datetime import datetime, timezone
 import base64
 
 import logging
 
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
-from .user_manager import UserManager, User
+from .user_manager import UserManager, User, UserRole
 from .api_key_manager import ApiKeyManager
 from code_indexer.server.logging_utils import format_error_log
 
@@ -23,6 +29,7 @@ from code_indexer.server.logging_utils import format_error_log
 # Imported here so tests can swap the module attribute for fixture isolation.
 from code_indexer.server.auth.elevated_session_manager import (
     elevated_session_manager,
+    log_elevation_owner_mismatch,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,6 +261,8 @@ def get_current_user(
             # Validate cookie JWT using same logic as Bearer
             user = _validate_jwt_and_get_user(token)
             _check_non_sso_api_restriction(user)
+            # The session JWT cookie is set by the Web UI login.
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         # No auth method available
         raise HTTPException(
@@ -298,38 +307,45 @@ def get_current_user(
                         headers={"WWW-Authenticate": _build_www_authenticate_header()},
                     )
                 _check_non_sso_api_restriction(user)
+                note_auth_method(AUTH_METHOD_OAUTH_TOKEN)
                 return user
 
     # Fallback to JWT validation
     user = _validate_jwt_and_get_user(token)
     _check_non_sso_api_restriction(user)
+    note_auth_method(AUTH_METHOD_JWT)
     return user
 
 
 def require_permission(permission: str):
     """
-    Decorator factory for requiring specific permissions.
+    FastAPI dependency factory for requiring specific permissions.
+
+    The returned callable depends on the same `get_current_user` dependency
+    every route already uses, so a route can wire it as its sole
+    `Depends(...)` for both authentication and authorization --
+    `user: User = Depends(require_permission("repository:write"))`.
 
     Args:
         permission: Required permission string
 
     Returns:
-        Decorator function
+        A dependency callable that resolves to the current User (via
+        `Depends(get_current_user)`) and raises HTTPException(403) if that
+        user lacks `permission`.
     """
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(current_user: User = Depends(get_current_user), *args, **kwargs):
-            if not current_user.has_permission(permission):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Insufficient permissions: {permission} required",
-                )
-            return func(current_user, *args, **kwargs)
+    def _require_permission_dependency(
+        current_user: User = Depends(get_current_user),
+    ) -> User:
+        if not current_user.has_permission(permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions: {permission} required",
+            )
+        return current_user
 
-        return wrapper
-
-    return decorator
+    return _require_permission_dependency
 
 
 def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
@@ -444,8 +460,38 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     if not client_id or not client_secret:
         return None
 
-    # Verify credentials using MCPCredentialManager (AC3-AC5)
-    user_id = mcp_credential_manager.verify_credential(client_id, client_secret)
+    # Verify credentials using MCPCredentialManager (AC3-AC5).
+    # Story #1491 AC1 (Finding B1, CRITICAL): verify_credential does a
+    # bcrypt hash comparison (100-300ms pure CPU) and user_manager.get_user
+    # does a synchronous user-DB read -- running either directly on the event
+    # loop stalls EVERY concurrent request, not just this one. AC1 names BOTH
+    # as blocking work that must leave the loop, so they share ONE
+    # anyio.to_thread.run_sync boundary here rather than offloading bcrypt and
+    # then immediately reading the DB back on the loop. One boundary (not two)
+    # also halves the thread round-trips on the hottest MCP path.
+    import anyio.to_thread
+
+    def _verify_credential_and_load_user() -> Tuple[Optional[str], Optional[User]]:
+        verified_user_id = mcp_credential_manager.verify_credential(
+            client_id, client_secret
+        )
+        if not verified_user_id:
+            return None, None
+        return verified_user_id, user_manager.get_user(verified_user_id)
+
+    # mypy: pre-commit's isolated mypy hook venv has no `anyio` stub package
+    # installed (only types-PyYAML/types-requests/types-cachetools are
+    # declared as additional_dependencies), so under ignore_missing_imports
+    # anyio.to_thread.run_sync's return resolves to Any there -- even though
+    # it resolves correctly with anyio actually installed. cast() restores
+    # the real, already-known type here, taken from
+    # _verify_credential_and_load_user's own declared return annotation
+    # immediately above, so the narrowing below is real regardless of
+    # anyio's resolution status in whichever environment mypy runs in.
+    user_id, user = cast(
+        Tuple[Optional[str], Optional[User]],
+        await anyio.to_thread.run_sync(_verify_credential_and_load_user),
+    )
 
     if not user_id:
         # Invalid credentials - return 401 (AC3)
@@ -455,14 +501,21 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
 
-    # Get User object
-    user = user_manager.get_user(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
+
+    # A separate, single-assignment name for the narrowed, definitely-non-None
+    # user: mypy does not retain `if not user: raise` narrowing for a
+    # variable captured by a nested function (the closure below) -- it uses
+    # the variable's type across the WHOLE enclosing function instead, which
+    # for `user` (assigned once, as Optional[User]) stays Optional[User]
+    # even past the guard above. `authenticated_user` has exactly one
+    # assignment, explicitly typed User, so the closure below never sees None.
+    authenticated_user: User = user
 
     # v10.4.7: OAuth-MCP sessions are pre-elevated by virtue of holding the
     # credential. The credential was provisioned by a TOTP-elevated admin --
@@ -472,28 +525,41 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     # client_id is used directly as the session key: MCP client IDs (mcp_...)
     # are already distinct from JWT JTI values (UUIDs). No construction needed.
     request.state.user_jti = client_id
+    # An elevation window is valid only for the user who created it -- stash
+    # the authenticated username alongside the session key.
+    request.state.elevation_username = authenticated_user.username
     if elevated_session_manager is not None:
         try:
             client_ip = request.client.host if request.client else "unknown"
-            elevated_session_manager.create(
-                session_key=client_id,
-                username=user.username,
-                elevated_from_ip=client_ip,
-                scope="full",
-            )
+
+            # Story #1491 AC1: elevated_session_manager.create performs a
+            # synchronous psycopg round-trip plus commit -- offload it too,
+            # via a zero-arg sync closure (no new functools import needed).
+            def _create_elevation_window() -> None:
+                elevated_session_manager.create(
+                    session_key=client_id,
+                    username=authenticated_user.username,
+                    elevated_from_ip=client_ip,
+                    scope="full",
+                )
+
+            import anyio.to_thread
+
+            await anyio.to_thread.run_sync(_create_elevation_window)
         except Exception as exc:
             # Defense-in-depth: if elevation manager is misconfigured, log and
             # let the request proceed. The decorator will surface "No active
             # elevation window" -- distinguishable from "no session key" (Gate 5).
             logger.warning(
                 "v10.4.7: failed to pre-elevate oauth session for %s: %s",
-                user.username,
+                authenticated_user.username,
                 exc,
                 exc_info=True,
             )
 
     # Success - verify_credential() already updated last_used_at (AC5)
-    return user
+    note_auth_method(AUTH_METHOD_MCP_CREDENTIAL)
+    return authenticated_user
 
 
 def get_current_user_web_or_api(
@@ -545,6 +611,18 @@ def get_current_user_web_or_api(
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
                 if user:
+                    # Elevation windows opened through the Web UI (e.g.
+                    # /admin/elevate) are keyed by the raw "session" cookie
+                    # value -- the same value _hybrid_auth_impl's web-session
+                    # branch stores as user_jti. Set it here too so
+                    # _resolve_session_key() finds that same window instead
+                    # of falling through to the unrelated cidx_session cookie.
+                    request.state.user_jti = session_cookie
+                    # An elevation window is valid only for the user who
+                    # created it -- stash the authenticated username so any
+                    # downstream elevation lookup binds to this identity.
+                    request.state.elevation_username = user.username
+                    note_auth_method(AUTH_METHOD_WEB_SESSION)
                     return user
         except Exception as e:
             # Web session validation failed - fall through to JWT/Bearer auth
@@ -556,7 +634,13 @@ def get_current_user_web_or_api(
 
     # Priority 2: Fall back to JWT/Bearer authentication
     try:
-        return get_current_user(request, credentials)
+        resolved_user = get_current_user(request, credentials)
+        # An elevation window is valid only for the user who created it --
+        # stash the authenticated username so any downstream elevation
+        # lookup binds to this identity, not to whatever session key gets
+        # resolved from a possibly-unrelated cookie.
+        request.state.elevation_username = resolved_user.username
+        return resolved_user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:
@@ -652,7 +736,37 @@ async def get_current_user_for_mcp(request: Request) -> User:
         credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     try:
-        user = get_current_user(request, credentials)
+        # Story #1491 AC1 (Finding B1, CRITICAL): get_current_user performs
+        # a synchronous user DB read plus JWT-blacklist read (and, for
+        # cookie/Bearer JWTs, jwt_manager.validate_token) -- offload it to a
+        # worker thread so it never blocks the shared event loop. A zero-arg
+        # lambda closure avoids introducing a new functools import.
+        # HTTPException raised inside get_current_user propagates through
+        # run_sync unchanged (anyio re-raises worker-thread exceptions as-is).
+        import anyio.to_thread
+
+        # mypy: pre-commit's isolated mypy hook venv has no `anyio` stub
+        # package installed, so under ignore_missing_imports
+        # anyio.to_thread.run_sync's return resolves to Any there. cast()
+        # restores the real type here, taken from get_current_user's own
+        # declared return annotation (called inside the lambda immediately
+        # below), into a fresh, single-assignment name: mypy does not retain
+        # narrowing for a variable captured by a nested function (the
+        # `_create_oauth_bearer_elevation_window` closure further down), and
+        # `user` already has an earlier assignment typed Optional[User]
+        # (from get_mcp_user_from_credentials above) that a second,
+        # same-named assignment cannot un-widen for that closure.
+        resolved_user: User = cast(
+            User,
+            await anyio.to_thread.run_sync(
+                lambda: get_current_user(request, credentials)
+            ),
+        )
+        # An elevation window is valid only for the user who created it --
+        # stash the authenticated username now, before any session-key
+        # resolution below, so it is set even on the path where jti
+        # extraction fails entirely (non-JWT, non-OAuth bearer credential).
+        request.state.elevation_username = resolved_user.username
         # Extract jti for elevation key — Bearer path or cookie fallback path.
         # token is only set when Authorization: Bearer ... is present; when the
         # client authenticates via cidx_session cookie, token is None and we must
@@ -662,7 +776,14 @@ async def get_current_user_for_mcp(request: Request) -> User:
         _user_jti_set = False
         if _jti_token and jwt_manager:
             try:
-                payload = jwt_manager.validate_token(_jti_token)
+                # Story #1491 AC1: JWT signature validation is CPU-bound
+                # sync work -- offload it, matching the primary
+                # get_current_user call above.
+                import anyio.to_thread
+
+                payload = await anyio.to_thread.run_sync(
+                    jwt_manager.validate_token, _jti_token
+                )
                 jti = payload.get("jti")
                 if jti:
                     request.state.user_jti = str(jti)
@@ -694,21 +815,30 @@ async def get_current_user_for_mcp(request: Request) -> User:
                 if elevated_session_manager is not None:
                     try:
                         client_ip = request.client.host if request.client else "unknown"
-                        elevated_session_manager.create(
-                            session_key=session_key,
-                            username=user.username,
-                            elevated_from_ip=client_ip,
-                            scope="full",
+
+                        # Story #1491 AC1: offload the sync DB round-trip.
+                        def _create_oauth_bearer_elevation_window() -> None:
+                            elevated_session_manager.create(
+                                session_key=session_key,
+                                username=resolved_user.username,
+                                elevated_from_ip=client_ip,
+                                scope="full",
+                            )
+
+                        import anyio.to_thread
+
+                        await anyio.to_thread.run_sync(
+                            _create_oauth_bearer_elevation_window
                         )
                     except Exception as exc:
                         logger.warning(
                             "v10.4.8: failed to pre-elevate OAuth Bearer "
                             "session for %s: %s",
-                            user.username,
+                            resolved_user.username,
                             exc,
                             exc_info=True,
                         )
-        return user
+        return resolved_user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:
@@ -813,6 +943,11 @@ def _hybrid_auth_impl(
             request.state.user_jti = (
                 session_cookie_value  # enables elevation session key resolution
             )
+            # An elevation window is valid only for the user who created it --
+            # stash the authenticated username alongside the session key so
+            # every downstream elevation lookup binds to this identity.
+            request.state.elevation_username = user.username
+            note_auth_method(AUTH_METHOD_WEB_SESSION)
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
@@ -821,6 +956,12 @@ def _hybrid_auth_impl(
     if not session_cookie_value and credentials:
         try:
             current_user = get_current_user(request, credentials)
+
+            # An elevation window is valid only for the user who created it --
+            # bind every downstream elevation lookup to the identity this
+            # credential actually authenticated, not to whatever session key
+            # gets resolved from a possibly-unrelated cookie.
+            request.state.elevation_username = current_user.username
 
             # Set user_jti for elevation session key resolution.
             # Session-cookie path sets this at the session success block above;
@@ -918,9 +1059,24 @@ _ERROR_TOTP_SETUP_REQUIRED = "totp_setup_required"
 _ERROR_ELEVATION_REQUIRED = "elevation_required"
 _ERROR_ELEVATION_FAILED = "elevation_failed"  # reserved; used by /auth/elevate
 
-# Stable internal FastAPI route path for MFA setup — not environment-specific;
-# the router registers this path unconditionally in all deployments.
+# Stable internal FastAPI route paths for MFA setup — not environment-specific;
+# the router registers both paths unconditionally in all deployments.
+# _TOTP_SETUP_URL renders via a session with role=="admin" (_get_session_username);
+# _USER_TOTP_SETUP_URL renders for any authenticated session (_get_any_session_username).
 _TOTP_SETUP_URL = "/admin/mfa/setup"
+_USER_TOTP_SETUP_URL = "/user/mfa/setup"
+
+
+def _mfa_setup_url_for_role(role: UserRole) -> str:
+    """Return the MFA setup page appropriate to `role`.
+
+    Elevation is available to every TOTP-enrolled user, not only admins, but
+    the admin setup page is gated to an admin-role session -- pointing a
+    non-admin caller at it would be a dead end. Only ADMIN gets the admin
+    page; every other role gets the self-service one.
+    """
+    return _TOTP_SETUP_URL if role == UserRole.ADMIN else _USER_TOTP_SETUP_URL
+
 
 # Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
 # A session satisfies required_scope R when session_rank <= required_rank.
@@ -940,11 +1096,11 @@ def _elevation_required_exc(message: Optional[str] = None) -> HTTPException:
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
-def _totp_setup_required_exc() -> HTTPException:
-    """403 — admin has TOTP not yet set up; directs to setup_url."""
+def _totp_setup_required_exc(setup_url: str = _TOTP_SETUP_URL) -> HTTPException:
+    """403 — caller has TOTP not yet set up; directs to `setup_url`."""
     return HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": _TOTP_SETUP_URL},
+        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": setup_url},
     )
 
 
@@ -973,10 +1129,15 @@ def _is_elevation_enforcement_enabled() -> bool:
 
 
 def _check_totp_setup(user: User) -> None:
-    """Raise 403 totp_setup_required when admin has no TOTP MFA enabled.
+    """Raise 403 totp_setup_required when the caller has no TOTP MFA enabled.
+
+    Shared by the admin-only require_elevation() gate and the self-service
+    elevation gate (any role) -- the setup_url in the raised exception is
+    resolved from the CALLER's own role so a non-admin is never pointed at
+    the admin-only setup page.
 
     Design: fail-open on non-HTTP exceptions (e.g. TOTPService DB unavailable).
-    TOTPService availability must not block admin access entirely — the elevation
+    TOTPService availability must not block access entirely — the elevation
     window check that follows is the authoritative gate (Story #923 AC5 spec).
     Logs a warning so operators can detect persistent TOTPService failures.
     """
@@ -989,7 +1150,7 @@ def _check_totp_setup(user: User) -> None:
             # design: TOTPService availability must not block admin access.
             return
         if not totp_service.is_mfa_enabled(user.username):
-            raise _totp_setup_required_exc()
+            raise _totp_setup_required_exc(_mfa_setup_url_for_role(user.role))
     except HTTPException:
         raise
     except Exception:
@@ -1027,18 +1188,38 @@ def _check_session_window(
     request: Request,
     required_scope: str,
     manager: Any,
+    username: Optional[str] = None,
 ) -> None:
     """Resolve session key, validate elevation window, and check scope.
 
-    Raises 403 elevation_required when: no session key, window absent/expired,
+    An elevation window is valid only for the user who created it: the
+    lookup is bound to the authenticating user via touch_atomic_for_user(),
+    never the unqualified session-key-only touch_atomic(). `username` is the
+    identity this request actually authenticated as -- callers that already
+    resolved it (e.g. require_elevation()'s `_check`) pass it explicitly;
+    callers that only have `request` fall back to `request.state.elevation_username`,
+    stashed by the auth-resolution dependency (get_current_user_web_or_api,
+    _hybrid_auth_impl, get_mcp_user_from_credentials, get_current_user_for_mcp)
+    at the same point it resolved that same user.
+
+    Raises 403 elevation_required when: no session key, no resolvable
+    authenticated username, window absent/expired/owned by a different user,
     or session scope is insufficient for required_scope.
     """
     session_key = _resolve_session_key(request)
     if not session_key:
         raise _elevation_required_exc()
 
-    session = manager.touch_atomic(session_key)
+    resolved_username = username or getattr(
+        getattr(request, "state", None), "elevation_username", None
+    )
+    if not resolved_username:
+        raise _elevation_required_exc()
+    resolved_username = str(resolved_username)
+
+    session = manager.touch_atomic_for_user(session_key, resolved_username)
     if session is None:
+        log_elevation_owner_mismatch(manager, session_key, resolved_username)
         raise _elevation_required_exc()
 
     _check_scope(getattr(session, "scope", None), required_scope)
@@ -1087,10 +1268,63 @@ def require_elevation(required_scope: str = "full"):
         if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
             return user
         _check_totp_setup(user)
-        _check_session_window(request, required_scope, elevated_session_manager)
+        _check_session_window(
+            request, required_scope, elevated_session_manager, user.username
+        )
         return user
 
     return _check
+
+
+def _bearer_jwt_jti(
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[str]:
+    """Return the jti of a Bearer JWT, or None for any other credential."""
+    if credentials is None or jwt_manager is None:
+        return None
+    try:
+        payload = jwt_manager.validate_token(credentials.credentials)
+    except (InvalidTokenError, TokenExpiredError):
+        return None
+    jti = payload.get("jti")
+    return str(jti) if jti else None
+
+
+def require_self_elevation(
+    request: Request,
+    current_user: User = Depends(get_current_user_web_or_api),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> User:
+    """TOTP-elevation gate for SELF-service credential mutations (any role).
+
+    Applies to actions on the caller's OWN account that every authenticated
+    user may perform (e.g. creating or deleting their own MCP credential or
+    personal API key, managing their own git-forge credential). It mirrors
+    require_elevation()'s kill-switch / TOTP-setup / session-window logic,
+    but resolves the caller via get_current_user_web_or_api (ANY
+    authenticated user) instead of the admin-only resolver, so it never
+    grants or requires a role. The MCP twins use @require_mcp_elevation(),
+    which has the same role-agnostic semantics.
+
+    The elevation window must be owned by the caller: the window lookup is
+    bound to `current_user.username`. The window key is the web-session
+    cookie for Web UI callers; for a Bearer JWT caller it is the token's jti,
+    the same key /auth/elevate stores that caller's window under.
+
+    With enforcement off (or no elevation manager wired) the request
+    proceeds unchanged.
+    """
+    if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
+        return current_user
+    _check_totp_setup(current_user)
+    if getattr(request.state, "user_jti", None) is None:
+        jti = _bearer_jwt_jti(credentials)
+        if jti is not None:
+            request.state.user_jti = jti
+    _check_session_window(
+        request, "full", elevated_session_manager, current_user.username
+    )
+    return current_user
 
 
 def require_localhost(request: Request) -> None:

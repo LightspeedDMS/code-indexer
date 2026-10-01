@@ -9,8 +9,8 @@ import shutil
 from unittest.mock import patch
 
 
-from src.code_indexer.indexing.chunker import TextChunker
-from src.code_indexer.config import IndexingConfig
+from code_indexer.indexing.chunker import TextChunker
+from code_indexer.config import IndexingConfig
 
 
 class TestChunkerImageValidationLogging:

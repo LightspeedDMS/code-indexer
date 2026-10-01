@@ -5,9 +5,17 @@ handler boundary, so callers who passed page=1 (expecting the first page) were
 actually requesting page=1 internally, causing an off-by-one error.
 
 Fix:
-  - Handler normalises the incoming page to 1-indexed via max(1, int(page)).
+  - Handler normalises the incoming page to 1-indexed via
+    max(1, int(page or 1)).
   - Translates to 0-indexed before calling retrieve(): page - 1.
   - Returns 1-indexed page in the response: result.page + 1.
+
+Bug #1928 final round (Codex P1): strict, no-clamp page validation
+(invalid_page error, no coercion) is a contract for pages-v1
+(xray-pv1-*) handles ONLY -- see
+test_cidx_fetch_cached_payload_pv1_page_validation_1928.py. A legacy
+handle (the plain mocked handle used throughout this file) keeps its
+pre-#1928 lenient max(1, int(page or 1)) clamping exactly.
 """
 
 import json
@@ -111,7 +119,12 @@ class TestCachePageIndexBug1027:
         cache.retrieve.assert_called_once_with("test-handle-abc", page=0)
 
     def test_page_zero_clamped_to_first_page(self) -> None:
-        """page=0 must be clamped to 1 via max(1, ...), so retrieve gets page=0."""
+        """page=0 must be clamped to 1 via max(1, ...), so retrieve gets page=0.
+
+        Bug #1928 final round (Codex P1): this is a LEGACY (mocked,
+        non-pages-v1) handle -- it must keep its pre-#1928 lenient
+        clamping exactly. Strict, no-clamp validation applies only to
+        xray-pv1-* handles."""
         cache = _make_cache(page=0, total_pages=3)
         data = _call_handler(cache, page=0)
 

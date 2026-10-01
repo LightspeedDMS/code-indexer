@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 import pytest
 
-from src.code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
 
 
 class TestTemporalMetadataOperations:

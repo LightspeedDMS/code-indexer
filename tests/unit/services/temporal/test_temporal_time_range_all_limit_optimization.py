@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import MagicMock
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 
@@ -58,7 +58,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
         author = None  # NO filter
 
         # Mock vector store to track search calls
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -102,7 +102,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
         author = None
 
         # Mock vector store
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -146,7 +146,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
         author = "john"  # HAS filter
 
         # Mock vector store
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 

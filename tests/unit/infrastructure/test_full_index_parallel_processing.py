@@ -62,6 +62,8 @@ def mock_filesystem_client():
     client.clear_collection.return_value = True
     client.get_collection_info.return_value = {"points_count": 100}
     client.scroll_points.return_value = ([], None)
+    client.get_pending_self_heal_reprocess_paths.return_value = frozenset()
+    client.is_self_heal_reprocess_sidecar_corrupt.return_value = False
     client.upsert_points_batched.return_value = True
     return client
 
@@ -404,7 +406,7 @@ class TestFullIndexParallelProcessing:
             mock_direct_processing.return_value = mock_stats
 
             # Mock branch processing (should not be called for full index)
-            from src.code_indexer.services.high_throughput_processor import (
+            from code_indexer.services.high_throughput_processor import (
                 BranchIndexingResult,
             )
 

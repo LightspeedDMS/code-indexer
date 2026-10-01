@@ -99,7 +99,6 @@ class WorkspaceCleanupService:
                 format_error_log(
                     "MCP-GENERAL-188",
                     f"Workspace root does not exist: {self.workspace_root}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return workspaces
@@ -140,7 +139,6 @@ class WorkspaceCleanupService:
                 format_error_log(
                     "MCP-GENERAL-189",
                     f"Error checking workspace age for {workspace_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -183,7 +181,6 @@ class WorkspaceCleanupService:
                 format_error_log(
                     "MCP-GENERAL-190",
                     f"Error checking workspace modification time for {workspace_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -246,7 +243,6 @@ class WorkspaceCleanupService:
                 format_error_log(
                     "MCP-GENERAL-191",
                     f"Error calculating size for {directory_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -281,7 +277,6 @@ class WorkspaceCleanupService:
                 format_error_log(
                     "MCP-GENERAL-192",
                     f"Failed to delete workspace {workspace_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False, 0
@@ -444,7 +439,6 @@ class WorkspaceCleanupService:
                     format_error_log(
                         "MCP-GENERAL-193",
                         f"Error checking workspace age for {workspace_path}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 

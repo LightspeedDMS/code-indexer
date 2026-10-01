@@ -126,12 +126,18 @@ class TestQueryUserRepositoriesSignature:
 # Shared helpers for handler integration tests (Scenarios 3-4, 5a-5b)
 # ---------------------------------------------------------------------------
 
-_PIPELINE_CLS_PATCH = "code_indexer.server.mcp.handlers.search.MemoryRetrievalPipeline"
-_CONFIG_SVC_PATCH = "code_indexer.server.mcp.handlers.search.get_config_service"
-_GOLDEN_DIR_PATCH = "code_indexer.server.mcp.handlers.search._get_golden_repos_dir"
+_PIPELINE_CLS_PATCH = (
+    "code_indexer.server.mcp.handlers.search.memory_retrieval.MemoryRetrievalPipeline"
+)
+_CONFIG_SVC_PATCH = (
+    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
+)
+_GOLDEN_DIR_PATCH = (
+    "code_indexer.server.mcp.handlers.search.memory_retrieval._get_golden_repos_dir"
+)
 _APP_MODULE_PATCH = "code_indexer.server.mcp.handlers._utils.app_module"
 _COMPUTE_VECTOR_PATCH = (
-    "code_indexer.server.mcp.handlers.search._compute_shared_query_vector"
+    "code_indexer.server.mcp.handlers.search.repo_search._compute_shared_query_vector"
 )
 
 _FAKE_GOLDEN_DIR = "/fake/golden-repos"
@@ -324,7 +330,7 @@ class TestRunMemoryRetrievalAcceptsQueryVector:
             patch(_PIPELINE_CLS_PATCH, return_value=pipeline_instance),
             patch(_GOLDEN_DIR_PATCH, return_value=_FAKE_GOLDEN_DIR),
             patch(
-                "code_indexer.server.mcp.handlers.search._compute_memory_query_vector"
+                "code_indexer.server.mcp.handlers.search.memory_retrieval._compute_memory_query_vector"
             ) as mock_compute,
         ):
             params = {

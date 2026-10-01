@@ -13,10 +13,17 @@ from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.config import write_json_atomic
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
@@ -28,6 +35,8 @@ from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
 from ._utils import (
+    _admin_role_first,
+    _admin_role_required_response,
     _mcp_response,
     _get_golden_repos_dir,
     _list_global_repos,
@@ -36,7 +45,9 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
-from ._temporal_index_cmd import _build_temporal_index_cmd
+from ..auth.elevation_decorator import require_mcp_elevation
+from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
+from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -229,9 +240,8 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-035",
                 f"Failed to list repository categories: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return _mcp_response(
             {"success": False, "error": str(e), "categories": [], "total": 0}
@@ -342,7 +352,15 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.server.services.health_service import health_service
 
         health_response = health_service.get_system_health()
-        node_id = getattr(_utils.app_module.app.state, "node_id", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none("app")
+        # instead of a bare _utils.app_module.app.state attribute chain,
+        # which would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        node_id = getattr(
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "node_id",
+            None,
+        )
 
         return _mcp_response(
             {
@@ -376,7 +394,6 @@ def _load_category_map() -> dict:
             format_error_log(
                 "MCP-GENERAL-034",
                 f"Failed to load category map: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     return {}
@@ -504,6 +521,10 @@ def _get_global_repo_status(
 
 def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get status summary of all repositories."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
@@ -600,7 +621,6 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
                     format_error_log(
                         "MCP-GENERAL-035",
                         f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 continue
@@ -621,9 +641,8 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load global repos status: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
 
 
@@ -653,7 +672,11 @@ def _build_mcp_deactivating_map() -> dict:
     Fetches with is_admin=True so admin-submitted deactivations appear for all users.
     Filters client-side for operation_type=deactivate_repository and pending/running status.
     """
-    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # bare getattr(_utils.app_module, name, None), which would otherwise
+    # permanently construct the process-wide app singleton as a side
+    # effect of merely reading it.
+    bjm = _utils._lazy_module_attr_or_none("background_job_manager")
     if bjm is None:
         return {}
     try:
@@ -695,7 +718,6 @@ def _load_global_repos_normalized() -> list:
                     format_error_log(
                         "MCP-GENERAL-032",
                         f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 continue
@@ -714,9 +736,8 @@ def _load_global_repos_normalized() -> list:
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Failed to load global repos from storage backend: {e}",
-                exc_info=True,
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
     return result
 
@@ -871,8 +892,12 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -941,8 +966,10 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Add a golden repository (admin only)."""
+    """Add a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         repo_url = params.get("url", "")
         alias = params.get("alias", "")
@@ -1001,8 +1028,10 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Remove a golden repository (admin only)."""
+    """Remove a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1024,8 +1053,10 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Refresh a golden repository (admin only)."""
+    """Refresh a golden repository (admin only; elevation-gated like REST and Web)."""
     try:
         alias = params.get("alias", "")
         if not alias:
@@ -1057,8 +1088,12 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "job_id": None,
                 }
             )
-        job_id = refresh_scheduler.trigger_refresh_for_repo(
-            alias, submitter_username=user.username
+        from code_indexer.server.services.golden_repo_audited_ops import (
+            request_golden_repo_refresh,
+        )
+
+        job_id = request_golden_repo_refresh(
+            refresh_scheduler, alias, actor=user.username
         )
         return _mcp_response(
             {
@@ -1072,8 +1107,14 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Change the active branch of a golden repository async (Story #308)."""
+    """Change the active branch of a golden repository async (Story #308).
+
+    Admin-only, like the Web twin: checked here even when a group tool grant
+    admits the call.
+    """
     alias = params.get("alias", "")
     branch = params.get("branch", "")
 
@@ -1087,7 +1128,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 
     try:
         result = _utils.app_module.golden_repo_manager.change_branch_async(
-            alias, branch, user.username
+            alias, branch, submitter_username=user.username
         )
         job_id = result.get("job_id")
         if job_id is None:
@@ -1119,8 +1160,14 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
+@_admin_role_first
+@require_mcp_elevation()
 def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5)."""
+    """Handler for add_golden_repo_index tool (Story #596 AC1, AC3, AC4, AC5).
+
+    Requires the admin role and an elevation window, matching REST POST
+    /api/admin/golden-repos/{alias}/indexes.
+    """
     alias = args.get("alias", "")
     index_type = args.get("index_type", "")
 
@@ -1134,7 +1181,8 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1157,7 +1205,6 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
             format_error_log(
                 "MCP-GENERAL-037",
                 f"Error adding index to golden repo: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1174,7 +1221,8 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1189,7 +1237,6 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
             format_error_log(
                 "MCP-GENERAL-038",
                 f"Error getting golden repo indexes: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1521,8 +1568,7 @@ def _append_provider_to_config(repo_path: str, provider_name: str) -> bool:
         if provider_name not in existing:
             existing.append(provider_name)
         config_data["embedding_providers"] = existing
-        with open(config_path, "w") as f:
-            json.dump(config_data, f)
+        write_json_atomic(config_path, config_data)
         return True
     except Exception as exc:
         logger.warning("_append_provider_to_config failed for %s: %s", config_path, exc)
@@ -1551,8 +1597,7 @@ def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
         if provider_name in existing:
             existing.remove(provider_name)
             config_data["embedding_providers"] = existing
-            with open(config_path, "w") as f:
-                json.dump(config_data, f)
+            write_json_atomic(config_path, config_data)
     except Exception as exc:
         logger.warning(
             "_remove_provider_from_config failed for %s: %s", config_path, exc
@@ -1722,6 +1767,20 @@ def _post_provider_index_snapshot(
             )
             return
 
+        # Bug #1775: evict stale HNSW + chunk-store cache entries for
+        # the old versioned path -- this publish path previously
+        # invalidated NEITHER cache. Shared helper -- never reimplement
+        # the two-cache invalidation inline here.
+        from code_indexer.server.cache.snapshot_cache_invalidation import (
+            invalidate_snapshot_caches,
+        )
+
+        invalidate_snapshot_caches(
+            old_snapshot_path,
+            log_context=f"[provider-index-{repo_alias}]",
+            is_versioned_snapshot_check=scheduler._is_versioned_snapshot,
+        )
+
         cleanup_manager = getattr(scheduler, "cleanup_manager", None)
         if cleanup_manager is not None:
             cleanup_manager.schedule_cleanup(old_snapshot_path)
@@ -1760,7 +1819,8 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     if not repo_alias:
         return
 
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         logger.warning(
             "_set_enable_temporal_flag: golden_repo_manager unavailable, "
@@ -1777,9 +1837,16 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     try:
         if grm._sqlite_backend.update_enable_temporal(bare_alias, True):
-            repo_meta = grm.golden_repos.get(bare_alias)
+            # Bug #1481: refresh via the authoritative get_golden_repo() read
+            # and REPLACE the cache entry wholesale, instead of patching a
+            # single field on whatever object happened to already be
+            # cached. The old read-and-patch pattern silently did nothing
+            # when this worker's cache never held the alias (cross-node/
+            # cross-worker cold cache), leaving it permanently cold despite
+            # the backend write above having just succeeded.
+            repo_meta = grm.get_golden_repo(bare_alias)
             if repo_meta is not None:
-                repo_meta.enable_temporal = True
+                grm.golden_repos[bare_alias] = repo_meta
             logger.info(
                 "Set enable_temporal=True for %s in golden_repos_metadata", bare_alias
             )
@@ -1795,7 +1862,11 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
     try:
-        _app_state = getattr(_utils.app_module.app, "state", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side
+        # effect. getattr()'s default parameter safely handles a None
+        # return from _lazy_module_attr_or_none() (Python's getattr never
+        # raises when a default is supplied, regardless of object type).
+        _app_state = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
         _storage_mode = (
             getattr(_app_state, "storage_mode", None) if _app_state else None
         )
@@ -1967,6 +2038,9 @@ def _run_provider_subprocess(
     from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
         build_embedding_stats_child_env,
     )
+    from code_indexer.storage.shared.hnsw_sync_state import (
+        resolve_hnsw_sync_epoch_env_var,
+    )
 
     env_with_stats = build_embedding_stats_child_env(
         get_config_service().get_config(),
@@ -1975,6 +2049,10 @@ def _run_provider_subprocess(
         job_id=job_id,
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
+    # Bug #1575 Part C independent re-review: this is the SHARED
+    # convergence point for both provider-index job types (semantic and
+    # temporal), so the postgres-mode signal is merged in here ONCE.
+    sanitized_env.update(resolve_hnsw_sync_epoch_env_var())
 
     try:
         run_with_popen_progress(
@@ -2041,7 +2119,13 @@ def _provider_index_job(
         elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
 
-    cmd = ["cidx", "index", "--progress-json"]
+    from code_indexer.server.utils.index_command_layout import (
+        append_server_layout_args,
+    )
+
+    # Story #1488: server states the new-collection layout explicitly
+    # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+    cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
     if clear:
         cmd.append("--clear")
 
@@ -2075,190 +2159,82 @@ def _provider_index_job(
     }
 
 
-def _provider_temporal_index_job(
-    repo_path: str,
-    provider_name: str,
-    clear: bool = False,
-    progress_callback=None,
-    **kwargs,
+def _provider_request_error_response(
+    error: Any, action: str, provider_name: str, repo_alias: str, service: Any
 ) -> Dict[str, Any]:
-    """Background job for per-provider temporal index (Story #641).
+    """This door's response for a refused provider-index request."""
+    from code_indexer.server.services import golden_repo_audited_ops as ops
 
-    Called externally from inline_admin_ops.py via __init__.py re-exports.
-    """
-    if not repo_path or not provider_name:
-        return {
-            "success": False,
-            "error": "Missing repo_path or provider_name",
-            "provider": provider_name,
-        }
-
-    repo_alias = kwargs.get("repo_alias", "")
-    # EVO-66105: pick up job_id from kwargs for embedding stats correlation.
-    job_id = kwargs.get("job_id")
-    actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
-        repo_path, repo_alias
-    )
-    # Bug #1084 B1: refuse when a versioned snapshot could not be redirected to an
-    # existing base clone. The resolver now returns the (non-existent) base_clone
-    # path rather than the snapshot path, so check existence of actual_path
-    # directly -- the snapshot itself is NEVER indexed.
-    if is_versioned and not Path(actual_path).exists():
-        return {
-            "success": False,
-            "error": f"Base clone not found for {repo_path}",
-            "provider": provider_name,
-        }
-
-    env = _build_provider_api_key_env(provider_name)
-
-    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
-    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
-    # subprocess installs the PostgreSQL temporal-metadata backend instead
-    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
-    # returns a NEW dict (base_env=env, so the provider API key is
-    # preserved) in postgres mode, or None in sqlite mode -- fall back to
-    # the unmodified env in that case (byte-unchanged existing behavior).
-    # get_config_service().get_config() (not ServerConfigManager().load_config())
-    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
-    # get_config_service() as the sole config-read path.
-    from code_indexer.server.storage.postgres.temporal_child_wiring import (
-        build_temporal_child_env,
-    )
-
-    _server_config = get_config_service().get_config()
-    _merged_env = build_temporal_child_env(_server_config, base_env=env)
-    if _merged_env is not None:
-        env = _merged_env
-
-    # Story #1412: golden/server temporal all-branches indexing is gated
-    # behind a server-wide runtime flag, shipped OFF by default. Reuse the
-    # config already fetched above rather than a second get_config_service()
-    # call.
-    _all_branches_gate_enabled = bool(
-        getattr(_server_config.indexing_config, "temporal_all_branches_enabled", False)
-    )
-
-    # Story #1404: global temporal indexing floor date, reusing the config
-    # already fetched above rather than a second get_config_service() call
-    # (mirrors the _all_branches_gate_enabled reuse pattern immediately
-    # above).
-    _global_floor_date = getattr(
-        _server_config.temporal_indexing_config, "index_floor_date", None
-    )
-
-    temporal_options = kwargs.get("temporal_options", {}) or {}
-    cmd = _build_temporal_index_cmd(
-        clear,
-        temporal_options,
-        all_branches_gate_enabled=_all_branches_gate_enabled,
-        alias=repo_alias,
-        global_floor_date=_global_floor_date,
-    )
-
-    success, stdout_out, stderr_out = _run_provider_subprocess(
-        cmd,
-        actual_path,
-        env,
-        "temporal",
-        ["temporal"],
-        progress_callback,
-        golden_repo_alias=repo_alias,
-        job_id=job_id,
-    )
-
-    if success:
-        if is_versioned and actual_path != repo_path:
-            try:
-                _post_provider_index_snapshot(
-                    repo_alias=repo_alias,
-                    base_clone_path=actual_path,
-                    old_snapshot_path=repo_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Post-temporal-index snapshot failed for %s: %s", repo_alias, exc
-                )
-        _set_enable_temporal_flag(repo_alias)
-    else:
-        logger.warning(
-            "Temporal provider index failed for provider=%s repo=%s",
-            provider_name,
-            repo_path,
+    kind = error.kind
+    if kind == ops.INVALID_PROVIDER:
+        providers = service.list_providers()
+        return _mcp_response(
+            {
+                "error": error.detail,
+                "available_providers": [p["name"] for p in providers],
+            }
         )
-
-    return {
-        "success": success,
-        "provider": provider_name,
-        "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else "",
-        "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else "",
-    }
+    if kind == ops.REPO_NOT_FOUND:
+        return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+    if kind == ops.JOB_MANAGER_UNAVAILABLE:
+        return _mcp_response({"error": "Background job manager not available"})
+    if kind == ops.CONFIG_WRITE_FAILED:
+        return _mcp_response(
+            {
+                "error": f"Failed to write provider '{provider_name}' to config at {error.detail}"
+            }
+        )
+    requirement = (
+        "Remove requires a writable path."
+        if action == "remove"
+        else "Write operations require a writable path."
+    )
+    return _mcp_response(
+        {"error": f"Cannot resolve base clone for '{repo_alias}'. {requirement}"}
+    )
 
 
 def _handle_provider_index_action(
     action: str,
     provider_name: str,
     repo_alias: str,
-    repo_path: str,
     user: User,
     service,
 ) -> Dict[str, Any]:
-    """Handle add/recreate/remove actions for manage_provider_indexes."""
-    if action == "remove":
-        base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
-        if not base_clone_path:
+    """Handle add/recreate/remove actions for manage_provider_indexes.
+
+    The change itself (and its audit row) is the shared provider-index
+    entry point also used by the REST routes.
+    """
+    from code_indexer.server.services import golden_repo_audited_ops as ops
+
+    try:
+        if action == "remove":
+            result = ops.remove_provider_index_audited(
+                service=service,
+                provider=provider_name,
+                alias=repo_alias,
+                actor=user.username,
+            )
             return _mcp_response(
                 {
-                    "error": f"Cannot resolve base clone for '{repo_alias}'. Remove requires a writable path."
+                    "success": result["removed"],
+                    "message": result["message"],
+                    "collection_name": result["collection_name"],
                 }
             )
-        _remove_provider_from_config(base_clone_path, provider_name)
-        result = service.remove_provider_index(base_clone_path, provider_name)
-        return _mcp_response(
-            {
-                "success": result["removed"],
-                "message": result["message"],
-                "collection_name": result["collection_name"],
-            }
+        job_id = ops.submit_provider_index_job(
+            job_manager=_utils.app_module.background_job_manager,
+            service=service,
+            action=action,
+            provider=provider_name,
+            alias=repo_alias,
+            actor=user.username,
         )
-
-    # add or recreate
-    clear = action == "recreate"
-    if _utils.app_module.background_job_manager is None:
-        return _mcp_response({"error": "Background job manager not available"})
-
-    base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
-    if not base_clone_path:
-        return _mcp_response(
-            {
-                "error": f"Cannot resolve base clone for '{repo_alias}'. Write operations require a writable path."
-            }
+    except ops.ProviderIndexRequestError as error:
+        return _provider_request_error_response(
+            error, action, provider_name, repo_alias, service
         )
-    if not _append_provider_to_config(base_clone_path, provider_name):
-        return _mcp_response(
-            {
-                "error": f"Failed to write provider '{provider_name}' to config at {base_clone_path}"
-            }
-        )
-
-    job_id = _utils.app_module.background_job_manager.submit_job(
-        operation_type=f"provider_index_{action}",
-        func=_provider_index_job,
-        submitter_username=user.username,
-        repo_alias=repo_alias,
-        repo_path=repo_path,
-        provider_name=provider_name,
-        clear=clear,
-        # Pod-pull: reconstruction params for _provider_index_job.
-        # repo_alias is needed so the child subprocess can tag embed
-        # stats records (EVO-66105 follow-up).
-        metadata={
-            "repo_path": repo_path,
-            "provider_name": provider_name,
-            "clear": clear,
-            "repo_alias": repo_alias,
-        },
-    )
     return _mcp_response(
         {
             "success": True,
@@ -2271,8 +2247,41 @@ def _handle_provider_index_action(
     )
 
 
-def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Manage provider-specific semantic indexes (Story #490)."""
+@require_mcp_elevation()
+def _manage_provider_index_mutation(
+    params: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Run an add/recreate/remove action of manage_provider_indexes.
+
+    Elevation-gated to match the REST twins (POST .../add, .../recreate and
+    .../remove carry require_elevation()); the read actions are not.
+    """
+    from code_indexer.server.services.provider_index_service import (
+        ProviderIndexService,
+    )
+
+    action = params.get("action", "")
+    provider_name = params.get("provider", "")
+    repo_alias = params.get("repository_alias", "")
+    if not provider_name:
+        return _mcp_response({"error": "Missing required parameter: provider"})
+    if not repo_alias:
+        return _mcp_response({"error": "Missing required parameter: repository_alias"})
+
+    service = ProviderIndexService(config=get_config_service().get_config())
+    return _handle_provider_index_action(
+        action, provider_name, repo_alias, user, service
+    )
+
+
+def manage_provider_indexes(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """Manage provider-specific semantic indexes (Story #490); admin-only like
+    the REST provider-index routes. ``kwargs`` carries ``session_key``."""
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
@@ -2281,6 +2290,9 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         action = params.get("action", "")
         if not action:
             return _mcp_response({"error": "Missing required parameter: action"})
+
+        if action in ("add", "recreate", "remove"):
+            return _manage_provider_index_mutation(params, user, **kwargs)
 
         service = ProviderIndexService(config=get_config_service().get_config())
 
@@ -2312,107 +2324,71 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                 }
             )
 
-        provider_name = params.get("provider", "")
-        repo_alias = params.get("repository_alias", "")
-        if not provider_name:
-            return _mcp_response({"error": "Missing required parameter: provider"})
-        if not repo_alias:
-            return _mcp_response(
-                {"error": "Missing required parameter: repository_alias"}
-            )
-
-        error = service.validate_provider(provider_name)
-        if error:
-            providers = service.list_providers()
-            return _mcp_response(
-                {"error": error, "available_providers": [p["name"] for p in providers]}
-            )
-
-        repo_path = _resolve_golden_repo_path(repo_alias)
-        if not repo_path:
-            return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
-
-        if action in ("add", "recreate", "remove"):
-            return _handle_provider_index_action(
-                action, provider_name, repo_alias, repo_path, user, service
-            )
-
         return _mcp_response({"error": f"Unknown action: {action}"})
     except Exception as e:
         logger.error("manage_provider_indexes error: %s", e, exc_info=True)
         return _mcp_response({"error": str(e)})
 
 
-def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Bulk add provider index to all repositories (Story #490)."""
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated mutation helper above consumes it.
+manage_provider_indexes.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+def bulk_add_provider_index(
+    params: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """Bulk add provider index to all repositories (Story #490).
+
+    Admin-only like the REST twin (POST .../bulk-add). The admin role is
+    checked here even when a group tool grant admits the call. ``kwargs``
+    carries ``session_key``.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
+    return _bulk_add_provider_index(params, user, **kwargs)
+
+
+# The dispatcher injects session_key only into handlers carrying this marker;
+# the elevation-gated body below consumes it.
+bulk_add_provider_index.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
+@require_mcp_elevation()
+def _bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Elevation-gated body of bulk_add_provider_index.
+
+    Elevation-gated to match the REST twin (POST .../bulk-add carries
+    require_elevation()).
+    """
     try:
         from code_indexer.server.services.provider_index_service import (
             ProviderIndexService,
         )
+
+        from code_indexer.server.services import golden_repo_audited_ops as ops
 
         provider_name = params.get("provider", "")
         if not provider_name:
             return _mcp_response({"error": "Missing required parameter: provider"})
 
         service = ProviderIndexService(config=get_config_service().get_config())
-        error = service.validate_provider(provider_name)
-        if error:
-            providers = service.list_providers()
-            return _mcp_response(
-                {"error": error, "available_providers": [p["name"] for p in providers]}
+        # Admin-only (checked by the public handler), so every golden
+        # repository is in scope, as with the REST twin.  The shared entry
+        # point records one row for the whole request.
+        try:
+            job_ids, skipped = ops.bulk_add_provider_index_audited(
+                job_manager=_utils.app_module.background_job_manager,
+                service=service,
+                provider=provider_name,
+                filter_str=params.get("filter"),
+                actor=user.username,
             )
-
-        global_repos = _list_global_repos()
-        filter_pattern = params.get("filter")
-        job_ids = []
-        skipped = []
-
-        if _utils.app_module.background_job_manager is None:
-            return _mcp_response({"error": "Background job manager not available"})
-
-        for repo in global_repos:
-            alias = repo.get("alias_name", "")
-            if filter_pattern:
-                category = repo.get("category", "")
-                if filter_pattern.startswith("category:"):
-                    filter_cat = filter_pattern.split(":", 1)[1]
-                    if filter_cat.lower() not in category.lower():
-                        continue
-
-            repo_path = _resolve_golden_repo_path(alias)
-            if not repo_path:
-                continue
-            status = service.get_provider_index_status(repo_path, alias)
-            if status.get(provider_name, {}).get("exists"):
-                skipped.append(alias)
-                continue
-
-            base_clone_path = _resolve_golden_repo_base_clone(alias)
-            if not base_clone_path or not _append_provider_to_config(
-                base_clone_path, provider_name
-            ):
-                logger.warning("bulk_add_provider_index: skipping %s", alias)
-                skipped.append(alias)
-                continue
-
-            job_id = _utils.app_module.background_job_manager.submit_job(
-                operation_type="provider_index_add",
-                func=_provider_index_job,
-                submitter_username=user.username,
-                repo_alias=alias,
-                repo_path=repo_path,
-                provider_name=provider_name,
-                clear=False,
-                # Pod-pull: reconstruction params for _provider_index_job.
-                # repo_alias needed for embed stats tagging (EVO-66105).
-                metadata={
-                    "repo_path": repo_path,
-                    "provider_name": provider_name,
-                    "clear": False,
-                    "repo_alias": alias,
-                },
+        except ops.ProviderIndexRequestError as request_error:
+            return _provider_request_error_response(
+                request_error, "add", provider_name, "", service
             )
-            job_ids.append({"alias": alias, "job_id": job_id})
 
         return _mcp_response(
             {
@@ -2431,7 +2407,13 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
 
 
 def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get provider health metrics (Story #491)."""
+    """Get provider health metrics (Story #491).
+
+    Admin-only, matching the REST provider-health routes.
+    """
+    role_error = _admin_role_required_response(user)
+    if role_error is not None:
+        return role_error
     try:
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 

@@ -6,6 +6,8 @@ safety features, confirmation prompts, and error handling.
 Follows TDD methodology and MESSI Rule #1 (anti-mock).
 """
 
+from unittest.mock import patch
+
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -17,7 +19,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_command_exists(self):
         """Test that admin repos delete command exists (will fail initially)."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         # Command should exist and show help
         assert result.exit_code == 0
@@ -27,7 +33,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_requires_alias_argument(self):
         """Test that admin repos delete requires alias argument."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete"])
 
         # Should fail without alias
         assert result.exit_code != 0
@@ -36,7 +46,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_has_force_flag(self):
         """Test that delete command has --force flag."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "--force" in result.output
@@ -45,7 +59,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_help_contains_safety_warnings(self):
         """Test that delete command help contains safety warnings."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "permanently delete" in result.output.lower()
@@ -55,7 +73,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_help_contains_examples(self):
         """Test that delete command help contains usage examples."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output
@@ -109,7 +131,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_listed_in_repos_help(self):
         """Test that delete command is listed in admin repos help."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "--help"])
 
         assert result.exit_code == 0
         assert "delete" in result.output
@@ -117,7 +143,11 @@ class TestAdminReposDeleteCommand:
     def test_admin_repos_delete_destructive_operation_warnings(self):
         """Test that delete command help emphasizes destructive nature."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         # Should emphasize the destructive nature
@@ -143,16 +173,20 @@ class TestAdminReposDeleteCommand:
         """Test that delete command follows same structure as other admin repos commands."""
         runner = CliRunner()
 
-        # Check that delete is available alongside other commands
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
-        assert "delete" in repos_result.output
-        assert "add" in repos_result.output
-        assert "list" in repos_result.output
-        assert "show" in repos_result.output
-        assert "refresh" in repos_result.output
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            # Check that delete is available alongside other commands
+            repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+            assert "delete" in repos_result.output
+            assert "add" in repos_result.output
+            assert "list" in repos_result.output
+            assert "show" in repos_result.output
+            assert "refresh" in repos_result.output
 
-        # Check delete command follows same help pattern
-        delete_result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+            # Check delete command follows same help pattern
+            delete_result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
         assert delete_result.exit_code == 0
         assert "Args:" in delete_result.output
         assert "Examples:" in delete_result.output
@@ -164,7 +198,11 @@ class TestAdminReposDeleteCommandSafetyFeatures:
     def test_admin_repos_delete_confirmation_prompt_described(self):
         """Test that confirmation prompt behavior is described in help."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "confirmation" in result.output.lower()
@@ -173,7 +211,11 @@ class TestAdminReposDeleteCommandSafetyFeatures:
     def test_admin_repos_delete_force_flag_bypasses_confirmation(self):
         """Test that force flag is described as bypassing confirmation."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "--force" in result.output
@@ -189,7 +231,11 @@ class TestAdminReposDeleteCommandSafetyFeatures:
     def test_admin_repos_delete_alias_parameter_description(self):
         """Test that alias parameter is properly described."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "alias" in result.output.lower()
@@ -198,7 +244,11 @@ class TestAdminReposDeleteCommandSafetyFeatures:
     def test_admin_repos_delete_admin_privileges_requirement(self):
         """Test that admin privileges requirement is clearly stated."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
         assert "admin" in result.output.lower()
@@ -207,7 +257,11 @@ class TestAdminReposDeleteCommandSafetyFeatures:
     def test_admin_repos_delete_expected_user_experience(self):
         """Test that help describes expected user experience."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
 
@@ -247,7 +301,11 @@ class TestAdminReposDeleteCommandSignature:
     def test_admin_repos_delete_command_signature_validation(self):
         """Test that delete command has correct signature."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
 
@@ -259,7 +317,11 @@ class TestAdminReposDeleteCommandSignature:
     def test_admin_repos_delete_parameter_order(self):
         """Test that parameters are in expected order."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
 
         assert result.exit_code == 0
 
@@ -271,14 +333,18 @@ class TestAdminReposDeleteCommandSignature:
         """Test proper integration with admin command group."""
         runner = CliRunner()
 
-        # Should be listed in admin group
-        admin_result = runner.invoke(cli, ["admin", "--help"])
-        assert "repos" in admin_result.output
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            # Should be listed in admin group
+            admin_result = runner.invoke(cli, ["admin", "--help"])
+            assert "repos" in admin_result.output
 
-        # Should be listed in repos subgroup
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
-        assert "delete" in repos_result.output
+            # Should be listed in repos subgroup
+            repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+            assert "delete" in repos_result.output
 
-        # Should have consistent command structure
-        delete_result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+            # Should have consistent command structure
+            delete_result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
         assert delete_result.exit_code == 0

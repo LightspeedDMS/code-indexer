@@ -679,6 +679,26 @@ class TestTraceCallChain:
             f"Expected symbols in path: {path_str}"
         )
 
+    def test_trace_call_chain_forwards_timeout_errors_to_backend(self, query_engine):
+        """Bug #1603 code review (Priority 1): the timeout-propagation
+        contract added to DatabaseBackend.trace_call_chain must reach
+        through this thin SCIPQueryEngine passthrough unchanged, or
+        SCIPQueryService (the next layer up) can never learn about a
+        timeout even though the backend now supports reporting one.
+        """
+        from unittest.mock import MagicMock
+
+        query_engine.backend.trace_call_chain = MagicMock(return_value=[])
+        timeout_errors: list = []
+
+        query_engine.trace_call_chain(
+            "A", "B", max_depth=3, limit=50, timeout_errors=timeout_errors
+        )
+
+        query_engine.backend.trace_call_chain.assert_called_once_with(
+            "A", "B", max_depth=3, limit=50, timeout_errors=timeout_errors
+        )
+
     @pytest.mark.slow  # Inherently slow due to O(n²) algorithm in backend (not index issue)
     def test_trace_call_chain_performance(self, real_query_engine):
         """Verify trace_call_chain completes in <15 seconds.

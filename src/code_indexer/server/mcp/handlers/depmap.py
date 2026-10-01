@@ -21,6 +21,10 @@ from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
 
 from . import _utils
 from ._utils import _mcp_response
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from ._depmap_aliases import (
     apply_consumer_aliases,
     apply_domain_membership_aliases,
@@ -101,6 +105,16 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
                 "anomalies": [],
             }
         )
+
+    # Repo-level access for repo_name is enforced upstream by the MCP
+    # dispatcher's _check_repository_access() (mcp/protocol.py), which
+    # recognizes repo_name for THIS tool specifically -- see
+    # _REPO_NAME_PARAM_TOOLS there. Not re-checked here: the dispatcher
+    # resolves an admin's acting_users into a scoped repo set and applies
+    # it to its own check, but this handler only ever receives the plain
+    # `user` argument -- a second, independent check at this layer could
+    # not see that scoping and would have to fall back to the caller's
+    # full access, so the single check point stays at the dispatcher.
 
     # Resolve dep_map_path fresh — NEVER cached
     dep_map_path: Path = (
@@ -249,6 +263,10 @@ def depmap_get_repo_domains_handler(
                 "anomalies": [],
             }
         )
+
+    # Repo-level access for repo_name is enforced upstream by the MCP
+    # dispatcher (mcp/protocol.py::_check_repository_access) before this
+    # handler is ever invoked.
 
     parser, err = _resolve_parser("depmap_get_repo_domains")
     if err is not None:
@@ -488,6 +506,10 @@ def depmap_get_cross_domain_graph_handler(
         - success=false: {"success": false, "error": "...", "edges": [],
                           "anomalies": [], "parser_anomalies": [], "data_anomalies": []}
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     parser, err = _resolve_parser("depmap_get_cross_domain_graph")
     if err is not None:
         success, resolution = False, "invalid_input"
@@ -693,6 +715,10 @@ def depmap_get_hub_domains_handler(params: Dict[str, Any], user: Any) -> Dict[st
         - invalid_input: unknown by=, invalid/negative top_n, or dep_map_path not a valid Path
         - ok:            hubs computed (may be empty list)
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     is_dict = isinstance(params, dict)
     raw_by = params.get("by", "total_degree") if is_dict else "total_degree"
 

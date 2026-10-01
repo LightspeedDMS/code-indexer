@@ -10,15 +10,15 @@ inputSchema:
   properties:
     score:
       type: number
-      description: 'Optional success score for the research session (0.0 to 1.0). Use to quantify research effectiveness: 1.0 = fully successful (found answer/solution), 0.5 = partially successful (found leads), 0.0 = unsuccessful (no progress). Helps analyze which research strategies work best.'
+      description: 'Optional success score for the research session (0.0 to 1.0). 1.0 = fully successful (found answer/solution), 0.5 = partially successful (found leads), 0.0 = unsuccessful (no progress).'
       minimum: 0
       maximum: 1
     summary:
       type: string
-      description: 'Optional human-readable summary of the research session outcome. Examples: "Found root cause in auth module", "Need to investigate caching layer next", "Dead end - API not used in this codebase". Appears in Langfuse dashboard for context.'
+      description: 'Optional human-readable summary of the research session outcome (e.g., "Found root cause in auth module"). Appears in Langfuse dashboard for context.'
     outcome:
       type: string
-      description: 'Optional structured outcome description. Examples: "bug_found", "implementation_complete", "needs_more_investigation", "blocked". Useful for categorizing trace results and generating reports.'
+      description: 'Optional structured outcome description (e.g., "bug_found"). Useful for categorizing trace results and generating reports.'
     output:
       type: string
       description: 'Optional: Claude''s complete response to the user. Captures the full AI-generated output for prompt observability analysis in Langfuse.'
@@ -26,7 +26,7 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Optional list of additional tags to add at trace end (e.g., ["completed", "verified"]). These are merged with any tags provided at start_trace.'
+      description: 'Optional list of additional tags to add at trace end. These are merged with any tags provided at start_trace.'
     intel:
       type: object
       description: 'Optional prompt intelligence metadata updates at trace end. Can update or add new intelligence metrics based on final results.'
@@ -35,25 +35,25 @@ inputSchema:
           type: number
           minimum: 0
           maximum: 1
-          description: 'User frustration level: 0.0 = calm/satisfied, 1.0 = very frustrated. Can update if frustration changed during session.'
+          description: 'User frustration level (0.0-1.0). Can update if frustration changed during session. See "INTEL CODES" below.'
         specificity:
           type: string
           enum: [surg, const, outc, expl]
-          description: 'Prompt type: surg=surgical (specific fix), const=constructive (building), outc=outcome-focused (goal-oriented), expl=exploratory (discovery).'
+          description: 'Prompt type classification. See "INTEL CODES" below for code meanings.'
         task_type:
           type: string
           enum: [bug, feat, refac, research, test, docs, debug, conf, other]
-          description: 'Task classification: bug=bug fix, feat=new feature, refac=refactoring, research=investigation, test=testing, docs=documentation, debug=debugging, conf=configuration, other=miscellaneous.'
+          description: 'Task classification. See "INTEL CODES" below for code meanings.'
         quality:
           type: number
           minimum: 0
           maximum: 1
-          description: 'Prompt quality score: 0.0 = poor/vague, 1.0 = excellent/clear. Can be updated based on final assessment.'
+          description: 'Prompt quality score (0.0-1.0). Can be updated based on final assessment. See "INTEL CODES" below.'
         iteration:
           type: integer
           minimum: 1
           maximum: 9
-          description: 'Task iteration count: How many attempts at this task (1 = first attempt, 2+ = retry/refinement).'
+          description: 'Task iteration count. See "INTEL CODES" below.'
   required: []
 outputSchema:
   type: object
@@ -94,6 +94,8 @@ FULL PROMPT OBSERVABILITY:
 NESTED TRACES: Ends only the most recent trace. Previous trace remains active. Call multiple times to unwind nested traces.
 
 SCORING: 0.0 (failed) to 1.0 (fully successful). Optional but helps analyze research effectiveness.
+
+INTEL CODES: same `specificity`, `task_type`, `frustration`, `quality`, and `iteration` semantics as `start_trace` -- see its "INTEL CODES" section for the full code-to-meaning legend and numeric anchors.
 
 EXAMPLE WITH FULL OBSERVABILITY:
   end_trace(

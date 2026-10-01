@@ -24,7 +24,9 @@ def _point(point_id: str, dim: int = 8):
 
 class TestTemporalVectorFsync:
     def test_temporal_collection_upsert_fsyncs_vector_file(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
+        )
         collection = "code-indexer-temporal-voyage_context_4-2024Q1"
         vector_store.create_collection(collection, 8)
         vector_store.begin_indexing(collection)
@@ -42,7 +44,9 @@ class TestTemporalVectorFsync:
         assert fsync_value is True
 
     def test_non_temporal_collection_upsert_does_not_fsync_vector_file(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
+        )
         collection = "normal_collection"
         vector_store.create_collection(collection, 8)
         vector_store.begin_indexing(collection)
@@ -62,7 +66,9 @@ class TestTemporalVectorFsync:
 
 class TestTemporalDirectoryFsyncOnCreate:
     def test_new_quantization_directory_is_fsynced_for_temporal(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
+        )
         collection = "code-indexer-temporal-voyage_context_4-2024Q1"
         vector_store.create_collection(collection, 8)
         vector_store.begin_indexing(collection)
@@ -75,7 +81,9 @@ class TestTemporalDirectoryFsyncOnCreate:
         assert mock_fsync.called
 
     def test_non_temporal_directory_create_does_not_fsync(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index", use_chunks_db_for_new_collections=False
+        )
         collection = "normal_collection"
         vector_store.create_collection(collection, 8)
         vector_store.begin_indexing(collection)

@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import pytest
 
-from src.code_indexer.server.auth.user_manager import UserManager, UserRole
-from src.code_indexer.server.utils.datetime_parser import DateTimeParseError
+from code_indexer.server.auth.user_manager import UserManager, UserRole
+from code_indexer.server.utils.datetime_parser import DateTimeParseError
 
 
 class TestDatetimeParsingFix:

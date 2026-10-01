@@ -2,8 +2,8 @@
 
 import pytest
 from unittest.mock import MagicMock, patch
-from src.code_indexer.cli import _display_file_chunk_match
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.cli import _display_file_chunk_match
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResult,
 )
 
@@ -38,7 +38,7 @@ class TestDiffTypeMarkers:
         }
 
         # Act & Assert
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 1, mock_service)
 
             # Check that [ADDED] marker was printed
@@ -74,7 +74,7 @@ class TestDiffTypeMarkers:
         }
 
         # Act & Assert
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 2, mock_service)
 
             # Check that [MODIFIED] marker was printed
@@ -113,7 +113,7 @@ class TestDiffTypeMarkers:
         mock_service._is_new_file.return_value = False
 
         # Act & Assert
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 4, mock_service)
 
             # Check that [NO CHANGES IN CHUNK] was NOT printed

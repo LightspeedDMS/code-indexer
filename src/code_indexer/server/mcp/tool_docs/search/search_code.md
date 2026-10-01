@@ -9,18 +9,15 @@ inputSchema:
   properties:
     query_text:
       type: string
-      description: 'Search query text. MULTI-TERM FTS QUERIES: When using search_mode=''fts'' with multiple terms (e.g., ''authenticate
-        user''), ALL terms must match (AND semantics). Single-term queries match normally. For OR semantics, use separate
-        queries or regex mode with ''|'' operator (e.g., ''term1|term2'').'
+      description: 'Search query text.'
     repository_alias:
       oneOf:
       - type: string
       - type: array
         items:
           type: string
-      description: 'Repository alias(es) to search. FORMATS: (1) String for single repo: ''backend-global'', (2) Array for
-        multi-repo: [''backend-global'', ''frontend-global''], (3) Wildcard pattern: ''*-global'' (all global repos) or ''pch-*-global''
-        (pattern match). Multi-repo searches support aggregation_mode and response_format parameters for result organization.'
+      description: 'Repository alias(es) to search. String for single repo, array for multi-repo, or a wildcard pattern
+        (e.g. ''*-global'', ''pch-*-global'').'
     aggregation_mode:
       type: string
       enum:
@@ -28,7 +25,7 @@ inputSchema:
       - per_repo
       default: global
       description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
-        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
+        N evenly across repos.'
     exclude_patterns:
       type: array
       items:
@@ -36,9 +33,7 @@ inputSchema:
       description: Regex patterns to exclude repositories from omni-search.
     limit:
       type: integer
-      description: 'Maximum number of results. IMPORTANT: Start with limit=5 to conserve context tokens. Each result consumes
-        tokens proportional to code snippet size. Only increase limit if initial results insufficient. High limits (>20) can
-        rapidly consume context window.'
+      description: 'Maximum number of results.'
       default: 10
       minimum: 1
       maximum: 100
@@ -148,9 +143,7 @@ inputSchema:
       description: 'Query strategy: primary_only, failover (switch on failure — API error or timeout, not empty results),
         parallel (score fusion across both providers), specific (use one named provider). When both VoyageAI and Cohere
         embedding providers are configured, the default strategy is automatically ''parallel'' with ''rrf'' fusion. Pass
-        query_strategy=''primary_only'' to override and use only the primary provider. With parallel strategy, each result
-        includes contributing_providers (which providers ranked it) and fusion_score (rank-derived combined score) alongside
-        the raw similarity_score.'
+        query_strategy=''primary_only'' to override and use only the primary provider.'
     score_fusion:
       type: string
       enum:
@@ -158,9 +151,7 @@ inputSchema:
       - multiply
       - average
       description: "Score fusion method for parallel strategy (default: rrf). 'rrf' (Reciprocal Rank Fusion): rank-position-based,\
-        \ immune to score-scale differences between providers — recommended default since VoyageAI and Cohere calibrate scores\
-        \ differently. 'multiply'/'average': raw score arithmetic, only meaningful when both providers produce comparably\
-        \ calibrated scores on the same corpus."
+        \ immune to score-scale differences between providers. 'multiply'/'average': raw score arithmetic."
     preferred_provider:
       type: string
       enum:
@@ -348,6 +339,8 @@ REPOSITORY SELECTION:
 
 SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both, merges via RRF - common hits ranked highest)
 
+FTS MULTI-TERM: a multi-term fts query (e.g. 'authenticate user') requires ALL terms to match (AND semantics); single-term queries match normally. For OR semantics, use separate queries or regex mode with the '|' operator (e.g. 'term1|term2').
+
 RERANKING SMELL TEST: query_text is 2+ words and search_mode is semantic or hybrid? Add rerank_query. Write query_text short for retrieval, write rerank_query long for precision. Skipping reranking on a conceptual query typically costs 2-4 additional searches to find the right result; reranking adds ~200-500ms but is almost always cheaper than re-searching.
 
 SKIP RERANKING ONLY WHEN: exact single-identifier lookup (e.g., fts for 'def authenticate_user') | result set <= 3 | chronological/positional order matters more than relevance
@@ -364,7 +357,9 @@ CRITICAL: Semantic search finds code by MEANING, not exact text. Results are APP
 
 LIMIT BEHAVIOR: limit=10 with 3 repos in 'global' mode may return 7+3+0=10. In 'per_repo' mode returns 4+3+3=10 (NOT 30 - per_repo does NOT multiply the limit).
 
-PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content).
+PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content). Only increase limit if initial results are insufficient -- high limits (>20) can rapidly consume the context window.
+
+PARALLEL QUERY STRATEGY: with query_strategy='parallel', each result additionally carries contributing_providers (list of providers that ranked it) and fusion_score (rank-derived combined score) alongside the raw similarity_score. 'rrf' score_fusion is the recommended default because VoyageAI and Cohere calibrate scores differently; 'multiply'/'average' are only meaningful when both providers produce comparably calibrated scores on the same corpus.
 
 EXAMPLE (standard call with reranking):
 search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5,

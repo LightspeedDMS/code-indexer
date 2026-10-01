@@ -342,7 +342,7 @@ class TestOIDCRoutes:
 
         # Set CIDX_ISSUER_URL environment variable
         with patch.dict(
-            os.environ, {"CIDX_ISSUER_URL": "https://linner.ddns.net:8383"}
+            os.environ, {"CIDX_ISSUER_URL": "https://cidx.example.com:8383"}
         ):
             # Make callback request
             response = client.get(
@@ -359,7 +359,7 @@ class TestOIDCRoutes:
 
             # Third argument should be the callback URL using CIDX_ISSUER_URL
             callback_url = call_args[0][2]  # positional arg 2
-            assert callback_url == "https://linner.ddns.net:8383/auth/sso/callback"
+            assert callback_url == "https://cidx.example.com:8383/auth/sso/callback"
 
     def test_sso_callback_uses_request_url_when_cidx_issuer_url_not_set(self):
         """Test that /auth/sso/callback falls back to request.url_for() when CIDX_ISSUER_URL not set."""

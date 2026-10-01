@@ -202,7 +202,7 @@ class TestDeleteAPIKeyHandler:
     def mock_user_manager(self):
         """Create mock user manager for testing handlers."""
         manager = MagicMock()
-        manager.delete_api_key.return_value = True
+        manager.delete_api_key_audited.return_value = True
         return manager
 
     def test_delete_api_key_returns_success(

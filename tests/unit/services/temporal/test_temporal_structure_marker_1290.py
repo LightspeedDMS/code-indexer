@@ -9,7 +9,7 @@ collection looking legacy (AC27).
 
 import json
 
-from src.code_indexer.services.temporal.temporal_structure_marker import (
+from code_indexer.services.temporal.temporal_structure_marker import (
     STRUCTURE_MARKER_FILENAME,
     is_v2_structure,
     read_structure_marker,

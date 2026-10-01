@@ -32,6 +32,8 @@ class TestTemporalMetadataBackendProtocolShape:
             "delete_metadata",
             "cleanup_stale_metadata",
             "count_entries",
+            "copy_collection_scope",
+            "delete_collection_scope",
         ]
         for method_name in required:
             assert hasattr(TemporalMetadataBackend, method_name), (
@@ -79,6 +81,12 @@ class TestTemporalMetadataBackendProtocolShape:
 
             def count_entries(self):
                 return 0
+
+            def copy_collection_scope(self, target_collection_path):
+                return None
+
+            def delete_collection_scope(self):
+                return None
 
         assert isinstance(_FakeBackend(), TemporalMetadataBackend)
 

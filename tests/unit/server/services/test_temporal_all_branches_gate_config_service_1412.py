@@ -48,32 +48,32 @@ class TestUpdateIndexingSettingTemporalAllBranchesEnabled:
 
     def test_update_true_string_sets_true(self) -> None:
         svc = _make_service()
-        svc._update_indexing_setting("temporal_all_branches_enabled", "true")
+        svc.update_setting("indexing", "temporal_all_branches_enabled", "true")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_all_branches_enabled is True
 
     def test_update_false_string_sets_false(self) -> None:
         svc = _make_service()
-        svc._update_indexing_setting("temporal_all_branches_enabled", "true")
-        svc._update_indexing_setting("temporal_all_branches_enabled", "false")
+        svc.update_setting("indexing", "temporal_all_branches_enabled", "true")
+        svc.update_setting("indexing", "temporal_all_branches_enabled", "false")
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_all_branches_enabled is False
 
     def test_update_bool_true_passthrough(self) -> None:
         svc = _make_service()
-        svc._update_indexing_setting("temporal_all_branches_enabled", True)
+        svc.update_setting("indexing", "temporal_all_branches_enabled", True)
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_all_branches_enabled is True
 
     def test_update_bool_false_passthrough(self) -> None:
         svc = _make_service()
-        svc._update_indexing_setting("temporal_all_branches_enabled", False)
+        svc.update_setting("indexing", "temporal_all_branches_enabled", False)
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_all_branches_enabled is False
 
     def test_update_persists_and_reflects_in_get_all_settings(self) -> None:
         svc = _make_service()
-        svc._update_indexing_setting("temporal_all_branches_enabled", "true")
+        svc.update_setting("indexing", "temporal_all_branches_enabled", "true")
         settings = svc.get_all_settings()
         assert settings["indexing"]["temporal_all_branches_enabled"] is True
 

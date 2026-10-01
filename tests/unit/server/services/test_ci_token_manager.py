@@ -15,7 +15,7 @@ import os
 import pytest
 import re
 
-from src.code_indexer.server.services.ci_token_manager import (
+from code_indexer.server.services.ci_token_manager import (
     CITokenManager,
     TokenValidationError,
 )

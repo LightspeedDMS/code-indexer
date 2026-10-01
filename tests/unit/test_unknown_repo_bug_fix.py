@@ -7,7 +7,7 @@ and validates against "unknown" values.
 
 import logging
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
 )
 

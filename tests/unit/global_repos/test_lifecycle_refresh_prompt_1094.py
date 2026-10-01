@@ -121,6 +121,19 @@ def repo_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _abs_path_prefix(repo_path: Path) -> str:
+    """The absolute-path statement __call__ prepends to every rendered
+    prompt: the agent's subprocess cwd is a neutral scratch directory, never
+    the repo itself, so file reads need the repo's absolute path spelled
+    out. Mirrors LifecycleClaudeCliInvoker.__call__."""
+    return (
+        f"You are analyzing the repository at the absolute path: {repo_path}\n"
+        "This directory is reachable via the Read/Glob/Grep tools even though "
+        "it is not your current working directory — use this absolute path "
+        "(or paths relative to it) for every file access.\n\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CREATE-mode byte-identity regression guard (critical)
 # ---------------------------------------------------------------------------
@@ -145,9 +158,12 @@ def test_create_mode_prompt_is_byte_identical_to_current_file(
     assert "REFRESH MODE" not in rendered
     assert "EXISTING DESCRIPTION" not in rendered
 
-    # And it must equal the file with the placeholder line stripped exactly.
+    # And it must equal the file with the placeholder line stripped exactly,
+    # prefixed by the absolute-path statement __call__ adds.
     raw = _PROMPT_PATH.read_text(encoding="utf-8")
-    expected_create = raw.replace("{{REFRESH_SECTION}}\n\n", "", 1)
+    expected_create = _abs_path_prefix(repo_dir) + raw.replace(
+        "{{REFRESH_SECTION}}\n\n", "", 1
+    )
     assert rendered == expected_create
 
 
@@ -281,7 +297,9 @@ def test_whitespace_existing_description_falls_back_to_create_mode(
     assert "REFRESH MODE" not in rendered
     assert "{{REFRESH_SECTION}}" not in rendered
     raw = _PROMPT_PATH.read_text(encoding="utf-8")
-    expected_create = raw.replace("{{REFRESH_SECTION}}\n\n", "", 1)
+    expected_create = _abs_path_prefix(repo_dir) + raw.replace(
+        "{{REFRESH_SECTION}}\n\n", "", 1
+    )
     assert rendered == expected_create
 
 

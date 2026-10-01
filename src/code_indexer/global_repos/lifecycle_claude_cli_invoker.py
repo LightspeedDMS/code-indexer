@@ -336,7 +336,19 @@ class LifecycleClaudeCliInvoker:
         """
         path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
-        prompt = _render_prompt(alias, existing_description, last_analyzed)
+        # The agent's subprocess cwd is a neutral scratch directory, never the
+        # repo itself, so the repo's own CLAUDE.md/AGENTS.md is not auto-loaded
+        # as trusted CLI configuration. State the repo's absolute path
+        # explicitly so file reads resolve correctly —
+        # the unified prompt otherwise implicitly assumes cwd == repo. Composed
+        # here rather than inside _render_prompt so CREATE mode's
+        # byte-identical-to-lifecycle_unified.md contract is unaffected.
+        prompt = (
+            f"You are analyzing the repository at the absolute path: {path_obj}\n"
+            "This directory is reachable via the Read/Glob/Grep tools even though "
+            "it is not your current working directory — use this absolute path "
+            "(or paths relative to it) for every file access.\n\n"
+        ) + _render_prompt(alias, existing_description, last_analyzed)
         result = self._build_dispatcher().dispatch(
             flow="repo_lifecycle",
             cwd=str(path_obj),

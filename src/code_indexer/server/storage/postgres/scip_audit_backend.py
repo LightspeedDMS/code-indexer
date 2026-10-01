@@ -4,18 +4,22 @@ PostgreSQL backend for SCIP audit storage (Story #516).
 Drop-in replacement for SCIPAuditSqliteBackend using psycopg v3 sync connections
 via ConnectionPool.  Satisfies the SCIPAuditBackend Protocol (protocols.py).
 
-Table created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for new deployments.
+Schema (`scip_dependency_installations` table and its indexes) is owned
+entirely by the SQL migration
+(storage/postgres/migrations/sql/025_runtime_only_tables.sql) -- this
+backend does NOT create or alter any table. `service_init.py` always runs
+`MigrationRunner` before `StorageFactory.create_backends()` constructs this
+class, so schema is guaranteed present by the time any instance exists
+(Issue #1697, mirroring Bug #1655/#1662: a previous self-heal
+`CREATE TABLE IF NOT EXISTS` here was dead code in every real deployment
+-- removed rather than kept as a second, drift-prone copy of the schema).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
-
-logger = logging.getLogger(__name__)
 
 
 class SCIPAuditPostgresBackend:
@@ -29,55 +33,15 @@ class SCIPAuditPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the table exists.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create the scip_dependency_installations table and indexes if they don't exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS scip_dependency_installations (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TIMESTAMPTZ DEFAULT NOW(),
-                        job_id VARCHAR(36) NOT NULL,
-                        repo_alias VARCHAR(255) NOT NULL,
-                        project_path VARCHAR(255),
-                        project_language VARCHAR(50),
-                        project_build_system VARCHAR(50),
-                        package VARCHAR(255) NOT NULL,
-                        command TEXT NOT NULL,
-                        reasoning TEXT,
-                        username VARCHAR(255),
-                        node_id VARCHAR(255)
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_scip_audit_pg_timestamp "
-                    "ON scip_dependency_installations (timestamp)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_scip_audit_pg_repo_alias "
-                    "ON scip_dependency_installations (repo_alias)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_scip_audit_pg_job_id "
-                    "ON scip_dependency_installations (job_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_scip_audit_pg_project_language "
-                    "ON scip_dependency_installations (project_language)"
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning("SCIPAuditPostgresBackend: schema setup failed: %s", exc)
 
     def create_audit_record(
         self,

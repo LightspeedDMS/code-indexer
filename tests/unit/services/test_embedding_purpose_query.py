@@ -41,7 +41,7 @@ class TestFilesystemVectorStorePassesEmbeddingPurpose:
 
     def test_search_passes_embedding_purpose_query(self):
         """FilesystemVectorStore.search() must call get_embedding with embedding_purpose='query'."""
-        from src.code_indexer.storage.filesystem_vector_store import (
+        from code_indexer.storage.filesystem_vector_store import (
             FilesystemVectorStore,
         )
 
@@ -65,11 +65,11 @@ class TestFilesystemVectorStorePassesEmbeddingPurpose:
 
             # Patch IDIndexManager at its source module (lazily imported inside search())
             with patch(
-                "src.code_indexer.storage.hnsw_index_manager.HNSWIndexManager",
+                "code_indexer.storage.hnsw_index_manager.HNSWIndexManager",
                 return_value=mock_hnsw_manager,
             ):
                 with patch(
-                    "src.code_indexer.storage.id_index_manager.IDIndexManager"
+                    "code_indexer.storage.id_index_manager.IDIndexManager"
                 ) as mock_id_cls:
                     mock_id_manager = MagicMock()
                     mock_id_manager.load_index.return_value = {}

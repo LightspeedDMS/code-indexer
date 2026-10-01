@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
     JobStatus,

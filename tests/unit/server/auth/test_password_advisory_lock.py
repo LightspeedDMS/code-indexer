@@ -130,3 +130,32 @@ class TestIsUserLocked:
         pool.connection.return_value.__exit__ = MagicMock(return_value=False)
 
         assert prot.is_user_locked("alice") is True
+
+
+class TestConcurrencyProtectionDefaultLockDirDataDir:
+    """Bug #1778: default lock_dir fallback must honor CIDX_SERVER_DATA_DIR.
+
+    An isolated/test server instance sets CIDX_SERVER_DATA_DIR to a
+    throwaway directory. Without honoring it, PasswordChangeConcurrencyProtection
+    hardcodes Path.home() / ".cidx-server" / "locks" for its default lock_dir,
+    leaking lock files into the real server's directory. Path.home() is
+    mocked to a temp "fake home" so this test never touches the real
+    ~/.cidx-server directory either way.
+    """
+
+    def test_uses_cidx_server_data_dir_env_var_when_no_explicit_lock_dir(
+        self, tmp_path, monkeypatch
+    ):
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        isolated_data_dir = tmp_path / "isolated-server-instance"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(isolated_data_dir))
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            prot = PasswordChangeConcurrencyProtection()
+
+        expected_lock_dir = isolated_data_dir / "locks"
+        real_default_lock_dir = fake_home / ".cidx-server" / "locks"
+
+        assert prot.lock_dir == expected_lock_dir
+        assert prot.lock_dir != real_default_lock_dir

@@ -21,12 +21,17 @@ import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
+from code_indexer.server.storage.shared.snapshot_paths import (
+    resolve_versioned_snapshot_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +239,81 @@ class HNSWIndexCacheConfig:
         )
 
 
+#: Bug #1538: the on-disk IDENTITY of an ``hnsw_index.bin`` --
+#: ``(st_mtime_ns, st_size, st_ino, st_dev)``.
+#:
+#: ``st_mtime_ns`` uses nanosecond precision, never the lossy float
+#: ``st_mtime``, matching the ``st_mtime_ns`` convention this codebase's other
+#: path-keyed caches already use (``CollectionMetaCache``,
+#: ``ChunkStoreThreadCache``).
+#:
+#: Time and size ALONE are not an identity, and relying on them would leave
+#: the exact staleness this bug reports reachable through a narrower window: a
+#: refresh may legitimately rebuild a shard to the same item count (same file
+#: size) with different content, and the timestamps can compare equal too (a
+#: coarse server-side mtime granularity, a same-tick rewrite). ``st_ino``
+#: (qualified by ``st_dev``, since inode numbers are only unique within a
+#: filesystem) closes that: EVERY ``hnsw_index.bin`` publish in this codebase
+#: is an atomic rename over the live path
+#: (``BackgroundIndexRebuilder.atomic_swap`` and ``HNSWIndexManager``'s two
+#: ``os.replace`` sites), which always installs a DIFFERENT inode. Detection
+#: is therefore exact rather than probabilistic -- and costs nothing extra,
+#: since all four fields come from the SAME single ``os.stat()`` call. A
+#: content digest would be the alternative, and was rejected: hashing a
+#: multi-megabyte graph on every query-path cache hit is far too expensive for
+#: a check the inode already answers exactly.
+_IndexFileFingerprint = Tuple[int, int, int, int]
+
+#: Bug #1538: minimum interval between potentially-blocking freshness stats
+#: for the SAME cache key.
+#:
+#: This bounds how often the CHECK runs. Its PURPOSE is not to define an
+#: acceptable staleness window, but it does have that as a side effect: after a
+#: successful check, a change landing within this interval is served stale
+#: until the next check is due. That window is bounded and small, unlike the
+#: indefinite staleness Bug #1538 reported. It is not a TTL -- entry lifetime
+#: is still governed by ttl_minutes, independently of this.
+#: The golden-repos mount is ``hard`` NFSv3,
+#: where an outage makes ``os.stat()`` block in uninterruptible kernel retry;
+#: without a rate limit, every query for a key would enter that blocking call.
+#: Combined with the per-key in-flight guard (``_freshness_checking``), at most
+#: ONE thread is inside a blocking stat for a given key at a time.
+#:
+#: The cost is that a change is noticed up to this long after it lands, on top
+#: of the NFS client's own attribute-revalidation window -- negligible next to
+#: a refresh cycle, and far smaller than the indefinite staleness Bug #1538
+#: reported. A freshly loaded entry has ``freshness_checked_at=None``, which
+#: always checks on its FIRST hit, so a refresh landing during the load is
+#: still caught immediately rather than waiting out this interval.
+_FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS = 2.0
+
+
+def _stat_index_fingerprint(index_file: Path) -> Optional[_IndexFileFingerprint]:
+    """Return ``index_file``'s identity fingerprint, or None if it cannot be
+    stat'd (missing file, OSError).
+
+    A None result means freshness is UNVERIFIABLE for this file right now.
+    Callers must treat that as "cannot confirm unchanged", never as
+    "unchanged": ``_apply_freshness_verdict`` keeps serving the last verified
+    graph and WARNs once per degradation, rather than silently accepting the
+    entry as current or reloading it on every subsequent hit.
+    """
+    try:
+        stat_result = os.stat(index_file)
+    except OSError as e:
+        logger.debug(
+            f"Could not stat index file {index_file} for freshness tracking: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+    return (
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        stat_result.st_ino,
+        stat_result.st_dev,
+    )
+
+
 @dataclass
 class HNSWIndexCacheEntry:
     """
@@ -255,10 +335,24 @@ class HNSWIndexCacheEntry:
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
     index_size_bytes: int = 0
-    # EVO-64244 Facet 2: st_mtime of hnsw_index.bin captured at load time.
-    # None when the index_file path was not supplied (mtime check disabled),
-    # letting a later on-disk rebuild invalidate this stale in-RAM entry.
-    index_file_mtime: Optional[float] = None
+    # EVO-64244 Facet 2 / Bug #1538: identity fingerprint of hnsw_index.bin,
+    # captured BEFORE the load that produced this entry (see get_or_load).
+    # None when the index_file path was not supplied, or when it could not be
+    # stat'd at load time. None does NOT disable checking: once the file
+    # becomes stat-able again, _apply_freshness_verdict evicts this entry so
+    # the reload can stamp a real fingerprint (an entry that kept a None
+    # fingerprint could never be verified for as long as it lived).
+    index_file_fingerprint: Optional[_IndexFileFingerprint] = None
+    # Bug #1538: monotonic timestamp of the last COMPLETED freshness check.
+    # None means "never checked since this entry was loaded", which always
+    # makes the next HIT check -- so a refresh that landed during the load is
+    # caught immediately instead of waiting out the rate-limit interval.
+    freshness_checked_at: Optional[float] = None
+    # Bug #1538: True once an UNVERIFIABLE check has been reported for this
+    # entry; reset as soon as a check succeeds. Without this, a persistently
+    # failing stat would emit one WARNING per query instead of one per
+    # degradation.
+    freshness_unverified_reported: bool = False
 
     def record_access(self) -> None:
         """
@@ -338,14 +432,37 @@ class HNSWIndexCache:
     Performance improvement: ~277ms → <1ms for repeated queries (1800x faster).
     """
 
-    def __init__(self, config: Optional[HNSWIndexCacheConfig] = None):
+    def __init__(
+        self,
+        config: Optional[HNSWIndexCacheConfig] = None,
+        *,
+        lease_root: Optional[Path] = None,
+        is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
+    ):
         """
         Initialize HNSW index cache.
 
         Args:
             config: Cache configuration (defaults to standard config if None)
+            lease_root: Bug #1845 remediation round 2 (Defect 3) -- the
+                shared cross-node lease-coordination root
+                (golden_repos_dir / "cidx-meta"), resolved and injected by
+                the server-layer construction site (server/cache/__init__.py)
+                via get_cidx_meta_path(). None (default) means "leasing not
+                configured" -- correct for CLI/solo/test construction that
+                never touches a real versioned snapshot.
+            is_versioned_snapshot: Bug #1845 remediation round 2 (Defect 1)
+                -- the canonical is_versioned_snapshot predicate, injected
+                by the same server-layer construction site rather than
+                imported here. Importing it directly was measured to pull
+                214 extra modules into this otherwise-lean module (see
+                snapshot_reader_lease.py's module docstring for the
+                evidence), so it travels as an injected callable instead.
+                None (default) disables reader-lease publication entirely.
         """
         self.config = config or HNSWIndexCacheConfig()
+        self._lease_root = lease_root
+        self._is_versioned_snapshot = is_versioned_snapshot
 
         # Per-repository cache (AC4)
         self._cache: Dict[str, HNSWIndexCacheEntry] = {}
@@ -360,11 +477,29 @@ class HNSWIndexCache:
         # Allows concurrent loads for DIFFERENT keys while deduplicating SAME-key loads.
         self._loading: Dict[str, threading.Event] = {}
 
+        # Bug #1538: keys with a freshness stat currently in flight. Mirrors
+        # the _loading sentinel idea for the CHECK rather than the load: the
+        # stat runs with NO lock held and can block indefinitely on a hard NFS
+        # mount, so only one thread enters it per key while the others serve
+        # the entry they already have.
+        self._freshness_checking: Set[str] = set()
+
         # Statistics tracking (AC7)
         self._hit_count = 0
         self._miss_count = 0
         self._eviction_count = 0
         self._oversized_load_count = 0  # Bug #1377: entries too big to ever cache
+        self._reader_leases: Dict[str, SnapshotReaderLease] = {}
+
+        # Bug #1849: leases queued for release/renewal while holding
+        # _cache_lock. Purely in-memory -- appending here does NO
+        # filesystem I/O and spawns NO thread. Drained serially, off
+        # lock, by the already-running background cleanup thread (see
+        # _cleanup_expired_entries / _process_pending_lease_work), and
+        # synchronously on stop_background_cleanup so no lease outlives
+        # the process.
+        self._pending_lease_releases: List[SnapshotReaderLease] = []
+        self._pending_lease_renewals: List[SnapshotReaderLease] = []
 
         # Background cleanup thread (AC2)
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -394,17 +529,27 @@ class HNSWIndexCache:
         hnsw_index.bin does not exist yet (repo mid-(re)index) — is never
         cached, so a later query re-runs the loader and picks up the built
         index without waiting for TTL/restart. When index_file is provided,
-        a cache HIT is also invalidated if the on-disk index was rebuilt
-        (newer mtime), since hnswlib has no in-place reload.
+        a cache HIT is also dropped if the on-disk index is no longer the
+        file the entry was loaded from, since hnswlib has no in-place reload.
 
         Args:
             repo_path: Repository path (cache key)
             loader: Function to load index if not cached
                     Returns (hnsw_index, id_mapping)
             index_file: Optional path to hnsw_index.bin. When supplied, its
-                    st_mtime is stored on load and re-checked on every HIT so a
-                    rebuilt index invalidates the stale in-RAM object. Default
-                    None preserves the original behavior (no mtime check).
+                    identity fingerprint — (st_mtime_ns, st_size, st_ino,
+                    st_dev) — is captured BEFORE the load (Bug #1538) and
+                    re-compared on later HITs, so an in-place refresh drops the
+                    superseded in-RAM object. The comparison is INEQUALITY of
+                    that fingerprint, never "mtime is newer". The stat runs
+                    OUTSIDE the cache lock and is rate-limited per key
+                    (_FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS), so a stat hung on
+                    a hard NFS mount cannot stall other cache consumers; a
+                    freshly loaded entry is always checked on its first HIT. A
+                    check that cannot be performed serves the last verified
+                    graph and WARNs once per degradation rather than reloading
+                    on every hit (see _apply_freshness_verdict). Default None
+                    disables the freshness check entirely.
 
         Returns:
             Tuple of (hnsw_index, id_mapping)
@@ -425,6 +570,12 @@ class HNSWIndexCache:
         # Failure safety: the finally block always removes the sentinel and signals
         # the Event, ensuring waiters are never permanently blocked even on errors.
         while True:
+            # Bug #1538: set when THIS iteration claimed the freshness check for
+            # this key, carrying the entry AND its index_file together. The stat
+            # then runs after the locked block exits, never inside it -- see
+            # _verify_entry_freshness for why that matters.
+            pending_check: Optional[Tuple[HNSWIndexCacheEntry, Path]] = None
+
             with self._cache_lock:
                 # Check if cached (fast path: entry exists and not expired)
                 if repo_path in self._cache:
@@ -437,6 +588,7 @@ class HNSWIndexCache:
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
+                        self._release_reader_lease_locked(repo_path)
                         self._eviction_count += 1
                         # Fall through (no return here)
                     elif entry.hnsw_index is None:
@@ -449,23 +601,36 @@ class HNSWIndexCache:
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
+                        self._release_reader_lease_locked(repo_path)
                         self._eviction_count += 1
                         # Fall through (no return here)
-                    elif index_file is not None and self._index_file_is_newer(
-                        index_file, entry.index_file_mtime
+                    elif (
+                        index_file is not None
+                        and repo_path not in self._freshness_checking
+                        and self._freshness_check_due(entry)
                     ):
-                        # EVO-64244 Facet 2: the on-disk index was rebuilt after
-                        # this entry was cached (atomic replace bumps mtime).
-                        # hnswlib has no in-place reload, so evict and reload.
-                        logger.debug(
-                            f"On-disk index newer than cached entry for {repo_path}, reloading",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        del self._cache[repo_path]
-                        self._eviction_count += 1
-                        # Fall through (no return here)
+                        # EVO-64244 Facet 2 / Bug #1538: verify the on-disk
+                        # identity, but do the stat OUTSIDE this lock. Claim the
+                        # key so concurrent readers of the SAME key serve their
+                        # entry instead of piling into the same blocking stat.
+                        self._freshness_checking.add(repo_path)
+                        # index_file is narrowed to Path by the condition above;
+                        # carrying it with the entry keeps the call site typed.
+                        pending_check = (entry, index_file)
                     else:
-                        # Cache hit - refresh TTL (AC3)
+                        # Cache hit - refresh TTL (AC3). Reached when the check
+                        # is not yet due, is already in flight on another
+                        # thread, or is disabled (index_file is None).
+                        #
+                        # Bug #1845 remediation round 2 (Defect 2): reader-
+                        # lease renewal is intentionally NOT done here. It
+                        # used to spawn a daemon threading.Thread on every
+                        # single cache hit (unbounded thread churn plus a
+                        # shared-storage os.replace write on the hottest
+                        # path in the product). Liveness is maintained
+                        # entirely by the periodic background cleanup pass
+                        # (_cleanup_expired_entries) instead -- see its
+                        # renewal loop below for the TTL-vs-interval margin.
                         entry.record_access()
                         self._hit_count += 1
                         logger.debug(
@@ -474,18 +639,30 @@ class HNSWIndexCache:
                         )
                         return entry.hnsw_index, entry.id_mapping
 
-                # No ready entry. Check if another thread is already loading this key.
-                if repo_path in self._loading:
-                    # Another thread is loading - become a waiter
-                    event = self._loading[repo_path]
-                    self._miss_count += 1
-                    # Release lock BEFORE waiting - allows other threads to proceed
-                else:
-                    event = threading.Event()
-                    self._loading[repo_path] = event
-                    self._miss_count += 1
-                    # Break out of the with-block to perform I/O without lock
-                    break
+                if pending_check is None:
+                    # No ready entry. Is another thread already loading this key?
+                    if repo_path in self._loading:
+                        # Another thread is loading - become a waiter
+                        event = self._loading[repo_path]
+                        self._miss_count += 1
+                        # Release lock BEFORE waiting - lets other threads proceed
+                    else:
+                        event = threading.Event()
+                        self._loading[repo_path] = event
+                        self._miss_count += 1
+                        # Break out of the with-block to perform I/O without lock
+                        break
+
+            if pending_check is not None:
+                # === NO LOCK HELD: this stat can block on a hung NFS mount ===
+                entry_to_check, index_file_to_check = pending_check
+                verified = self._verify_entry_freshness(
+                    repo_path, index_file_to_check, entry_to_check
+                )
+                if verified is not None:
+                    return verified
+                # Entry was dropped, or replaced mid-stat: re-evaluate.
+                continue
 
             # We are a waiter: block on the per-key Event (NOT on the global lock)
             logger.debug(
@@ -504,6 +681,27 @@ class HNSWIndexCache:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            # Bug #1538 (root cause of the indefinite post-refresh staleness):
+            # the fingerprint MUST be captured BEFORE the load, never after.
+            # An in-place refresh that atomically replaces hnsw_index.bin
+            # between the loader's read and the capture would otherwise stamp
+            # the entry with the NEW file's identity while it holds the OLD
+            # graph -- every later HIT then compares equal and serves the
+            # pre-refresh graph forever, with no way to self-heal.
+            #
+            # Capturing pre-load is conservative in the safe direction: if the
+            # file did change during the load, the stored fingerprint is the
+            # superseded one, so the very next read detects the difference and
+            # reloads (one extra load, never a stale answer). If it did not
+            # change, the fingerprint still matches the current file and the
+            # entry is served from RAM exactly as before -- no spurious reload.
+            #
+            # Fail-soft, as before: a missing file / OSError leaves this None,
+            # which simply disables the freshness check for this entry.
+            index_file_fingerprint: Optional[_IndexFileFingerprint] = (
+                _stat_index_fingerprint(index_file) if index_file is not None else None
+            )
+
             hnsw_index, id_mapping = loader()
 
             # EVO-64244 Facet 1: never negatively-cache a missing index.
@@ -532,19 +730,53 @@ class HNSWIndexCache:
                 )
             index_size_bytes += sys.getsizeof(id_mapping)
 
-            # EVO-64244 Facet 2: capture the on-disk index mtime so a later
-            # rebuild (atomic replace of hnsw_index.bin) invalidates this entry
-            # on the next HIT. Guarded: a missing file / OSError leaves it None
-            # (mtime check simply disabled for this entry) rather than crashing.
-            index_file_mtime: Optional[float] = None
-            if index_file is not None:
-                try:
-                    index_file_mtime = os.stat(index_file).st_mtime
-                except OSError as e:
-                    logger.debug(
-                        f"Could not stat index file {index_file} for mtime tracking: {e}",
-                        extra={"correlation_id": get_correlation_id()},
+            reader_lease = None
+            snapshot_root = None
+            if self._is_versioned_snapshot is not None:
+                # Bug #1850: repo_path is the INDEX DIRECTORY (a descendant
+                # of the snapshot root); the predicate only matches at the
+                # root itself, so it must be resolved via ancestor walk.
+                snapshot_root = resolve_versioned_snapshot_root(
+                    repo_path, predicate=self._is_versioned_snapshot
+                )
+            if snapshot_root is not None:
+                lease_root = self._lease_root
+                if lease_root is None:
+                    # Bug #1845 remediation round 2 (Defect 3): a genuine
+                    # wiring bug (is_versioned_snapshot injected without
+                    # lease_root) -- logged loudly (ERROR, so the mandatory
+                    # E2E log-audit gate catches it) but NOT raised. Unlike
+                    # the CleanupManager read side, this is the query hot
+                    # path: crashing get_or_load() over a leasing
+                    # misconfiguration would break query serving itself,
+                    # which the "Query Is Everything" project invariant
+                    # forbids. Degrading to "no lease published" is the
+                    # same accepted risk shape the OSError catch below
+                    # already uses for lease-acquisition failures.
+                    logger.error(
+                        "Snapshot %s (root=%s) is versioned but no "
+                        "lease_root is wired into this HNSWIndexCache "
+                        "instance; skipping reader-lease publication",
+                        repo_path,
+                        snapshot_root,
                     )
+                else:
+                    try:
+                        reader_lease = SnapshotReaderLease(
+                            snapshot_root,
+                            self.config.ttl_minutes * 60.0,
+                            lease_root=lease_root,
+                        )
+                        reader_lease.acquire()
+                    except OSError as exc:
+                        logger.warning(
+                            "Could not publish snapshot reader lease for "
+                            "%s (root=%s): %s",
+                            repo_path,
+                            snapshot_root,
+                            exc,
+                        )
+                        reader_lease = None
 
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
@@ -554,10 +786,12 @@ class HNSWIndexCache:
                     repo_path=repo_path,
                     ttl_minutes=self.config.ttl_minutes,
                     index_size_bytes=index_size_bytes,
-                    index_file_mtime=index_file_mtime,
+                    index_file_fingerprint=index_file_fingerprint,
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
+                if reader_lease is not None:
+                    self._reader_leases[repo_path] = reader_lease
                 # Enforce size limit while holding lock (as documented)
                 self._enforce_size_limit()
 
@@ -575,33 +809,121 @@ class HNSWIndexCache:
                 self._loading.pop(repo_path, None)
             event.set()  # Wake ALL waiters (outside lock)
 
-    def _index_file_is_newer(
-        self, index_file: Path, cached_mtime: Optional[float]
-    ) -> bool:
-        """Return True if the on-disk index file is newer than the cached entry.
+    def _freshness_check_due(self, entry: HNSWIndexCacheEntry) -> bool:
+        """Return True if this entry's on-disk identity may be re-stat'd now.
 
-        Used by get_or_load (EVO-64244 Facet 2) to detect a rebuilt index and
-        invalidate the stale in-RAM object. A None cached_mtime (entry stored
-        without mtime tracking) or any stat failure (missing file, OSError)
-        returns False so the cached entry is still served rather than crashing.
-
-        Args:
-            index_file: Path to hnsw_index.bin on disk.
-            cached_mtime: st_mtime captured when the entry was loaded, or None.
-
-        Returns:
-            True if the file's current mtime is strictly newer than cached_mtime.
+        Bug #1538: the stat can block indefinitely on a hard NFS mount, so it
+        is rate-limited per key instead of run on every hit. A freshly loaded
+        entry (``freshness_checked_at is None``) is ALWAYS due, so a refresh
+        that landed during the load is caught on the very next read.
         """
-        if cached_mtime is None:
-            return False
+        if entry.freshness_checked_at is None:
+            return True
+        elapsed = time.monotonic() - entry.freshness_checked_at
+        return elapsed >= _FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS
+
+    def _verify_entry_freshness(
+        self,
+        repo_path: str,
+        index_file: Path,
+        entry: HNSWIndexCacheEntry,
+    ) -> Optional[Tuple[Any, Dict[int, str]]]:
+        """Stat ``index_file`` WITHOUT the cache lock, then apply the verdict.
+
+        The caller has already claimed this key in ``_freshness_checking`` and
+        MUST NOT hold ``_cache_lock``. Bug #1538: on the ``hard`` NFSv3
+        golden-repos mount a server outage makes ``os.stat()`` block in
+        uninterruptible kernel retry, so running it under the shared lock would
+        stall every other cache consumer in this worker behind one hung call.
+
+        Returns the ``(hnsw_index, id_mapping)`` to serve, or None if the caller
+        must re-evaluate (entry dropped, or replaced by another thread).
+        """
         try:
-            return os.stat(index_file).st_mtime > cached_mtime
-        except OSError as e:
+            current_fingerprint = _stat_index_fingerprint(index_file)
+            # The verdict runs INSIDE the try on purpose: it is what records
+            # freshness_checked_at, so releasing the claim first would open a
+            # window where a second thread sees neither an in-flight claim nor
+            # a recorded timestamp, and starts another blocking stat -- the
+            # rate limit would not be enforced across the handoff. No deadlock
+            # risk: no lock is held here, and the verdict takes and releases
+            # _cache_lock on its own.
+            return self._apply_freshness_verdict(
+                repo_path, index_file, entry, current_fingerprint
+            )
+        finally:
+            # Release the claim on EVERY path, including an unexpected raise,
+            # so a failure can never wedge this key's checks permanently.
+            with self._cache_lock:
+                self._freshness_checking.discard(repo_path)
+
+    def _apply_freshness_verdict(
+        self,
+        repo_path: str,
+        index_file: Path,
+        entry: HNSWIndexCacheEntry,
+        current_fingerprint: Optional[_IndexFileFingerprint],
+    ) -> Optional[Tuple[Any, Dict[int, str]]]:
+        """Apply a completed freshness check, under the cache lock.
+
+        Comparison is INEQUALITY of the identity fingerprint, never "mtime is
+        strictly newer": a same-tick rewrite, an NFS clock skew or a restored
+        shard all change content without advancing the clock.
+
+        A fingerprint we could not obtain NOW keeps serving the last verified
+        graph (bounded: warn once, retry after the interval). A fingerprint that
+        was never captured AT LOAD drops the entry instead -- the stat works
+        now, so one reload re-stamps it permanently, whereas keeping it would
+        retain an entry that can never be verified for as long as it lives.
+        """
+        with self._cache_lock:
+            if self._cache.get(repo_path) is not entry:
+                return None  # evicted/replaced mid-stat; caller re-evaluates
+            entry.freshness_checked_at = time.monotonic()
+
+            if current_fingerprint is None:
+                if not entry.freshness_unverified_reported:
+                    entry.freshness_unverified_reported = True
+                    logger.warning(
+                        f"Could not stat {index_file} to verify the cached HNSW "
+                        "index is current; serving the last verified graph and "
+                        "retrying later (freshness checking is degraded here)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                return self._serve_locked(entry)
+
+            # Succeeded: re-arm reporting so a LATER degradation is not muted.
+            entry.freshness_unverified_reported = False
+
+            if entry.index_file_fingerprint is None:
+                drop_reason = "carries no freshness fingerprint"
+            elif current_fingerprint != entry.index_file_fingerprint:
+                drop_reason = "no longer matches the on-disk index"
+            else:
+                return self._serve_locked(entry)
+
             logger.debug(
-                f"Could not stat index file {index_file} for staleness check: {e}",
+                f"Cached entry for {repo_path} {drop_reason}, reloading",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return False
+            del self._cache[repo_path]
+            self._release_reader_lease_locked(repo_path)
+            self._eviction_count += 1
+            return None
+
+    def _serve_locked(self, entry: HNSWIndexCacheEntry) -> Tuple[Any, Dict[int, str]]:
+        """Record a HIT and return the entry's payload.
+
+        The caller MUST already hold ``_cache_lock``.
+
+        Bug #1845 remediation round 2 (Defect 2): no per-hit reader-lease
+        renewal here either -- same reasoning as the get_or_load hit branch
+        above. Liveness is maintained entirely by the periodic background
+        cleanup pass.
+        """
+        entry.record_access()
+        self._hit_count += 1
+        return entry.hnsw_index, entry.id_mapping
 
     def invalidate(self, repo_path: str) -> None:
         """
@@ -615,6 +937,7 @@ class HNSWIndexCache:
         with self._cache_lock:
             if repo_path in self._cache:
                 del self._cache[repo_path]
+                self._release_reader_lease_locked(repo_path)
                 self._eviction_count += 1
                 logger.info(
                     f"Invalidated cache for {repo_path}",
@@ -654,6 +977,7 @@ class HNSWIndexCache:
             ]
             for key in stale_keys:
                 del self._cache[key]
+                self._release_reader_lease_locked(key)
                 self._eviction_count += 1
 
         evicted_count = len(stale_keys)
@@ -664,11 +988,21 @@ class HNSWIndexCache:
         return evicted_count
 
     def clear(self) -> None:
-        """Clear all cache entries."""
+        """Clear all cache entries.
+
+        Bug #1849: queues the released leases in-memory instead of
+        spawning a thread per lease -- they are released serially,
+        off-lock, the next time _process_pending_lease_work runs (on
+        the background cleanup thread, or synchronously on
+        stop_background_cleanup).
+        """
         with self._cache_lock:
             evicted = len(self._cache)
             self._cache.clear()
+            leases = list(self._reader_leases.values())
+            self._reader_leases.clear()
             self._eviction_count += evicted
+            self._pending_lease_releases.extend(leases)
             logger.info(
                 f"Cleared cache ({evicted} entries)",
                 extra={"correlation_id": get_correlation_id()},
@@ -688,6 +1022,7 @@ class HNSWIndexCache:
         ]
         for key in oversized_keys:
             entry = self._cache.pop(key)
+            self._release_reader_lease_locked(key)
             self._eviction_count += 1
             self._oversized_load_count += 1
             logger.warning(
@@ -720,6 +1055,7 @@ class HNSWIndexCache:
             )
 
             del self._cache[lru_repo_path]
+            self._release_reader_lease_locked(lru_repo_path)
             self._eviction_count += 1
             logger.debug(
                 f"Evicted LRU cache entry to enforce size limit: {lru_repo_path}",
@@ -763,6 +1099,12 @@ class HNSWIndexCache:
         Clean up expired cache entries (AC2: TTL-based eviction).
 
         Called by background cleanup thread and manual cleanup.
+
+        Bug #1849: lease release/renewal is queued (in-memory only) while
+        holding _cache_lock, then the lock is dropped and every queued
+        lease is released/renewed serially on this thread -- the
+        already-running background cleanup thread -- instead of
+        spawning a new thread per lease.
         """
         with self._cache_lock:
             expired_repos = [
@@ -773,6 +1115,7 @@ class HNSWIndexCache:
 
             for repo_path in expired_repos:
                 del self._cache[repo_path]
+                self._release_reader_lease_locked(repo_path)
                 self._eviction_count += 1
                 logger.debug(
                     f"Evicted expired cache entry: {repo_path}",
@@ -785,11 +1128,73 @@ class HNSWIndexCache:
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+            for repo_path, lease in self._reader_leases.items():
+                if repo_path in self._cache:
+                    self._renew_reader_lease_locked(lease)
+
+            # Snapshot + clear the queued work while still holding the
+            # lock, then release the lock before any filesystem I/O.
+            pending_releases = self._pending_lease_releases
+            self._pending_lease_releases = []
+            pending_renewals = self._pending_lease_renewals
+            self._pending_lease_renewals = []
+
+        # --- NO LOCK HELD: serial I/O on the calling (cleanup) thread ---
+        self._process_pending_lease_work(pending_releases, pending_renewals)
+
         # Bug #897 mitigation 1: optionally trim glibc heap after eviction.
         # Feature-flagged so operators can measure RSS recovery on staging
         # before committing. Default ON since v9.23.3; set enable_malloc_trim=false in config.json to disable.
         if _feature_flag_enabled("enable_malloc_trim"):
             _maybe_malloc_trim()
+
+    def _release_reader_lease_locked(self, repo_path: str) -> None:
+        """Queue a reader lease for release. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn
+        here -- the lease is released serially, off-lock, the next time
+        _process_pending_lease_work runs (on the background cleanup
+        thread, or synchronously on stop_background_cleanup).
+        """
+        lease = self._reader_leases.pop(repo_path, None)
+        if lease is not None:
+            self._pending_lease_releases.append(lease)
+
+    def _renew_reader_lease_locked(self, lease: SnapshotReaderLease) -> None:
+        """Queue a reader lease for renewal. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn --
+        see _release_reader_lease_locked.
+        """
+        self._pending_lease_renewals.append(lease)
+
+    def _process_pending_lease_work(
+        self,
+        pending_releases: List[SnapshotReaderLease],
+        pending_renewals: List[SnapshotReaderLease],
+    ) -> None:
+        """Release and renew queued leases serially, with NO cache lock
+        held. Bug #1849: replaces the old one-OS-thread-per-lease
+        mechanism. Always runs on the caller's own thread (the
+        background cleanup thread during normal operation, or the
+        calling thread synchronously during stop_background_cleanup).
+        """
+        for lease in pending_releases:
+            self._release_reader_lease(lease)
+        for lease in pending_renewals:
+            self._renew_reader_lease(lease)
+
+    @staticmethod
+    def _release_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.release()
+        except OSError:
+            logger.debug("Could not release snapshot reader lease", exc_info=True)
+
+    @staticmethod
+    def _renew_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.renew()
+        except OSError:
+            logger.debug("Could not renew snapshot reader lease", exc_info=True)
 
     def start_background_cleanup(self) -> None:
         """
@@ -802,7 +1207,6 @@ class HNSWIndexCache:
                 format_error_log(
                     "GIT-GENERAL-012",
                     "Background cleanup thread already running",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -819,7 +1223,6 @@ class HNSWIndexCache:
                         format_error_log(
                             "GIT-GENERAL-013",
                             f"Error in background cleanup: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -838,14 +1241,45 @@ class HNSWIndexCache:
         )
 
     def stop_background_cleanup(self) -> None:
-        """Stop background cleanup thread."""
+        """Stop background cleanup thread.
+
+        Bug #1849: also drains any lease queued for release/renewal
+        synchronously, since the cleanup thread that would normally
+        drain it on its next tick is being stopped here -- a lease must
+        never outlive the process. The drain only runs once the cleanup
+        thread has actually stopped: if join() times out (the thread is
+        genuinely stuck, e.g. blocked on a hard-NFS lease I/O call), that
+        thread could still be mid-drain itself, so draining here too
+        would race it. In that case the pending queues are left for the
+        (still-running) thread to drain on its own -- this call simply
+        does not block waiting for it, matching the original bounded
+        join() semantics.
+        """
+        cleanup_thread_stopped = True
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_stop_event.set()
             self._cleanup_thread.join(timeout=5)
-            logger.info(
-                "Stopped background cache cleanup thread",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            cleanup_thread_stopped = not self._cleanup_thread.is_alive()
+            if cleanup_thread_stopped:
+                logger.info(
+                    "Stopped background cache cleanup thread",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "HNSW background cleanup thread did not stop within "
+                    "timeout; skipping synchronous lease drain to avoid "
+                    "racing with it",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        if cleanup_thread_stopped:
+            with self._cache_lock:
+                pending_releases = self._pending_lease_releases
+                self._pending_lease_releases = []
+                pending_renewals = self._pending_lease_renewals
+                self._pending_lease_renewals = []
+            self._process_pending_lease_work(pending_releases, pending_renewals)
 
     def evict_lru_entries(self, n: int) -> int:
         """Evict the n least-recently-used cache entries (YELLOW proactive action).
@@ -873,6 +1307,7 @@ class HNSWIndexCache:
                     key=lambda path: self._cache[path].last_accessed,
                 )
                 del self._cache[lru_path]
+                self._release_reader_lease_locked(lru_path)
                 self._eviction_count += 1
                 evicted_count += 1
                 logger.debug(

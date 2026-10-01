@@ -1,10 +1,11 @@
 ---
 name: feedback-fix-every-issue-found-no-deferral
 description: "Any issue discovered during active implementation/backlog work gets fixed in the same session, not just filed for later — bug filing is for organizing work, never for deferring it"
-metadata: 
+metadata:
   node_type: memory
   type: feedback
   originSessionId: ede890d5-0358-4ba6-a741-0ed8d5e2db8f
+  modified: 2026-09-26T05:28:20.543Z
 ---
 
 During active implementation work (e.g. `/implement-backlog`), any issue discovered — including ones outside the original scope, like pre-existing test failures surfaced by a broader sweep — must be fixed before the work package is considered done. Filing a GitHub issue and moving on is not acceptable as a substitute for fixing.
@@ -15,6 +16,8 @@ User's exact words: "you find an issue, you fix it. period. no issues leaves thi
 
 **How to apply**:
 - When a broader test sweep or investigation surfaces additional failures beyond the immediate task, still fix them in the same session — file the issue first if useful for tracking, then dispatch the fix (dispatch immediately if root cause and scope are already clear; investigate first if not).
-- This does NOT mean ignoring genuine environmental/flaky-under-load noise (e.g. shared `/tmp/pytest-of-jsbattig` contention, SQLite lock contention across parallel test chunks) that is proven, via isolation re-runs, to not be a real code defect — see [[project_test_gates_flake_under_load]]. The distinction is: a test that fails deterministically (same result every isolated run) is a real issue to fix now; a test that only fails under concurrent chunk load and passes cleanly in isolation is environmental noise, not a "found issue" in this rule's sense.
+- This does NOT mean ignoring genuine environmental/flaky-under-load noise (e.g. shared `/tmp/pytest-of-$USER` contention, SQLite lock contention across parallel test chunks) that is proven, via isolation re-runs, to not be a real code defect — see [[project_test_gates_flake_under_load]]. The distinction is: a test that fails deterministically (same result every isolated run) is a real issue to fix now; a test that only fails under concurrent chunk load and passes cleanly in isolation is environmental noise, not a "found issue" in this rule's sense.
 - Parallelize fixes whenever they touch independent files/subsystems — the user explicitly wants this ("you paralelize when you can"), e.g. dispatching multiple tdd-engineer agents concurrently for unrelated root causes discovered in the same sweep.
 - This reverses/narrows the older [[feedback_bug_report_means_report_not_fix]] memory: that memory applies ONLY when the user's literal request is "root cause + bug report" (investigate-and-stop as the explicit ask). It does NOT apply during active implementation/backlog execution, where the default is fix-everything-found.
+
+**Repeat violation, corrected 2026-07-24 (Epic #1454)**: filed 6 bugs (#1467-#1472) during Stories #1456/#1457's implementation and deferred all of them, reasoning that several were "too large/cross-cutting to safely fix mid-story." The user corrected this directly: "you know you have to fix the bugs you find in the process of working this epic." Being large or requiring investigation is NOT a valid exemption from this rule — it only changes how (parallelize independent fixes, dispatch a scoped tdd-engineer per bug, accept a partial/honestly-disclosed fix on a genuinely huge one) not whether. The only real exemption is a hard file-conflict with concurrently-running work on the SAME uncommitted file — in that case relay the bug to the agent already holding that file rather than skip it entirely.

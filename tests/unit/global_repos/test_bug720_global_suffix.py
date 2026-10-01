@@ -20,7 +20,14 @@ FILES_TO_CHECK = [
     "src/code_indexer/global_repos/refresh_scheduler.py",
     "src/code_indexer/server/mcp/handlers/_legacy.py",
     "src/code_indexer/server/mcp/handlers/files.py",
-    "src/code_indexer/server/mcp/handlers/search.py",
+    # Issue #1935: search.py was split into the search/ package; these are
+    # the submodules that carry -global suffix handling now.
+    "src/code_indexer/server/mcp/handlers/search/_shared.py",
+    "src/code_indexer/server/mcp/handlers/search/omni.py",
+    "src/code_indexer/server/mcp/handlers/search/repo_search.py",
+    "src/code_indexer/server/mcp/handlers/search/temporal_search.py",
+    "src/code_indexer/server/mcp/handlers/search/code_search.py",
+    "src/code_indexer/server/mcp/handlers/search/regex_search.py",
     "src/code_indexer/server/mcp/handlers/git_read.py",
 ]
 

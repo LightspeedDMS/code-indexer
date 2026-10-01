@@ -92,8 +92,8 @@ def _test_user() -> User:
 
 
 @pytest.fixture
-def real_job_manager():
-    manager = BackgroundJobManager()
+def real_job_manager(background_job_manager_factory):
+    manager = background_job_manager_factory()
     yield manager
     time.sleep(0.1)
 
@@ -154,6 +154,19 @@ class _AppUnderTest:
                 repository_health,
                 "_get_background_job_manager",
                 return_value=self._job_manager,
+            )
+        )
+        # POST .../health/check enforces a repo-level access check. This
+        # suite's user ("alice", a NORMAL_USER) has no group grants
+        # configured, so an admin-bypass mock keeps every existing
+        # scenario's behavior unchanged.
+        mock_access_service = MagicMock()
+        mock_access_service.is_admin_user.return_value = True
+        self._stack.enter_context(
+            patch.object(
+                repository_health,
+                "_get_access_filtering_service",
+                return_value=mock_access_service,
             )
         )
 

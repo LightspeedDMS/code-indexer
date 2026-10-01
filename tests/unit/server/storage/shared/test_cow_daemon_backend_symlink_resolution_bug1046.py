@@ -1,7 +1,7 @@
 """Bug #1046: CowDaemonBackend._translate_to_daemon_path must resolve symlinks.
 
 On staging, golden_repos_dir is a symlink:
-  /home/jsbattig/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos
+  /home/opuser/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos
 
 The literal startswith check rejected the symlink path even though os.path.realpath()
 resolves it correctly under mount_point.

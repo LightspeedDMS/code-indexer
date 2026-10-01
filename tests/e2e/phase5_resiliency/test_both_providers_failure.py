@@ -1,5 +1,5 @@
 """
-AC3: Both providers dead — graceful empty result.
+AC3: Both providers dead — graceful empty result with a completeness marker.
 
 Installs kill profiles (error_rate=1.0, error_codes=[503]) on BOTH
 api.voyageai.com and api.cohere.com and asserts that MCP search_code with
@@ -8,14 +8,29 @@ query_strategy="parallel" degrades gracefully:
   - No JSON-RPC protocol error in the envelope
   - result["success"] is True — server handled the failure gracefully
   - result["results"]["results"] is empty (both providers failed, no results)
+  - result["results"]["query_metadata"]["completeness"] == "providers_unavailable"
+    (Bug #1804) — an explicit degraded-state marker so an empty result set
+    from a total provider outage is never indistinguishable from a genuine
+    zero-match query (Rule 13 anti-silent-failure). A plain
+    success:true/results:[] with NO marker (the pre-fix false-empty shape)
+    must fail this assertion.
+  - result["results"]["query_metadata"]["provider_errors"] names both
+    failed providers, so an operator can see WHICH providers failed and why.
   - GET /health returns < SERVER_ERROR_THRESHOLD (server still alive)
 
 Test approach: MCP tools/call search_code with query_strategy="parallel"
 (not cidx CLI).  The parallel strategy runs both providers concurrently via
-RRF coalescing — when both are dead the coalescing produces an empty result
-set rather than surfacing a provider error.  The CLI path (/api/query/multi)
-always uses primary_only which propagates the error; MCP parallel is the
-path that delivers graceful degradation per epic #485.
+RRF coalescing — when both are dead, the dispatch layer
+(semantic_query_manager.py) still raises (Bug #1760's total-failure
+contract is unchanged), but it records the completeness marker + per-
+provider error detail via a `_provider_completeness_out` out-param BEFORE
+raising. The MCP handler layer (search.py's _search_global_repo /
+_search_activated_repo) catches that specific marker and converts it into
+this graceful envelope instead of propagating success:false. The CLI path
+(/api/query/multi) uses a completely separate single-provider code path
+(SemanticSearchService, never semantic_query_manager's parallel dispatch)
+whose per-repo failures already land in a distinguishable `errors` field
+--  it needs no change for this bug and is unaffected.
 
 Target hostnames are fault-transport protocol constants, not environment config.
 
@@ -26,7 +41,11 @@ MCP result shape (from search.py _search_global_repo):
     "results": {
       "results": [],          # empty when both providers fail gracefully
       "total_results": 0,
-      "query_metadata": {...}
+      "query_metadata": {
+        ...,
+        "completeness": "providers_unavailable",
+        "provider_errors": {"voyage-ai": "...", "cohere": "..."},
+      },
     }
   }
 
@@ -39,6 +58,7 @@ Depends on session fixtures from conftest.py:
 See:
   https://github.com/LightspeedDMS/code-indexer/issues/485 (epic design)
   https://github.com/LightspeedDMS/code-indexer/issues/866 (AC3)
+  https://github.com/LightspeedDMS/code-indexer/issues/1804 (this fix)
 """
 
 from __future__ import annotations
@@ -60,6 +80,9 @@ HTTP_OK: int = 200  # Expected status for successful profile GET
 HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
 SEARCH_LIMIT: int = 10  # Result limit for MCP search calls
 SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
+# Bug #1804: the degraded-state marker query_metadata carries when every
+# dispatched embedding provider is unavailable.
+PROVIDER_UNAVAILABLE_COMPLETENESS: str = "providers_unavailable"
 
 
 def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
@@ -126,6 +149,23 @@ def test_both_providers_dead_graceful_empty(
     assert items == [], (
         f"MCP search_code returned non-empty results with both providers killed: "
         f"{items}. Expected empty list under graceful degradation."
+    )
+
+    # Bug #1804: an empty result set must carry an explicit degraded-state
+    # marker distinguishing "both providers unavailable" from a genuine
+    # zero-match query (Rule 13 anti-silent-failure). A plain
+    # success:true/results:[] with NO marker (the pre-fix false-empty
+    # shape) fails this assertion.
+    query_metadata = results_wrapper.get("query_metadata", {})
+    assert query_metadata.get("completeness") == PROVIDER_UNAVAILABLE_COMPLETENESS, (
+        f"Expected completeness={PROVIDER_UNAVAILABLE_COMPLETENESS!r} marking this "
+        f"empty result as a total-provider-outage degradation, not a genuine "
+        f"zero-match query. query_metadata: {query_metadata}"
+    )
+    provider_errors = query_metadata.get("provider_errors", {})
+    assert "voyage-ai" in provider_errors and "cohere" in provider_errors, (
+        f"Expected provider_errors to name BOTH failed providers so an operator "
+        f"can see which providers failed and why. provider_errors: {provider_errors}"
     )
 
     # Server must remain alive after both kill profiles are installed.

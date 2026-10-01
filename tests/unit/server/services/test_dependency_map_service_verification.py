@@ -14,6 +14,7 @@ Coverage (_update_domain_file — real method, temp files):
 - repo_list built from changed + new + removed aliases (all three sources)
 """
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Generator, cast
@@ -192,7 +193,22 @@ class TestDeltaMergeVerificationWiring:
         service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
 
         def _edit_in_place(document_path, *args, **kwargs):
-            document_path.write_text(_VERIFIED_MERGE_BODY)
+            # Faithful to the real contract (fact_check.md / invoke_verification_pass):
+            # Claude receives a temp file that ALREADY carries frontmatter (it is
+            # written from updated_content, which has frontmatter) and is instructed
+            # to "edit the file in place" — never to emit a body-only rewrite. So the
+            # stub must simulate a surgical body edit that preserves the existing
+            # frontmatter block verbatim, not overwrite the whole file with bare body
+            # text (which would trip Bug #1870's validate_rendered_frontmatter guard,
+            # exactly as it should for a real corrupted edit).
+            existing = document_path.read_text()
+            match = re.match(r"^(---\n.*?\n---\n\n)(.*)$", existing, re.DOTALL)
+            assert match, (
+                "verification stub expects the temp file to already carry "
+                f"frontmatter (real invoke_verification_pass contract); got: {existing!r}"
+            )
+            frontmatter_block = match.group(1)
+            document_path.write_text(frontmatter_block + _VERIFIED_MERGE_BODY)
             return True
 
         _prime_analyzer(mock_analyzer, invoke_side_effect=_edit_in_place)

@@ -74,7 +74,18 @@ _KNOWN_TEMPORAL_LAUNCH_SITES = {
 #     and passes the result as env= to _run_provider_subprocess BEFORE
 #     calling this helper to build the argv list.
 _NON_LAUNCH_SITE_EXCEPTIONS = frozenset(
-    {"cli.py", "cli_daemon_fast.py", "cli_fast_entry.py", "_temporal_index_cmd.py"}
+    {
+        "cli.py",
+        "cli_daemon_fast.py",
+        "cli_fast_entry.py",
+        "_temporal_index_cmd.py",
+        # Story #1488: the CLI chunk-migration command only NAMES the
+        # "--index-commits" literal in its AC11 option-conflict rejection
+        # (offenders.append("--index-commits")) -- it performs in-place
+        # consolidation and spawns no temporal subprocess, so it needs no
+        # build_temporal_child_env wiring.
+        "chunk_migration_cli.py",
+    }
 )
 
 _LITERAL = '"--index-commits"'

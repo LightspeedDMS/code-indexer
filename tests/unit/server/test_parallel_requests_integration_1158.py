@@ -86,9 +86,9 @@ class TestIntegrationParallelRequestsSeed:
     def test_all_three_fields_seeded_correctly(self, seeding_env) -> None:
         """Save all 3 new fields to config_service, seed to temp repo, verify config.json."""
         svc, repo_path = seeding_env
-        svc._update_indexing_setting("voyage_ai_parallel_requests", "16")
-        svc._update_indexing_setting("cohere_parallel_requests", "12")
-        svc._update_indexing_setting("temporal_parallel_requests", "4")
+        svc.update_setting("indexing", "voyage_ai_parallel_requests", "16")
+        svc.update_setting("indexing", "cohere_parallel_requests", "12")
+        svc.update_setting("indexing", "temporal_parallel_requests", "4")
 
         written = _seed_and_read(svc, repo_path)
 
@@ -101,7 +101,7 @@ class TestIntegrationParallelRequestsSeed:
         """Scenario 8 regression guard: temporal_parallel_requests=None -> JSON null present."""
         svc, repo_path = seeding_env
         # Empty string clears temporal to None
-        svc._update_indexing_setting("temporal_parallel_requests", "")
+        svc.update_setting("indexing", "temporal_parallel_requests", "")
 
         cfg = svc.get_config()
         assert cfg.indexing_config.temporal_parallel_requests is None
@@ -124,8 +124,8 @@ class TestIntegrationParallelRequestsSeed:
     def test_temporal_set_then_cleared_writes_null(self, seeding_env) -> None:
         """Set temporal to 4, then clear it -- re-seed must write null."""
         svc, repo_path = seeding_env
-        svc._update_indexing_setting("temporal_parallel_requests", "4")
-        svc._update_indexing_setting("temporal_parallel_requests", "")
+        svc.update_setting("indexing", "temporal_parallel_requests", "4")
+        svc.update_setting("indexing", "temporal_parallel_requests", "")
 
         written = _seed_and_read(svc, repo_path)
 
@@ -138,9 +138,9 @@ class TestIntegrationParallelRequestsSeed:
         server_dir.mkdir()
 
         svc1 = _make_service(server_dir)
-        svc1._update_indexing_setting("voyage_ai_parallel_requests", "20")
-        svc1._update_indexing_setting("cohere_parallel_requests", "10")
-        svc1._update_indexing_setting("temporal_parallel_requests", "6")
+        svc1.update_setting("indexing", "voyage_ai_parallel_requests", "20")
+        svc1.update_setting("indexing", "cohere_parallel_requests", "10")
+        svc1.update_setting("indexing", "temporal_parallel_requests", "6")
 
         # Fresh instance on same server_dir
         svc2 = _make_service(server_dir)

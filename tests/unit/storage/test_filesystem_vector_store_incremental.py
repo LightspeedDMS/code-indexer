@@ -20,7 +20,9 @@ def temp_base_path(tmp_path):
 def vector_store(temp_base_path):
     """Create FilesystemVectorStore instance."""
     return FilesystemVectorStore(
-        base_path=temp_base_path, project_root=temp_base_path.parent
+        base_path=temp_base_path,
+        project_root=temp_base_path.parent,
+        use_chunks_db_for_new_collections=False,
     )
 
 

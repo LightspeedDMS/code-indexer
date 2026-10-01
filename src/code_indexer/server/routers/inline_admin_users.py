@@ -42,8 +42,62 @@ from ..auth.concurrency_protection import (
     password_change_concurrency_protection,
     ConcurrencyConflictError,
 )
+from ..routers.groups import get_group_manager
+from ..services.constants import DEFAULT_GROUP_ADMINS, DEFAULT_GROUP_USERS
+from ..logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+
+def _assign_new_user_to_default_group(
+    username: str,
+    role_enum: UserRole,
+    assigned_by: str,
+) -> None:
+    """
+    Story #1593 AC7: auto-assign a freshly created user to a default
+    group so fail-closed tool-access enforcement never strands them.
+    Non-fatal: a group-assignment failure must not undo the
+    already-created user account, so any error -- including the group
+    manager not being configured at all, or the target default group
+    itself not existing -- is logged and swallowed. `get_group_manager()`
+    is resolved HERE, inside the try, rather than via FastAPI `Depends()`
+    on the route: a `Depends()` failure aborts the whole request before
+    the handler body (and this try/except) ever runs, which would make a
+    missing group manager fail user creation outright instead of merely
+    skipping the auto-assignment.
+    """
+    try:
+        group_manager = get_group_manager()
+        target_group_name = (
+            DEFAULT_GROUP_ADMINS if role_enum == UserRole.ADMIN else DEFAULT_GROUP_USERS
+        )
+        target_group = group_manager.get_group_by_name(target_group_name)
+        if target_group is None:
+            logger.warning(
+                format_error_log(
+                    "REST-GENERAL-050",
+                    f"Default group '{target_group_name}' not found for "
+                    f"user '{username}' -- skipping auto-assignment",
+                )
+            )
+            return
+        group_manager.ensure_user_group_membership(
+            username,
+            target_group,
+            assigned_by=assigned_by,
+            audit_details={
+                "group": target_group.name,
+                "reason": "auto_assign_on_creation",
+            },
+        )
+    except Exception as group_error:
+        logger.warning(
+            format_error_log(
+                "REST-GENERAL-051",
+                f"Failed to auto-assign user '{username}' to group: {group_error}",
+            )
+        )
 
 
 def register_admin_user_routes(
@@ -108,8 +162,15 @@ def register_admin_user_routes(
             role_enum = UserRole(user_data.role)
 
             # Create user through UserManager
-            new_user = user_manager.create_user(
-                username=user_data.username, password=user_data.password, role=role_enum
+            new_user = user_manager.create_user_audited(
+                user_data.username,
+                user_data.password,
+                role_enum,
+                actor=current_user.username,
+            )
+
+            _assign_new_user_to_default_group(
+                new_user.username, role_enum, current_user.username
             )
 
             return UserResponse(
@@ -144,20 +205,17 @@ def register_admin_user_routes(
         Raises:
             HTTPException: If user not found or update fails
         """
-        # Check if user exists
-        existing_user = user_manager.get_user(username)
-        if existing_user is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User not found: {username}",
-            )
-
         try:
-            # Convert string role to UserRole enum
+            # Convert string role to UserRole enum (already validated by the
+            # request model)
             role_enum = UserRole(user_data.role)
 
-            # Update user role
-            success = user_manager.update_user_role(username, role_enum)
+            # Update user role.  The audited method looks the account up
+            # itself: an unknown account returns False after recording its
+            # failure row, and gets the same 404 as before.
+            success = user_manager.update_user_role_audited(
+                username, role_enum, actor=current_user.username
+            )
             if not success:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -201,17 +259,12 @@ def register_admin_user_routes(
         Raises:
             HTTPException: If user not found or deletion would remove last admin
         """
-        # Get user to check if it exists and get their role
+        # Get the user's role for the last-admin check below
         user_to_delete = user_manager.get_user(username)
-        if user_to_delete is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User not found: {username}",
-            )
 
         # CRITICAL SECURITY CHECK: Prevent deletion of last admin user
         # This prevents system lockout by ensuring at least one admin remains
-        if user_to_delete.role == UserRole.ADMIN:
+        if user_to_delete is not None and user_to_delete.role == UserRole.ADMIN:
             all_users = user_manager.get_all_users()
             admin_count = sum(1 for user in all_users if user.role == UserRole.ADMIN)
 
@@ -221,10 +274,12 @@ def register_admin_user_routes(
                     detail="Cannot delete the last admin user. System requires at least one admin user to remain accessible.",
                 )
 
-        success = user_manager.delete_user(username)
+        # The audited deletion looks the account up itself: an unknown
+        # account returns False after recording its failure row.
+        success = user_manager.delete_user_audited(
+            username, actor=current_user.username
+        )
         if not success:
-            # This should not happen since we already checked user exists above,
-            # but keeping for defensive programming
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {username}",
@@ -345,8 +400,11 @@ def register_admin_user_routes(
                             )
 
                     # Old password is valid - proceed with password change
-                    success = user_manager.change_password(
-                        username, password_data.new_password
+                    # A self-change: recorded by the password-change rows.
+                    success = user_manager.change_password_audited(
+                        username,
+                        password_data.new_password,
+                        actor=current_user.username,
                     )
                     if not success:
                         raise HTTPException(
@@ -455,7 +513,9 @@ def register_admin_user_routes(
             HTTPException: If user not found
         """
         try:
-            success = user_manager.change_password(username, password_data.new_password)
+            success = user_manager.change_password_audited(
+                username, password_data.new_password, actor=current_user.username
+            )
             if not success:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

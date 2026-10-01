@@ -526,3 +526,86 @@ class TestGetLockInfo:
             result = manager.get_lock_info("my-repo")
 
         assert result is None, "get_lock_info() must return None for dead-PID lock"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1548 round-7 fix — renew() extends the lease of an owned lock
+# ---------------------------------------------------------------------------
+
+# Named constants avoiding repeated inline magic numbers across TestRenew.
+_TEST_TTL_SECONDS = 3600
+_ANCIENT_LOCK_AGE_DAYS = 10
+_ANCIENT_LOCK_MIN_ADVANCE_DAYS = 9
+
+
+class TestRenew:
+    """renew() lets the current owner extend a lock's lease without
+    releasing/reacquiring it -- required for legitimately long-running
+    holders (e.g. temporal-legacy-migration) that must never depend
+    solely on a long-but-finite TTL to survive.
+    """
+
+    def test_renew_rewrites_acquired_at_forward(self, manager, lock_dir):
+        """renew() must rewrite acquired_at to "now" -- proven directly:
+        after renewing, the recorded acquired_at is far newer than a
+        deliberately ancient value written just before the call.
+        """
+        acquired = manager.acquire("my-repo", "my-owner", ttl_seconds=_TEST_TTL_SECONDS)
+        assert acquired is True
+
+        lock_file = lock_dir / ".locks" / "my-repo.lock"
+        content = json.loads(lock_file.read_text())
+        ancient = datetime.now(timezone.utc) - timedelta(days=_ANCIENT_LOCK_AGE_DAYS)
+        content["acquired_at"] = ancient.isoformat()
+        lock_file.write_text(json.dumps(content))
+
+        renewed = manager.renew("my-repo", "my-owner", ttl_seconds=_TEST_TTL_SECONDS)
+        assert renewed is True
+
+        content_after_renew = json.loads(lock_file.read_text())
+        new_acquired_at = datetime.fromisoformat(content_after_renew["acquired_at"])
+        assert new_acquired_at > ancient + timedelta(
+            days=_ANCIENT_LOCK_MIN_ADVANCE_DAYS
+        ), (
+            "renew() must rewrite acquired_at forward, not leave the "
+            "stale timestamp untouched"
+        )
+
+    def test_renew_refuses_when_owned_by_a_different_owner(self, manager, lock_dir):
+        """renew() must never let a caller extend a lock it does not
+        own -- refuses, returns False, and leaves the lock's metadata
+        completely byte-for-byte unmodified.
+        """
+        acquired = manager.acquire(
+            "my-repo", "real-owner", ttl_seconds=_TEST_TTL_SECONDS
+        )
+        assert acquired is True
+
+        lock_file = lock_dir / ".locks" / "my-repo.lock"
+        content_before = lock_file.read_text()
+
+        renewed = manager.renew(
+            "my-repo", "impostor-owner", ttl_seconds=_TEST_TTL_SECONDS
+        )
+        assert renewed is False
+
+        content_after = lock_file.read_text()
+        assert content_after == content_before, (
+            "renew() must leave the lock file completely untouched when "
+            "the caller is not the recorded owner"
+        )
+
+    def test_renew_returns_false_and_creates_no_file_when_absent(
+        self, manager, lock_dir
+    ):
+        """renew() must never CREATE a lock -- only extend one that is
+        already held. Both the return value AND the absence of a lock
+        file on disk are asserted.
+        """
+        renewed = manager.renew("nonexistent-repo", "some-owner")
+        assert renewed is False
+
+        lock_file = lock_dir / ".locks" / "nonexistent-repo.lock"
+        assert not lock_file.exists(), (
+            "renew() must not create a lock file for an alias that was never acquired"
+        )

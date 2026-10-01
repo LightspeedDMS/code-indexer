@@ -34,6 +34,7 @@ def _patch_http_factory():
 class TestComputeMemoryQueryVectorEmitsEmbedEvent:
     def test_calls_emit_embed_event_with_meta(self):
         import code_indexer.server.mcp.handlers.search as sh
+        import code_indexer.server.mcp.handlers.search.memory_retrieval as mr_mod
         import code_indexer.server.services.governed_call as gc_mod
 
         with (
@@ -43,7 +44,7 @@ class TestComputeMemoryQueryVectorEmitsEmbedEvent:
                 return_value=(FAKE_VEC, DIRECT_META),
             ),
             _patch_http_factory(),
-            patch.object(sh, "emit_embed_event") as mock_emit,
+            patch.object(mr_mod, "emit_embed_event") as mock_emit,
         ):
             sh._compute_memory_query_vector("test query")
 
@@ -54,6 +55,7 @@ class TestComputeMemoryQueryVectorEmitsEmbedEvent:
 class TestComputeSharedQueryVectorEmitsEmbedEvent:
     def test_calls_emit_embed_event_with_meta(self):
         import code_indexer.server.mcp.handlers.search as sh
+        import code_indexer.server.mcp.handlers.search.memory_retrieval as mr_mod
         import code_indexer.server.services.governed_call as gc_mod
 
         with (
@@ -63,7 +65,7 @@ class TestComputeSharedQueryVectorEmitsEmbedEvent:
                 return_value=(FAKE_VEC, DIRECT_META),
             ),
             _patch_http_factory(),
-            patch.object(sh, "emit_embed_event") as mock_emit,
+            patch.object(mr_mod, "emit_embed_event") as mock_emit,
         ):
             sh._compute_shared_query_vector("test query")
 

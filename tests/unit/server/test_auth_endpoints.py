@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 # These imports will fail initially - that's the TDD approach
 from code_indexer.server.app import create_app
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -28,10 +29,29 @@ class TestAuthLoginEndpoint:
         return TestClient(app)
 
     @pytest.fixture
-    def mock_user_manager(self):
-        """Create mock user manager."""
-        with patch("code_indexer.server.app.user_manager") as mock:
-            yield mock
+    def mock_user_manager(self, client):
+        """Mock authenticate_user on the REAL user_manager instance.
+
+        NOTE (#1695): /auth/login is registered by register_auth_routes()
+        (Story #409 routes extraction), whose login() handler captures
+        `user_manager` as a closure PARAMETER at create_app() time --
+        patch("code_indexer.server.app.user_manager") only reassigns the
+        app module's global name and never reaches that closure, so the
+        mock was silently never invoked (login succeeded against the real,
+        already-wired user_manager instead of the mock). Fixed using the
+        SAME patch.object-on-the-real-instance pattern already established
+        in this codebase for the identical closure-capture problem (see
+        tests/unit/server/auth/test_password_change_security.py, commit
+        5b287bfc, issue #1698): dependencies.user_manager is wired by
+        app_wiring.py to the SAME object instance passed into
+        register_auth_routes()'s user_manager closure parameter, so
+        patching a method on that real instance reaches every holder of
+        the reference, including the login() closure -- unlike reassigning
+        a module attribute, which only changes what a NEW lookup would see.
+        """
+        real_user_manager = dependencies.user_manager
+        with patch.object(real_user_manager, "authenticate_user"):
+            yield real_user_manager
 
     def test_login_with_valid_admin_credentials(self, client, mock_user_manager):
         """Test login with valid admin credentials returns JWT token."""
@@ -447,7 +467,10 @@ class TestRoleBasedAccessControl:
         assert response.status_code != 403  # Not forbidden (can list repos)
 
     def test_require_permission_decorator_admin_only(self):
-        """Test require_permission decorator for admin-only operations."""
+        """require_permission() is a FastAPI dependency factory: it returns
+        a dependency callable that resolves the current user and raises
+        HTTPException(403) when that user lacks the permission -- proving
+        a disallowed user is rejected."""
         from fastapi import HTTPException
 
         # Mock current user as power user
@@ -458,19 +481,20 @@ class TestRoleBasedAccessControl:
             created_at=datetime.now(timezone.utc),
         )
 
-        # Create a test function that requires admin permission
-        @require_permission("manage_users")
-        def test_admin_function(current_user):
-            return "admin_success"
+        # The dependency callable itself takes current_user (normally
+        # resolved by FastAPI via Depends(get_current_user)); called
+        # directly here with an explicit user, as routes' own tests do.
+        permission_dependency = require_permission("manage_users")
 
-        # Should raise HTTPException for admin-only permission
         with pytest.raises(HTTPException) as exc_info:
-            test_admin_function(power_user)
+            permission_dependency(current_user=power_user)
 
         assert exc_info.value.status_code == 403
 
     def test_require_permission_decorator_allowed_permission(self):
-        """Test require_permission decorator for allowed operations."""
+        """require_permission()'s dependency callable returns the resolved
+        user unchanged when the user DOES hold the permission -- proving an
+        allowed user passes through."""
 
         # Mock current user as power user
         power_user = User(
@@ -480,14 +504,10 @@ class TestRoleBasedAccessControl:
             created_at=datetime.now(timezone.utc),
         )
 
-        # Create a test function that requires power user permission
-        @require_permission("activate_repos")
-        def test_power_function(current_user):
-            return "power_success"
+        permission_dependency = require_permission("activate_repos")
 
-        # Should not raise exception for allowed permission
-        result = test_power_function(power_user)
-        assert result == "power_success"
+        result = permission_dependency(current_user=power_user)
+        assert result is power_user
 
 
 @pytest.mark.e2e

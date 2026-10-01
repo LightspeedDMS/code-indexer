@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import SemanticQueryManager
+from code_indexer.server.query.semantic_query_manager import SemanticQueryManager
 
 
 @pytest.fixture

@@ -1,8 +1,11 @@
 """Tests for Issue #1241 P1.3: AuditLogService async-batched writer.
 
 These tests assert that:
-1. audit_log_service.log() / log_raw() do NOT perform DB I/O on the calling
-   thread — the write is enqueued and committed by a background writer thread.
+1. audit_log_service.log() / log_raw() of a QUEUED action type (high-volume
+   authentication activity) do NOT perform DB I/O on the calling thread --
+   the write is enqueued and committed by a background writer thread.
+   DURABLE action types are committed on the caller's thread by design (see
+   test_audit_legacy_delivery.py).
 2. flush() (or stop()) drains the queue completely; no rows are lost.
 3. The audit DB connection uses WAL journal_mode and busy_timeout > 0.
 4. Graceful shutdown via stop() loses no audit records.
@@ -15,6 +18,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, List
+
+# A catalog action type delivered through the async writer (QUEUED).
+_QUEUED_ACTION_TYPE = "token_refresh_success"
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +68,8 @@ def test_audit_log_does_not_block_on_calling_thread(tmp_path: Path) -> None:
         for i in range(100):
             svc.log(
                 admin_id="admin",
-                action_type="test_action",
-                target_type="user",
+                action_type=_QUEUED_ACTION_TYPE,
+                target_type="auth",
                 target_id=f"user-{i}",
                 details=f'{{"index": {i}}}',
             )
@@ -259,8 +265,8 @@ def test_audit_log_writer_thread_not_caller_thread(tmp_path: Path) -> None:
     try:
         svc.log(
             admin_id="spy-admin",
-            action_type="spy_action",
-            target_type="user",
+            action_type=_QUEUED_ACTION_TYPE,
+            target_type="auth",
             target_id="spy-user",
         )
 

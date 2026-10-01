@@ -6,7 +6,7 @@ from io import StringIO
 from unittest.mock import patch
 
 
-from src.code_indexer.logging.adaptive_logger import AdaptiveLogger
+from code_indexer.logging.adaptive_logger import AdaptiveLogger
 
 
 class TestAdaptiveLoggerContextDetection:

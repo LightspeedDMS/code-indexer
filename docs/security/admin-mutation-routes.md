@@ -46,7 +46,6 @@ Requests without an active window receive HTTP 403 with `elevation_required`.
 | POST | /api/discovery/hide | Hide a discovered repository |
 | POST | /api/discovery/unhide | Unhide a previously hidden repository |
 | POST | /api/discovery/branches | Update branch settings for a discovered repo |
-| POST | /config/claude_delegation | Update Claude delegation settings |
 | POST | /config/reset | Reset configuration to defaults |
 | POST | /config/langfuse_pull | Pull Langfuse configuration |
 | POST | /config/cidx_meta_backup | Update cidx-meta backup configuration |

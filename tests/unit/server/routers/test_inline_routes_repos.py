@@ -13,6 +13,7 @@ Covers:
 from unittest.mock import Mock, patch
 
 from tests.unit.server.routers.inline_routes_test_helpers import (
+    _access_service_granting,
     _find_route_handler,
     _patch_closure,
     admin_client,  # noqa: F401
@@ -41,6 +42,7 @@ class TestRefreshGoldenRepo:
         handler = _find_route_handler("/api/admin/golden-repos/{alias}/refresh", "POST")
         mock_grm = Mock()
         mock_grm.golden_repos = {}  # empty - alias not registered
+        mock_grm.get_golden_repo.return_value = None  # genuinely absent (Bug #1481)
 
         with _patch_closure(handler, "golden_repo_manager", mock_grm):
             response = admin_client.post(
@@ -86,6 +88,53 @@ class TestRefreshGoldenRepo:
         data = response.json()
         assert data["job_id"] == "job-refresh-123"
         assert "myrepo" in data["message"]
+
+    def test_cross_node_repo_not_cached_locally_still_succeeds_bug1481(
+        self, admin_client
+    ):
+        """Bug #1481: alias exists in the shared backend (registered by
+        another node) but this worker's per-process `golden_repos` cache
+        dict never loaded it. The 404 gate must consult the authoritative
+        `get_golden_repo()` read, not the raw per-worker cache dict.
+        """
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/refresh", "POST")
+
+        class _FakeGoldenRepoManager:
+            """Faithful stand-in: real decision logic, no black-box Mock."""
+
+            def __init__(self, alias, repo):
+                self.golden_repos: dict = {}  # empty - cold cache on this worker
+                self._alias = alias
+                self._repo = repo
+
+            def get_golden_repo(self, alias):
+                if alias == self._alias:
+                    return self._repo
+                return None
+
+        mock_grm = _FakeGoldenRepoManager("mock-test", Mock())
+
+        mock_scheduler = Mock()
+        mock_scheduler.trigger_refresh_for_repo.return_value = "job-refresh-cross-node"
+
+        mock_lifecycle = Mock()
+        mock_lifecycle.refresh_scheduler = mock_scheduler
+
+        mock_app = Mock()
+        mock_app.state.global_lifecycle_manager = mock_lifecycle
+
+        with _patch_closure(handler, "golden_repo_manager", mock_grm):
+            with _patch_closure(handler, "app", mock_app):
+                response = admin_client.post(
+                    "/api/admin/golden-repos/mock-test/refresh"
+                )
+
+        assert response.status_code == 202, (
+            f"expected 202 (cross-node repo found via authoritative read), "
+            f"got {response.status_code}: {response.text}"
+        )
+        data = response.json()
+        assert data["job_id"] == "job-refresh-cross-node"
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +303,7 @@ class TestGeneralRepositorySync:
 
         assert response.status_code == 422
 
-    def test_repo_not_found_returns_404(self, user_client):
+    def test_repo_not_found_returns_404(self, user_client, tmp_path):
         handler = _find_route_handler("/api/repos/sync", "POST")
 
         mock_arm = Mock()
@@ -264,13 +313,20 @@ class TestGeneralRepositorySync:
         mock_rlm = Mock()
         mock_rlm.get_repository_details.side_effect = Exception("not found")
 
-        with _patch_closure(handler, "activated_repo_manager", mock_arm):
-            with _patch_closure(handler, "background_job_manager", mock_bgm):
-                with _patch_closure(handler, "repository_listing_manager", mock_rlm):
-                    response = user_client.post(
-                        "/api/repos/sync",
-                        json={"repository_alias": "missing-repo"},
-                    )
+        # The alias is granted, so the request passes the group-access check
+        # and reaches the not-found path.
+        with _access_service_granting(
+            tmp_path / "groups.db", "testuser", ["missing-repo"]
+        ):
+            with _patch_closure(handler, "activated_repo_manager", mock_arm):
+                with _patch_closure(handler, "background_job_manager", mock_bgm):
+                    with _patch_closure(
+                        handler, "repository_listing_manager", mock_rlm
+                    ):
+                        response = user_client.post(
+                            "/api/repos/sync",
+                            json={"repository_alias": "missing-repo"},
+                        )
 
         assert response.status_code == 404
 

@@ -8,7 +8,7 @@ and authentication system verification.
 
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 import httpx
 
 
@@ -98,8 +98,7 @@ class TestServerCompatibilityValidator:
 class TestConnectivityValidation:
     """Test network connectivity validation methods."""
 
-    @pytest.mark.asyncio
-    async def test_connectivity_success(self):
+    def test_connectivity_success(self):
         """Test successful connectivity validation."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -107,20 +106,19 @@ class TestConnectivityValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"status": "ok"}
             mock_get.return_value = mock_response
 
-            result = await validator._test_connectivity()
+            result = validator._test_connectivity()
 
             assert result["success"] is True
             assert result["error"] is None
             mock_get.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_connectivity_network_error(self):
+    def test_connectivity_network_error(self):
         """Test connectivity validation with network error."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -128,10 +126,10 @@ class TestConnectivityValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_get.side_effect = httpx.NetworkError("Connection refused")
 
-            result = await validator._test_connectivity()
+            result = validator._test_connectivity()
 
             assert result["success"] is False
             assert "Connection refused" in result["error"]
@@ -140,8 +138,7 @@ class TestConnectivityValidation:
                 for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_connectivity_timeout_error(self):
+    def test_connectivity_timeout_error(self):
         """Test connectivity validation with timeout error."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -149,10 +146,10 @@ class TestConnectivityValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_get.side_effect = httpx.TimeoutException("Request timeout")
 
-            result = await validator._test_connectivity()
+            result = validator._test_connectivity()
 
             assert result["success"] is False
             assert "timeout" in result["error"].lower()
@@ -161,8 +158,7 @@ class TestConnectivityValidation:
                 for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_connectivity_ssl_certificate_error(self):
+    def test_connectivity_ssl_certificate_error(self):
         """Test connectivity validation with SSL certificate error."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -170,12 +166,12 @@ class TestConnectivityValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_get.side_effect = httpx.RequestError(
                 "SSL certificate verification failed"
             )
 
-            result = await validator._test_connectivity()
+            result = validator._test_connectivity()
 
             assert result["success"] is False
             assert "SSL certificate" in result["error"]
@@ -187,8 +183,7 @@ class TestConnectivityValidation:
 class TestServerHealthValidation:
     """Test server health check validation methods."""
 
-    @pytest.mark.asyncio
-    async def test_server_health_success(self):
+    def test_server_health_success(self):
         """Test successful server health check."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -196,7 +191,7 @@ class TestServerHealthValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {
@@ -207,15 +202,14 @@ class TestServerHealthValidation:
             }
             mock_get.return_value = mock_response
 
-            result = await validator._check_server_health()
+            result = validator._check_server_health()
 
             assert result["success"] is True
             assert result["server_version"] == "v1.1"
             assert result["server_status"] == "healthy"
             assert "auth" in result["available_services"]
 
-    @pytest.mark.asyncio
-    async def test_server_health_degraded_status(self):
+    def test_server_health_degraded_status(self):
         """Test server health check with degraded status."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -223,7 +217,7 @@ class TestServerHealthValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {
@@ -233,7 +227,7 @@ class TestServerHealthValidation:
             }
             mock_get.return_value = mock_response
 
-            result = await validator._check_server_health()
+            result = validator._check_server_health()
 
             assert result["success"] is False
             assert result["server_status"] == "degraded"
@@ -243,8 +237,7 @@ class TestServerHealthValidation:
                 for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_server_health_endpoint_not_found(self):
+    def test_server_health_endpoint_not_found(self):
         """Test server health check when endpoint is not found."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -252,13 +245,13 @@ class TestServerHealthValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 404
             mock_response.text = "Not Found"
             mock_get.return_value = mock_response
 
-            result = await validator._check_server_health()
+            result = validator._check_server_health()
 
             assert result["success"] is False
             assert "health endpoint not available" in result["error"]
@@ -270,8 +263,7 @@ class TestServerHealthValidation:
 class TestAPIVersionValidation:
     """Test API version compatibility validation methods."""
 
-    @pytest.mark.asyncio
-    async def test_api_version_compatible(self):
+    def test_api_version_compatible(self):
         """Test API version validation with compatible version."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -279,7 +271,7 @@ class TestAPIVersionValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {
@@ -288,14 +280,13 @@ class TestAPIVersionValidation:
             }
             mock_get.return_value = mock_response
 
-            result = await validator._check_api_version()
+            result = validator._check_api_version()
 
             assert result["compatible"] is True
             assert result["server_version"] == "v1.2"
             assert result["warning"] is None
 
-    @pytest.mark.asyncio
-    async def test_api_version_compatible_with_warning(self):
+    def test_api_version_compatible_with_warning(self):
         """Test API version validation with warning for non-optimal version."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -303,7 +294,7 @@ class TestAPIVersionValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {
@@ -312,7 +303,7 @@ class TestAPIVersionValidation:
             }
             mock_get.return_value = mock_response
 
-            result = await validator._check_api_version()
+            result = validator._check_api_version()
 
             assert result["compatible"] is True
             assert result["server_version"] == "v1.1"
@@ -321,8 +312,7 @@ class TestAPIVersionValidation:
                 "consider upgrading" in rec.lower() for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_api_version_incompatible(self):
+    def test_api_version_incompatible(self):
         """Test API version validation with incompatible version."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -330,7 +320,7 @@ class TestAPIVersionValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {
@@ -339,7 +329,7 @@ class TestAPIVersionValidation:
             }
             mock_get.return_value = mock_response
 
-            result = await validator._check_api_version()
+            result = validator._check_api_version()
 
             assert result["compatible"] is False
             assert result["server_version"] == "v2.0"
@@ -348,8 +338,7 @@ class TestAPIVersionValidation:
                 "upgrade client" in rec.lower() for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_api_version_endpoint_missing(self):
+    def test_api_version_endpoint_missing(self):
         """Test API version validation when version endpoint is missing."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -357,13 +346,13 @@ class TestAPIVersionValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 404
             mock_response.text = "Not Found"
             mock_get.return_value = mock_response
 
-            result = await validator._check_api_version()
+            result = validator._check_api_version()
 
             assert result["compatible"] is False
             assert "version endpoint not available" in result["error"]
@@ -376,8 +365,7 @@ class TestAPIVersionValidation:
 class TestAuthenticationValidation:
     """Test authentication system validation methods."""
 
-    @pytest.mark.asyncio
-    async def test_authentication_validation_success(self):
+    def test_authentication_validation_success(self):
         """Test successful authentication validation."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -386,8 +374,8 @@ class TestAuthenticationValidation:
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
         with (
-            patch("httpx.AsyncClient.post") as mock_post,
-            patch("httpx.AsyncClient.get") as mock_get,
+            patch("httpx.Client.post") as mock_post,
+            patch("httpx.Client.get") as mock_get,
         ):
             # Mock authentication response
             auth_response = MagicMock()
@@ -406,7 +394,7 @@ class TestAuthenticationValidation:
             }
             mock_get.return_value = user_info_response
 
-            result = await validator._validate_authentication("testuser", "testpass")
+            result = validator._validate_authentication("testuser", "testpass")
 
             assert result["success"] is True
             assert result["username"] == "testuser"
@@ -419,8 +407,7 @@ class TestAuthenticationValidation:
                 json={"username": "testuser", "password": "testpass"},
             )
 
-    @pytest.mark.asyncio
-    async def test_authentication_validation_invalid_credentials(self):
+    def test_authentication_validation_invalid_credentials(self):
         """Test authentication validation with invalid credentials."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -428,13 +415,13 @@ class TestAuthenticationValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.post") as mock_post:
+        with patch("httpx.Client.post") as mock_post:
             # Mock 401 Unauthorized response
             auth_response = MagicMock()
             auth_response.status_code = 401
             mock_post.return_value = auth_response
 
-            result = await validator._validate_authentication("baduser", "badpass")
+            result = validator._validate_authentication("baduser", "badpass")
 
             assert result["success"] is False
             assert "Invalid username or password" in result["error"]
@@ -449,8 +436,7 @@ class TestAuthenticationValidation:
                 json={"username": "baduser", "password": "badpass"},
             )
 
-    @pytest.mark.asyncio
-    async def test_authentication_validation_server_error(self):
+    def test_authentication_validation_server_error(self):
         """Test authentication validation with server error."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -458,13 +444,13 @@ class TestAuthenticationValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.post") as mock_post:
+        with patch("httpx.Client.post") as mock_post:
             # Mock 500 Server Error response
             auth_response = MagicMock()
             auth_response.status_code = 500
             mock_post.return_value = auth_response
 
-            result = await validator._validate_authentication("testuser", "testpass")
+            result = validator._validate_authentication("testuser", "testpass")
 
             assert result["success"] is False
             assert "Authentication failed with status 500" in result["error"]
@@ -483,8 +469,7 @@ class TestAuthenticationValidation:
 class TestRequiredEndpointsValidation:
     """Test required endpoints availability validation methods."""
 
-    @pytest.mark.asyncio
-    async def test_required_endpoints_all_available(self):
+    def test_required_endpoints_all_available(self):
         """Test required endpoints validation when all are available."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -492,20 +477,19 @@ class TestRequiredEndpointsValidation:
 
         validator = ServerCompatibilityValidator("https://cidx.example.com")
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             # All endpoints return 200
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_get.return_value = mock_response
 
-            result = await validator._check_required_endpoints()
+            result = validator._check_required_endpoints()
 
             assert result["success"] is True
             assert len(result["available_endpoints"]) == 4
             assert len(result["missing_endpoints"]) == 0
 
-    @pytest.mark.asyncio
-    async def test_required_endpoints_some_missing(self):
+    def test_required_endpoints_some_missing(self):
         """Test required endpoints validation with some missing endpoints."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -521,10 +505,10 @@ class TestRequiredEndpointsValidation:
                 mock_response.status_code = 200
             return mock_response
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_get.side_effect = mock_get_side_effect
 
-            result = await validator._check_required_endpoints()
+            result = validator._check_required_endpoints()
 
             assert result["success"] is False
             assert len(result["available_endpoints"]) == 3
@@ -535,8 +519,7 @@ class TestRequiredEndpointsValidation:
                 for rec in result["recommendations"]
             )
 
-    @pytest.mark.asyncio
-    async def test_required_endpoints_authentication_required(self):
+    def test_required_endpoints_authentication_required(self):
         """Test required endpoints validation with authentication requirements."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -553,10 +536,10 @@ class TestRequiredEndpointsValidation:
                 mock_response.status_code = 200
             return mock_response
 
-        with patch("httpx.AsyncClient.get") as mock_get:
+        with patch("httpx.Client.get") as mock_get:
             mock_get.side_effect = mock_get_side_effect
 
-            result = await validator._check_required_endpoints()
+            result = validator._check_required_endpoints()
 
             assert (
                 result["success"] is True
@@ -569,8 +552,7 @@ class TestRequiredEndpointsValidation:
 class TestComprehensiveCompatibilityValidation:
     """Test the main validate_compatibility method with comprehensive scenarios."""
 
-    @pytest.mark.asyncio
-    async def test_validate_compatibility_all_checks_pass(self):
+    def test_validate_compatibility_all_checks_pass(self):
         """Test comprehensive validation when all checks pass."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -613,7 +595,7 @@ class TestComprehensiveCompatibilityValidation:
                 "missing_endpoints": [],
             }
 
-            result = await validator.validate_compatibility("testuser", "testpass")
+            result = validator.validate_compatibility("testuser", "testpass")
 
             assert result.compatible is True
             assert len(result.issues) == 0
@@ -621,8 +603,7 @@ class TestComprehensiveCompatibilityValidation:
             assert result.server_info["version"] == "v1.1"
             assert result.server_info["health"] == "healthy"
 
-    @pytest.mark.asyncio
-    async def test_validate_compatibility_connectivity_failure(self):
+    def test_validate_compatibility_connectivity_failure(self):
         """Test comprehensive validation with connectivity failure."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -640,15 +621,14 @@ class TestComprehensiveCompatibilityValidation:
                 ],
             }
 
-            result = await validator.validate_compatibility("testuser", "testpass")
+            result = validator.validate_compatibility("testuser", "testpass")
 
             assert result.compatible is False
             assert len(result.issues) > 0
             assert "Connection refused" in result.issues[0]
             assert "Check network connectivity" in result.recommendations
 
-    @pytest.mark.asyncio
-    async def test_validate_compatibility_version_incompatible(self):
+    def test_validate_compatibility_version_incompatible(self):
         """Test comprehensive validation with incompatible API version."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -674,14 +654,13 @@ class TestComprehensiveCompatibilityValidation:
                 "recommendations": ["Upgrade client to support v2.0"],
             }
 
-            result = await validator.validate_compatibility("testuser", "testpass")
+            result = validator.validate_compatibility("testuser", "testpass")
 
             assert result.compatible is False
             assert "API version v2.0 is not compatible" in result.issues[0]
             assert "Upgrade client" in result.recommendations[0]
 
-    @pytest.mark.asyncio
-    async def test_validate_compatibility_with_warnings(self):
+    def test_validate_compatibility_with_warnings(self):
         """Test comprehensive validation that succeeds with warnings."""
         from code_indexer.remote.server_compatibility import (
             ServerCompatibilityValidator,
@@ -724,7 +703,7 @@ class TestComprehensiveCompatibilityValidation:
                 "missing_endpoints": [],
             }
 
-            result = await validator.validate_compatibility("testuser", "testpass")
+            result = validator.validate_compatibility("testuser", "testpass")
 
             assert result.compatible is True
             assert len(result.issues) == 0
@@ -736,8 +715,7 @@ class TestComprehensiveCompatibilityValidation:
 class TestIntegrationWithRemoteInitialization:
     """Test integration of compatibility validation with remote initialization."""
 
-    @pytest.mark.asyncio
-    async def test_remote_initialization_with_compatibility_check_success(self):
+    def test_remote_initialization_with_compatibility_check_success(self):
         """Test remote initialization includes compatibility validation and succeeds."""
         from code_indexer.remote.initialization import (
             initialize_remote_mode_with_validation,
@@ -767,7 +745,7 @@ class TestIntegrationWithRemoteInitialization:
                 ) as mock_remote_config_class,
             ):
                 # Mock successful compatibility validation
-                mock_validator = AsyncMock()
+                mock_validator = MagicMock()
                 mock_validator_class.return_value = mock_validator
 
                 from code_indexer.remote.server_compatibility import CompatibilityResult
@@ -791,7 +769,7 @@ class TestIntegrationWithRemoteInitialization:
                 mock_remote_config.store_credentials.return_value = None
 
                 # Should complete successfully
-                await initialize_remote_mode_with_validation(
+                initialize_remote_mode_with_validation(
                     project_root=test_dir,
                     server_url="https://cidx.example.com",
                     username="testuser",
@@ -807,8 +785,7 @@ class TestIntegrationWithRemoteInitialization:
                 # Verify configuration was created after validation
                 mock_create_config.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_remote_initialization_with_compatibility_check_failure(self):
+    def test_remote_initialization_with_compatibility_check_failure(self):
         """Test remote initialization fails when compatibility check fails."""
         from code_indexer.remote.initialization import (
             initialize_remote_mode_with_validation,
@@ -828,7 +805,7 @@ class TestIntegrationWithRemoteInitialization:
                 ) as mock_url_validate,
             ):
                 # Mock failed compatibility validation
-                mock_validator = AsyncMock()
+                mock_validator = MagicMock()
                 mock_validator_class.return_value = mock_validator
 
                 from code_indexer.remote.server_compatibility import CompatibilityResult
@@ -853,7 +830,7 @@ class TestIntegrationWithRemoteInitialization:
 
                 # Should fail with detailed compatibility error
                 with pytest.raises(RemoteInitializationError) as exc_info:
-                    await initialize_remote_mode_with_validation(
+                    initialize_remote_mode_with_validation(
                         project_root=test_dir,
                         server_url="https://cidx.example.com",
                         username="testuser",

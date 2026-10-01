@@ -122,6 +122,7 @@ class TestGoldenRepoRegistryOrphanBug1317:
             manager.add_golden_repo(
                 repo_url="https://github.com/test/new-repo.git",
                 alias="new-repo",
+                submitter_username="example-admin",
             )
             background_worker = self._captured_worker(manager)
 
@@ -151,6 +152,7 @@ class TestGoldenRepoRegistryOrphanBug1317:
                 repo_url="https://github.com/test/good-repo.git",
                 alias="good-repo",
                 default_branch="main",
+                submitter_username="example-admin",
             )
             background_worker = self._captured_worker(manager)
             result = background_worker()
@@ -185,6 +187,7 @@ class TestGoldenRepoRegistryOrphanBug1317:
                 repo_url="https://github.com/test/bad-repo.git",
                 alias="bad-repo",
                 default_branch="main",
+                submitter_username="example-admin",
             )
             background_worker = self._captured_worker(manager)
 
@@ -217,7 +220,9 @@ class TestGoldenRepoRegistryOrphanBug1317:
             ),
             patch.object(manager, "_cleanup_repository_files") as mock_cleanup,
         ):
-            manager.remove_golden_repo("orphan-risk-repo")
+            manager.remove_golden_repo(
+                "orphan-risk-repo", submitter_username="example-admin"
+            )
             background_worker = self._captured_worker(manager)
 
             with pytest.raises(GitOperationError):
@@ -236,7 +241,7 @@ class TestGoldenRepoRegistryOrphanBug1317:
         and the on-disk clone directory."""
         clone_path = self._register_existing_repo(manager, "removable-repo")
 
-        manager.remove_golden_repo("removable-repo")
+        manager.remove_golden_repo("removable-repo", submitter_username="example-admin")
         background_worker = self._captured_worker(manager)
         result = background_worker()
 

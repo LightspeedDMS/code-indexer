@@ -13,6 +13,15 @@ from .branch_detect import detect_default_branch
 class CidxMetaBackupBootstrap:
     """Bootstrap a mutable cidx-meta directory into a git-backed remote."""
 
+    # Single source of truth for required .gitignore entries (Bug #1871).
+    # Referenced by BOTH the first-bootstrap and already-initialized
+    # convergence paths in _write_gitignore() -- never duplicate this
+    # literal elsewhere.
+    _REQUIRED_GITIGNORE_ENTRIES: tuple = (
+        ".code-indexer/",
+        ".snapshot-reader-leases/",
+    )
+
     def _git(
         self, cidx_meta_path: str, *args: str, check: bool = True
     ) -> subprocess.CompletedProcess:
@@ -21,6 +30,12 @@ class CidxMetaBackupBootstrap:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
+        # Bug #1500 (defense-in-depth): every commit this helper currently
+        # issues already passes -m, so this is not fixing an active bug
+        # here, but it protects any future rebase/merge step from opening
+        # an interactive editor in the non-interactive systemd job context
+        # -- see CidxMetaBackupSync._git() for the active fix this mirrors.
+        env.setdefault("GIT_EDITOR", "true")
         return subprocess.run(
             ["git", *args],
             cwd=cidx_meta_path,
@@ -31,10 +46,30 @@ class CidxMetaBackupBootstrap:
         )
 
     def _write_gitignore(self, cidx_meta_path: str) -> None:
+        """Idempotently converge .gitignore to include every required entry
+        (Bug #1871). Check-then-apply: preserves any existing lines --
+        including operator-added ones -- appending only whichever required
+        entries are currently missing, in their declared order, and never
+        rewrites the file when it already contains everything required.
+
+        Called from BOTH bootstrap() return paths (first-bootstrap and
+        already-initialized) so an already-deployed host self-heals a
+        stale .gitignore automatically, with no human editing files by
+        hand.
+        """
         gitignore_path = Path(cidx_meta_path) / ".gitignore"
-        content = ".code-indexer/\n"
-        if not gitignore_path.exists() or gitignore_path.read_text() != content:
-            gitignore_path.write_text(content)
+        existing_lines = (
+            gitignore_path.read_text().splitlines() if gitignore_path.exists() else []
+        )
+        missing_entries = [
+            entry
+            for entry in self._REQUIRED_GITIGNORE_ENTRIES
+            if entry not in existing_lines
+        ]
+        if not missing_entries:
+            return
+        new_content = "\n".join(existing_lines + missing_entries) + "\n"
+        gitignore_path.write_text(new_content)
 
     def _push(self, cidx_meta_path: str, branch: str) -> None:
         """Push to remote. Raises RuntimeError on rejection -- never force-pushes."""
@@ -68,6 +103,11 @@ class CidxMetaBackupBootstrap:
             if current_remote_result.returncode == 0
             else None
         )
+
+        # Bug #1871 self-heal: an already-initialized host can never reach
+        # the first-bootstrap call site above again, so convergence must
+        # also run here on every invocation.
+        self._write_gitignore(cidx_meta_path)
 
         if current_remote != remote_url:
             self._git(cidx_meta_path, "checkout", "-B", branch)

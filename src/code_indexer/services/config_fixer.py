@@ -81,9 +81,24 @@ class GitStateDetector:
                 else "unknown"
             )
 
-            # Get current commit
+            # Get current commit.
+            # Bug #1591: must be the FULL SHA, matching the format the
+            # real indexing path writes via `git rev-parse HEAD` --
+            # git_detection.py's GitDetectionService._get_detailed_git_state()
+            # (reached via SmartIndexer.get_git_status() ->
+            # GitAwareDocumentProcessor.get_git_status()) and
+            # file_identifier.py's _get_cached_commit_hash() both write
+            # the full SHA (and both also write the literal "unknown" on
+            # failure, same as this detector). refresh_scheduler.py's
+            # stale-index drift check reads this field expecting that
+            # producer format; an abbreviated `--short` SHA is tolerated
+            # there via prefix-comparison, but writing the same full
+            # format here avoids relying on that fallback for every
+            # future write. (git_topology_service.py's _get_current_commit()
+            # is a SEPARATE producer feeding the unrelated `cidx watch`
+            # command path, not this one.)
             commit_result = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
+                ["git", "rev-parse", "HEAD"],
                 cwd=codebase_dir,
                 capture_output=True,
                 text=True,

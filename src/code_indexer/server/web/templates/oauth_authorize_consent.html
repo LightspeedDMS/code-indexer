@@ -47,8 +47,8 @@
 <script>
     function denyAccess() {
         // Redirect to client's redirect_uri with error
-        const redirectUri = "{{ redirect_uri }}";
-        const state = "{{ state or '' }}";
+        const redirectUri = {{ redirect_uri | tojson }};
+        const state = {{ (state or '') | tojson }};
         let errorUrl = redirectUri +
             "?error=access_denied" +
             "&error_description=" + encodeURIComponent("User denied authorization");

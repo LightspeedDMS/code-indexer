@@ -32,7 +32,7 @@ class TestDashboardPlaceholderHealth:
         that _get_health_data() triggers. We verify it is never invoked during
         get_dashboard_data().
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.services.dashboard_service import DashboardService
 
         service = DashboardService()
 
@@ -54,8 +54,8 @@ class TestDashboardPlaceholderHealth:
         The placeholder must be a proper HealthCheckResponse instance with all required
         fields populated with valid defaults.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import HealthCheckResponse
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import HealthCheckResponse
 
         service = DashboardService()
 
@@ -79,8 +79,8 @@ class TestDashboardPlaceholderHealth:
         HealthStatus enum value — the placeholder should use DEGRADED or a similar
         valid enum value that signals the health is not yet loaded.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import HealthStatus
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import HealthStatus
 
         service = DashboardService()
 
@@ -103,7 +103,7 @@ class TestDashboardPlaceholderHealth:
 
         The HealthCheckResponse model requires a timestamp field.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.services.dashboard_service import DashboardService
 
         service = DashboardService()
 
@@ -125,7 +125,7 @@ class TestDashboardPlaceholderHealth:
 
         The HealthCheckResponse model requires a services field (dict of ServiceHealthInfo).
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.services.dashboard_service import DashboardService
 
         service = DashboardService()
 
@@ -147,8 +147,8 @@ class TestDashboardPlaceholderHealth:
 
         The HealthCheckResponse model requires a system field (SystemHealthInfo).
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import SystemHealthInfo
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import SystemHealthInfo
 
         service = DashboardService()
 
@@ -172,8 +172,8 @@ class TestDashboardPlaceholderHealth:
         get_health_partial() which must continue fetching real health data.
         This is the endpoint that does the actual health check after page load.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import (
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import (
             HealthCheckResponse,
             HealthStatus,
             ServiceHealthInfo,
@@ -218,13 +218,13 @@ class TestDashboardPlaceholderHealth:
 
         The fix must not break the overall structure of the return value.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.services.dashboard_service import (
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.services.dashboard_service import (
             DashboardData,
             JobCounts,
             RepoCounts,
         )
-        from src.code_indexer.server.models.api_models import HealthCheckResponse
+        from code_indexer.server.models.api_models import HealthCheckResponse
 
         service = DashboardService()
 
@@ -257,13 +257,13 @@ class TestDashboardPlaceholderHealth:
         We verify by patching health_service.get_system_health() and confirming
         it is never called during get_dashboard_data(), even indirectly.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.services.dashboard_service import DashboardService
 
         service = DashboardService()
 
         with (
             patch(
-                "src.code_indexer.server.services.dashboard_service.health_service"
+                "code_indexer.server.services.dashboard_service.health_service"
             ) as mock_health_svc,
             patch.object(service, "_get_job_counts", return_value=MagicMock()),
             patch.object(service, "_get_repo_counts", return_value=MagicMock()),
@@ -282,8 +282,8 @@ class TestDashboardPlaceholderHealth:
         Using DEGRADED (not HEALTHY) prevents false-positive green indicators
         on the initial page load before real health data arrives via HTMX.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import HealthStatus
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import HealthStatus
 
         service = DashboardService()
 
@@ -307,8 +307,8 @@ class TestDashboardPlaceholderHealth:
         This is the method used by the HTMX /admin/partials/dashboard-health endpoint.
         It must continue to work exactly as before the fix.
         """
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.models.api_models import (
+        from code_indexer.server.services.dashboard_service import DashboardService
+        from code_indexer.server.models.api_models import (
             HealthCheckResponse,
             HealthStatus,
             SystemHealthInfo,

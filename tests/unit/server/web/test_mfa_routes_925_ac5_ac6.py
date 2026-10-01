@@ -391,11 +391,37 @@ def test_check_elevation_window_finds_window_via_user_jti(esm):
     request.cookies = {}  # no cidx_session cookie present
 
     with patch(_ESM_PATH, esm):
-        result = _check_elevation_window(request, required_scope="full")
+        result = _check_elevation_window(request, _ADMIN, required_scope="full")
 
     # Before fix: returns elevation_required error dict (jti key not checked).
     # After fix: returns None (elevation found via user_jti).
     assert result is None, f"Expected None (elevation found), got: {result}"
+
+
+def test_check_elevation_window_rejects_window_opened_by_a_different_user(esm):
+    """An elevation window is valid only for the user who created it: a
+    window opened by _OTHER must not satisfy _check_elevation_window() for
+    a request authenticated as _ADMIN, even when the session key resolves
+    correctly."""
+    from code_indexer.server.web.mfa_routes import _check_elevation_window
+
+    session_key = _make_session_key()
+    esm.create(
+        session_key=session_key,
+        username=_OTHER,
+        elevated_from_ip=None,
+        scope="full",
+    )
+
+    request = MagicMock()
+    request.state.user_jti = session_key
+    request.cookies = {}
+
+    with patch(_ESM_PATH, esm):
+        result = _check_elevation_window(request, _ADMIN, required_scope="full")
+
+    assert result is not None, "Expected elevation_required for a mismatched user"
+    assert result["error"] == "elevation_required"
 
 
 # ---------------------------------------------------------------------------

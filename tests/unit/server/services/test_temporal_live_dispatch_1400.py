@@ -124,11 +124,20 @@ def _make_instant_worker(
 ):
     """A fast fake worker matching run_temporal_worker's exact call
     contract (worker_input, payload_cache, job_id, progress_callback=None,
-    cancel_check=None) -- writes a real, verified terminal snapshot
-    immediately via the REAL store_temporal_snapshot, then returns."""
+    cancel_check=None, query_tracker=None, activated_repo_manager=None) --
+    writes a real, verified terminal snapshot immediately via the REAL
+    store_temporal_snapshot, then returns."""
 
     def _worker(
-        worker_input, payload_cache, job_id, progress_callback=None, cancel_check=None
+        worker_input,
+        payload_cache,
+        job_id,
+        progress_callback=None,
+        cancel_check=None,
+        query_tracker=None,
+        # Bug #1533: the dispatch layer forwards the DI-wired
+        # ActivatedRepoManager as a worker kwarg, just like query_tracker.
+        activated_repo_manager=None,
     ):
         store_temporal_snapshot(
             payload_cache,
@@ -155,7 +164,13 @@ def _make_slow_worker(payload_cache: PayloadCache, delay_seconds: float):
     used to deterministically force the async-handoff path (Scenario 2)."""
 
     def _worker(
-        worker_input, payload_cache, job_id, progress_callback=None, cancel_check=None
+        worker_input,
+        payload_cache,
+        job_id,
+        progress_callback=None,
+        cancel_check=None,
+        query_tracker=None,
+        activated_repo_manager=None,
     ):
         time.sleep(delay_seconds)
         store_temporal_snapshot(
@@ -590,6 +605,67 @@ class TestSingleFlightDedupJoin:
 
         assert result1["job_id"] == result2["job_id"]
         assert submit_count["n"] == 1
+
+
+class TestQueryTrackerForwarding:
+    """Bug #1482: execute_live_temporal_search must forward query_tracker
+    into the submitted worker's kwargs (submit_job(...)) so
+    run_temporal_worker can construct a resolution-scope-safe
+    TemporalShardResolver. query_tracker must NOT enter
+    TemporalWorkerInput (the dedup signature)."""
+
+    def test_query_tracker_forwarded_to_submitted_worker(
+        self, tmp_path, payload_cache, bgm
+    ):
+        from code_indexer.server.services.temporal_live_dispatch import (
+            execute_live_temporal_search,
+        )
+
+        captured_kwargs: Dict = {}
+
+        def _capturing_worker(
+            worker_input,
+            payload_cache,
+            job_id,
+            progress_callback=None,
+            cancel_check=None,
+            query_tracker=None,
+            activated_repo_manager=None,
+        ):
+            captured_kwargs["query_tracker"] = query_tracker
+            store_temporal_snapshot(
+                payload_cache,
+                job_id,
+                {
+                    "results": [],
+                    "shards_completed": 1,
+                    "shards_total": 1,
+                    "ctx": {"requested_limit": worker_input.requested_limit},
+                },
+                terminal=True,
+            )
+            return {"result_ready": True}
+
+        sentinel_tracker = object()
+        worker_input = _make_worker_input(
+            tmp_path, query_text="tracker forwarding query"
+        )
+
+        execute_live_temporal_search(
+            worker_input=worker_input,
+            background_job_manager=bgm,
+            payload_cache=payload_cache,
+            access_filtering_service=_FakeAccessFilteringService(),
+            is_admin=False,
+            inline_wait_seconds=5.0,
+            handler_deadline_monotonic=None,
+            response_reserve_seconds=1.0,
+            dedup_cache=TemporalDedupCache(),
+            worker_fn=_capturing_worker,
+            query_tracker=sentinel_tracker,
+        )
+
+        assert captured_kwargs.get("query_tracker") is sentinel_tracker
 
 
 if __name__ == "__main__":

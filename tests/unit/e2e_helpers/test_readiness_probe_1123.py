@@ -156,12 +156,75 @@ class _HealthyHandler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
+# Handler: fails the first FAIL_COUNT /health checks with 503, then serves
+# healthy /health + /auth/login responses identical to _HealthyHandler.
+#
+# Used to prove the bash wait_for_server retry loop actually retries across
+# multiple non-ready iterations (rather than aborting on the first one).
+# ---------------------------------------------------------------------------
+
+# Non-secret placeholder value for a local in-process stub HTTP server that
+# performs no real authentication -- never a real credential or API token.
+_FAKE_ACCESS_TOKEN = "test-jwt-token"
+
+
+class _FailsThenSucceedsHandler(BaseHTTPRequestHandler):
+    FAIL_COUNT = 2
+
+    _lock = threading.Lock()
+    _health_call_count = 0
+
+    def do_GET(self):
+        if self.path == "/health":
+            with self.__class__._lock:
+                self.__class__._health_call_count += 1
+                current_count = self.__class__._health_call_count
+            if current_count <= self.FAIL_COUNT:
+                self.send_response(503)
+                self.end_headers()
+                return
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/auth/login":
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length:
+                self.rfile.read(content_length)
+            body = json.dumps({"access_token": _FAKE_ACCESS_TOKEN}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def _reset_fails_then_succeeds_counter() -> None:
+    """Reset the shared /health failure counter between test runs."""
+    with _FailsThenSucceedsHandler._lock:
+        _FailsThenSucceedsHandler._health_call_count = 0
+
+
+# ---------------------------------------------------------------------------
 # Helper: run bash wait_for_server by sourcing e2e-automation.sh
 # ---------------------------------------------------------------------------
 
 
 def _run_bash_wait_for_server(
-    port: int, timeout: int = _READINESS_TIMEOUT
+    port: int, timeout: int = _READINESS_TIMEOUT, poll: float = 0.5
 ) -> subprocess.CompletedProcess:
     """Source e2e-automation.sh and call wait_for_server against the given port.
 
@@ -169,6 +232,10 @@ def _run_bash_wait_for_server(
     The script is sourced (not executed) so only function definitions are
     loaded — the main body credential-exit and phase-loop do NOT run.
     """
+    if isinstance(poll, bool) or not (
+        isinstance(poll, (int, float)) and 0 < poll < float("inf")
+    ):
+        raise ValueError(f"poll must be a finite positive number, got {poll!r}")
     script = str(E2E_SCRIPT)
     bash_cmd = (
         f"source {script!r}; "
@@ -177,7 +244,7 @@ def _run_bash_wait_for_server(
         f"E2E_ADMIN_USER=testuser "
         f"E2E_ADMIN_PASS=testpass "
         f"E2E_SERVER_READINESS_TIMEOUT={timeout} "
-        f"E2E_SERVER_READINESS_POLL=0.5 "
+        f"E2E_SERVER_READINESS_POLL={poll} "
         f"wait_for_server"
     )
     return subprocess.run(
@@ -220,6 +287,34 @@ class TestBashWaitForServerMutation:
         )
         assert "source_ok" in result.stdout, (
             f"Expected 'source_ok' in stdout after sourcing; got: {result.stdout!r}"
+        )
+
+    def test_sourcing_does_not_arm_exit_trap(self):
+        """Sourcing e2e-automation.sh must NOT arm the composite EXIT trap.
+
+        cleanup_all_servers_and_reset (registered via `trap ... EXIT`) calls
+        reset_test_environment, which reaps OTHER processes' /tmp-path
+        daemons (via pgrep/SIGTERM) and prunes pytest temp directories
+        beyond the newest few. If sourcing this script (to reuse
+        wait_for_server) armed that trap, every sibling test that sources
+        this file would risk killing another test's live daemon and
+        deleting the currently-running pytest session's own temp dir when
+        its bash subprocess exits. The trap registration must live only
+        inside the direct-execution main guard, never at source time.
+        """
+        result = subprocess.run(
+            ["bash", "-c", f"source {str(E2E_SCRIPT)!r}; trap -p EXIT"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Sourcing must succeed cleanly. rc={result.returncode}, "
+            f"stderr={result.stderr!r}"
+        )
+        assert result.stdout.strip() == "", (
+            "Sourcing e2e-automation.sh must NOT arm an EXIT trap -- "
+            f"'trap -p EXIT' must print nothing. Got: {result.stdout!r}"
         )
 
     def test_wait_for_server_defined_after_source(self):
@@ -296,3 +391,32 @@ class TestBashWaitForServerMutation:
             f"wait_for_server must time out when nothing listens on port {port} "
             f"(rc={result.returncode})"
         )
+
+    def test_retries_across_multiple_fractional_poll_intervals(self):
+        """wait_for_server must actually RETRY with a fractional poll interval.
+
+        A server that only becomes healthy after 1+ retries must still be
+        detected as ready, well within the timeout. This is the
+        discriminating case for a real bash bug: `elapsed=$((elapsed +
+        E2E_SERVER_READINESS_POLL))` is bash INTEGER arithmetic, so a
+        fractional poll (e.g. 0.3, used here to keep the test fast) makes
+        the very first accumulation a syntax error. Under this script's
+        `set -euo pipefail`, that error aborts the whole sourced shell on
+        the first non-ready iteration instead of looping -- so a server
+        that would genuinely become healthy after a couple of retries is
+        incorrectly reported as NOT ready.
+        """
+        _reset_fails_then_succeeds_counter()
+        port = _find_free_port()
+        server = _make_stub_server(port, _FailsThenSucceedsHandler)
+        _start_stub(server)
+        try:
+            result = _run_bash_wait_for_server(port, timeout=5, poll=0.3)
+            assert result.returncode == 0, (
+                "wait_for_server must retry past transient 503s with a "
+                f"fractional poll interval and eventually succeed "
+                f"(rc={result.returncode}, stdout={result.stdout!r}, "
+                f"stderr={result.stderr!r})"
+            )
+        finally:
+            server.shutdown()

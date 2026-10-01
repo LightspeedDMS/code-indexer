@@ -251,6 +251,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -858,6 +867,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "xray-core",
 ]
 
@@ -865,9 +875,13 @@ dependencies = [
 name = "xray-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "libloading",
+ "memmap2",
  "proc-macro2",
  "rayon",
+ "serde",
+ "serde_json",
  "sha2",
  "syn",
  "tempfile",
@@ -890,6 +904,7 @@ dependencies = [
  "tree-sitter-xml",
  "tree-sitter-yaml",
  "walkdir",
+ "xray-core",
 ]
 
 [[package]]

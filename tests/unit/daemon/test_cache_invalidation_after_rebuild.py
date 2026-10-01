@@ -275,6 +275,10 @@ class TestAC11CacheInvalidation:
         service.cache_entry = CacheEntry(project_path, ttl_minutes=10)
         service.cache_entry.hnsw_index = Mock()  # Simulated loaded index
         service.cache_entry.id_mapping = {"vec1": "path1"}
+        # Bug #1730: staleness check now resolves collection_path from
+        # cache_entry.collection_name -- set it to reflect the collection
+        # this simulated cache actually represents.
+        service.cache_entry.collection_name = collection_path.name
         # Track the loaded version
         version_a = service.cache_entry._read_index_rebuild_uuid(collection_path)
         service.cache_entry.hnsw_index_version = version_a
@@ -489,6 +493,10 @@ class TestAC13MmapSafety:
         service.cache_entry = CacheEntry(project_path, ttl_minutes=10)
         service.cache_entry.hnsw_index = index_old
         service.cache_entry.id_mapping = {"0": "vec_old"}
+        # Bug #1730: staleness check now resolves collection_path from
+        # cache_entry.collection_name -- set it to reflect the collection
+        # this simulated cache actually represents.
+        service.cache_entry.collection_name = collection_path.name
         # Track the loaded version
         version_old = service.cache_entry._read_index_rebuild_uuid(collection_path)
         service.cache_entry.hnsw_index_version = version_old

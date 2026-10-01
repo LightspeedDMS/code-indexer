@@ -16,7 +16,6 @@ _ALL_DOMAIN_SUBMODULES = [
     "code_indexer.server.mcp.handlers.scip",
     "code_indexer.server.mcp.handlers.guides",
     "code_indexer.server.mcp.handlers.ssh_keys",
-    "code_indexer.server.mcp.handlers.delegation",
     "code_indexer.server.mcp.handlers.pull_requests",
     "code_indexer.server.mcp.handlers.git_read",
     "code_indexer.server.mcp.handlers.git_write",
@@ -38,19 +37,36 @@ def _ensure_modules_loaded() -> None:
 def _sentinel_across_submodules(
     attr_name: str,
 ) -> Generator[object, None, None]:
-    """Plant a sentinel attribute in every domain submodule, yield the
-    sentinel, then clean up all submodules."""
+    """Plant a matching "already forwarded" placeholder on the handlers
+    package AND in every domain submodule (same object identity), yield a
+    distinct sentinel to write next, then clean up all modules.
+
+    Bug #1610: the corrected _ForwardingModule.__setattr__ only propagates a
+    package-level write into a submodule when that submodule's CURRENT
+    binding for the name is identical to the package's PREVIOUS binding --
+    i.e. the name genuinely was a shared/forwarded alias, not merely a
+    same-named attribute that happens to exist there.  Planting the SAME
+    placeholder object in both the package's own __dict__ and every
+    submodule's __dict__ models a real prior-forwarding state, so the
+    subsequent `setattr(handlers, attr_name, sentinel)` in the tests below
+    is recognized as a legitimate forward and propagates everywhere.
+    """
     _ensure_modules_loaded()
+    import code_indexer.server.mcp.handlers as handlers
+
+    placeholder = object()
     sentinel = object()
+    handlers.__dict__[attr_name] = placeholder
     modules: List[ModuleType] = []
     for mod_name in _ALL_DOMAIN_SUBMODULES:
         mod = sys.modules.get(mod_name)
         assert mod is not None, f"{mod_name} not loaded"
-        mod.__dict__[attr_name] = None
+        mod.__dict__[attr_name] = placeholder
         modules.append(mod)
     try:
         yield sentinel
     finally:
+        handlers.__dict__.pop(attr_name, None)
         for mod in modules:
             mod.__dict__.pop(attr_name, None)
 
@@ -96,7 +112,7 @@ def _swap_app_module(sentinel: Any) -> Generator[None, None, None]:
 
 
 class TestLegacyForwardingSubmoduleList:
-    """Verify _LegacyForwardingModule forwards to all 12 domain submodules."""
+    """Verify _LegacyForwardingModule forwards to all 11 domain submodules."""
 
     def test_all_domain_submodules_receive_forwarded_writes(self) -> None:
         """Setting an attribute on _legacy propagates to every submodule."""

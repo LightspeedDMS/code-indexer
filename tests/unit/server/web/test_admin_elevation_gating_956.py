@@ -192,9 +192,12 @@ def app_with_db(tmpdir_path):
 
     from code_indexer.server.app import create_app
     from code_indexer.server.services.config_service import reset_config_service
-    from code_indexer.server.storage.database_manager import DatabaseSchema
 
-    DatabaseSchema(str(tmpdir_path / "test.db")).initialize_database()
+    # Bug #1892: no separate DatabaseSchema(.../"test.db").initialize_database()
+    # call here -- create_app() below creates and initializes its own schema at
+    # <tmpdir>/data/cidx_server.db (CIDX_SERVER_DATA_DIR-relative). A prior
+    # version of this fixture also initialized an unrelated, never-read
+    # <tmpdir>/test.db, which cost ~0.1s of pure dead work per test run.
     with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmpdir_path)}):
         reset_config_service()
         app = create_app()
@@ -204,8 +207,20 @@ def app_with_db(tmpdir_path):
 
 @pytest.fixture
 def client(app_with_db):
-    with TestClient(app_with_db, follow_redirects=False) as test_client:
-        yield test_client
+    # Bug #1892: use a bare TestClient (no `with` block) so the FastAPI ASGI
+    # lifespan (dozens of schedulers/services wired in startup/lifespan.py)
+    # never starts, matching the established convention in this directory
+    # (see conftest.py module docstring; test_repo_category_update_route.py's
+    # `client` fixture does the same). Measured cost of the lifespan
+    # start+stop cycle was ~2.8s (1.52s startup + 1.26s shutdown) for zero
+    # behavioral benefit here: test_exempt_routes_accessible_without_elevation
+    # only exercises GET /admin/logout, whose handler
+    # (server/web/routes.py:634 logout()) reads only globals that create_app()
+    # itself already wires (elevated_session_manager, get_token_blacklist(),
+    # get_session_manager()) -- never lifespan-only `request.app.state`
+    # attributes. Verified empirically: the redirect (303) is identical with
+    # or without the lifespan running.
+    return TestClient(app_with_db, follow_redirects=False)
 
 
 # ---------------------------------------------------------------------------

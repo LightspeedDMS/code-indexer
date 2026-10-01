@@ -74,7 +74,7 @@ class TestMainRetryPathSurvivesUrlFailure:
         )
         fake_executor.execute.return_value = False
 
-        def fail_url():
+        def fail_url(executor):
             url_resolve_called.append(True)
             raise RuntimeError("no config.json")
 
@@ -108,7 +108,7 @@ class TestMainRetryPathSurvivesUrlFailure:
             m._should_retry_on_startup.return_value = False
             return m
 
-        def track_url():
+        def track_url(executor):
             call_order.append("url_resolved")
             return "http://localhost:8000"
 
@@ -176,7 +176,7 @@ class TestMainHealthyPathPreservesBehavior:
         """_resolve_server_url must be called exactly once on the normal poll path."""
         url_calls: list[int] = []
 
-        def _record_url_call() -> str:
+        def _record_url_call(executor) -> str:
             url_calls.append(1)
             return "http://localhost:8000"
 

@@ -15,14 +15,51 @@ All tests are unit-level and do NOT call real providers.
 """
 
 import os
-from typing import Any, Dict, List
+import sys
+import time as _real_time
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any, Dict, Iterator, List
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from src.code_indexer.config import VoyageAIConfig
-from src.code_indexer.services.voyage_ai import VoyageAIClient
+from code_indexer.config import VoyageAIConfig
+from code_indexer.services.voyage_ai import VoyageAIClient
+
+# The module object whose `time` name voyage_ai's methods resolve at call time.
+_VOYAGE_MODULE = sys.modules[VoyageAIClient.__module__]
+
+
+@contextmanager
+def _voyage_sleep_spy() -> Iterator[List[float]]:
+    """Record time.sleep calls originating ONLY from voyage_ai code.
+
+    Determinism fix (flaky under fast-automation parallel load): the old
+    approach patched the *process-global* ``time.sleep`` and asserted the
+    recorded list was empty. That is unreliable in the full suite because
+    unrelated background daemon threads (schedulers, metrics writers, etc.)
+    call ``time.sleep`` during the patch window and append to the same list,
+    so a "no sleep" assertion spuriously fails — while it always passes in
+    isolation (no such threads running).
+
+    Rebinding the ``time`` NAME inside the voyage_ai module isolates the spy
+    to the code under test: other threads keep using the real ``time`` module
+    and cannot pollute this list. ``time()``/``monotonic()`` still delegate to
+    real time so voyage_ai's latency bookkeeping is unaffected.
+
+    Proven with a background sleeper: global patch pollutes ~22/50 iterations;
+    this module-scoped spy pollutes 0/50.
+    """
+    sleep_calls: List[float] = []
+    fake_time = SimpleNamespace(
+        sleep=lambda t: sleep_calls.append(t),
+        time=_real_time.time,
+        monotonic=_real_time.monotonic,
+    )
+    with patch.object(_VOYAGE_MODULE, "time", fake_time):
+        yield sleep_calls
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +148,7 @@ class TestMakeSyncRequestRetryFalse:
 
         _install_fake_transport(client, fake_post)
 
-        sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with _voyage_sleep_spy() as sleep_calls:
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 
@@ -135,8 +171,7 @@ class TestMakeSyncRequestRetryFalse:
 
         _install_fake_transport(client, fake_post)
 
-        sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with _voyage_sleep_spy() as sleep_calls:
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 
@@ -249,8 +284,7 @@ class TestMakeSyncRequestRetryTrue429Retries:
 
         _install_fake_transport(client, fake_post)
 
-        sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with _voyage_sleep_spy() as sleep_calls:
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 

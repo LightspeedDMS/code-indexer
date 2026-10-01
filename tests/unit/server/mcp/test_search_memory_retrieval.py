@@ -274,13 +274,19 @@ class TestBodyTruncation:
 #     with filtered — proving exact inter-stage data handoff.
 #   - Scenarios B/C assert the class was never instantiated.
 
-_PIPELINE_CLS_PATCH = "code_indexer.server.mcp.handlers.search.MemoryRetrievalPipeline"
-_CONFIG_SVC_PATCH = "code_indexer.server.mcp.handlers.search.get_config_service"
-# _get_golden_repos_dir is imported directly into search.py's namespace via
-# `from ._utils import ..., _get_golden_repos_dir, ...`, so patching the _utils
-# module attribute would not affect the already-bound name in search.py.
-# We must patch the name as bound in search.py instead.
-_GOLDEN_DIR_PATCH = "code_indexer.server.mcp.handlers.search._get_golden_repos_dir"
+_PIPELINE_CLS_PATCH = (
+    "code_indexer.server.mcp.handlers.search.memory_retrieval.MemoryRetrievalPipeline"
+)
+_CONFIG_SVC_PATCH = (
+    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
+)
+# _get_golden_repos_dir is imported directly into memory_retrieval.py's namespace
+# via `from .._utils import ..., _get_golden_repos_dir, ...` (Issue #1935 split),
+# so patching the _utils module attribute would not affect the already-bound
+# name in memory_retrieval.py. We must patch the name as bound there instead.
+_GOLDEN_DIR_PATCH = (
+    "code_indexer.server.mcp.handlers.search.memory_retrieval._get_golden_repos_dir"
+)
 _APP_MODULE_PATCH = "code_indexer.server.mcp.handlers._utils.app_module"
 
 _FAKE_GOLDEN_DIR = "/fake/golden-repos"

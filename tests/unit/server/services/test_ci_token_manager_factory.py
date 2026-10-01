@@ -11,7 +11,7 @@ Tests that:
 
 import pytest
 
-from src.code_indexer.server.services.ci_token_manager import (
+from code_indexer.server.services.ci_token_manager import (
     CITokenManager,
     create_token_manager,
 )

@@ -19,6 +19,95 @@ logger = logging.getLogger(__name__)
 
 _BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
 
+# Bug #1497: field name for verbatim (untokenized) regex matching.
+#
+# RegexQuery matches whole TERMS in the term dictionary, not raw document
+# text. "content"/"content_raw"/"identifiers" all use the "default" tokenizer,
+# which splits on non-alphanumeric characters (including underscore), so an
+# identifier like "cancel_job" is indexed as two separate terms "cancel" and
+# "job" -- no single term ever contains the substring "cancel_job". This new
+# field stores each document's raw content as ONE untokenized term
+# (tokenizer_name="raw"), so a regex wrapped for substring semantics can
+# match it via Tantivy's own DFA-based regex engine (ReDoS-immune, unlike
+# falling back to Python-level regex scanning across broad candidate sets).
+_REGEX_VERBATIM_FIELD = "content_raw_verbatim"
+
+# Bug #1761: field name for verbatim (untokenized) exact path matching.
+#
+# delete_document()/update_document() need to remove ALL prior FTS
+# documents for a given file path before/while a file is (re)indexed, so
+# that reprocessing an already-indexed, unchanged file (e.g. two separate
+# `cidx index` runs against the same on-disk Tantivy index, or an
+# activation branch-delta reindex) never leaves stale duplicate chunk
+# documents behind. The existing "path" field uses the "default"
+# tokenizer, so a delete built via `index.parse_query(file_path, ["path"])`
+# is a TOKEN match, not an exact-path match -- verified empirically that a
+# path whose tokens are a contiguous prefix of another path's tokens (e.g.
+# deleting "src/foo/bar.py" while "src/foo/bar.py.bak" also exists) gets
+# BOTH documents deleted, a real over-deletion risk once delete-by-path is
+# used on every indexed file rather than only in the low-traffic watch-mode
+# path. This field stores each document's path as ONE untokenized term
+# (tokenizer_name="raw", same technique as _REGEX_VERBATIM_FIELD), so a
+# Query.term_query() against it matches only the exact path.
+_PATH_EXACT_FIELD = "path_exact_raw"
+
+# Bug #1497 (follow-up, ReDoS-immunity + accurate highlighting): sentinel for
+# "no precise match position available". Tantivy's DFA-based regex engine
+# already confirms the ACCEPT/REJECT decision for a regex query against the
+# verbatim field (ReDoS-immune, see the use_regex branch in search() below).
+# A separate Python-level match-position/text EXTRACTION step re-scans the
+# matched document with a bounded-timeout `regex.search(content_raw,
+# timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS)` call (see below) to recover the
+# actual matched substring/line/column for snippet/highlight display. This
+# sentinel is used only when that bounded extraction times out or otherwise
+# fails -- the document is still a genuine Tantivy-confirmed match, just
+# without a precisely-extracted highlight span.
+_NO_MATCH_POSITION = -1
+
+# Bug #1497 (follow-up): bounded timeout (seconds) for the Python-level
+# match-position/text EXTRACTION step. This is a SEPARATE, backtracking
+# `regex.search(content_raw)` call that exists only to recover the matched
+# substring/position for snippet/highlight display -- it is NOT the query
+# decision itself (that is Tantivy's own DFA engine, already ReDoS-immune).
+# For an adversarial pattern like "(a|a)*b" this extraction call could, in
+# principle, itself backtrack catastrophically. Bounding it keeps the
+# overall search provably fast (well under the DFA-safety test's 0.1s
+# ceiling) while remaining far larger than the microseconds a legitimate
+# match normally takes to extract.
+_REGEX_EXTRACTION_TIMEOUT_SECONDS = 0.03
+
+# Bug #1497 (follow-up): substring marker identifying Tantivy's
+# "Compiled regex exceeds size limit of N states" RegexQueryError, as
+# distinct from a genuine pattern syntax error. See
+# _is_regex_state_limit_error() and its use in search() below.
+_REGEX_STATE_LIMIT_ERROR_MARKER = "size limit"
+
+# Story #1494 AC2 (Finding A4, GIL-blocking analysis report): caps the
+# number of per-result candidates that receive the GIL-held Python-level
+# regex-extraction step in search() below. See that method's use of this
+# constant for the full rationale and fallback behavior.
+_MAX_REGEX_EXTRACTION_CANDIDATES = 2000
+
+
+def _is_regex_state_limit_error(exc: Exception) -> bool:
+    """
+    Bug #1497 (follow-up): detect whether `exc` is Tantivy's DFA
+    state-limit RegexQueryError (a structurally valid pattern that is too
+    complex for the fixed 1000-state limit -- e.g. a Unicode `\\w`/`\\s`
+    class combined with the required substring-wrapping wildcards on both
+    sides), as opposed to a genuine regex syntax error (e.g. an unmatched
+    parenthesis).
+
+    Proven empirically: wrapping a pattern containing `\\w` with
+    `[\\s\\S]*` on both sides reliably exceeds the limit regardless of
+    wrapping syntax (anchors and lazy quantifiers are rejected outright by
+    Tantivy's regex parser, and there is no Python-exposed way to raise
+    the limit), while the same wrap without `\\w` compiles fine. search()
+    uses this to gracefully degrade to legacy token-level matching for
+    just this one search, rather than failing the entire query.
+    """
+    return _REGEX_STATE_LIMIT_ERROR_MARKER in str(exc).lower()
+
 
 def sanitize_fts_query(query_text: str) -> str:
     """Sanitize an FTS query to prevent Tantivy parse errors.
@@ -269,6 +358,23 @@ class TantivyIndexManager:
         self._metadata_file = self.index_dir / "metadata.json"
         self._lock = threading.Lock()  # Thread safety for writer operations
 
+        # Bug #1497: lazily-computed, cached flag for whether the PHYSICAL
+        # on-disk index actually has _REGEX_VERBATIM_FIELD. Legacy indexes
+        # built before this fix lack it; querying a field the physical index
+        # doesn't have panics at the Rust FFI boundary. None = not yet checked.
+        self._verbatim_field_available: Optional[bool] = None
+
+        # Bug #1761: lazily-computed, cached flag for whether the PHYSICAL
+        # on-disk index actually has _PATH_EXACT_FIELD. Legacy indexes built
+        # before this fix lack it; querying a field the physical index
+        # doesn't have panics at the Rust FFI boundary. None = not yet
+        # checked. Named distinctly from the _path_exact_field_available()
+        # METHOD below (mirrors the existing _verbatim_field_available
+        # attribute / _regex_verbatim_field_available() method split) --
+        # an identically-named attribute would shadow the method on this
+        # instance.
+        self._exact_path_field_available: Optional[bool] = None
+
         # Try to import tantivy
         try:
             import tantivy
@@ -326,6 +432,22 @@ class TantivyIndexManager:
         # language: stored as text field for retrieval AND facet for filtering
         schema_builder.add_text_field("language", stored=True)
         schema_builder.add_facet_field("language_facet")
+
+        # Bug #1497: verbatim (untokenized) field for regex matching.
+        # MUST be added LAST so existing field IDs are unchanged for indexes
+        # built before this fix (backward compatibility -- see
+        # _regex_verbatim_field_available()).
+        schema_builder.add_text_field(
+            _REGEX_VERBATIM_FIELD, stored=False, tokenizer_name="raw"
+        )
+
+        # Bug #1761: verbatim (untokenized) field for exact path-based
+        # delete/lookup. MUST be added LAST (after _REGEX_VERBATIM_FIELD) so
+        # existing field IDs are unchanged for indexes built before this fix
+        # (backward compatibility -- see _path_exact_field_available()).
+        schema_builder.add_text_field(
+            _PATH_EXACT_FIELD, stored=False, tokenizer_name="raw"
+        )
 
         self._schema = schema_builder.build()
 
@@ -430,6 +552,56 @@ class TantivyIndexManager:
         assert self._writer is None, "open_for_search() must never create a writer"
         logger.debug(f"Opened Tantivy index for read-only search at {self.index_dir}")
 
+    def open_from_cached_index(self, index: "Index") -> None:
+        """Adopt an already-open Tantivy Index object with NO disk I/O.
+
+        Bug #1730: daemon mode keeps one already-open ``tantivy.Index`` per
+        project resident in its own long-lived in-memory cache
+        (``CacheEntry.tantivy_index``). Constructing a brand new
+        TantivyIndexManager per query and reopening from disk via
+        ``initialize_index()``/``open_for_search()`` defeats that cache on
+        every single query — and ``initialize_index()`` additionally
+        acquires the exclusive writer lock on every read (Bug #1233). This
+        method adopts the caller-supplied, already-open index directly: no
+        ``Index.open()`` call, no writer lock, only the cheap, purely
+        in-memory schema rebuild ``search()`` needs.
+
+        Invariants (mirrors ``open_for_search()``):
+          - self._index is set so search() works normally.
+          - self._schema is rebuilt so _build_search_query()/regex helpers work.
+          - self._writer remains None — no writer lock is ever acquired here.
+
+        Args:
+            index: An already-open tantivy.Index instance (e.g. from a
+                daemon's in-memory CacheEntry). Typed as the real
+                ``tantivy.Index`` (imported under TYPE_CHECKING at module
+                top, matching ``self._index``'s own annotation) rather than
+                ``Any``, since callers are expected to hand this method a
+                genuine already-open index, never an arbitrary object.
+
+        Raises:
+            ValueError: If index is None -- callers must check
+                cache-availability themselves and fall back to
+                open_for_search() instead of calling this method with
+                nothing to adopt.
+        """
+        if index is None:
+            raise ValueError(
+                "open_from_cached_index() requires an already-open Index; "
+                "got None. Callers must fall back to open_for_search() "
+                "when no cached index is available."
+            )
+
+        self._index = index
+        self._create_schema()
+
+        assert self._writer is None, (
+            "open_from_cached_index() must never create a writer"
+        )
+        logger.debug(
+            f"Adopted cached Tantivy index for read-only search at {self.index_dir}"
+        )
+
     def get_writer_heap_size(self) -> int:
         """
         Get the configured writer heap size.
@@ -478,6 +650,19 @@ class TantivyIndexManager:
             tantivy_doc.add_text("content", doc["content"])
             tantivy_doc.add_text("content_raw", doc["content_raw"])
 
+            # Bug #1761: mirror path into the untokenized exact-match field
+            # used for precise delete-by-path (supersession on reindex).
+            # Safe no-op on a legacy (pre-fix) physical index that lacks
+            # this field -- tantivy silently ignores add_text() calls for
+            # unknown fields.
+            tantivy_doc.add_text(_PATH_EXACT_FIELD, doc["path"])
+
+            # Bug #1497: mirror content_raw into the untokenized verbatim
+            # field used for regex substring matching. Safe no-op on a
+            # legacy (pre-fix) physical index that lacks this field --
+            # tantivy silently ignores add_text() calls for unknown fields.
+            tantivy_doc.add_text(_REGEX_VERBATIM_FIELD, doc["content_raw"])
+
             # Add identifiers (convert list to space-separated string)
             identifiers_str = (
                 " ".join(doc["identifiers"])
@@ -518,6 +703,19 @@ class TantivyIndexManager:
         writer = self._writer
         writer.commit()
         writer.wait_merging_threads()
+        # Bug #1799: Tantivy releases the directory lockfile only when the
+        # underlying Rust IndexWriter is dropped, which for this PyO3-wrapped
+        # object happens only once its CPython refcount reaches zero. Before
+        # this fix, `self._writer = self._index.writer(self._heap_size)`
+        # evaluated the RHS (acquiring a NEW writer) while BOTH the local
+        # `writer` variable above AND the not-yet-reassigned `self._writer`
+        # attribute still referenced the OLD writer -- delaying the lock
+        # release and causing an intermittent LockBusy ValueError under
+        # production load. Drop every Python reference to the old writer
+        # FIRST so the lock is released deterministically before requesting
+        # its replacement.
+        self._writer = None
+        del writer
         # wait_merging_threads() consumes the writer; re-create it so
         # subsequent add_document() calls remain valid.
         assert self._index is not None
@@ -744,6 +942,237 @@ class TantivyIndexManager:
                     query_text, [search_field, "identifiers"]
                 )
 
+    def _regex_verbatim_field_available(self) -> bool:
+        """
+        Bug #1497: check whether the PHYSICAL on-disk index actually has
+        _REGEX_VERBATIM_FIELD in its schema.
+
+        Legacy indexes built before this fix lack this field. Querying a
+        field the physical index doesn't have panics at the Rust FFI
+        boundary (pyo3_runtime.PanicException: "index out of bounds") --
+        proven empirically. This check reads meta.json directly (pure JSON
+        parsing, no tantivy API calls), so detection itself can never panic.
+
+        Cached after the first call since an open index's on-disk schema is
+        fixed for the lifetime of this manager instance.
+
+        Returns:
+            True if regex search may safely target _REGEX_VERBATIM_FIELD.
+        """
+        if self._verbatim_field_available is not None:
+            return self._verbatim_field_available
+
+        meta_path = self.index_dir / "meta.json"
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+            self._verbatim_field_available = _REGEX_VERBATIM_FIELD in field_names
+        except Exception as e:
+            logger.warning(
+                "Could not determine verbatim regex field availability "
+                "from %s (falling back to legacy regex matching): %s",
+                meta_path,
+                e,
+            )
+            self._verbatim_field_available = False
+
+        return self._verbatim_field_available
+
+    def _path_exact_field_available(self) -> bool:
+        """
+        Bug #1761: check whether the PHYSICAL on-disk index actually has
+        _PATH_EXACT_FIELD in its schema (module constant defined at top of
+        file; self._exact_path_field_available is the cache attribute,
+        already initialized in __init__).
+
+        Legacy indexes built before this fix lack this field. Querying a
+        field the physical index doesn't have panics at the Rust FFI
+        boundary (see _regex_verbatim_field_available() immediately above
+        for the identical, already-proven Bug #1497 precedent this method
+        mirrors). This check reads meta.json directly (pure JSON parsing,
+        no tantivy API calls, using the `json` module already imported at
+        the top of this file), so detection itself can never panic.
+
+        Cached (in self._exact_path_field_available) after the first call
+        since an open index's on-disk schema is fixed for the lifetime of
+        this manager instance.
+
+        Returns:
+            True if delete/update may safely target _PATH_EXACT_FIELD for
+            an exact-match query.
+        """
+        if self._exact_path_field_available is not None:
+            return self._exact_path_field_available
+
+        meta_path = self.index_dir / "meta.json"
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+            self._exact_path_field_available = _PATH_EXACT_FIELD in field_names
+        except Exception as e:
+            logger.warning(
+                "Could not determine exact path field availability "
+                "from %s (falling back to legacy tokenized path matching): %s",
+                meta_path,
+                e,
+            )
+            self._exact_path_field_available = False
+
+        return self._exact_path_field_available
+
+    def schema_needs_rebuild(self) -> bool:
+        """
+        Bug #1763: True if an EXISTING on-disk index at self.index_dir has
+        a stale (pre-#1761) physical schema and must be rebuilt via
+        initialize_index(create_new=True) before reuse -- otherwise
+        #1761's dedup fix (delete_document_deferred(), gated on
+        _path_exact_field_available()) stays a permanent no-op on this
+        index and duplicate FTS rows keep accumulating forever.
+
+        Pure meta.json read (no tantivy API calls, so it can never
+        panic), safely callable BEFORE initialize_index(). Deliberately
+        uncached and independent of self._exact_path_field_available:
+        a caller that finds the schema stale is about to trigger a real
+        rebuild on this same instance, and caching "legacy" here would
+        leave a stale answer baked in for this instance's lifetime even
+        after the rebuild adds the field.
+
+        Returns:
+            True when meta.json exists and can be parsed but the schema
+            lacks _PATH_EXACT_FIELD.
+            False when no physical index exists yet (callers already
+            have their own "doesn't exist" branch), the schema is
+            already current, OR meta.json exists but can't be read/
+            parsed (MEDIUM-3, #1763 code review: fail toward the
+            CONSERVATIVE answer -- same fail-safe direction as the
+            sibling _path_exact_field_available() method above -- so a
+            transient read glitch (OSError, PermissionError, a partial
+            read mid-write) can never trigger a destructive rmtree. A
+            genuinely legacy index that happens to hit a transient read
+            error here simply gets re-detected as stale on the NEXT
+            call once the transient condition clears; the reverse
+            (fail toward True) risked deleting a perfectly healthy
+            index on a one-off filesystem hiccup).
+        """
+        meta_path = self.index_dir / "meta.json"
+        if not meta_path.exists():
+            return False
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+        except Exception as e:
+            logger.warning(
+                "Could not determine FTS schema compatibility from %s "
+                "(assuming current schema -- conservative, never "
+                "triggers a destructive rebuild from a transient read "
+                "error): %s",
+                meta_path,
+                e,
+            )
+            return False
+
+        return _PATH_EXACT_FIELD not in field_names
+
+    def _build_path_delete_query(self, file_path: str) -> Any:
+        """
+        Bug #1761: build a Tantivy Query (return type Any -- Query is not
+        importable at module scope here per this file's established lazy
+        `from tantivy import Query as TantivyQuery` convention, used
+        identically elsewhere in this same file) that matches ALL FTS
+        documents for exactly `file_path`, for use with
+        delete_documents_by_query() in delete_document()/update_document().
+
+        Prefers an EXACT term_query against the untokenized
+        _PATH_EXACT_FIELD when the physical index has it. Falls back to the
+        legacy tokenized `index.parse_query(file_path, ["path"])` for
+        indexes built before this fix -- preserves pre-fix behavior exactly
+        rather than crashing on a missing field.
+
+        Note: the legacy fallback is a TOKEN match on the "path" field's
+        "default" tokenizer, not an exact match -- it can over-match a
+        different file whose path tokens are a contiguous prefix of another
+        file's path tokens (verified empirically, e.g. deleting
+        "src/foo/bar.py" while "src/foo/bar.py.bak" also exists deletes
+        both). This is accepted only as a legacy-index compatibility path;
+        every index built after this fix uses the exact match above.
+        """
+        assert self._index is not None, (
+            "Index must be initialized when writer is initialized"
+        )
+        assert self._schema is not None, "Schema must be initialized"
+
+        if self._path_exact_field_available():
+            from tantivy import Query as TantivyQuery
+
+            return TantivyQuery.term_query(self._schema, _PATH_EXACT_FIELD, file_path)
+
+        return self._index.parse_query(file_path, ["path"])
+
+    def _wrap_regex_for_verbatim_match(self, pattern: str, case_sensitive: bool) -> str:
+        """
+        Bug #1497: wrap a user regex pattern for substring (grep-like) matching
+        against the untokenized _REGEX_VERBATIM_FIELD term.
+
+        RegexQuery requires a FULL match of the entire term against the
+        pattern (proven empirically), so a bare user pattern like
+        "cancel_job" never matches a term equal to an entire document's raw
+        content. Wrapping with [\\s\\S]* on both sides (rather than a global
+        (?s) DOTALL flag) lets the wrapper span newlines while leaving the
+        user's own pattern semantics (e.g. their own ".") untouched -- proven
+        via Tantivy's DFA regex engine to remain ReDoS-immune regardless of
+        pattern complexity.
+
+        Args:
+            pattern: The user-supplied regex pattern (unwrapped).
+            case_sensitive: When False, prefixes an inline (?i) flag so
+                Tantivy's own engine performs case folding (never the
+                user's pattern text itself, which could corrupt
+                case-sensitive escape sequences like \\S).
+
+        Returns:
+            The wrapped pattern string, ready for TantivyQuery.regex_query().
+        """
+        prefix = "" if case_sensitive else "(?i)"
+        return f"{prefix}[\\s\\S]*(?:{pattern})[\\s\\S]*"
+
+    def _build_legacy_regex_query(
+        self, query_text: str, search_field: str, TantivyQuery: Any
+    ) -> Any:
+        """
+        Bug #1497 (follow-up): build a RegexQuery against a TOKENIZED field
+        using the bare (unwrapped) user pattern -- the exact pre-#1497
+        matching behavior.
+
+        Used in two situations:
+          1. The physical index lacks _REGEX_VERBATIM_FIELD (legacy index
+             built before Bug #1497's fix).
+          2. The verbatim-wrapped pattern exceeds Tantivy's fixed
+             1000-state DFA limit (see _is_regex_state_limit_error()) --
+             graceful degradation to legacy token-level matching for just
+             this one search, rather than failing the whole query.
+
+        Args:
+            query_text: The user-supplied regex pattern (unwrapped).
+            search_field: Tokenized field to query ("content" or
+                "content_raw").
+            TantivyQuery: Tantivy Query class.
+
+        Returns:
+            Tantivy query object.
+
+        Raises:
+            ValueError: If the pattern itself fails to compile (a genuine
+                syntax error), wrapped with a clear message.
+        """
+        try:
+            return TantivyQuery.regex_query(self._schema, search_field, query_text)
+        except Exception as e:
+            raise ValueError(f"Invalid regex pattern '{query_text}': {str(e)}") from e
+
     def search(
         self,
         query_text: str,
@@ -850,29 +1279,57 @@ class TantivyIndexManager:
             if use_regex:
                 # Build regex query using Tantivy's regex_query
                 assert self._schema is not None  # For mypy
-                # The default (case-insensitive) FTS field "content" is
-                # lowercased at index time, so an uppercase regex pattern can
-                # never match it. Lowercase the pattern's literals -- escape-
-                # awarely so class escapes like \W \D \b are preserved -- to
-                # make FTS regex case-insensitive against that field. When
-                # case_sensitive=True we search "content_raw" (case preserved),
-                # so the pattern is used verbatim.
-                effective_pattern = (
-                    query_text
-                    if case_sensitive
-                    else lowercase_regex_literals(query_text)
-                )
-                try:
-                    text_query = TantivyQuery.regex_query(
-                        self._schema,
-                        search_field,
-                        effective_pattern,  # The regex pattern
+                if self._regex_verbatim_field_available():
+                    # Bug #1497 fix: match against the untokenized verbatim
+                    # field (whole-document term) so substring/cross-token
+                    # patterns like "cancel_job" or "def.*cancel_job" work,
+                    # instead of full-term matching against a tokenized field
+                    # whose terms never contain underscores/spaces.
+                    wrapped_pattern = self._wrap_regex_for_verbatim_match(
+                        query_text, case_sensitive
                     )
-                except Exception as e:
-                    # Wrap any regex compilation errors with clear message
-                    raise ValueError(
-                        f"Invalid regex pattern '{query_text}': {str(e)}"
-                    ) from e
+                    try:
+                        text_query = TantivyQuery.regex_query(
+                            self._schema,
+                            _REGEX_VERBATIM_FIELD,
+                            wrapped_pattern,
+                        )
+                    except Exception as e:
+                        if _is_regex_state_limit_error(e):
+                            # Bug #1497 (follow-up): some patterns -- e.g. a
+                            # Unicode \w/\s class combined with the required
+                            # [\s\S]* substring wrapping on both sides --
+                            # compile to an automaton that exceeds Tantivy's
+                            # fixed 1000-state DFA limit (proven empirically;
+                            # there is no Python-exposed way to raise this
+                            # limit, and anchors/lazy quantifiers are
+                            # rejected outright by Tantivy's regex parser).
+                            # Gracefully degrade to the legacy token-level
+                            # match for just this one search instead of
+                            # failing the whole query.
+                            logger.warning(
+                                "Regex pattern '%s' exceeds Tantivy's "
+                                "verbatim-field state limit; falling back "
+                                "to legacy token-level regex matching: %s",
+                                query_text,
+                                e,
+                            )
+                            text_query = self._build_legacy_regex_query(
+                                query_text, search_field, TantivyQuery
+                            )
+                        else:
+                            # Genuine regex syntax error -- wrap with clear message
+                            raise ValueError(
+                                f"Invalid regex pattern '{query_text}': {str(e)}"
+                            ) from e
+                else:
+                    # Legacy on-disk index built before Bug #1497's fix --
+                    # lacks _REGEX_VERBATIM_FIELD. Preserve the exact pre-fix
+                    # token-based behavior (no crash; Bug #1497 remains
+                    # present for this index until it is rebuilt).
+                    text_query = self._build_legacy_regex_query(
+                        query_text, search_field, TantivyQuery
+                    )
             else:
                 # Build query using existing helper method for non-regex searches
                 # Defense-in-depth: catch ValueError from Tantivy's parse_query() for
@@ -977,21 +1434,46 @@ class TantivyIndexManager:
                 path_matcher = PathPatternMatcher()
                 exclude_matcher = PathPatternMatcher()  # Use same class for exclusions
 
-            # PERFORMANCE OPTIMIZATION: Compile regex pattern ONCE before loop (not per result)
-            # This reduces 100x compilation overhead for searches with many results
+            # PERFORMANCE OPTIMIZATION: Compile regex pattern ONCE before loop (not per
+            # result). This reduces 100x compilation overhead for searches with many
+            # results.
+            #
+            # Bug #1497 (follow-up): this Python-level regex is used ONLY to extract
+            # the matched text/position for snippet/highlight display from
+            # content_raw -- Tantivy's own DFA-based regex engine already made the
+            # ACCEPT/REJECT decision above and is ReDoS-immune regardless of pattern
+            # complexity (see the use_regex branch above). Each .search() call below
+            # is bounded by _REGEX_EXTRACTION_TIMEOUT_SECONDS so this extraction step
+            # can never regress that ReDoS-immunity guarantee, even for an
+            # adversarial pattern like "(a|a)*b".
             compiled_regex_pattern = None
+            regex_module_supports_timeout = False
+            # Story #1494 AC2 (Finding A4): count of candidates that
+            # actually received the real (GIL-held) Python-level extraction
+            # step; once this reaches _MAX_REGEX_EXTRACTION_CANDIDATES,
+            # remaining candidates fall back to the sentinel position
+            # instead of running the expensive search() call -- bounding
+            # worst-case work on an unbounded (limit=0) regex query.
+            # `regex_extraction_cap_warned` ensures the WARNING below is
+            # logged exactly once per search() call, not once per skipped
+            # candidate.
+            regex_extraction_evaluated_count = 0
+            regex_extraction_cap_warned = False
             if use_regex:
-                # Use 'regex' library for enhanced Unicode support
-                # Note: Tantivy's DFA-based regex engine is already ReDoS-immune at query execution time (line 489)
-                # This Python regex is only for extracting matched text from results, not for query validation
+                # Use 'regex' library for enhanced Unicode support and bounded-timeout
+                # search(). Falls back to stdlib 're' (no timeout kwarg support) only
+                # if 'regex' is somehow unavailable -- it is a hard pyproject.toml
+                # dependency, so this branch is a defensive legacy fallback.
                 try:
                     import regex
                 except ImportError:
                     import re as regex  # type: ignore
 
                     logger.debug(
-                        "regex library not installed. Using standard 're' module."
+                        "regex library not installed. Using standard 're' module "
+                        "(bounded-timeout extraction unavailable)."
                     )
+                regex_module_supports_timeout = regex.__name__ == "regex"
 
                 # Pre-compile pattern with appropriate flags
                 try:
@@ -1057,40 +1539,96 @@ class TantivyIndexManager:
                         continue
 
                 # Find match position in content
-                # CRITICAL: For regex search, use pre-compiled pattern for match extraction
-                if use_regex and compiled_regex_pattern:
-                    # Extract actual matched text and position using pre-compiled pattern
-                    try:
-                        # Use pre-compiled pattern to extract matched text from Tantivy result
-                        # Note: ReDoS protection is provided by Tantivy's DFA engine, not here
-                        match_obj = compiled_regex_pattern.search(content_raw)
+                # CRITICAL (Bug #1497 follow-up): Tantivy's DFA-based regex engine
+                # already confirmed a genuine match against the verbatim field
+                # (ReDoS-immune, see the use_regex branch in search() above). The
+                # Python-level extraction below is a SEPARATE, bounded-timeout
+                # operation used only to recover the actual matched text/position
+                # for snippet/highlight display -- it can never regress the
+                # project's ReDoS-immunity guarantee because
+                # _REGEX_EXTRACTION_TIMEOUT_SECONDS caps it well under the
+                # DFA-safety test's 0.1s ceiling, even for an adversarial pattern
+                # like "(a|a)*b". If the 'regex' module (which alone supports the
+                # timeout= kwarg) is unavailable, extraction is skipped entirely
+                # in favor of the sentinel position -- never an UNBOUNDED
+                # backtracking call via stdlib 're'.
+                regex_extraction_capped = False
+                if (
+                    use_regex
+                    and compiled_regex_pattern
+                    and regex_module_supports_timeout
+                ):
+                    if (
+                        regex_extraction_evaluated_count
+                        < _MAX_REGEX_EXTRACTION_CANDIDATES
+                    ):
+                        regex_extraction_evaluated_count += 1
+                        try:
+                            match_obj = compiled_regex_pattern.search(
+                                content_raw, timeout=_REGEX_EXTRACTION_TIMEOUT_SECONDS
+                            )
 
-                        if match_obj:
-                            # Extract actual matched text and position
-                            match_text = match_obj.group(0)
-                            match_start = match_obj.start()
+                            if match_obj:
+                                # Extract actual matched text and position
+                                match_text = match_obj.group(0)
+                                match_start = match_obj.start()
 
-                            # Validate for zero-length matches
-                            if len(match_text) == 0:
-                                logger.warning(
-                                    f"Regex pattern '{query_text}' produced zero-length match "
-                                    f"in {path} at line {line_start}. Consider using a more specific pattern."
+                                # Validate for zero-length matches
+                                if len(match_text) == 0:
+                                    logger.warning(
+                                        f"Regex pattern '{query_text}' produced zero-length match "
+                                        f"in {path} at line {line_start}. Consider using a more specific pattern."
+                                    )
+                            else:
+                                # No match found (shouldn't happen since Tantivy found it)
+                                logger.debug(
+                                    f"Regex pattern '{query_text}' matched in Tantivy but not in Python regex "
+                                    f"for file {path}. This may indicate indexing/search inconsistency."
                                 )
-                        else:
-                            # No match found (shouldn't happen since Tantivy found it)
-                            logger.debug(
-                                f"Regex pattern '{query_text}' matched in Tantivy but not in Python regex "
-                                f"for file {path}. This may indicate indexing/search inconsistency."
+                                match_text = query_text
+                                match_start = _NO_MATCH_POSITION
+                        except Exception as e:
+                            # Bounded-timeout extraction failed (adversarial pattern)
+                            # or any other unexpected extraction error. Tantivy
+                            # already confirmed this is a genuine match via its
+                            # ReDoS-immune DFA engine, so fall back gracefully to
+                            # the sentinel position instead of raising or letting a
+                            # slow Python-level backtrack regress the DFA-safety
+                            # guarantee.
+                            logger.warning(
+                                f"Regex extraction timed out or failed for pattern "
+                                f"'{query_text}' in {path} (falling back to "
+                                f"line-based position): {e}"
                             )
                             match_text = query_text
-                            match_start = -1
-                    except AttributeError as e:
-                        # Pattern search failed (shouldn't happen with pre-compiled pattern)
-                        logger.warning(
-                            f"Regex pattern '{query_text}' search failed for {path}: {e}"
-                        )
+                            match_start = _NO_MATCH_POSITION
+                    else:
+                        # Story #1494 AC2: candidate cap reached -- never
+                        # silently drop the result (anti-silent-failure
+                        # rule). Skip the expensive extraction, mark the
+                        # result so callers can distinguish "capped" from a
+                        # genuine no-match, and use the same sentinel
+                        # position the module-unavailable branch below uses.
+                        regex_extraction_capped = True
+                        if not regex_extraction_cap_warned:
+                            logger.warning(
+                                f"Regex extraction candidate cap "
+                                f"({_MAX_REGEX_EXTRACTION_CANDIDATES}) reached for "
+                                f"pattern '{query_text}'; remaining candidates use a "
+                                f"sentinel match position and are marked "
+                                f"regex_extraction_capped."
+                            )
+                            regex_extraction_cap_warned = True
                         match_text = query_text
-                        match_start = -1
+                        match_start = _NO_MATCH_POSITION
+                elif use_regex:
+                    # 'regex' module unavailable (defensive legacy fallback --
+                    # it is a hard pyproject.toml dependency, so this branch is
+                    # not expected to run in practice): no timeout-bounded
+                    # search is possible, so skip Python-level extraction
+                    # entirely rather than risk an unbounded backtracking call.
+                    match_text = query_text
+                    match_start = _NO_MATCH_POSITION
                 else:
                     # Non-regex search: use literal string matching
                     match_text = query_text
@@ -1140,6 +1678,11 @@ class TantivyIndexManager:
                     "language": language or "unknown",
                     "score": score,
                 }
+                # Story #1494 AC2: never silently drop a capped candidate --
+                # surface the fact its regex extraction was skipped instead
+                # of omitting the field (or the result) entirely.
+                if regex_extraction_capped:
+                    result["regex_extraction_capped"] = True
 
                 docs.append(result)
 
@@ -1363,7 +1906,7 @@ class TantivyIndexManager:
                 assert self._index is not None, (
                     "Index must be initialized when writer is initialized"
                 )
-                delete_query = self._index.parse_query(file_path, ["path"])
+                delete_query = self._build_path_delete_query(file_path)
                 self._writer.delete_documents_by_query(delete_query)
 
             # Add updated version (has its own lock)
@@ -1398,13 +1941,26 @@ class TantivyIndexManager:
                 "Index writer not initialized. Call initialize_index() first."
             )
 
+        # Bug #1764: on a legacy physical index, the fallback path query
+        # is TOKENIZED, not exact, and can over-match a sibling document.
+        # Skip rather than over-match, mirroring
+        # delete_document_deferred()'s existing safety behavior.
+        if not self._path_exact_field_available():
+            logger.debug(
+                "Skipping FTS delete for %s: physical index lacks %s "
+                "(legacy pre-#1761 schema)",
+                file_path,
+                _PATH_EXACT_FIELD,
+            )
+            return
+
         try:
             with self._lock:
                 # Delete document using query-based deletion (idempotent)
                 assert self._index is not None, (
                     "Index must be initialized when writer is initialized"
                 )
-                delete_query = self._index.parse_query(file_path, ["path"])
+                delete_query = self._build_path_delete_query(file_path)
                 self._writer.delete_documents_by_query(delete_query)
 
                 # Commit atomically (5-50ms target): use _commit_inner() so that
@@ -1415,6 +1971,47 @@ class TantivyIndexManager:
 
         except Exception as e:
             logger.error(f"Failed to delete document {file_path}: {e}")
+            raise
+
+    def delete_document_deferred(self, file_path: str) -> None:
+        """Bug #1761 CRITICAL 1/2 fix: queue a delete-by-path on the
+        writer WITHOUT committing (no _commit_inner()), and skip entirely
+        on a legacy on-disk index lacking _PATH_EXACT_FIELD (see the
+        module-level _PATH_EXACT_FIELD comment and delete_document()'s
+        docstring for the full commit-cost and over-deletion rationale).
+
+        Raises:
+            RuntimeError: If writer is not initialized (propagates --
+                a genuine wiring/lifecycle bug, not swallowed here).
+            ValueError: If file_path is empty/None.
+        """
+        if not file_path:
+            raise ValueError("file_path must be a non-empty string")
+
+        if self._writer is None:
+            raise RuntimeError(
+                "Index writer not initialized. Call initialize_index() first."
+            )
+
+        if not self._path_exact_field_available():
+            logger.debug(
+                "Skipping deferred FTS delete for %s: physical index lacks "
+                "%s (legacy pre-#1761 schema)",
+                file_path,
+                _PATH_EXACT_FIELD,
+            )
+            return
+
+        try:
+            with self._lock:
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
+                delete_query = self._build_path_delete_query(file_path)
+                self._writer.delete_documents_by_query(delete_query)
+            logger.debug(f"Deferred delete queued (uncommitted) for: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to queue deferred delete for {file_path}: {e}")
             raise
 
     def rebuild_from_documents_background(

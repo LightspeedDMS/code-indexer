@@ -214,7 +214,9 @@ class TestAddIndexesTemporalOptionsCrossNodeMutationStaleness:
             ),
         ):
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["temporal"]
+                alias="test-repo",
+                index_types=["temporal"],
+                submitter_username="example-admin",
             )
             self._run_captured_worker(manager)
 

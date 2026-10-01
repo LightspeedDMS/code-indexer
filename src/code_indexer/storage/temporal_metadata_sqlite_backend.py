@@ -9,14 +9,19 @@ server modes.
 Satisfies the TemporalMetadataBackend Protocol (temporal_metadata_backend.py).
 """
 
+import hashlib
+import json
 import logging
 import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from .temporal_metadata_store import generate_hash_prefix
+from .temporal_metadata_store import (
+    canonical_content_digest_rows,
+    generate_hash_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,13 @@ class TemporalMetadataSqliteBackend:
     """
 
     METADATA_DB_NAME = "temporal_metadata.db"
+
+    # Bug #484 pattern (see save_metadata/save_metadata_batch below): make
+    # concurrent writers wait rather than immediately raising
+    # "database is locked". Named here for copy_collection_scope's re-key
+    # write, which uses the identical value the rest of this class already
+    # hardcodes inline.
+    _BUSY_TIMEOUT_MS = 30000
 
     def __init__(self, collection_path: Path):
         """Initialize temporal metadata store.
@@ -378,3 +390,111 @@ class TemporalMetadataSqliteBackend:
             return row[0] if row else 0
         finally:
             conn.close()
+
+    def content_digest(self) -> str:
+        """Deterministic sha256 digest of every row this scope holds.
+
+        Issue #1548 round-4 exploit fix: this is the genuine, content-bound
+        proof ``mover.py`` compares between a legacy and a fixed-root
+        metadata scope before authorizing legacy deletion -- unlike
+        ``count_entries() > 0`` alone (which a forged repo-level marker plus
+        unrelated, coincidentally non-empty rows at the fixed root could
+        satisfy without ANY real relocation ever having occurred), two
+        scopes can only produce the same digest if they hold field-for-field
+        identical rows. Deliberately excludes ``created_at`` (a write-time
+        timestamp, not migrated content) and ``format_version`` (schema
+        metadata, not row content) from the encoded payload -- only fields
+        that describe the actual relocated data are covered. ``hash_prefix``
+        is this table's PRIMARY KEY (unique), but the ORDER BY covers every
+        selected column regardless, so the row order is fully deterministic
+        even if that uniqueness invariant were ever relaxed.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path, chunk_index
+                FROM temporal_metadata
+                ORDER BY hash_prefix, point_id, commit_hash, file_path, chunk_index
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        # Issue #1548 round-5 secondary finding 4: re-sort in Python with a
+        # NULL-order-neutral key, independent of SQLite's own NULL-first
+        # ORDER BY default -- see canonical_content_digest_rows()'s
+        # docstring for why the bare ORDER BY above is not sufficient on
+        # its own for cross-backend digest agreement.
+        rows = canonical_content_digest_rows(rows)
+        encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Copy every metadata row into a fresh store at the target path.
+
+        Issue #1548 blocker 3: this is a genuine row-level re-key, not a
+        whole-file ``backup()`` clone. The destination schema is created
+        through the normal ``TemporalMetadataSqliteBackend(target_
+        collection_path)`` constructor (idempotent CREATE TABLE IF NOT
+        EXISTS) and each row is written via ``INSERT OR REPLACE``, so a
+        repeated copy for a resumed migration pass never depends on the
+        destination file's prior on-disk state. The source database is
+        never mutated or deleted by this method.
+
+        Issue #1548 round-10 Finding 1: ``pre_commit_check`` (if given) is
+        invoked immediately before this transaction's own ``commit()`` --
+        the narrowest achievable window between "rows written" and
+        "durably committed". A large scope's ``executemany`` can take
+        real time, so checking only ONCE before this method is even
+        called (mover.py's entry-level gate) is not enough -- a lock lost
+        DURING the write must still prevent the commit. If the check
+        raises, the transaction is rolled back (never committed) and the
+        exception propagates unchanged.
+        """
+        source_conn = sqlite3.connect(self.db_path)
+        try:
+            rows = source_conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path,
+                       chunk_index, created_at, format_version
+                FROM temporal_metadata
+                """
+            ).fetchall()
+        finally:
+            source_conn.close()
+        if not rows:
+            # An empty source must never have the side effect of creating a
+            # destination database file -- the constructor below would
+            # otherwise create one unconditionally.
+            return
+
+        destination = TemporalMetadataSqliteBackend(target_collection_path)
+        dest_conn = sqlite3.connect(destination.db_path)
+        try:
+            dest_conn.execute("PRAGMA journal_mode=WAL")
+            dest_conn.execute(f"PRAGMA busy_timeout={self._BUSY_TIMEOUT_MS}")
+            dest_conn.executemany(
+                """
+                INSERT OR REPLACE INTO temporal_metadata
+                (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at, format_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            if pre_commit_check is not None:
+                pre_commit_check()
+            dest_conn.commit()
+        except Exception:
+            dest_conn.rollback()
+            raise
+        finally:
+            dest_conn.close()
+
+    def delete_collection_scope(self) -> None:
+        """Remove this shard's SQLite metadata database."""
+        self.db_path.unlink(missing_ok=True)

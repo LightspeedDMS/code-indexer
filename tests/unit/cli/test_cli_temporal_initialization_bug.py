@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 import json
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.cli import cli
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 def test_temporal_service_initialization_includes_vector_store_client():
@@ -52,21 +52,21 @@ def test_temporal_service_initialization_includes_vector_store_client():
         runner = CliRunner()
 
         with (
-            patch("src.code_indexer.cli.ConfigManager") as mock_config_manager,
+            patch("code_indexer.cli.ConfigManager") as mock_config_manager,
             patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+                "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as mock_temporal_service_class,
             patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
             ) as mock_vector_store_class,
             patch(
-                "src.code_indexer.cli.EmbeddingProviderFactory"
+                "code_indexer.cli.EmbeddingProviderFactory"
             ) as mock_embedding_factory,
         ):
             # Setup mocks
             mock_config = Mock()
             mock_config.codebase_dir = project_root
-            mock_config.embedding_provider = "voyage"
+            mock_config.embedding_provider = "voyage-ai"
             mock_config.voyage_api = Mock(api_key=None)
             mock_config.filesystem = Mock(port=6333)
             # CRITICAL: Force standalone mode (not daemon mode) for this test
@@ -209,7 +209,7 @@ def test_temporal_query_e2e_with_real_initialization():
         runner = CliRunner()
 
         with patch(
-            "src.code_indexer.cli.EmbeddingProviderFactory"
+            "code_indexer.cli.EmbeddingProviderFactory"
         ) as mock_embedding_factory:
             # Mock embedding service
             mock_embedding_service = Mock()

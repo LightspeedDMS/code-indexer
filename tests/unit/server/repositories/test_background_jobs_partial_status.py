@@ -20,13 +20,13 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
     JobStatus,
 )
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 # Named constants — no magic numbers inline
 _MAX_CONCURRENT_JOBS = 10

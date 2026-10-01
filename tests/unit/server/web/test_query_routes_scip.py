@@ -1,7 +1,14 @@
 """Unit tests for SCIP query execution in web routes."""
 
+from contextlib import contextmanager
+
 import pytest
 from unittest.mock import patch, MagicMock
+
+# Test-only fixture values (not real credentials/limits) shared by the
+# query_submit() SCIP-mode test helpers below.
+_TEST_CSRF_TOKEN = "valid_token"
+_DEFAULT_TEST_LIMIT = 10
 
 
 @pytest.fixture
@@ -17,6 +24,107 @@ def mock_query_manager():
     """Mock semantic query manager."""
     manager = MagicMock()
     return manager
+
+
+def _fake_trace_call_chain_timeout(from_symbol, to_symbol, max_depth=3, **kwargs):
+    """Shared SCIPQueryEngine.trace_call_chain fake (Bug #1603 code review
+    round 4): reports a timeout via the mutable timeout_errors list and
+    returns no chains, simulating a query that was cut off mid-flight."""
+    timeout_errors = kwargs.get("timeout_errors")
+    if timeout_errors is not None:
+        timeout_errors.append("Query exceeded 30-second timeout.")
+    return []
+
+
+def _make_scip_dir(tmp_path):
+    """Create a minimal `.code-indexer/scip/index.scip` fixture on disk."""
+    scip_dir = tmp_path / ".code-indexer" / "scip"
+    scip_dir.mkdir(parents=True)
+    (scip_dir / "index.scip").touch()
+
+
+def _scip_query_submit_kwargs(query_text, scip_query_type):
+    """Shared query_submit() kwarg set for SCIP-mode tests (everything
+    except `request`, which the caller supplies)."""
+    return dict(
+        query_text=query_text,
+        repository="test-repo",
+        search_mode="scip",
+        limit=_DEFAULT_TEST_LIMIT,
+        language="",
+        path_pattern="",
+        min_score="",
+        csrf_token=_TEST_CSRF_TOKEN,
+        time_range_all=False,
+        time_range="",
+        at_commit="",
+        case_sensitive=False,
+        fuzzy=False,
+        regex=False,
+        scip_query_type=scip_query_type,
+        scip_exact=False,
+    )
+
+
+@contextmanager
+def _patch_query_submit_env(mock_session, tmp_path, mock_engine):
+    """Shared patch stack for query_submit() SCIP-mode tests.
+
+    Yields the mock_response patch object (_create_query_page_response)
+    so callers only need to assert on how it was called.
+    """
+    with (
+        patch(
+            "code_indexer.server.web.routes._require_admin_session",
+            return_value=mock_session,
+        ),
+        patch(
+            "code_indexer.server.web.routes.validate_login_csrf_token",
+            return_value=True,
+        ),
+        patch(
+            "code_indexer.server.web.routes._get_all_activated_repos_for_query",
+            return_value=[
+                {
+                    "user_alias": "test-repo",
+                    "username": "testuser",
+                    "is_global": False,
+                    "path": str(tmp_path),
+                }
+            ],
+        ),
+        patch(
+            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            return_value=mock_engine,
+        ),
+        patch(
+            "code_indexer.server.web.routes._create_query_page_response"
+        ) as mock_response,
+        patch("code_indexer.server.web.routes._add_to_query_history"),
+    ):
+        yield mock_response
+
+
+def _run_query_submit_scip(
+    mock_session, tmp_path, mock_engine, scip_query_type, query_text
+):
+    """Shared invoke helper for query_submit() SCIP-mode tests.
+
+    Returns the (args, kwargs) tuple _create_query_page_response was
+    called with, so callers only need to assert on the outcome.
+    """
+    from code_indexer.server.web.routes import query_submit
+    from fastapi import Request
+
+    request = MagicMock(spec=Request)
+    request.cookies = {}
+    _make_scip_dir(tmp_path)
+
+    with _patch_query_submit_env(mock_session, tmp_path, mock_engine) as mock_response:
+        query_submit(
+            request=request, **_scip_query_submit_kwargs(query_text, scip_query_type)
+        )
+        return mock_response.call_args
 
 
 class TestSCIPQueryExecution:
@@ -775,12 +883,57 @@ class TestSCIPQueryExecution:
                 )
 
                 mock_engine.trace_call_chain.assert_called_once_with(
-                    "main", "UserService", max_depth=5
+                    "main", "UserService", max_depth=3, timeout_errors=[]
                 )
                 assert mock_response.called
 
             except (TypeError, AttributeError) as e:
                 pytest.fail(f"Test setup failed: {e}")
+
+    def test_scip_query_callchain_timeout_reports_error(self, mock_session, tmp_path):
+        """query_submit() must report a clear error (Bug #1603 code review
+        round 4 Priority 1) when the callchain query times out, instead of
+        silently rendering the resulting empty chain list as a success."""
+        mock_engine = MagicMock()
+        mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain_timeout
+
+        call_args = _run_query_submit_scip(
+            mock_session, tmp_path, mock_engine, "callchain", "main UserService"
+        )
+
+        assert call_args is not None
+        error_message = call_args[1].get("error_message")
+        assert error_message is not None
+        assert "timed out" in error_message.lower()
+        assert not call_args[1].get("results")
+
+    def test_execute_scip_query_callchain_timeout_reports_error(self, tmp_path):
+        """`_execute_scip_query()` (the multi-repo web-query helper) must
+        also report a clear error when its callchain query times out,
+        mirroring query_submit's single-repo callchain branch fix."""
+        from code_indexer.server.web.routes import _execute_scip_query
+
+        _make_scip_dir(tmp_path)
+        mock_engine = MagicMock()
+        mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain_timeout
+
+        with patch(
+            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            return_value=mock_engine,
+        ):
+            results, error_message = _execute_scip_query(
+                target_repo={"path": str(tmp_path), "is_global": False},
+                user_alias="test-repo",
+                query_text="main UserService",
+                scip_query_type="callchain",
+                scip_exact=False,
+                limit=_DEFAULT_TEST_LIMIT,
+                min_score="",
+            )
+
+        assert not results
+        assert error_message is not None
+        assert "timed out" in error_message.lower()
 
     async def test_scip_query_callchain_validates_input_format(
         self, mock_session, tmp_path

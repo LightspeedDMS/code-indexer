@@ -185,6 +185,11 @@ class TestEnsureClaudeCliUpdated:
             patch.object(
                 executor, "_calculate_auto_update_hash", return_value="abc123"
             ),
+            # Bug #1722: _ensure_cli_dependencies_synced performs a real
+            # `pip install -e .` subprocess call when left unpatched.
+            patch.object(
+                executor, "_ensure_cli_dependencies_synced", return_value=True
+            ),
         ]
         with ExitStack() as stack:
             for p in patches:

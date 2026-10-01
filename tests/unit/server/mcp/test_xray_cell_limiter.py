@@ -275,10 +275,18 @@ def test_job_fn_returns_error_on_acquire_timeout():
 
     with (
         patch.object(xray_module._utils, "app_module", mock_app),
-        patch.object(xray_module, "_get_background_job_manager", return_value=mock_bjm),
-        patch.object(xray_module, "_get_job_tracker", return_value=mock_job_tracker),
-        patch.object(xray_module, "_get_xray_executor", return_value=mock_executor),
-        patch.object(xray_module, "_resolve_repo_path", return_value=fake_repo_path),
+        patch.object(
+            xray_module._search, "_get_background_job_manager", return_value=mock_bjm
+        ),
+        patch.object(
+            xray_module._search, "_get_job_tracker", return_value=mock_job_tracker
+        ),
+        patch.object(
+            xray_module._search, "_get_xray_executor", return_value=mock_executor
+        ),
+        patch.object(
+            xray_module._search, "_resolve_repo_path", return_value=fake_repo_path
+        ),
         patch("asyncio.get_running_loop", return_value=mock_loop),
     ):
         set_xray_cell_limiter(limiter)

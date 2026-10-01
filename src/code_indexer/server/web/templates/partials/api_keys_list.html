@@ -15,7 +15,7 @@
             <td><code>{{ key.key_prefix }}...</code></td>
             <td>{{ (key.created_at|string)[:10] }}</td>
             <td>
-                <button class="outline secondary" onclick="deleteKey('{{ key.key_id }}', '{{ key.name or '' }}')">
+                <button class="outline secondary" data-key-id="{{ key.key_id }}" data-key-name="{{ key.name or '' }}" onclick="deleteKey(this.dataset.keyId, this.dataset.keyName)">
                     Delete
                 </button>
             </td>

@@ -71,7 +71,13 @@ class TestReconcileShardBasic:
     for a SINGLE shard, matching reconcile_temporal_index's per-shard logic."""
 
     def test_missing_commit_on_nonexistent_shard(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         missing = reconcile_shard(
             vector_store, SHARD_2024Q1, [_commit("aaa111")], MODEL_NAME
         )
@@ -80,7 +86,13 @@ class TestReconcileShardBasic:
     def test_partial_commit_returned_missing_and_strays_deleted(self, tmp_path):
         from code_indexer.storage.id_index_manager import IDIndexManager
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         missing = reconcile_shard(
@@ -92,7 +104,13 @@ class TestReconcileShardBasic:
         assert IDIndexManager().rebuild_from_vectors(shard_dir) == {}
 
     def test_complete_commit_not_returned(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
         shard_dir = vector_store.base_path / SHARD_2024Q1
         TemporalProgressiveMetadata(shard_dir).save_completed("aaa111")
@@ -109,7 +127,13 @@ class TestReconcileShardFailClosed:
     StrayDeleteFailedError -- never logs-and-continues."""
 
     def test_unlink_failure_raises_stray_delete_failed_error(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
@@ -122,7 +146,13 @@ class TestReconcileShardFailClosed:
         """The operator --reconcile path (reconcile_temporal_index) reuses
         reconcile_shard, so it inherits fail-closed too (Amendment 4's
         'also run inside the durable stale barrier' requirement)."""
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         with patch.object(Path, "unlink", side_effect=OSError("permission denied")):
@@ -132,11 +162,17 @@ class TestReconcileShardFailClosed:
 
 class TestReconcileShardDirectoryFsync:
     def test_stray_delete_fsyncs_affected_directory(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # build and unlink legacy vector_*.json fixtures, so pin the
+            # legacy layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         with patch(
-            "code_indexer.services.temporal.temporal_reconciliation.nfs_safe_fsync"
+            "code_indexer.services.temporal.temporal_reconciliation.fsync_directory"
         ) as mock_fsync:
             reconcile_shard(vector_store, SHARD_2024Q1, [_commit("aaa111")], MODEL_NAME)
 

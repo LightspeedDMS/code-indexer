@@ -114,13 +114,6 @@ from typing import Any, Callable, List, cast
 #   in a different git operation (e.g. "git_push file not found") would still be
 #   flagged by the gate.
 #
-# "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found"
-#   Emitted by the delegation handler when list_delegation_functions is called
-#   and the claude-delegation-functions golden repo is absent from the test server.
-#   Produced by test_06_mcp_admin.py.  Log code MCP-GENERAL-120 is the stable
-#   identifier; a delegation failure from a registered function would surface
-#   under a different message / code.
-#
 # "[REPO-GENERAL-017] ValidationError"
 #   Emitted by the error_handler middleware for every FastAPI RequestValidationError
 #   (HTTP 422).  Produced by:
@@ -178,8 +171,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # data dir.  [APP-GENERAL-050] is a benign idempotent no-op WARNING (the watch
     # was never running); it does not affect backup or refresh correctness.
     "No watch running for",
-    # test_06: list_delegation_functions when claude-delegation-functions repo absent.
-    "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found",
     # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
     # server returns 422 and logs REPO-GENERAL-017 ValidationError.
     "[REPO-GENERAL-017] ValidationError",
@@ -355,17 +346,21 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # correctly -- not a service defect.
     "Temporal embedder 'not-a-configured-embedder' has no indexed collections",
     "Temporal index not available for repository, returning empty results repository_alias=temporal-dual-embedder-1292",
-    # Story #1400 (test_19_temporal_live_wiring_1400.py): execute_live_temporal_search
-    # deliberately omits repo_alias from submit_job for lane="temporal" jobs.
-    # BGM's register_job_if_no_conflict gate is a per-(operation_type, repo_alias)
-    # uniqueness constraint; passing repository_alias would incorrectly reject a
-    # SECOND, entirely different temporal query (different query_text/filters)
-    # against the same repo as a "duplicate". Correct dedup granularity (the full
-    # query signature) is already enforced at the TemporalDedupCache layer above
-    # submit_job -- this WARNING is submit_job's own pre-existing, generic
-    # "no repo_alias" notice firing as an EXPECTED side effect of that correct
-    # design choice, not a defect.
-    "Job submitted without repo_alias for operation 'temporal_query'",
+    # NOTE (Bug #1535, Codex follow-up on commit 650665a9): the allowlist entry
+    # that used to live here -- "Job submitted without repo_alias for operation
+    # 'temporal_query'" (added for Story #1400's execute_live_temporal_search,
+    # which deliberately omits repo_alias from submit_job for lane="temporal"
+    # jobs) -- was REMOVED, not merely left in place as harmless slack. Bug
+    # #1535 demoted that exact message to DEBUG for "temporal_query" (and the
+    # other confirmed-intentional operation_types) in
+    # background_jobs.py's submit_job, so it can no longer appear as a
+    # WARNING/ERROR entry query_logs_via_mcp would ever see. Leaving a
+    # now-unreachable allowlist string in place would silently mask a REAL
+    # regression if a future change ever reintroduced this WARNING for
+    # "temporal_query" (e.g. someone editing
+    # _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN without updating this file) --
+    # the gate would keep passing instead of catching it. Removing it restores
+    # the gate's ability to catch that regression.
     # Issue #1445 (Bug #1421, temporal_snapshot_store.py:211-219): the temporal
     # worker checkpoints while a query is in flight, so read_temporal_snapshot()
     # can legitimately observe a concurrent checkpoint rewrite mid-reassembly
@@ -382,6 +377,49 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # uses different wording ("reassembly failed after %d attempts") and is
     # unaffected by this entry.
     "concurrent checkpoint rewrite detected during reassembly",
+    # Bug #1534 (golden_repo_manager.py:_detect_checked_out_branch): after a
+    # plain filesystem copy, _establish_local_git_remote_and_upstream tries to
+    # configure origin/upstream tracking for the golden clone; when the copied
+    # clone's checked-out branch cannot be determined because HEAD is detached,
+    # it logs this WARNING and returns, skipping upstream configuration --
+    # registration still succeeds (this whole step is documented best-effort).
+    # The markupsafe golden-repo fixture used across many E2E tests is copied
+    # with a detached HEAD, so this fires routinely and is permanently benign.
+    # Anchored on the exact static suffix of the f-string template (the
+    # variable clone_path sits BEFORE this text, so the pattern intentionally
+    # starts after it); the sibling "was copied from a git WORKTREE" and other
+    # Bug #1534 WARNINGs use different wording and are NOT suppressed by this
+    # entry -- confirmed via `grep -n skipping golden_repo_manager.py`, this
+    # exact phrase appears nowhere else in the codebase.
+    "has detached HEAD; skipping upstream configuration",
+    # Story #1131/#980 (test_12_totp_elevation_real_endpoint.py::
+    # test_kill_switch_returns_503_not_403): deliberately disables TOTP
+    # elevation enforcement and asserts POST /auth/elevate returns HTTP 503
+    # (elevation_enforcement_disabled) -- this IS the kill-switch's designed
+    # behavior (elevation_routes.py), not a service failure. The response
+    # never raises an HTTPException the middleware's except-block can see
+    # (Bug #1566: ExceptionMiddleware converts it first), so it is logged via
+    # error_handler.py's response-side path (dispatch(): status >= 500 and
+    # not already logged -> msg=f"HTTP {status_code}", error_type=
+    # "HTTPException" -> WARNING under log code REPO-GENERAL-017). The joined
+    # log line is "... | HTTP 503 | Request: POST /auth/elevate ...". Anchored
+    # on that exact contiguous substring (status code + endpoint, no variable
+    # correlation-id/timestamp content in between) -- a distinct sub-case of
+    # the SAME REPO-GENERAL-017 code already allowlisted above for 422
+    # ValidationError; a genuine 503 on any OTHER endpoint, or any other
+    # status on /auth/elevate, would use different text and NOT be suppressed.
+    "HTTP 503 | Request: POST /auth/elevate",
+    # Story #1600 (test_query_admission_gate_e2e_1600.py): the query-path
+    # memory-pressure admission gate deliberately rejects POST /api/query
+    # with HTTP 503 when MemoryGovernor.admission_allowed() denies -- this
+    # is the ASSERTED SIGNAL for the reject->Retry-After workflow test,
+    # forced via MemoryGovernor's injectable readers/time_fn seam (never
+    # organic memory exhaustion). The middleware's generic HTTPException
+    # handler logs every 5xx as a WARNING regardless of cause; anchored on
+    # the exact endpoint so a genuine, unrelated 503 on /api/query (e.g. a
+    # real downstream outage) would still surface via other assertions in
+    # that code path, and a 503 on any OTHER endpoint is NOT suppressed.
+    "HTTP 503 | Request: POST /api/query",
 ]
 
 

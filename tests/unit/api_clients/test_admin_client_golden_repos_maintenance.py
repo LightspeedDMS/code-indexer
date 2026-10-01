@@ -18,6 +18,7 @@ from code_indexer.api_clients.base_client import (
     AuthenticationError,
     NetworkError,
 )
+from code_indexer.api_clients.network_error_handler import DNSResolutionError
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
 
 
@@ -213,7 +214,10 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
         )
 
         try:
-            with pytest.raises((NetworkError, APIClientError)):
+            # Bug #1725: an invalid hostname raises DNSResolutionError, a
+            # standalone Exception subclass (not NetworkError/APIClientError)
+            # -- see network_error_handler.py's _handle_connect_error.
+            with pytest.raises((NetworkError, APIClientError, DNSResolutionError)):
                 admin_client.list_golden_repositories()
 
         finally:
@@ -231,7 +235,8 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
         )
 
         try:
-            with pytest.raises((NetworkError, APIClientError)):
+            # Bug #1725: same DNS-classification fix as the list test above.
+            with pytest.raises((NetworkError, APIClientError, DNSResolutionError)):
                 admin_client.refresh_golden_repository("test-repo")
 
         finally:

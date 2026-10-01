@@ -226,8 +226,21 @@ class TestBuildEffectiveUrl:
 class TestFetchRemoteBranchesWithCredentials:
     """Integration tests for fetch_remote_branches with credential handling."""
 
-    def test_fetch_branches_uses_credentials_for_gitlab(self):
-        """Test that fetch_remote_branches properly uses credentials for GitLab URLs."""
+    def test_fetch_branches_uses_credentials_for_gitlab(self, remote_git_repo_dir):
+        """Test that fetch_remote_branches properly uses credentials for GitLab URLs.
+
+        Bug #1572: was a live `github.com` call; now a real local bare git
+        repo (`remote_git_repo_dir`, defined in conftest.py) -- no mocks, no
+        network. NOTE: this test passes `credentials=None`, so it never
+        exercised real credential-embedding into the URL (with no
+        credentials, `_build_effective_url` returns the URL unchanged
+        regardless of target) -- converting the target to a local path does
+        not weaken this test. The actual credential-format/URL-building
+        logic (oauth2 for GitLab, token-only for GitHub, HTTP rejection,
+        platform detection) is fully covered, unchanged, by the
+        `TestBuildEffectiveUrl` and `TestSecurityEnhancements` pure-function
+        tests in this same file, none of which touch the network.
+        """
         from code_indexer.server.services.remote_branch_service import (
             RemoteBranchService,
         )
@@ -239,7 +252,7 @@ class TestFetchRemoteBranchesWithCredentials:
         # by mocking subprocess.run (we use this sparingly as per CLAUDE.md Anti-Mock rule)
         # For now, just verify the method accepts credentials parameter
         result = service.fetch_remote_branches(
-            clone_url="https://github.com/octocat/Hello-World.git",
+            clone_url=remote_git_repo_dir,
             platform="github",
             credentials=None,  # Using None for public repo test
         )

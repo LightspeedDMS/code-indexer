@@ -98,7 +98,13 @@ def mock_file_crud_service(golden_repos_dir):
     """Mock FileCRUDService configured as write-exception repo."""
     svc = MagicMock()
     svc.is_write_exception.return_value = True
-    svc.get_write_exception_path.return_value = golden_repos_dir / "cidx-meta"
+    write_exception_path = golden_repos_dir / "cidx-meta"
+    # Bug #1683 round 2: _start_auto_watch_if_needed now requires the
+    # resolved repo path to exist on disk before calling start_watch --
+    # in real deployments the cidx-meta write-exception path always
+    # exists, so create it here too.
+    write_exception_path.mkdir(parents=True, exist_ok=True)
+    svc.get_write_exception_path.return_value = write_exception_path
     svc.create_file.return_value = {"success": True, "file_path": "test.md"}
     svc.edit_file.return_value = {"success": True, "file_path": "test.md"}
     svc.delete_file.return_value = {"success": True, "file_path": "test.md"}

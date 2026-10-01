@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -38,11 +39,22 @@ class TestPasswordChangeRateLimitingFix:
         Current behavior: Returns 401 every time
         Expected behavior: Returns 429 after reaching rate limit threshold
         """
+        # Captured BEFORE dependencies.user_manager gets mocked below --
+        # the route closure was bound to THIS object at create_app() time.
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(
+                        real_user_manager, "get_user"
+                    ) as mock_user_mgr_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -67,10 +79,10 @@ class TestPasswordChangeRateLimitingFix:
 
                             # Mock user retrieval
                             mock_dep_user_mgr.get_user.return_value = test_user
-                            mock_user_mgr.get_user.return_value = test_user
+                            mock_user_mgr_get_user.return_value = test_user
 
                             # Mock password verification to always fail
-                            mock_user_mgr.password_manager.verify_password.return_value = False
+                            mock_verify_password.return_value = False
 
                             # Configure rate limiter behavior
                             # First check should pass (no rate limit yet)
@@ -128,11 +140,22 @@ class TestPasswordChangeRateLimitingFix:
         This tests the case where record_failed_attempt returns True,
         indicating that this attempt triggered the lockout.
         """
+        # Captured BEFORE dependencies.user_manager gets mocked below --
+        # the route closure was bound to THIS object at create_app() time.
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(
+                        real_user_manager, "get_user"
+                    ) as mock_user_mgr_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -157,10 +180,10 @@ class TestPasswordChangeRateLimitingFix:
 
                             # Mock user retrieval
                             mock_dep_user_mgr.get_user.return_value = test_user
-                            mock_user_mgr.get_user.return_value = test_user
+                            mock_user_mgr_get_user.return_value = test_user
 
                             # Mock password verification to always fail
-                            mock_user_mgr.password_manager.verify_password.return_value = False
+                            mock_verify_password.return_value = False
 
                             # No rate limit initially
                             mock_rate_limiter.check_rate_limit.return_value = None

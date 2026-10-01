@@ -21,7 +21,7 @@ class TestMultiRepoOptionParsing:
 
     def test_repos_option_accepts_comma_separated_list(self):
         """Test that --repos accepts comma-separated repository list."""
-        from src.code_indexer.cli import cli
+        from code_indexer.cli import cli
 
         runner = CliRunner()
         with runner.isolated_filesystem():
@@ -35,7 +35,7 @@ class TestMultiRepoOptionParsing:
 
             # Test that --repos option is recognized
             with patch(
-                "src.code_indexer.cli_multi_repo.execute_multi_repo_query"
+                "code_indexer.cli_multi_repo.execute_multi_repo_query"
             ) as mock_exec:
                 mock_exec.return_value = {"results": {}}
                 result = runner.invoke(
@@ -55,7 +55,7 @@ class TestMultiRepoOptionParsing:
         and the multi-repo handler is skipped entirely. This is acceptable
         behavior - empty string = flag not provided.
         """
-        from src.code_indexer.cli import cli
+        from code_indexer.cli import cli
 
         runner = CliRunner()
         with runner.isolated_filesystem():
@@ -77,7 +77,7 @@ class TestMultiRepoOptionParsing:
 
     def test_repos_option_splits_on_comma(self):
         """Test that --repos correctly splits comma-separated values."""
-        from src.code_indexer.cli import cli
+        from code_indexer.cli import cli
 
         runner = CliRunner()
         with runner.isolated_filesystem():
@@ -90,7 +90,7 @@ class TestMultiRepoOptionParsing:
             )
 
             with patch(
-                "src.code_indexer.cli_multi_repo.execute_multi_repo_query"
+                "code_indexer.cli_multi_repo.execute_multi_repo_query"
             ) as mock_exec:
                 mock_exec.return_value = {
                     "results": {"repo1": [], "repo2": [], "repo3": []}
@@ -110,7 +110,7 @@ class TestMultiRepoErrorDisplay:
 
     def test_display_multi_repo_results_shows_partial_failures_quiet_mode(self):
         """Test AC4: Partial failure errors are displayed in quiet mode."""
-        from src.code_indexer.cli_multi_repo import display_multi_repo_results
+        from code_indexer.cli_multi_repo import display_multi_repo_results
         from rich.console import Console
         from io import StringIO
 
@@ -139,7 +139,7 @@ class TestMultiRepoErrorDisplay:
 
     def test_display_multi_repo_results_shows_partial_failures_rich_mode(self):
         """Test AC4: Partial failure errors are displayed in rich mode."""
-        from src.code_indexer.cli_multi_repo import display_multi_repo_results
+        from code_indexer.cli_multi_repo import display_multi_repo_results
         from rich.console import Console
         from io import StringIO
 
@@ -163,7 +163,7 @@ class TestMultiRepoErrorDisplay:
 
     def test_display_multi_repo_results_no_errors_section_when_empty(self):
         """Test that no error section is shown when errors dict is empty."""
-        from src.code_indexer.cli_multi_repo import display_multi_repo_results
+        from code_indexer.cli_multi_repo import display_multi_repo_results
         from rich.console import Console
         from io import StringIO
 
@@ -187,7 +187,7 @@ class TestMultiRepoErrorDisplay:
 
     def test_display_multi_repo_results_no_errors_section_when_missing(self):
         """Test that no error section is shown when errors key is missing."""
-        from src.code_indexer.cli_multi_repo import display_multi_repo_results
+        from code_indexer.cli_multi_repo import display_multi_repo_results
         from rich.console import Console
         from io import StringIO
 
@@ -218,15 +218,15 @@ class TestUnsupportedParameterWarnings:
         """Shared fixture for all unsupported parameter tests."""
         # Start all patches
         patcher_config = patch(
-            "src.code_indexer.remote.query_execution._load_remote_configuration"
+            "code_indexer.remote.query_execution._load_remote_configuration"
         )
         patcher_creds = patch(
-            "src.code_indexer.remote.query_execution._get_decrypted_credentials"
+            "code_indexer.remote.query_execution._get_decrypted_credentials"
         )
         patcher_client = patch(
-            "src.code_indexer.api_clients.remote_query_client.RemoteQueryClient"
+            "code_indexer.api_clients.remote_query_client.RemoteQueryClient"
         )
-        patcher_console = patch("src.code_indexer.cli_multi_repo.Console")
+        patcher_console = patch("code_indexer.cli_multi_repo.Console")
 
         mock_config = patcher_config.start()
         mock_creds = patcher_creds.start()
@@ -257,7 +257,7 @@ class TestUnsupportedParameterWarnings:
 
     def test_warning_for_exclude_languages_parameter(self, mock_multi_repo_environment):
         """Test that warning is shown for unsupported exclude_languages parameter."""
-        from src.code_indexer.cli_multi_repo import execute_multi_repo_query
+        from code_indexer.cli_multi_repo import execute_multi_repo_query
 
         execute_multi_repo_query(
             query_text="test",
@@ -277,7 +277,7 @@ class TestUnsupportedParameterWarnings:
 
     def test_warning_for_exclude_paths_parameter(self, mock_multi_repo_environment):
         """Test that warning is shown for unsupported exclude_paths parameter."""
-        from src.code_indexer.cli_multi_repo import execute_multi_repo_query
+        from code_indexer.cli_multi_repo import execute_multi_repo_query
 
         execute_multi_repo_query(
             query_text="test",
@@ -297,7 +297,7 @@ class TestUnsupportedParameterWarnings:
 
     def test_warning_for_accuracy_parameter(self, mock_multi_repo_environment):
         """Test that warning is shown for unsupported accuracy parameter."""
-        from src.code_indexer.cli_multi_repo import execute_multi_repo_query
+        from code_indexer.cli_multi_repo import execute_multi_repo_query
 
         execute_multi_repo_query(
             query_text="test",
@@ -319,7 +319,7 @@ class TestUnsupportedParameterWarnings:
         self, mock_multi_repo_environment
     ):
         """Test that no warning is shown when all parameters are supported."""
-        from src.code_indexer.cli_multi_repo import execute_multi_repo_query
+        from code_indexer.cli_multi_repo import execute_multi_repo_query
 
         execute_multi_repo_query(
             query_text="test",

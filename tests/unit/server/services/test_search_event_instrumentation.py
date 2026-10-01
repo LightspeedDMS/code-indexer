@@ -140,7 +140,8 @@ def wire_config_service(monkeypatch):
     cfg.get_config.return_value.memory_retrieval_config.memory_retrieval_enabled = False
     cfg.get_config.return_value.rerank_config = None
     cfg.get_config.return_value.node_id = "test-node"
-    monkeypatch.setattr(sh, "get_config_service", lambda: cfg)
+    monkeypatch.setattr(sh.code_search, "get_config_service", lambda: cfg)
+    monkeypatch.setattr(sh.repo_search, "get_config_service", lambda: cfg)
     return cfg
 
 
@@ -155,7 +156,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         raw = sh.search_code(_params(), _make_user("alice"))
@@ -176,7 +177,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         wire_app_module.semantic_query_manager.query_user_repositories.side_effect = (
             RuntimeError("index gone")
@@ -193,7 +194,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         long_q = "é" * 700
@@ -207,7 +208,7 @@ class TestEnqueueContract:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         wire_app_module.semantic_query_manager.query_user_repositories.return_value = (
             _qm_result(0)
@@ -222,7 +223,9 @@ class TestEnqueueContract:
         """search_code must not raise when writer is unavailable."""
         import code_indexer.server.mcp.handlers.search as sh
 
-        monkeypatch.setattr(sh, "_get_search_event_writer", lambda: None, raising=False)
+        monkeypatch.setattr(
+            sh.code_search, "_get_search_event_writer", lambda: None, raising=False
+        )
 
         raw = sh.search_code(_params(), _make_user("alice"))
         # Must return a dict (either MCP wrapper or error response) without raising
@@ -240,7 +243,7 @@ class TestContextVarLifecycle:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         captured: list = []
@@ -270,7 +273,7 @@ class TestContextVarLifecycle:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
 
         sh.search_code(_params(), _make_user("alice"))
@@ -701,7 +704,7 @@ class TestEmbeddingMetadataInRecord:
         import code_indexer.server.mcp.handlers.search as sh
 
         monkeypatch.setattr(
-            sh, "_get_search_event_writer", lambda: writer, raising=False
+            sh.code_search, "_get_search_event_writer", lambda: writer, raising=False
         )
         # FTS does not call coalesced_query_embedding — ctx fields remain None
         wire_app_module.semantic_query_manager.query_user_repositories.return_value = (
@@ -887,17 +890,24 @@ class TestCorrelationIdInlineQueryImport:
         2. Setting _correlation_id_var to a known value
         3. Asserting get_current_correlation_id() returns that value
 
-        If inline_query.py used the old import (middleware.correlation.get_correlation_id),
-        that function reads from a DIFFERENT ContextVar (_correlation_id, not _correlation_id_var)
-        and would return None when only _correlation_id_var is set.
+        Bug #1632 update: middleware.correlation.get_correlation_id() now
+        DELEGATES to telemetry.correlation_bridge.get_current_correlation_id()
+        (rather than reading its own separate, never-populated ContextVar), so
+        the two readers are unified and both must return the SAME value here.
+        This test used to assert the old (pre-#1632) module stayed at None to
+        document the divergence bug; now that the divergence is fixed at the
+        source, asserting continued divergence would be asserting a
+        regression. inline_query.py itself still correctly imports directly
+        from correlation_bridge (see the sibling source-level test above) —
+        this test now additionally proves the two readers agree.
         """
         from code_indexer.server.telemetry.correlation_bridge import (
             _correlation_id_var,
             get_current_correlation_id,
         )
 
-        # Also verify the old middleware's ContextVar is separate — setting bridge var
-        # does NOT affect the old module's var
+        # Bug #1632: the old middleware's module-level function now delegates
+        # to the SAME bridge ContextVar -- no longer a separate, dead store.
         from code_indexer.server.middleware import correlation as old_corr_mod
 
         token = _correlation_id_var.set("test-corr-id-123")
@@ -905,7 +915,7 @@ class TestCorrelationIdInlineQueryImport:
             # This is the function that inline_query.py now aliases as get_correlation_id
             result = get_current_correlation_id()
 
-            # The old (wrong) function reads from a different ContextVar — always None here
+            # Post-#1632: the old module's reader delegates to the same store.
             old_result = old_corr_mod.get_correlation_id()
         finally:
             _correlation_id_var.reset(token)
@@ -916,9 +926,9 @@ class TestCorrelationIdInlineQueryImport:
                 result
             )
         )
-        assert old_result is None, (
-            "The OLD get_correlation_id() from middleware.correlation reads from a DIFFERENT "
-            "ContextVar that is never populated (middleware never registered). Got: {!r}".format(
+        assert old_result == "test-corr-id-123", (
+            "Bug #1632: middleware.correlation.get_correlation_id() must now DELEGATE "
+            "to the wired bridge reader and return the SAME value, not diverge. Got: {!r}".format(
                 old_result
             )
         )

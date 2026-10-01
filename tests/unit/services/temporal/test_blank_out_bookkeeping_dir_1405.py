@@ -22,13 +22,13 @@ v2-marked collections are still preserved.
 
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_blank_out import (
+from code_indexer.services.temporal.temporal_blank_out import (
     blank_out_legacy_temporal_collections,
 )
-from src.code_indexer.services.temporal.temporal_collection_naming import (
+from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
 )
-from src.code_indexer.services.temporal.temporal_structure_marker import (
+from code_indexer.services.temporal.temporal_structure_marker import (
     write_structure_marker,
 )
 

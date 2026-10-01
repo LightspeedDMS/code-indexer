@@ -16,6 +16,7 @@ import secrets
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
@@ -62,6 +63,84 @@ class TestJWTSecretManagerFileMode:
         secret = mgr.get_or_create_secret()
         assert secret
         assert mgr.secret_file_path.exists()
+
+    def test_creates_nested_missing_directories_when_data_dir_has_no_parent(
+        self, tmp_path, monkeypatch
+    ):
+        """Bug #1778 remediation: CIDX_SERVER_DATA_DIR may point at a nested
+        path whose intermediate directories don't exist yet (operator/harness
+        supplied, unlike Path.home() which always exists). mkdir() must use
+        parents=True or this crashes with FileNotFoundError.
+        """
+        nested_dir = tmp_path / "missing" / "intermediate" / "server-data"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(nested_dir))
+
+        mgr = JWTSecretManager()
+
+        assert mgr.server_dir == nested_dir
+        assert mgr.server_dir.exists()
+
+    def test_uses_cidx_server_data_dir_env_var_when_no_explicit_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Bug #1778: default fallback must honor CIDX_SERVER_DATA_DIR.
+
+        An isolated/test server instance sets CIDX_SERVER_DATA_DIR to a
+        throwaway directory. Without honoring it, JWTSecretManager hardcodes
+        Path.home() / ".cidx-server" for its server_dir default, leaking (or
+        silently adopting) the JWT signing secret from the real server's
+        directory. Path.home() is mocked to a temp "fake home" so this test
+        never touches the real ~/.cidx-server directory either way.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        isolated_data_dir = tmp_path / "isolated-server-instance"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(isolated_data_dir))
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            mgr = JWTSecretManager()
+
+        real_default_dir = fake_home / ".cidx-server"
+
+        assert mgr.server_dir == isolated_data_dir
+        assert mgr.server_dir != real_default_dir
+
+    def test_two_isolated_instances_generate_independent_secrets(
+        self, tmp_path, monkeypatch
+    ):
+        """Bug #1778 security property: isolated instances must not share
+        secrets via a common hardcoded fallback directory.
+
+        Two JWTSecretManager instances constructed with different
+        CIDX_SERVER_DATA_DIR values must each generate/store their own
+        independent secret rather than reading/adopting the other's (or a
+        real server's) secret through a shared hardcoded fallback path.
+        """
+        # Guard against a false negative: if JWT_SECRET_KEY happens to be
+        # set in the ambient environment, get_or_create_secret()'s env-var
+        # priority branch would make both instances legitimately adopt the
+        # same externally-set key, which is unrelated to the directory
+        # isolation property this test actually verifies.
+        monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        dir_a = tmp_path / "instance-a"
+        dir_b = tmp_path / "instance-b"
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(dir_a))
+            mgr_a = JWTSecretManager()
+            secret_a = mgr_a.get_or_create_secret()
+
+            monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(dir_b))
+            mgr_b = JWTSecretManager()
+            secret_b = mgr_b.get_or_create_secret()
+
+        assert secret_a != secret_b
+        assert mgr_a.secret_file_path.exists()
+        assert mgr_b.secret_file_path.exists()
+        assert mgr_a.secret_file_path != mgr_b.secret_file_path
 
 
 # ---------------------------------------------------------------------------

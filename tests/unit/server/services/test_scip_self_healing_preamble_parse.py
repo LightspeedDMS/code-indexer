@@ -18,7 +18,6 @@ import json
 
 import pytest
 
-from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.services.scip_self_healing import (
     ClaudeResponse,
     SCIPSelfHealingService,
@@ -37,10 +36,10 @@ VALID_HEALING_JSON = json.dumps(
 
 
 @pytest.fixture
-def job_manager(tmp_path):
+def job_manager(tmp_path, background_job_manager_factory):
     """Create a BackgroundJobManager for testing."""
     storage_path = tmp_path / "jobs.json"
-    return BackgroundJobManager(storage_path=str(storage_path))
+    return background_job_manager_factory(storage_path=str(storage_path))
 
 
 @pytest.fixture

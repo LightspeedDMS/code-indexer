@@ -153,9 +153,7 @@ See: [Configuration Guide](docs/configuration.md#embedding-provider)
 
 ### X-Ray AST Search
 
-Tree-sitter-powered AST analysis with sandboxed Python evaluators. Write custom evaluators that operate on parsed syntax trees for structural code search beyond text matching.
-
-See: [X-Ray Architecture](docs/xray-architecture.md) | [X-Ray Cookbook](docs/xray-cookbook.md)
+Tree-sitter-powered AST analysis with Rust evaluators. MCP `xray_search` accepts `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` for structural code search beyond text matching. See the [X-Ray Architecture](docs/xray-architecture.md), [X-Ray Cookbook](docs/xray-cookbook.md), and [graph-mode tool contract](src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md).
 
 ## Operating Modes
 
@@ -199,8 +197,6 @@ See: [Configuration Guide](docs/configuration.md)
 - [AI Integration Guide](docs/ai-integration.md) -- Connect AI assistants to CIDX
 - [Langfuse Trace Sync](docs/langfuse-trace-sync.md) -- Searchable AI conversation history
 - [Meta-Repo Discovery](docs/meta-repo-discovery.md) -- Cross-repo dependency mapping
-- [Guardrails Convention](docs/guardrails-repo-convention.md) -- Safety guardrails for delegation jobs
-- [Delegation Functions](docs/delegation-functions.md) -- AI workflows for code review and analysis
 
 ### Server Administration
 

@@ -1,0 +1,14 @@
+{
+  "before": {
+    "total_candidates": 1080,
+    "chunk_store_read_calls": 1080,
+    "results_returned": 1080,
+    "search_elapsed_ms": 101.38774616643786
+  },
+  "after": {
+    "total_candidates": 1080,
+    "chunk_store_read_calls": 30,
+    "results_returned": 30,
+    "search_elapsed_ms": 18.191444221884012
+  }
+}

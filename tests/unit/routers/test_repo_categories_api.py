@@ -19,6 +19,7 @@ from code_indexer.server.auth.user_manager import UserManager, UserRole
 from code_indexer.server.auth.dependencies import (
     get_current_user,
     get_current_admin_user,
+    get_current_admin_user_hybrid,
 )
 
 pytestmark = pytest.mark.slow
@@ -83,21 +84,40 @@ def client():
 
 
 @pytest.fixture
-def admin_auth(mock_admin_user):
-    """Override auth to return admin user."""
+def admin_auth(mock_admin_user, set_dependency_override):
+    """Override auth to return admin user.
+
+    Bug #1807: the mutating endpoints (create/update/delete/reorder/
+    re-evaluate) authenticate via the route-decorator-level
+    `dependencies=[Depends(require_elevation())]` extra, which chains to
+    `get_current_admin_user_hybrid` -- NOT the handler-param
+    `get_current_admin_user` alone. Both must be overridden or real hybrid
+    auth runs unauthenticated and 401s before the handler-param override is
+    ever consulted. `set_dependency_override` (tests/unit/routers/conftest.py)
+    asserts each target is actually declared by a route before installing
+    the override, so a future auth refactor fails loudly here instead of
+    degrading every test behind it to a silent 401.
+    """
 
     def mock_get_admin():
         return mock_admin_user
 
-    app.dependency_overrides[get_current_admin_user] = mock_get_admin
-    app.dependency_overrides[get_current_user] = mock_get_admin
+    set_dependency_override(app, get_current_admin_user, mock_get_admin)
+    set_dependency_override(app, get_current_admin_user_hybrid, mock_get_admin)
+    set_dependency_override(app, get_current_user, mock_get_admin)
     yield
     app.dependency_overrides.clear()
 
 
 @pytest.fixture
-def normal_user_auth(mock_normal_user):
-    """Override auth to return normal user (but not admin)."""
+def normal_user_auth(mock_normal_user, set_dependency_override):
+    """Override auth to return normal user (but not admin).
+
+    Bug #1807: see `admin_auth` above -- the admin gate on mutating endpoints
+    is enforced by BOTH `get_current_admin_user` (handler param) and
+    `get_current_admin_user_hybrid` (via `require_elevation()`), so both must
+    be overridden to raise 403 for a non-admin caller.
+    """
 
     def mock_get_user():
         return mock_normal_user
@@ -110,8 +130,9 @@ def normal_user_auth(mock_normal_user):
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required"
         )
 
-    app.dependency_overrides[get_current_user] = mock_get_user
-    app.dependency_overrides[get_current_admin_user] = mock_get_admin
+    set_dependency_override(app, get_current_user, mock_get_user)
+    set_dependency_override(app, get_current_admin_user, mock_get_admin)
+    set_dependency_override(app, get_current_admin_user_hybrid, mock_get_admin)
     yield
     app.dependency_overrides.clear()
 

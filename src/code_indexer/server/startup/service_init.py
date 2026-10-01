@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 _postgres_pools_for_cleanup: List[Any] = []
 _postgres_pools_lock = threading.Lock()
 
+# Story #1787 S2 amendment AC16: node-local TTL for the K-calibration read
+# cache -- keeps calibration reads off any future admission hot path
+# without ever letting nodes diverge (the underlying store is always the
+# same cluster-shared database; this only bounds how often each node
+# re-reads it). See TTLCachedKProvider's own docstring for the rationale.
+_XRAY_K_CALIBRATION_TTL_SECONDS = 300.0
+
 
 def _cleanup_postgres_pools() -> None:
     """Close all PostgreSQL connection pools on process exit (Bug #567).
@@ -147,6 +154,7 @@ def initialize_services() -> Dict[str, Any]:
     # Web UI config on each tick (hot-reload, no server restart required).
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.services.memory_governor import (
+        YELLOW_LRU_FLOOR,
         build_memory_governor,
         set_memory_governor,
     )
@@ -165,8 +173,28 @@ def initialize_services() -> Dict[str, Any]:
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
         extra={"correlation_id": get_correlation_id()},
     )
-    # Story 4: wire HNSW cache into governor for YELLOW proactive LRU eviction.
-    _memory_governor.attach_cache(_server_hnsw_cache)
+
+    # Story #1787 S2 amendment AC14 (dual-review defect H4/H6): the X-Ray
+    # graph-build wire-file cache must ALSO be governor-visible for YELLOW
+    # proactive eviction. attach_cache() is single-slot -- a second,
+    # unguarded call here would silently REPLACE the HNSW registration, so
+    # both caches are composed behind ONE CompositeLRUCache before the
+    # sole attach_cache() call (ADR-003 Decision 4).
+    from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+        XrayGraphCacheProxy,
+        set_xray_graph_cache,
+    )
+    from code_indexer.server.services.xray_graph_governor.cache_governor_bridge import (
+        CompositeLRUCache,
+    )
+
+    _xray_graph_cache = XrayGraphCacheProxy()
+    _xray_composite_cache = CompositeLRUCache(
+        [_server_hnsw_cache, _xray_graph_cache], floor_per_cache=YELLOW_LRU_FLOOR
+    )
+    set_xray_graph_cache(_xray_graph_cache)
+    # Story 4: wire caches into governor for YELLOW proactive LRU eviction.
+    _memory_governor.attach_cache(_xray_composite_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
@@ -250,13 +278,6 @@ def initialize_services() -> Dict[str, Any]:
 
     _cfg_oidc_sqlite(str(db_path))
 
-    # Bug #577: Wire DelegationJobTracker with SQLite path for standalone mode
-    from code_indexer.server.services.delegation_job_tracker import (
-        DelegationJobTracker,
-    )
-
-    DelegationJobTracker.get_instance().set_sqlite_path(str(db_path))
-
     # Story #578: Initialize SQLite-backed runtime config (unified model).
     # Must happen after schema init (server_config table) and before PG pool.
     config_service.initialize_runtime_db(str(db_path))
@@ -289,12 +310,19 @@ def initialize_services() -> Dict[str, Any]:
         DependencyLatencyTracker,
     )
 
-    _cluster_cfg = _raw_config.get("cluster") if _raw_config else None
-    _node_id = (
-        _cluster_cfg.get("node_id", "local")
-        if isinstance(_cluster_cfg, dict)
-        else "local"
-    )
+    # Bug (E2E Phase 6 discovery): _node_id MUST be resolved via the shared
+    # resolve_cluster_node_id() helper -- it is threaded into
+    # JobTracker(node_id=_node_id) below, which stamps every job's
+    # executing_node column. That value must agree with the identity
+    # NodeHeartbeatService/get_active_nodes() use in lifespan.py's cluster
+    # block, or JobReconciliationService's dead-node reclaim wrongly treats
+    # a live, in-process-running job (e.g. lifecycle_registration, which
+    # never sets claimed_at) as abandoned on its very next sweep. A
+    # previous inline default of the literal string "local" here diverged
+    # from lifespan.py's f"{hostname}-cidx" default, causing exactly that.
+    from code_indexer.server.utils.cluster_node_id import resolve_cluster_node_id
+
+    _node_id = resolve_cluster_node_id(_raw_config)
     _latency_backend = DependencyLatencyBackend(str(db_path))
     latency_tracker = DependencyLatencyTracker(
         backend=_latency_backend, node_id=_node_id
@@ -381,6 +409,22 @@ def initialize_services() -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
 
+    # Story #1787 S2 amendment AC16 (dual-review defect H4/H6): construct
+    # the TTL-cached K-calibration provider now that the storage-mode-
+    # appropriate backend (SQLite or PostgreSQL) is known. Installed as a
+    # process-level singleton (mirroring set_memory_governor()) so a
+    # future graph-build call site retrieves this SAME instance.
+    from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+        TTLCachedKProvider,
+        set_xray_k_provider,
+    )
+
+    _xray_k_ttl_provider = TTLCachedKProvider(
+        store=_backend_registry.xray_k_calibration,
+        ttl_seconds=_XRAY_K_CALIBRATION_TTL_SECONDS,
+    )
+    set_xray_k_provider(_xray_k_ttl_provider)
+
     # Bug #575: Wire session manager to DB backend (SQLite or PG) for cluster support.
     # The module-level singleton starts in JSON file mode; set_backend() switches it
     # to use the protocol-backed storage so password-change invalidations are visible
@@ -447,7 +491,6 @@ def initialize_services() -> Dict[str, Any]:
             format_error_log(
                 "APP-GENERAL-028",
                 "SCIP audit database initialization failed (non-blocking)",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -485,6 +528,36 @@ def initialize_services() -> Dict[str, Any]:
     )
     if _backend_registry is not None:
         golden_repo_manager._global_repos_backend = _backend_registry.global_repos
+    # Bug #1549: prove this process is the sole live instance for
+    # server_data_dir BEFORE running any destructive startup orphan-cleanup
+    # sweep. A duplicate process (e.g. a crash-looping systemd unit racing
+    # an already-running out-of-band server) must not mark the live
+    # instance's just-created jobs as falsely "orphaned by restart".
+    from code_indexer.server.utils.primary_instance_lock import (
+        acquire_primary_instance_lock,
+    )
+
+    _is_primary_instance = acquire_primary_instance_lock(server_data_dir)
+    if not _is_primary_instance:
+        # Bug #1549 Finding 2b: under `uvicorn --workers N`, exactly one
+        # worker acquires this lock and the other N-1 correctly take this
+        # branch on EVERY multi-worker startup -- routine, by-design, not
+        # evidence of a caller bug (a genuinely crash-looping duplicate
+        # process is indistinguishable from a routine worker purely from
+        # this single failed-acquire signal). Demoted to DEBUG per the
+        # established Bug #1535 precedent (demote a happy-path log line
+        # rather than allowlisting it), since a WARNING here broke the
+        # mandatory post-E2E log-audit gate on a normal multi-worker
+        # deployment.
+        logger.debug(
+            "This process could not acquire the primary-instance lock for "
+            "%s -- another process appears to already be running against "
+            "this data directory. Startup orphan-cleanup sweeps will be "
+            "skipped to avoid corrupting jobs owned by the live instance "
+            "(Bug #1549).",
+            server_data_dir,
+        )
+
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
 
@@ -498,7 +571,9 @@ def initialize_services() -> Dict[str, Any]:
         # orphaned jobs, never another node's legitimately-running work.
         node_id=_node_id,
     )
-    job_tracker.cleanup_orphaned_jobs_on_startup()
+    job_tracker.cleanup_orphaned_jobs_on_startup(
+        is_primary_instance=_is_primary_instance
+    )
 
     # Story #313: Inject job_tracker into ClaudeCliManager singleton
     try:
@@ -530,6 +605,10 @@ def initialize_services() -> Dict[str, Any]:
         # Pod-pull: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
         # shared queue for cross-pod work-stealing instead of the local pool.
         cluster_mode=(_storage_mode == "postgres"),
+        # Bug #1549: skip the unscoped SQLite orphan-cleanup sweeps when
+        # this process could not confirm exclusive ownership of
+        # server_data_dir.
+        is_primary_instance=_is_primary_instance,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
@@ -591,9 +670,8 @@ def initialize_services() -> Dict[str, Any]:
                 format_error_log(
                     "APP-GENERAL-011",
                     f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     activated_repo_manager = ActivatedRepoManager(

@@ -129,6 +129,26 @@ class CIDXDaemonService(rpyc.Service if rpyc else object):  # type: ignore[misc]
         # Create query cache key
         query_key = f"semantic:{query}:{limit}:{json.dumps(kwargs, sort_keys=True)}"
 
+        # Bug #1736 Finding 2 (Anti-Orphan-Code, Messi Rule 12): this module
+        # (services/rpyc_daemon.py) has ZERO importers anywhere in src/ as of
+        # this writing -- the actively-used daemon implementation is
+        # daemon/service.py's CIDXDaemonService (Unix-socket based), not this
+        # rpyc-based one. It is kept rather than deleted because a dedicated
+        # test suite still exercises it directly (e.g.
+        # tests/unit/services/test_rpyc_daemon.py,
+        # test_daemon_fts_cache_performance.py,
+        # test_daemon_temporal_indexing.py) and full removal is a larger,
+        # separate cleanup than this low-priority finding's scope. If this
+        # module is ever wired back into a real production entry point,
+        # `self.cache_entry.hnsw_index` below MUST NOT be trusted without
+        # first verifying it belongs to the SAME collection this query
+        # targets -- this handler reads it with NO collection-identity check
+        # at all, the exact silent-wrong-results defect class Bug #1730 fixed
+        # for the reachable daemon/service.py + daemon/cache.py production
+        # path. See FilesystemVectorStore.hnsw_cache_key_for_collection() and
+        # CacheEntry.set_semantic_indexes()'s hnsw_cache_key gating in
+        # daemon/cache.py for the required pattern.
+
         # Get or create cache entry
         with self.cache_lock:
             if self.cache_entry is None:

@@ -23,6 +23,19 @@ showed EVERY coalescer-path ``search_embed_event`` row had a NULL
 ("audit columns never populated"). ``_make_hit_meta``/``_make_miss_meta``/
 ``_make_joiner_meta`` never threaded the resolved cache key onto
 ``EmbeddingCacheMetadata.embed_key`` -- fixed here.
+
+Bug #1531 Codex review follow-up: the warm-burst test below used to discard
+the actual vector returned to every concurrent caller (``vec, meta = ...``
+then only ``meta`` was kept) and had no hit-metric assertion at all -- so a
+broken Future result (e.g. a joiner receiving ``None`` or a corrupted vector
+instead of the correct cached embedding) would still have passed. Fixed by
+capturing every caller's ``vec`` and asserting approximate-float equality
+against the known cached vector (``pytest.approx``, the same idiom
+test_coalescer_cache_1147.py already uses for cache-retrieved vectors, since
+the value round-trips through the cache backend's byte encode/decode), plus
+wrapping ``cache.record_hit`` with a counting probe (mirroring
+test_hit_miss_once_per_key_1148.py's ``_CacheCallProbe``) to assert the
+single-flight group records exactly 1 hit metric.
 """
 
 from __future__ import annotations
@@ -30,7 +43,10 @@ from __future__ import annotations
 import threading
 from typing import Any, cast
 
+import pytest
+
 from tests.unit.server.services.test_coalescer_cache_1147 import (
+    CACHED_VEC,
     GOV_K,
     LANE,
     _FakeVoyageProvider,
@@ -116,36 +132,139 @@ class TestConcurrentColdOwnerJoiner:
         assert provider.call_count == 1
 
     def test_warm_burst_after_cold_uses_warm_hit_with_null_batch_id(self, monkeypatch):
-        """After the key is warm, a burst of identical queries records
-        role=warm_hit / live_batch_id=None and adds zero provider calls."""
-        text = "A3 warm burst"
-        coalescer, provider, gov = _make_harness(monkeypatch, "on", pre_seed_text=text)
+        """After the key is warm, a burst of identical queries all resolve
+        with outcome=hit / live_batch_id=None and adds zero provider calls.
 
+        Bug #1531 correction: the original version started 3 unsynchronized
+        threads and asserted ``role == "warm_hit"`` for ALL of them. That only
+        held by scheduling luck -- the single-flight registry (Story #1148
+        PART 1) covers on-mode HITs too, so a same-key requestor that reaches
+        the inflight check while the owner's ``cache.lookup`` critical section
+        is still running becomes a genuine JOINER (role="joiner"), not a
+        second independent warm_hit. Under CPU contention (a full
+        server-fast-automation.sh run) the GIL can switch mid-critical-section
+        often enough to flip a thread from warm_hit to joiner, which is the
+        exact load-sensitive flake this bug reports.
+
+        This test now FORCES full overlap deterministically (delaying the
+        owner's ``cache.lookup`` via an Event, the same accumulate-window
+        technique ``_run_saturated_submits`` already uses for the MISS path)
+        and asserts the real single-flight invariant: exactly 1 owner
+        (role="warm_hit") + 2 joiners (role="joiner"), all outcome=hit,
+        live_batch_id=None (a joiner shares the owner's live_batch_id
+        verbatim, which is None for a warm-HIT resolution), correct embed_key,
+        zero provider calls.
+
+        Codex review follow-up (Bug #1531): also asserts (a) every one of the
+        n_threads concurrent callers received the EXACT expected cached
+        vector (not just "no exception" on role/outcome metadata -- a broken
+        Future result returning None or a corrupted vector would still have
+        passed the pre-fix version of this test), and (b) the cache records
+        exactly 1 hit metric for the whole coalesced group (mirroring
+        test_hit_miss_once_per_key_1148.py's hit-cardinality assertion,
+        which this file previously lacked entirely).
+        """
+        import time
+
+        from code_indexer.server.services import governed_call
+
+        text = "A3 warm burst"
+        n_threads = 3
+        coalescer, provider, gov = _make_harness(monkeypatch, "on", pre_seed_text=text)
+        cache = governed_call.get_query_embedding_cache()
+
+        # Hit-metric probe (mirrors test_hit_miss_once_per_key_1148.py's
+        # _CacheCallProbe): counts real cache.record_hit calls so we can
+        # assert the coalesced group records exactly 1 hit, not n_threads.
+        hit_count = {"n": 0}
+        hit_lock = threading.Lock()
+        orig_record_hit = cache.record_hit
+
+        def _counting_record_hit(key, qualifier):
+            with hit_lock:
+                hit_count["n"] += 1
+            return orig_record_hit(key, qualifier)
+
+        monkeypatch.setattr(cache, "record_hit", _counting_record_hit)
+
+        lookup_started = threading.Event()
+        release = threading.Event()
+        orig_lookup = cache.lookup
+
+        def _delayed_lookup(key, qualifier):
+            lookup_started.set()
+            release.wait(timeout=_JOIN_TIMEOUT)
+            return orig_lookup(key, qualifier)
+
+        monkeypatch.setattr(cache, "lookup", _delayed_lookup)
+
+        barrier = threading.Barrier(n_threads)
         results: list = []
         lock = threading.Lock()
 
         def _one() -> None:
+            barrier.wait()
             vec, meta = coalescer.submit(text)
             with lock:
-                results.append(meta)
+                results.append((vec, meta))
 
-        threads = [threading.Thread(target=_one, daemon=True) for _ in range(3)]
+        threads = [threading.Thread(target=_one, daemon=True) for _ in range(n_threads)]
         for t in threads:
             t.start()
+
+        assert lookup_started.wait(timeout=_JOIN_TIMEOUT), (
+            "owner never reached the delayed cache.lookup call"
+        )
+        time.sleep(_ACCUMULATE_SECS)
+        release.set()
+
         for t in threads:
             t.join(timeout=_JOIN_TIMEOUT)
 
-        assert len(results) == 3
+        assert len(results) == n_threads
         expected_key = _expected_key(text)
-        for meta in results:
-            assert meta.role == "warm_hit"
+
+        metas = [m for (_vec, m) in results]
+        owners = [m for m in metas if m.role == "warm_hit"]
+        joiners = [m for m in metas if m.role == "joiner"]
+        assert len(owners) == 1, (
+            f"expected exactly 1 warm_hit owner, got {len(owners)} "
+            f"(roles={[m.role for m in metas]})"
+        )
+        assert len(joiners) == n_threads - 1, (
+            f"expected {n_threads - 1} joiners, got {len(joiners)} "
+            f"(roles={[m.role for m in metas]})"
+        )
+        for meta in metas:
             assert meta.outcome == "hit"
             assert meta.live_batch_id is None
             assert meta.embed_key == expected_key, (
-                "Story #1295: warm_hit EmbeddingCacheMetadata.embed_key must be "
-                f"the real resolved cache key; got {meta.embed_key!r}"
+                "Story #1295: embed_key must be the real resolved cache key; "
+                f"got {meta.embed_key!r}"
             )
         assert provider.call_count == 0
+
+        # Codex review finding (Bug #1531): verify the ACTUAL vector value
+        # every caller (owner and every joiner) received, not just the
+        # metadata shape. A broken Future result would still pass every
+        # assertion above. pytest.approx is used (not `==`) because the
+        # vector round-trips through the cache backend's byte encode/decode
+        # -- the same comparison idiom test_coalescer_cache_1147.py already
+        # uses for cache-retrieved vectors.
+        for i, (vec, meta) in enumerate(results):
+            assert vec == pytest.approx(CACHED_VEC, abs=1e-4), (
+                f"caller {i} (role={meta.role!r}) must receive the exact "
+                f"cached vector {CACHED_VEC}, got {vec!r}"
+            )
+
+        # Codex review finding (Bug #1531): this file previously had no
+        # hit-metric assertion at all -- mirror test_hit_miss_once_per_key_
+        # 1148.py's cardinality check: single-flight must record exactly 1
+        # hit for the whole coalesced warm-burst group, not n_threads.
+        assert hit_count["n"] == 1, (
+            f"single-flight warm burst must record exactly 1 hit metric for "
+            f"the coalesced group, got hits={hit_count['n']}"
+        )
 
 
 class TestShadowModeEmbedKey:

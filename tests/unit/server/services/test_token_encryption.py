@@ -19,8 +19,8 @@ import os
 
 import pytest
 
-import src.code_indexer.server.services.token_encryption as token_encryption_module
-from src.code_indexer.server.services.token_encryption import (
+import code_indexer.server.services.token_encryption as token_encryption_module
+from code_indexer.server.services.token_encryption import (
     decrypt_single,
     decrypt_with_fallback,
     derive_encryption_key,

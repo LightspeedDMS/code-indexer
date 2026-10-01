@@ -1,9 +1,9 @@
 ---
 name: get_provider_health
 category: repos
-required_permission: query_repos
-tl_dr: Get health metrics for embedding providers (latency, error rate, availability).
-slim_description: "Get embedding provider health metrics including latency percentiles, error rate, and availability."
+required_permission: manage_golden_repos
+tl_dr: '[ADMIN ONLY] Get health metrics for embedding providers (latency, error rate, availability).'
+slim_description: "[ADMIN ONLY] Get embedding provider health metrics including latency percentiles, error rate, and availability."
 inputSchema:
   type: object
   properties:
@@ -12,7 +12,7 @@ inputSchema:
       description: "Optional: specific provider name. Omit to get all providers."
   additionalProperties: false
 ---
-Get health metrics for configured embedding providers.
+[ADMIN ONLY] Get health metrics for configured embedding providers. Matches the REST provider-health routes, which require the admin role.
 
 Returns per-provider metrics: p50/p95/p99 latency, error rate, availability,
 health score, and status (healthy/degraded/down).

@@ -14,6 +14,7 @@ Story #620 Priority 1B Acceptance Criteria:
 import pytest
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
@@ -155,18 +156,38 @@ def test_concurrent_refreshes_different_repos_no_interference(
             "Repo2 refresh should have started and ended"
         )
 
-        # Verify concurrent execution (total time should be < sum of individual times)
-        assert elapsed_time < 0.15, (
-            f"Refreshes should run concurrently (took {elapsed_time}s)"
-        )
+        # Bug #1506 4th-pass review Item 4: the absolute-wall-clock bound
+        # (previously "< 1.0", before that "< 0.15") was dropped entirely
+        # rather than relaxed further. It measured 1/8 flaky runs at 2.40s
+        # even after being relaxed to "< 1.0" -- this environment's actual
+        # scheduling jitter under load is not bounded tightly enough for an
+        # absolute-time assertion to be reliable. The real proof that the
+        # two refreshes ran CONCURRENTLY (not serialized by the per-repo
+        # lock incorrectly cross-locking different repos) is the
+        # repo2_start < repo1_end overlap assertion below -- it is a
+        # strictly better signal that carries the entire correctness claim
+        # without being sensitive to CI/host timing variance. `elapsed_time`
+        # is still measured (for potential ad-hoc debugging) but no longer
+        # asserted on.
+        del elapsed_time
 
-        # Verify overlap: repo2 should start before repo1 ends
-        refresh_events["repo1"][0][1]
+        # Verify overlap: repo2 should start before repo1 ends, AND
+        # (Bug #1506 Item 3) symmetrically repo1 should start before repo2
+        # ends. Together these two inequalities are the standard complete
+        # proof that the intervals [repo1_start, repo1_end] and
+        # [repo2_start, repo2_end] genuinely overlap -- neither interval
+        # entirely precedes the other. A one-sided check alone does not
+        # rule out every non-overlapping ordering.
+        repo1_start = refresh_events["repo1"][0][1]
         repo1_end = refresh_events["repo1"][1][1]
         repo2_start = refresh_events["repo2"][0][1]
+        repo2_end = refresh_events["repo2"][1][1]
 
         assert repo2_start < repo1_end, (
             "Repo2 should start before repo1 completes (concurrent execution)"
+        )
+        assert repo1_start < repo2_end, (
+            "Repo1 should start before repo2 completes (concurrent execution)"
         )
 
 
@@ -460,3 +481,49 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
         assert create_count[0] == 3, (
             f"All 3 refresh attempts should complete sequentially (got {create_count[0]})"
         )
+
+
+def test_held_write_lock_for_publish_survives_one_hour_ttl(scheduler):
+    """
+    Bug #1506 4th-pass review Item 1 (HIGH): WriteLockManager.acquire()'s
+    default TTL is 3600s (1 hour) when no ttl_seconds is passed explicitly.
+    CLAUDE.md's "Indexing Path Has No Job/Subprocess/Per-File Timeouts"
+    invariant (Bug #1218) states ordinary indexing legitimately runs for
+    hours on a large repo. If _held_write_lock_for_publish() inherited the
+    short default TTL, another writer could evict the "stale" lock and
+    acquire it concurrently with an indexing run that is still genuinely
+    in-progress -- defeating the exclusivity guarantee the lock exists to
+    provide around the index -> integrity-gate -> snapshot -> swap-alias
+    publish sequence.
+
+    Proven via real time-manipulation of WriteLockManager's own staleness
+    check (no real sleep): monkeypatch the `datetime` name inside
+    write_lock_manager.py so `datetime.now()` reports a time 3601 seconds
+    after the real acquisition instant, then assert the lock is still
+    considered live at that point -- i.e. its TTL is genuinely longer than
+    the short 3600s default, not merely "not yet expired by real wall
+    clock" (which a slow/flaky CI run could accidentally satisfy even for
+    a buggy short-TTL lock).
+    """
+    with scheduler._held_write_lock_for_publish("repo1") as acquired:
+        assert acquired is True, "Lock should be acquired for a fresh alias"
+
+        real_now = datetime.now(timezone.utc)
+        far_future = real_now + timedelta(seconds=3601)
+
+        class _FarFutureDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: A002 - matches datetime.now signature
+                return far_future
+
+        with patch(
+            "code_indexer.global_repos.write_lock_manager.datetime",
+            _FarFutureDateTime,
+        ):
+            assert scheduler.is_write_locked("repo1") is True, (
+                "Write lock held for the publish sequence must survive past "
+                "the short 3600s default TTL mark -- it must have been "
+                "acquired with an explicit, long TTL (mirroring the fleet "
+                "migration orchestrator's MIGRATION_LOCK_TTL_SECONDS "
+                "precedent), not the WriteLockManager default."
+            )

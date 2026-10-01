@@ -5,7 +5,6 @@ Story #633: Complete GitHub Actions Monitoring
 Provides workflow run monitoring, log search, and workflow control operations.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 import re
 import logging
 import httpx
@@ -219,7 +218,6 @@ class GitHubActionsClient:
                 format_error_log(
                     "GIT-GENERAL-015",
                     f"Failed to calculate duration: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -239,7 +237,6 @@ class GitHubActionsClient:
                     format_error_log(
                         "GIT-GENERAL-016",
                         f"Failed to fetch jobs for run {run_id}: HTTP {response.status_code}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return []
@@ -272,7 +269,6 @@ class GitHubActionsClient:
                 format_error_log(
                     "GIT-GENERAL-017",
                     f"Error fetching jobs for run {run_id}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -292,7 +288,6 @@ class GitHubActionsClient:
                     format_error_log(
                         "GIT-GENERAL-018",
                         f"Failed to fetch artifacts for run {run_id}: HTTP {response.status_code}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return []
@@ -315,7 +310,6 @@ class GitHubActionsClient:
                 format_error_log(
                     "GIT-GENERAL-019",
                     f"Error fetching artifacts for run {run_id}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []

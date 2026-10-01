@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     _safe_purge_trash_entry,
 )
 
@@ -228,7 +228,7 @@ class TestScandirNotFullyMaterialised:
         """list() must NOT receive an os.scandir iterator as argument."""
         import builtins
         import os as _os
-        from src.code_indexer.server.repositories.activated_repo_manager import (
+        from code_indexer.server.repositories.activated_repo_manager import (
             _fd_anchored_rmtree,
         )
 

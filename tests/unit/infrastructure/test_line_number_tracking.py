@@ -13,8 +13,8 @@ Provides comprehensive line number validation for multi-language support.
 from pathlib import Path
 import tempfile
 
-from src.code_indexer.indexing.chunker import TextChunker
-from src.code_indexer.config import IndexingConfig
+from code_indexer.indexing.chunker import TextChunker
+from code_indexer.config import IndexingConfig
 
 
 class TestLineNumberTrackingInChunker:
@@ -241,8 +241,8 @@ class TestLineNumbersInProcessorMetadata:
         # It's designed to test the processor's metadata handling
 
         # Mock dependencies
-        from src.code_indexer.indexing.processor import DocumentProcessor
-        from src.code_indexer.config import Config
+        from code_indexer.indexing.processor import DocumentProcessor
+        from code_indexer.config import Config
         from unittest.mock import Mock
 
         config = Mock(spec=Config)

@@ -424,8 +424,16 @@ async function loadHealthDetails(repoAlias, forceRefresh = false) {
         console.error(`Failed to load health data for ${repoAlias}:`, error);
         detailsContainer.innerHTML = `
             <p class="health-error">Failed to load health data: ${escapeHtml(error.message)}</p>
-            <button class="outline small" onclick="loadHealthDetails('${escapeHtml(repoAlias)}', false)">Retry</button>
         `;
+        // repoAlias captured as a real closure variable -- never
+        // serialized into an HTML/JS-string attribute at all.
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'outline small';
+        retryBtn.textContent = 'Retry';
+        retryBtn.addEventListener('click', () => {
+            loadHealthDetails(repoAlias, false);
+        });
+        detailsContainer.appendChild(retryBtn);
         hideJobProgress();
         if (refreshBtn) {
             refreshBtn.disabled = false;

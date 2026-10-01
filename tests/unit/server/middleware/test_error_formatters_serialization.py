@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi.exceptions import RequestValidationError
 
-from src.code_indexer.server.middleware.error_formatters import (
+from code_indexer.server.middleware.error_formatters import (
     _serialize_value_for_json,
     create_validation_error_response,
     generate_correlation_id,

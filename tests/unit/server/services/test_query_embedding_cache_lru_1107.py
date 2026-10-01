@@ -51,7 +51,43 @@ def _insert_row(
     backend, key: str, provider: str, last_used: float, created_at: float
 ) -> None:
     blob = _encode_vec(_make_vec(4, 1.0))
-    backend.upsert(key, provider, "test-model", 4, blob, created_at, last_used)
+    ok = backend.upsert(key, provider, "test-model", 4, blob, created_at, last_used)
+    if not ok:
+        raise AssertionError(f"backend.upsert() reported failure for key={key!r}")
+
+
+def _insert_rows_batch(backend, rows: List[tuple]) -> None:
+    """Insert many (key, provider, last_used, created_at) rows in ONE commit.
+
+    Bug #1545 cause-1: a Python loop calling backend.upsert() once per row
+    does one real sqlite3 commit per row (BEGIN EXCLUSIVE...COMMIT via
+    execute_atomic) -- measured at ~25ms/commit, so 200 rows cost ~5s of pure
+    fixture-population overhead before the test under measurement even
+    starts. This mirrors the exact INSERT/ON CONFLICT SQL
+    QueryEmbeddingCacheSqliteBackend.upsert() uses (same columns, same
+    conflict target) via executemany inside a single execute_atomic call,
+    producing byte-identical rows to the per-row loop in one commit.
+    """
+    blob = _encode_vec(_make_vec(4, 1.0))
+    params = [
+        (key, provider, "test-model", 4, blob, created_at, last_used)
+        for key, provider, last_used, created_at in rows
+    ]
+
+    def operation(conn):  # type: ignore[no-untyped-def]
+        conn.executemany(
+            """
+            INSERT INTO query_embedding_cache
+                (cache_key, provider, model, dimension, embedding, created_at, last_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (cache_key, provider, model, dimension) DO UPDATE SET
+                embedding  = excluded.embedding,
+                last_used  = excluded.last_used
+            """,
+            params,
+        )
+
+    backend._conn_manager.execute_atomic(operation)
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +485,12 @@ class TestConcurrentPruners:
     def test_two_pruners_no_crash(self, tmp_path: Path) -> None:
         """Two concurrent prune_to_max calls must not crash."""
         backend = _make_backend(tmp_path)
-        for i in range(200):
-            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        # Bug #1545 cause-1: batch-insert (one commit) instead of 200 separate
+        # commits -- see _insert_rows_batch docstring for the measured cost.
+        _insert_rows_batch(
+            backend,
+            [(f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i) for i in range(200)],
+        )
 
         errors: List[Exception] = []
 

@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional, cast
 from code_indexer.server.self_monitoring.llm_response_parser import (
     extract_json_from_llm_response,
 )
+from code_indexer.server.services.agent_cli_isolation import (
+    build_self_monitoring_log_query_command_prefix,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
@@ -127,9 +130,16 @@ class LogScanner:
         # Assemble deduplication context
         dedup_context = self.assemble_dedup_context(existing_issues=existing_issues)
 
-        # Format template - pass database path so Claude can query directly
+        # Format template. log_db_path is kept for backward-compatible
+        # templates that still reference it directly; the production
+        # prompt instead uses log_query_command_prefix, the server-pinned
+        # entry-point command -- the log database path itself is never
+        # shown to the agent, it
+        # reaches the entry point only via an environment variable the
+        # invoker sets.
         prompt = self.prompt_template.format(
             log_db_path=self.log_db_path,
+            log_query_command_prefix=build_self_monitoring_log_query_command_prefix(),
             last_scan_log_id=last_scan_log_id,
             dedup_context=dedup_context,
         )
@@ -243,15 +253,17 @@ class LogScanner:
                 FINGERPRINT_RETENTION_DAYS
             )
         else:
-            conn = self._conn_manager.get_connection()
-            cursor = conn.execute(
-                "SELECT fingerprint, classification, error_codes, title, created_at "
-                "FROM self_monitoring_issues "
-                "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
-                "ORDER BY created_at DESC",
-                (FINGERPRINT_RETENTION_DAYS,),
-            )
-            fingerprints = cursor.fetchall()
+            # Bug #1532 follow-up: route the raw connection through
+            # guarded_connection() so close_all() cannot close it mid-read.
+            with self._conn_manager.guarded_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT fingerprint, classification, error_codes, title, created_at "
+                    "FROM self_monitoring_issues "
+                    "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+                    "ORDER BY created_at DESC",
+                    (FINGERPRINT_RETENTION_DAYS,),
+                )
+                fingerprints = cursor.fetchall()
 
         if fingerprints:
             lines.append(
@@ -347,17 +359,19 @@ class LogScanner:
             )
             return int(result)
 
-        conn = self._conn_manager.get_connection()
-        logger.debug(
-            "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
-        )
-        cursor = conn.execute(
-            "SELECT log_id_end FROM self_monitoring_scans "
-            "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
-            "ORDER BY started_at DESC "
-            "LIMIT 1"
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            logger.debug(
+                "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
+            )
+            cursor = conn.execute(
+                "SELECT log_id_end FROM self_monitoring_scans "
+                "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
+                "ORDER BY started_at DESC "
+                "LIMIT 1"
+            )
+            row = cursor.fetchone()
         result = row[0] if row else 0
         logger.debug(
             f"[SELF-MON-DEBUG] get_last_scan_log_id: Query complete - result={result}, has_row={row is not None}"
@@ -820,9 +834,13 @@ class LogScanner:
             RuntimeError: If the dispatcher reports failure or raises unexpectedly.
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
-        # calling subprocess.run directly.
+        # calling subprocess.run directly. log_db_path lets the
+        # ClaudeInvoker it constructs set the CIDX_LOG_QUERY_DB_PATH
+        # environment variable to the exact log database this scan queries.
         dispatcher = build_dep_map_dispatcher(
-            get_config_service().get_config(), analysis_model=self.model
+            get_config_service().get_config(),
+            analysis_model=self.model,
+            log_db_path=self.log_db_path,
         )
         result = dispatcher.dispatch(
             flow="self_monitoring_scan",

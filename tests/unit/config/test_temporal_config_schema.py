@@ -6,7 +6,7 @@ Tests the configuration schema for diff context lines with validation and defaul
 import pytest
 from pydantic import ValidationError
 
-from src.code_indexer.config import Config, TemporalConfig
+from code_indexer.config import Config, TemporalConfig
 
 
 class TestTemporalConfigSchema:

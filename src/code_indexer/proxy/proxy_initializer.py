@@ -9,6 +9,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Union
+from code_indexer.config import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,7 @@ class ProxyInitializer:
         }
 
         config_file = config_dir / "config.json"
-        with open(config_file, "w") as f:
-            json.dump(config_data, f, indent=2)
+        write_json_atomic(config_file, config_data, indent=2)
 
         logger.info(f"Created proxy configuration at {config_dir}")
 
@@ -222,8 +222,7 @@ class ProxyInitializer:
             "discovered_repos": discovered_repos,
         }
 
-        with open(config_file, "w") as f:
-            json.dump(config_data, f, indent=2)
+        write_json_atomic(config_file, config_data, indent=2)
 
         logger.info(
             f"Initialized proxy mode at {self.target_dir} "

@@ -18,7 +18,9 @@ from typing import Any, Dict
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 from ._utils import _mcp_response, _parse_json_string_array
 
@@ -139,7 +141,6 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-219",
                     f"create_pull_request: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -212,7 +213,6 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-219",
                 f"create_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -221,7 +221,6 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-219",
                 f"create_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -295,7 +294,6 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-220",
                     f"list_pull_requests: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -365,7 +363,6 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-220",
                 f"list_pull_requests: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -374,7 +371,6 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-220",
                 f"list_pull_requests: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -451,7 +447,6 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-220",
                     f"get_pull_request: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -516,7 +511,6 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-220",
                 f"get_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -525,7 +519,6 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-220",
                 f"get_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -603,7 +596,6 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
                 format_error_log(
                     "MCP-GENERAL-220",
                     f"list_pull_request_comments: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -671,7 +663,6 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
             format_error_log(
                 "MCP-GENERAL-220",
                 f"list_pull_request_comments: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -680,7 +671,6 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
             format_error_log(
                 "MCP-GENERAL-220",
                 f"list_pull_request_comments: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -767,7 +757,6 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-221",
                     f"comment_on_pull_request: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -836,7 +825,6 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-221",
                 f"comment_on_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -845,7 +833,6 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-221",
                 f"comment_on_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -938,7 +925,6 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-222",
                     f"update_pull_request: failed to get remote URL: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return _mcp_response(
@@ -1010,7 +996,6 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-222",
                 f"update_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1019,7 +1004,6 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-222",
                 f"update_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1156,7 +1140,6 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-451",
                 f"merge_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1165,7 +1148,6 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-451",
                 f"merge_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1292,7 +1274,6 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-452",
                 f"close_pull_request: authentication error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1301,7 +1282,6 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-452",
                 f"close_pull_request: validation error: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})

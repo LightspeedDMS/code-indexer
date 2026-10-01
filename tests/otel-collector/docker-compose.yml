@@ -1,0 +1,104 @@
+# OTEL Collector + Jaeger + Prometheus stack for Story #1676 AC8.
+#
+# Every image is pinned to an exact tag AND content digest (no `latest`).
+# Re-verify digests with:
+#   docker inspect --format='{{index .RepoDigests 0}}' <image:tag>
+#
+# Bring up (waits on health checks, not sleep-and-hope):
+#   docker compose -f tests/otel-collector/docker-compose.yml up -d --wait --wait-timeout 120
+#
+# Tear down (removes containers AND volumes -- no orphaned state):
+#   docker compose -f tests/otel-collector/docker-compose.yml down -v
+#
+# Single-host-at-a-time constraint: every service below pins a fixed
+# `container_name:` and publishes fixed host ports (4317/4318/8888/8889/13133,
+# 16686/14269, 9090). Two concurrent invocations of this stack on the SAME
+# host (e.g. two parallel CI runners, or a developer running this test twice
+# at once) will collide on container-name or port-bind conflicts. That is a
+# LOUD `docker compose up` failure, not a silent one, so it is acceptable for
+# a single-host test -- just be aware this stack is not safe to parallelize
+# on one machine.
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0@sha256:2203eea06554f892c765d6eff8069cdf64ae8d4516526d03cab4a70e82775495
+    container_name: cidx-otel-collector-e2e-1676
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC -- CIDX Server sends traces/metrics/logs here
+      - "4318:4318" # OTLP HTTP -- alternative to gRPC
+      - "8888:8888" # Collector self-metrics (otelcol_receiver_accepted_* counters)
+      - "8889:8889" # Prometheus exporter -- scraped by the prometheus service below
+      - "13133:13133" # health_check extension HTTP endpoint
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    # NOTE: deliberately NO Docker-level `healthcheck:` for this service.
+    # otel/opentelemetry-collector-contrib is a distroless image with NO shell
+    # and NO wget/curl/busybox binary at all -- verified empirically:
+    #   docker run --rm --entrypoint /bin/sh otel/opentelemetry-collector-contrib:0.112.0
+    #   -> "exec: sh: executable file not found in $PATH"
+    # There is no in-container executable a `test: [...]` directive could run.
+    # Readiness for this service is instead polled from the HOST/test side
+    # against its real health_check extension endpoint
+    # (GET http://localhost:13133/ -> {"status":"Server available",...}) --
+    # see _wait_for_collector_health() in
+    # tests/e2e/server/test_21_otel_live_collector_1676.py, which the test
+    # itself calls. e2e-automation.sh's run_otel_live_collector_subcheck()
+    # does not implement a separate health-poll helper -- it simply invokes
+    # that test file via pytest, and the polling above happens inside the
+    # test. That is still a deterministic poll against a real endpoint, not
+    # a blind sleep -- it just runs outside the container instead of inside
+    # it.
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0@sha256:836e9b69c88afbedf7683ea7162e179de63b1f981662e83f5ebb68badadc710f
+    container_name: cidx-jaeger-e2e-1676
+    ports:
+      - "16686:16686" # Jaeger Query UI + HTTP query API (GET /api/traces, /api/services)
+      - "14269:14269" # Jaeger admin server (health check, /metrics)
+    # Jaeger all-in-one >= 1.35 accepts OTLP natively on 4317 (gRPC) / 4318
+    # (HTTP) with collector.otlp.enabled defaulting to true -- confirmed via
+    # `docker run --rm jaegertracing/all-in-one:1.62.0 --help`. Those OTLP
+    # ports are intentionally NOT published to the host: only the collector
+    # (same compose network, reached as "jaeger:4317") needs to send to them.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:14269/",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+    container_name: cidx-prometheus-e2e-1676
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090" # Prometheus UI + HTTP query API (GET /api/v1/query)
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9090/-/ready",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s

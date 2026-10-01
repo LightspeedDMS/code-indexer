@@ -20,13 +20,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.cli_provider_loop import (
+from code_indexer.cli_provider_loop import (
     ProviderResult,
     run_extra_provider_temporal_loop,
     write_provider_results_atomic,
     compute_exit_code,
 )
-from src.code_indexer.services.temporal.temporal_progressive_metadata import (
+from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
 

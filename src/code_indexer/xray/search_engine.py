@@ -9,8 +9,8 @@ dynamic libraries, and executes with native speed and rayon parallelism.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
+import math
 import re
 import threading
 import time
@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from code_indexer.xray.rust_backend import XrayCacheBackend
+    from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
+from code_indexer.utils.path_confinement import is_resolved_within_root
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
@@ -27,6 +28,42 @@ from code_indexer.global_repos.regex_search import (
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
+
+# Zero-match warnings are advisory. A missing pattern must not turn that
+# advisory check into an unbounded post-walk scan on a large repository.
+# This is a process-local operation budget, not an operator setting: at most
+# this many compiled-pattern/path comparisons are spent after Phase 1.
+_ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET = 10_000
+
+
+class XRayPhase1TimeoutError(Exception):
+    """Raised when Phase 1 (candidate-file selection) exceeds timeout_seconds.
+
+    Bug #1598: timeout_seconds is a real, documented xray_search parameter
+    but was never threaded into Phase 1 (only Phase 2's AST evaluation
+    budget consumed it). This exception lets both Phase 1 implementations
+    (filename walk and content/ripgrep driver) signal a deadline overrun
+    to XRaySearchEngine.run(), which catches it and returns the documented
+    partial/timeout result shape instead of letting the exception escape
+    into the background-job executor as an unhandled failure.
+
+    Attributes:
+        candidates: Partial list of candidate Path objects collected before
+            the deadline tripped. Non-empty for filename-mode timeouts (the
+            incremental walk preserves everything found so far). Always
+            empty for content-mode timeouts -- ripgrep's TimeoutError
+            carries no partial matches through the current
+            RegexSearchResult API, so this asymmetry with filename mode is
+            intentional, not a bug.
+    """
+
+    def __init__(self, candidates: List[Path]) -> None:
+        super().__init__(
+            f"XRay Phase 1 driver exceeded timeout_seconds "
+            f"({len(candidates)} partial candidates collected)"
+        )
+        self.candidates = candidates
+
 
 # Module-level singleton for cluster cache backend.
 # Created once on first successful/definitive initialization, reused thereafter.
@@ -153,14 +190,41 @@ class XRaySearchEngine:
     parallel AST evaluation via RustNativeBackend.
     """
 
-    def __init__(self) -> None:
-        """Initialise the engine, importing tree-sitter at this point."""
+    def __init__(
+        self,
+        identity_cache: Optional["SharedIdentityCache"] = None,
+        confine_to_repo_root: bool = True,
+    ) -> None:
+        """Initialise the engine, importing tree-sitter at this point.
+
+        Args:
+            identity_cache: Optional shared, bounded, thread-safe cache
+                mapping evaluator source -> CacheIdentityInfo (Bug #1784
+                review MAJOR-2). Pass a cache instance that OUTLIVES multiple
+                XRaySearchEngine constructions (e.g. one per
+                xray_search_batch job, shared across every repo x scan
+                cell) so `xray-cli --print-cache-identity` is invoked once
+                per UNIQUE evaluator source across the whole operation,
+                instead of once per cell. None (default) makes
+                RustNativeBackend create its own private, per-instance
+                cache -- unchanged single-repo xray_search behaviour.
+            confine_to_repo_root: True (default, every server-side caller)
+                keeps filename-target candidates and line-content reads
+                inside the resolved repository root. The local
+                ``cidx xray`` commands pass False: a user searching their
+                own checkout follows symlinks wherever they point.
+        """
         from code_indexer.xray.ast_engine import AstSearchEngine
         from code_indexer.xray.rust_backend import RustNativeBackend
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
+        self._confine_to_repo_root = confine_to_repo_root
         self.ast_engine = AstSearchEngine()
-        self.rust_backend = RustNativeBackend(xray_cache_backend=_get_cluster_cache())
+        self.rust_backend = RustNativeBackend(
+            xray_cache_backend=_get_cluster_cache(),
+            identity_cache=identity_cache,
+            confine_to_repo_root=confine_to_repo_root,
+        )
         self.sandbox = PythonEvaluatorSandbox()
 
     @staticmethod
@@ -269,7 +333,12 @@ class XRaySearchEngine:
                 lookbehind) in Phase 1 content driver. Default False.
             path: Subdirectory within the repository to restrict the search to.
                 Relative to repo root. None means the full repository. Default None.
-            timeout_seconds: Wall-clock cap (unused in #972; #978 enforces it).
+            timeout_seconds: Wall-clock cap enforced across BOTH phases: Phase 1
+                (candidate-file selection -- filename walk, content/ripgrep
+                driver, AND the zero-match-pattern probe, which shares the
+                SAME budget as the main Phase 1 search rather than each
+                getting a fresh allotment, Bug #1598) and Phase 2 (AST
+                evaluation, #978).
             worker_threads: Thread-pool size (unused in #972; #978 uses it).
             progress_callback: Called with ``(percent, phase_name, phase_detail)``
                 at key milestones.
@@ -294,6 +363,21 @@ class XRaySearchEngine:
         if max_files is not None and max_files <= 0:
             raise ValueError(f"max_files must be > 0 when provided, got {max_files}")
 
+        # Bug #1876 N5: validate include/exclude patterns ONCE here, at the
+        # top of the service-layer entry point every MCP handler (xray_search,
+        # xray_explore), REST route, and CLI command reaches -- so a
+        # malformed or negated pattern (e.g. "!*.md", which ripgrep/pathspec
+        # would otherwise treat as its own negation syntax) fails loud
+        # before ANY dispatch work, rather than depending on each
+        # candidate-collection path (content-mode's delegation to
+        # RegexSearchService.search, filename-mode's own selector in
+        # _run_phase1_filename) to independently remember to validate.
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        _pattern_matcher = PathPatternMatcher()
+        _pattern_matcher.compile_patterns(include_patterns)
+        _pattern_matcher.compile_patterns(exclude_patterns)
+
         start = time.monotonic()
         include_patterns = include_patterns or []
         exclude_patterns = exclude_patterns or []
@@ -313,6 +397,7 @@ class XRaySearchEngine:
                 multiline=multiline,
                 pcre2=pcre2,
                 path=path,
+                timeout_seconds=timeout_seconds,
             )
         except RipgrepExecutionError as exc:
             # Finding 3.1 (v10.4.4): surface Phase 1 errors (e.g. invalid regex)
@@ -328,6 +413,29 @@ class XRaySearchEngine:
                 "phase1_failed": True,
                 "phase1_error": str(exc),
                 "partial": True,
+            }
+        except XRayPhase1TimeoutError as exc:
+            # Bug #1598: Phase 1 (candidate-file selection) exceeded
+            # timeout_seconds -- neither phase-1 driver checked the caller's
+            # deadline before this fix, so a short timeout_seconds could not
+            # bound Phase 1 at all. Report the documented partial/timeout
+            # contract instead of letting this propagate into the
+            # background-job executor as an unhandled failure (would land
+            # on status="failed" with a raw traceback).
+            logger.warning(
+                "XRaySearchEngine: Phase 1 driver timed out after %ss "
+                "(%d partial candidates collected)",
+                timeout_seconds,
+                len(exc.candidates),
+            )
+            return {
+                "matches": [],
+                "evaluation_errors": [],
+                "files_processed": 0,
+                "files_total": len(exc.candidates),
+                "elapsed_seconds": time.monotonic() - start,
+                "partial": True,
+                "timeout": True,
             }
 
         files_total = len(candidate_files)
@@ -384,7 +492,16 @@ class XRaySearchEngine:
             )
 
         if file_specs:
-            remaining = max(1, timeout_seconds - int(_elapsed()))
+            # Bug #1797 (defect 2): floor the DIFFERENCE, not the elapsed
+            # value. The old `timeout_seconds - int(_elapsed())` truncated
+            # elapsed's fractional second BEFORE subtracting, which hands
+            # run_batch up to ~1s MORE budget than truly remains -- letting
+            # total wall-clock overrun timeout_seconds by up to ~1s.
+            # `max(1, ...)` is preserved unchanged: it is the deliberate
+            # "never hand the subprocess a zero/negative timeout" floor, a
+            # separate, existing contract this fix does not touch.
+            remaining = max(1, int(timeout_seconds - _elapsed()))
+            batch_call_start = time.monotonic()
             batch_results = self.rust_backend.run_batch(
                 evaluator_code=evaluator_code,
                 file_specs=file_specs,
@@ -393,15 +510,52 @@ class XRaySearchEngine:
                 on_process_spawned=on_process_spawned,
                 repo_path=str(repo_path),
             )
+            # Bug #1797 (defect 2 follow-on): a correctly-bounded `remaining`
+            # is deliberately LESS than `timeout_seconds - elapsed_before`
+            # would be under the old (buggy) formula, so run_batch's own
+            # subprocess can hit ITS internal timeout and still leave total
+            # elapsed under the OUTER `timeout_seconds` budget (Phase 1's
+            # share of the budget is never "given back"). `_timed_out()`
+            # alone can therefore miss a genuine Phase 2 timeout once
+            # overrun is fixed. Detect it directly: run_batch consuming its
+            # entire granted sub-budget IS a timeout, regardless of whether
+            # the outer wall-clock also crossed timeout_seconds.
+            batch_call_duration = time.monotonic() - batch_call_start
+            batch_exhausted_its_budget = batch_call_duration >= remaining
             for file_matches, file_errors, file_meta in batch_results:
-                if _timed_out():
+                if _timed_out() or batch_exhausted_its_budget:
                     timeout_hit = True
+                    # Bug #1797 (defect 1): preserve the specific error
+                    # carried by this batch item (e.g. the real
+                    # XRayCliError "xray-cli timed out after Ns") instead of
+                    # silently discarding it by breaking first. The
+                    # synthetic EvaluatorTimeout added below is the
+                    # caller-facing classification; this is the diagnostic
+                    # detail -- both must survive.
+                    evaluation_errors.extend(file_errors)
                     break
                 matches.extend(file_matches)
                 evaluation_errors.extend(file_errors)
                 if file_meta is not None:
                     file_metadata.append(file_meta)
-                files_processed += 1
+                # Bug #1827 (M-2): every batch-level failure run_batch()
+                # can return (compile error, xray-cli invocation error,
+                # JSON parse error) collapses to ONE deduplicated tuple
+                # whose error(s) carry file_path=="" -- the SAME
+                # convention _error_tuple("", ...) uses for every one of
+                # those whole-batch outcomes (rust_backend.py's
+                # invoke_error/parse_error/cli_error branches). No file
+                # was evaluated in ANY of those cases, so this is a
+                # structural discriminator, correct independent of which
+                # diagnostic label (error_type) the failure happens to
+                # carry -- unlike keying off error_type == "CompileError"
+                # alone, which would incorrectly count an XRayCliError
+                # dedup tuple as "1 file processed".
+                is_batch_level_failure = any(
+                    e.get("file_path") == "" for e in file_errors
+                )
+                if not is_batch_level_failure:
+                    files_processed += 1
 
         # Enrich matches with ast_debug and matched_node when requested.
         # Re-parses each matched file once; safe since include_ast_debug is a
@@ -459,9 +613,13 @@ class XRaySearchEngine:
         if timeout_hit:
             result["partial"] = True
             result["timeout"] = True
-            # When the job timed out with no results and no errors, surface a
-            # synthetic error so the caller knows why the job returned nothing.
-            if not matches and not evaluation_errors:
+            # Surface a synthetic caller-facing classification whenever the
+            # job timed out with no matches -- even if a specific diagnostic
+            # error (e.g. the preserved XRayCliError, bug #1797) already
+            # populated evaluation_errors. The synthetic entry is the
+            # DISTINCT terminal classification; any specific error already
+            # present is the diagnostic detail. Both must survive together.
+            if not matches:
                 evaluation_errors.append(
                     {
                         "file_path": "",
@@ -627,30 +785,80 @@ class XRaySearchEngine:
             include_patterns: The caller-supplied glob patterns.  Empty list
                 means "include all" — no warnings are emitted.
             all_rel_paths: Relative paths (from repo root) of every file that
-                existed in the repo before regex / include filtering.  These are
+                existed in the repo before regex / include filtering. These are
                 used to determine whether each pattern is capable of matching
-                anything in this repository at all.
+                anything in this repository at all, subject to the bounded
+                advisory scan budget below.
 
         Returns:
-            List of warning dicts (may be empty).  Each dict has keys:
-            ``type``, ``pattern``, ``hint``.
+            List of warning dicts (may be empty). A conclusive warning has
+            ``type``, ``pattern``, ``hint``. If the fixed comparison budget is
+            exhausted, a ``zero_match_probe_incomplete`` advisory identifies
+            the patterns that could not be checked without falsely claiming a
+            zero match.
 
         Notes:
-            ``*`` matches a single path segment (no ``/`` traversal).
+            ``*`` matches a single path segment (no ``/`` traversal) when the
+            pattern itself contains a ``/``; a bare ``*`` with no ``/``
+            matches at any depth (gitignore-style semantics -- the SAME
+            matcher ripgrep's own ``-g`` flags and the real filtering above
+            use, via ``PathPatternMatcher``).
             ``**`` matches multiple path segments recursively.
             A pattern that matches zero files receives a hint explaining the
             difference and suggesting ``**`` as a fix.
         """
         if not include_patterns:
             return []
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        path_matcher = PathPatternMatcher()
         warnings: List[Dict[str, Any]] = []
         hint = (
-            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
-            "path segment; use `**/time.py` (with **) for recursive matching "
-            "across directories."
+            "Pattern matched 0 files. Use `**/time.py` (with **) for "
+            "recursive matching across directories."
         )
-        for pat in include_patterns:
-            if not any(fnmatch.fnmatch(rel, pat) for rel in all_rel_paths):
+        remaining_attempts = _ZERO_MATCH_PATTERN_MATCH_ATTEMPT_BUDGET
+        for pattern_index, pat in enumerate(include_patterns):
+            # Bug #1876 item 5: compiled ONCE per pattern here, not once per
+            # (pattern, file) pair -- `compile_patterns` builds a fresh
+            # PathSpec on every call, so re-checking it against every file
+            # in `all_rel_paths` without hoisting the build out of this
+            # inner loop would rebuild the same PathSpec per file.
+            #
+            # Bug #1876 round-5 finding F9: this is an INCLUDE-pattern
+            # probe (include_patterns, checked against real candidate
+            # files) -- it must use the SAME `is_include=True` semantics
+            # (Bug #1876 N1, real ripgrep -g INCLUDE behavior: a
+            # directory match never implies its contents also match) the
+            # actual filtering selector uses. The default
+            # `is_include=False` (gitignore/pathspec directory-
+            # containment) silently disagreed with the real filter,
+            # e.g. "src/*" matching "src/a/b.ts" here (via the
+            # directory-containment optional group) even though the real
+            # selector picks nothing for that exact pattern/path pair.
+            compiled = path_matcher.compile_patterns([pat], is_include=True)
+            matched = False
+            if compiled is not None:
+                for rel in all_rel_paths:
+                    if remaining_attempts <= 0:
+                        warnings.append(
+                            {
+                                "type": "zero_match_probe_incomplete",
+                                "patterns": include_patterns[pattern_index:],
+                                "hint": (
+                                    "The zero-match-pattern check reached its "
+                                    "bounded comparison budget before checking "
+                                    "all files; some warnings may be missing. "
+                                    "The search results are unaffected."
+                                ),
+                            }
+                        )
+                        return warnings
+                    remaining_attempts -= 1
+                    if compiled.matches(rel):
+                        matched = True
+                        break
+            if not matched:
                 warnings.append(
                     {
                         "type": "zero_match_include_pattern",
@@ -664,39 +872,72 @@ class XRaySearchEngine:
         self,
         repo_path: Path,
         include_patterns: List[str],
+        timeout_seconds: int = 120,
     ) -> List[Dict[str, Any]]:
         """Probe each include_pattern to detect those that match zero files.
 
-        Uses ``RegexSearchService`` with a trivial ``.*`` regex so that the
-        glob semantics are identical to the main Phase 1 content search
-        (ripgrep-backed), avoiding false warnings from Python fnmatch
-        divergence (e.g. ``*/x`` has different semantics in ripgrep vs
-        Python fnmatch).
+        Unlike the AST-mode ``_check_zero_match_patterns`` sibling, this
+        content-mode probe has no pre-collected ``all_rel_paths`` list to
+        check patterns against directly with ``PathPatternMatcher`` --
+        candidates here stream from ripgrep rather than a full filesystem
+        walk. Uses ``RegexSearchService`` with a trivial ``.*`` regex so the
+        probe reuses that SAME real search call path (the same shared
+        selector the main Phase 1 content search itself uses), guaranteeing
+        identical glob semantics without a separate filesystem walk.
 
         Args:
             repo_path: Root directory of the repository.
             include_patterns: The caller-supplied glob patterns to probe.
+            timeout_seconds: TOTAL wall-clock budget SHARED across ALL
+                ``include_patterns`` probed by this call (Bug #1598 R1) --
+                NOT a fresh per-pattern allotment. The caller
+                (``_run_phase1_content``) passes the budget REMAINING after
+                the main Phase 1 search already consumed its share of the
+                caller's requested ``timeout_seconds``, so the main search
+                plus every probe together stay within ONE total deadline
+                instead of each of the N patterns getting its own full
+                budget (which previously let phase 1 alone run for up to
+                ``N * timeout_seconds``).
 
         Returns:
             List of zero-match warning dicts (may be empty).
+
+        Raises:
+            TimeoutError: If the shared probe budget is exhausted before
+                every ``include_pattern`` has been probed (checked at the
+                top of each loop iteration, so the loop stops itself once
+                the budget runs out rather than relying solely on each
+                individual ``search()`` call's own internal enforcement),
+                or if an individual probe ``search()`` call itself exceeds
+                its remaining share of the budget. The caller translates
+                this into an advisory warning (Bug #1598 R2) instead of
+                discarding the main search's already-found candidates.
         """
         if not include_patterns:
             return []
 
         hint = (
-            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
-            "path segment; use `**` for recursive matching across directories "
-            "(e.g. `**/time.py` instead of `*/time.py`)."
+            "Pattern matched 0 files. Use `**/time.py` (with **) for "
+            "recursive matching across directories."
         )
         warnings: List[Dict[str, Any]] = []
         probe_service = RegexSearchService(repo_path)
+        probe_loop_start = time.monotonic()
 
-        for pat in include_patterns:
+        for idx, pat in enumerate(include_patterns):
+            remaining = timeout_seconds - (time.monotonic() - probe_loop_start)
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"zero-match-pattern probe shared budget of "
+                    f"{timeout_seconds}s exhausted after probing {idx} of "
+                    f"{len(include_patterns)} include_pattern(s)"
+                )
             probe_result = _run_async_in_sync(
                 probe_service.search(
                     pattern=r".*",
                     include_patterns=[pat],
                     max_results=1,
+                    timeout_seconds=max(1, math.ceil(remaining)),
                 )
             )
             if not probe_result.matches:
@@ -705,6 +946,23 @@ class XRaySearchEngine:
                         "type": "zero_match_include_pattern",
                         "pattern": pat,
                         "hint": hint,
+                    }
+                )
+            # Issue #1601 (AC-E): this probe's own ``.*`` pattern is the
+            # broadest possible content search -- surface read_capped
+            # rather than silently dropping it, exactly as the main
+            # content driver does.
+            if probe_result.read_capped:
+                warnings.append(
+                    {
+                        "type": "content_search_read_capped",
+                        "pattern": pat,
+                        "hint": (
+                            "The zero-match probe for this include_pattern "
+                            "hit the byte-size read ceiling before "
+                            "completing; its zero-match determination may "
+                            "be unreliable for this pattern."
+                        ),
                     }
                 )
 
@@ -723,6 +981,7 @@ class XRaySearchEngine:
         multiline: bool = False,
         pcre2: bool = False,
         path: Optional[str] = None,
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Phase 1: regex-based candidate file selection.
 
@@ -746,9 +1005,14 @@ class XRaySearchEngine:
             multiline: Enable multi-line regex.
             pcre2: Enable PCRE2 engine.
             path: Optional subdirectory restriction within repo.
+            timeout_seconds: Wall-clock budget for Phase 1 itself (Bug #1598).
+                Raises ``XRayPhase1TimeoutError`` if exceeded.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If Phase 1 exceeds ``timeout_seconds``.
         """
         # Reset per-call side-channels.
         # Positions are dicts: {line_number, line_content, column, byte_offset,
@@ -758,7 +1022,11 @@ class XRaySearchEngine:
 
         if search_target == "filename":
             return self._run_phase1_filename(
-                repo_path, driver_regex, include_patterns, exclude_patterns
+                repo_path,
+                driver_regex,
+                include_patterns,
+                exclude_patterns,
+                timeout_seconds=timeout_seconds,
             )
 
         return self._run_phase1_content(
@@ -771,6 +1039,7 @@ class XRaySearchEngine:
             multiline=multiline,
             pcre2=pcre2,
             path=path,
+            timeout_seconds=timeout_seconds,
         )
 
     def _run_phase1_filename(
@@ -779,6 +1048,7 @@ class XRaySearchEngine:
         driver_regex: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Inline filename-path walker (RegexSearchService has no filename mode).
 
@@ -789,16 +1059,58 @@ class XRaySearchEngine:
                 segment, ``**`` matches multiple segments recursively.
                 Warnings are emitted for any pattern that matches zero files.
             exclude_patterns: Glob exclude filters (empty = exclude none).
+            timeout_seconds: Wall-clock budget for the walk (Bug #1598).
+                Checked on every ``rglob()`` entry -- NOT merely between
+                per-file evaluations -- since ``rglob()`` is consumed
+                directly (unsorted) rather than pre-materialized via
+                ``sorted()``, which previously drained the whole generator
+                before any check could run.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If the walk exceeds ``timeout_seconds``.
+                Carries the candidates collected so far (already sorted) so
+                a timed-out search still returns partial results instead of
+                discarding the work done.
         """
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        # Bug #1876 items 5/6: built ONCE for the whole walk, not once per
+        # file -- the same shared selector every other glob-filtering call
+        # site in this codebase now uses.
+        selector = PathPatternMatcher().create_selector(
+            include_patterns, exclude_patterns
+        )
         pattern = re.compile(driver_regex)
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
+        start = time.monotonic()
+        # Resolved ONCE for the whole walk, never per candidate.
+        resolved_repo_root = repo_path.resolve()
 
-        for p in sorted(repo_path.rglob("*")):
+        # Bug #1598: iterate rglob() directly (unsorted) instead of
+        # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
+        # sort the entire tree in memory BEFORE the loop body executes even
+        # once, so a time-check inside the loop alone could never bound
+        # that initial traversal on a large tree. Sort only the final,
+        # already-bounded candidate list to preserve deterministic output
+        # ordering.
+        for p in repo_path.rglob("*"):
+            if time.monotonic() - start > timeout_seconds:
+                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
+
             if not p.is_file():
+                continue
+
+            # p.is_file() follows a symlink's target regardless of where
+            # it points -- when confined (server context), reject any
+            # candidate whose resolved location is not strictly inside the
+            # repository root.
+            if self._confine_to_repo_root and not is_resolved_within_root(
+                p, resolved_repo_root
+            ):
                 continue
 
             rel = str(p.relative_to(repo_path))
@@ -811,14 +1123,7 @@ class XRaySearchEngine:
                 continue
             all_rel_paths.append(rel)
 
-            if include_patterns and not any(
-                fnmatch.fnmatch(rel, ip) for ip in include_patterns
-            ):
-                continue
-
-            if exclude_patterns and any(
-                fnmatch.fnmatch(rel, ep) for ep in exclude_patterns
-            ):
+            if not selector.select(rel):
                 continue
 
             if pattern.search(rel):
@@ -827,7 +1132,7 @@ class XRaySearchEngine:
         self._last_phase1_warnings = self._check_zero_match_patterns(
             include_patterns, all_rel_paths
         )
-        return candidates
+        return sorted(candidates)
 
     def _run_phase1_content(
         self,
@@ -841,6 +1146,7 @@ class XRaySearchEngine:
         multiline: bool = False,
         pcre2: bool = False,
         path: Optional[str] = None,
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Content driver via RegexSearchService (ripgrep-backed, async-bridged).
 
@@ -857,10 +1163,44 @@ class XRaySearchEngine:
             multiline: Enable multi-line regex matching.
             pcre2: Enable PCRE2 regex engine.
             path: Optional subdirectory restriction relative to repo root.
+            timeout_seconds: Wall-clock budget (Bug #1598), forwarded to
+                ``RegexSearchService.search()`` (already enforced there on
+                the ripgrep/grep subprocess paths) for the main search.
+                The zero-match-pattern probe below does NOT get a fresh
+                copy of this budget (Bug #1598 R1 fix) -- it receives
+                whatever remains of ``timeout_seconds`` after the main
+                search has already run, so main search + all N probes
+                together stay within ONE total ``timeout_seconds`` budget
+                instead of the probe alone being able to run for up to
+                ``N * timeout_seconds``. NOTE: the pure-Python multiline
+                fallback (``RegexSearchService._search_python_multiline``,
+                used when ``multiline=True`` on the grep engine or ripgrep
+                is unavailable) was out of scope for this fix and was
+                previously unbounded; issue #1611 has since fixed it to
+                accept and enforce ``timeout_seconds`` (forwarded via
+                ``_search_grep``), so this fallback is bounded too.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If the underlying MAIN search exceeds
+                ``timeout_seconds``. The candidate list is always empty on
+                this path — unlike filename-mode timeouts, ripgrep's
+                ``TimeoutError`` carries no partial matches through the
+                current ``RegexSearchResult`` API, so this asymmetry is
+                intentional. NOTE (Bug #1598 R2): a timeout in the
+                zero-match-pattern probe does NOT raise this exception --
+                the probe is advisory-only (diagnostic hints), so its
+                timeout is recorded as a warning and the function returns
+                the main search's already-found candidates normally
+                instead of discarding a fully successful search.
         """
+        # Bug #1598 R1: track elapsed time from the START of the main
+        # search so the zero-match-pattern probe below can be given only
+        # the REMAINING share of timeout_seconds, not a fresh copy of it.
+        start = time.monotonic()
+
         # Finding 3.6 (v10.4.4): always exclude CIDX's internal index store from
         # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
         # / vector .json files as candidates.
@@ -870,19 +1210,28 @@ class XRaySearchEngine:
             *list(exclude_patterns or []),
         ]
         service = RegexSearchService(repo_path)
-        search_result = _run_async_in_sync(
-            service.search(
-                pattern=driver_regex,
-                path=path,
-                include_patterns=include_patterns or None,
-                exclude_patterns=effective_excludes,
-                case_sensitive=case_sensitive,
-                context_lines=context_lines,
-                max_results=100_000,
-                multiline=multiline,
-                pcre2=pcre2,
+        try:
+            search_result = _run_async_in_sync(
+                service.search(
+                    pattern=driver_regex,
+                    path=path,
+                    include_patterns=include_patterns or None,
+                    exclude_patterns=effective_excludes,
+                    case_sensitive=case_sensitive,
+                    context_lines=context_lines,
+                    max_results=100_000,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
+        except TimeoutError as exc:
+            logger.warning(
+                "XRaySearchEngine: Phase 1 content driver timed out after %ss: %s",
+                timeout_seconds,
+                exc,
+            )
+            raise XRayPhase1TimeoutError(candidates=[]) from exc
 
         # Build deduplicated candidate list and populate positions side-channel.
         # Positions are dicts with line_number, line_content, column, byte_offset,
@@ -915,9 +1264,65 @@ class XRaySearchEngine:
 
         # Probe each include_pattern to detect zero-match patterns.
         # Uses ripgrep-backed probe so glob semantics match the main search.
+        # Bug #1598 R1: the probe receives only the REMAINING share of
+        # timeout_seconds after the main search above already ran, so
+        # main search + all N probes together stay within ONE total
+        # timeout_seconds budget (mirrors the remaining-budget pattern
+        # used for Phase 2 in run(): `max(1, timeout_seconds - elapsed)`).
+        # Bug #1598 R2: the probe is advisory-only (zero-match-pattern
+        # diagnostic hints) -- a probe timeout must NEVER discard the
+        # main search's already-found candidates, so it is recorded as a
+        # warning and this function returns normally instead of raising
+        # XRayPhase1TimeoutError.
         if include_patterns:
-            self._last_phase1_warnings = self._probe_zero_match_patterns_content(
-                repo_path, include_patterns
+            elapsed_before_probe = time.monotonic() - start
+            remaining_probe_budget = max(
+                1, math.ceil(timeout_seconds - elapsed_before_probe)
+            )
+            try:
+                self._last_phase1_warnings = self._probe_zero_match_patterns_content(
+                    repo_path,
+                    include_patterns,
+                    timeout_seconds=remaining_probe_budget,
+                )
+            except TimeoutError as exc:
+                logger.warning(
+                    "XRaySearchEngine: zero-match-pattern probe timed out "
+                    "after %ss (advisory only -- main search's %d "
+                    "already-found candidate(s) are preserved): %s",
+                    remaining_probe_budget,
+                    len(candidates),
+                    exc,
+                )
+                self._last_phase1_warnings = [
+                    {
+                        "type": "zero_match_probe_timeout",
+                        "hint": (
+                            "The zero-match-pattern probe timed out before "
+                            "checking all include_patterns; some "
+                            "zero-match-pattern warnings may be missing. "
+                            "The main search's results are unaffected."
+                        ),
+                    }
+                ]
+
+        # Issue #1601 (AC-E): surface the byte-ceiling signal rather than
+        # silently dropping it. Appended (not assigned) so it survives
+        # regardless of whether the zero-match-pattern probe above ran and
+        # reassigned self._last_phase1_warnings.
+        if self._last_phase1_warnings is None:
+            self._last_phase1_warnings = []
+        if search_result.read_capped:
+            self._last_phase1_warnings.append(
+                {
+                    "type": "content_search_read_capped",
+                    "hint": (
+                        "Content search hit the byte-size read ceiling "
+                        "before scanning could complete; results may be a "
+                        "subset of all matches. Narrow the pattern or "
+                        "include_patterns to reduce match volume."
+                    ),
+                }
             )
 
         return candidates

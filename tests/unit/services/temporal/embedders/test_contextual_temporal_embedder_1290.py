@@ -12,11 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from src.code_indexer.config import Config
-from src.code_indexer.services.temporal.embedders.contextual import (
+from code_indexer.config import Config
+from code_indexer.services.temporal.embedders.contextual import (
     ContextualTemporalEmbedder,
 )
-from src.code_indexer.services.temporal.embedders.registry import create_embedder
+from code_indexer.services.temporal.embedders.registry import create_embedder
 
 
 @pytest.fixture

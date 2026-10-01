@@ -6,8 +6,24 @@ Tests auto-watch lifecycle management for server file operations.
 
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
+from code_indexer.config import ConfigManager
 from code_indexer.server.services.auto_watch_manager import AutoWatchManager
+
+
+def _write_real_config(repo_path: Path) -> None:
+    """Write a real `.code-indexer/config.json` for repo_path.
+
+    Bug #1683 (round 3): `AutoWatchManager.start_watch` now fails loud when
+    `ConfigManager.create_with_backtrack` finds no real config for the repo
+    path (see `test_auto_watch_manager_root_cause_1683.py` for that
+    guard's own dedicated tests). The happy-path lifecycle tests in this
+    file need a genuine on-disk config so they keep exercising
+    DaemonWatchManager invocation, not the new guard.
+    """
+    config_manager = ConfigManager(repo_path / ".code-indexer" / "config.json")
+    config_manager.create_default_config(codebase_dir=repo_path)
 
 
 class TestAutoWatchManagerBasicLifecycle:
@@ -17,6 +33,7 @@ class TestAutoWatchManagerBasicLifecycle:
         """Test that start_watch creates and starts a watch instance."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
@@ -35,6 +52,7 @@ class TestAutoWatchManagerBasicLifecycle:
         """Test that starting watch again resets the timeout instead of creating new instance."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
@@ -63,6 +81,7 @@ class TestAutoWatchManagerBasicLifecycle:
         """Test that stop_watch properly terminates the watch instance."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
@@ -101,6 +120,7 @@ class TestAutoWatchManagerTimeout:
         """Test that _check_timeouts stops watch after inactivity timeout."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
@@ -129,6 +149,7 @@ class TestAutoWatchManagerTimeout:
         """Test that _check_timeouts does not stop watch within timeout period."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"
@@ -151,6 +172,7 @@ class TestAutoWatchManagerTimeout:
         """Test that reset_timeout updates last_activity timestamp."""
         manager = AutoWatchManager()
         repo_path = str(tmp_path)
+        _write_real_config(tmp_path)
 
         with patch(
             "code_indexer.server.services.auto_watch_manager.DaemonWatchManager"

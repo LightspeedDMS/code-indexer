@@ -54,7 +54,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -100,7 +102,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -150,7 +154,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # id_index is empty - ghost_point is not registered
@@ -169,7 +175,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         result = store._batch_update_payload_only([], "test_coll")
@@ -186,7 +194,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -229,7 +239,9 @@ class TestBatchUpdatePayloadOnly:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Register a path that doesn't exist
@@ -288,7 +300,9 @@ class TestScrollPointsFilterHoisting:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -326,7 +340,9 @@ class TestScrollPointsFilterHoisting:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -359,7 +375,9 @@ class TestScrollPointsFilterHoisting:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
@@ -382,7 +400,9 @@ class TestScrollPointsFilterHoisting:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"

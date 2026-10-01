@@ -305,14 +305,18 @@ class TestCowDaemonBackendVisibilityBarrier:
     def test_default_visibility_waiter_uses_real_helper(self, tmp_path):
         """When no waiter is injected, the backend uses the real bounded helper.
 
-        Here the dest is created on a local tmp dir BEFORE create, so the real
-        helper sees it immediately and returns without raising."""
+        create_clone_at_path now
+        refuses an already-existing DIRECTORY destination, so `dest` must
+        be ABSENT before the call (matching real production behavior --
+        the daemon creates it remotely) and only appear as a side effect
+        of the mocked `requests.post` call, simulating "the daemon created
+        it and it is now visible on this NFS client's dcache." The real
+        helper then sees it immediately and returns without raising."""
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
         from code_indexer.server.utils.config_manager import CowDaemonConfig
 
         mount = tmp_path
         dest = mount / ".versioned" / "ns" / "v_real"
-        dest.mkdir(parents=True)
 
         config = CowDaemonConfig(
             daemon_url="http://daemon:8081",
@@ -329,6 +333,12 @@ class TestCowDaemonBackendVisibilityBarrier:
         post_resp = _make_response(202, {"job_id": "j"})
         done_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
         mock_req = _mock_requests_module(post_resp, done_resp)
+
+        def _create_dest_and_return_post_resp(*args, **kwargs):
+            dest.mkdir(parents=True)
+            return post_resp
+
+        mock_req.post.side_effect = _create_dest_and_return_post_resp
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             result = backend.create_clone_at_path(str(mount / "src"), str(dest))

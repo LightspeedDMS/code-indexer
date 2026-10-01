@@ -315,7 +315,7 @@ class TestRepairUninitializedLocalRepoSanitizesPythonPath:
                 source_path=str(source_repo), alias_name="test-repo-global"
             )
 
-        assert result is True
+        assert result == (True, None)
         assert len(run_calls) == 1
         init_env = run_calls[0]["kwargs"].get("env")
         assert init_env is not None, "cidx init repair must receive a sanitized env"

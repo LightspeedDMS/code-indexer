@@ -6,7 +6,7 @@ so we can reconstruct content from git on query.
 
 import pytest
 import subprocess
-from src.code_indexer.services.temporal.temporal_diff_scanner import (
+from code_indexer.services.temporal.temporal_diff_scanner import (
     DiffInfo,
     TemporalDiffScanner,
 )

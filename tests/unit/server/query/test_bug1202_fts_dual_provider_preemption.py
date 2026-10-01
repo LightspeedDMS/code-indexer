@@ -678,19 +678,19 @@ class TestAC7_EffectiveModeEcho:
             }
             with (
                 patch(
-                    "code_indexer.server.mcp.handlers.search._apply_rerank_and_filter",
+                    "code_indexer.server.mcp.handlers.search.repo_search._apply_rerank_and_filter",
                     return_value=(qur_return["results"], _fake_rerank_meta),
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search._run_memory_retrieval",
+                    "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
                     return_value=None,
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search._load_category_map",
+                    "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                     return_value={},
                 ),
                 patch(
-                    "code_indexer.server.mcp.handlers.search.get_config_service"
+                    "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
                 ) as mock_cfg_svc,
             ):
                 mock_mem_cfg = MagicMock()
@@ -892,24 +892,24 @@ def _ac4_patch_context(qur_return, truncation_meta):
         mock_app.activated_repo_manager = MagicMock()
         with (
             patch(
-                "code_indexer.server.mcp.handlers.search._apply_search_truncation",
+                "code_indexer.server.mcp.handlers.search._shared._apply_search_truncation",
                 return_value=(qur_return["results"], truncation_meta),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._mcp_reranking"
+                "code_indexer.server.mcp.handlers.search._shared._mcp_reranking"
                 "._apply_reranking_sync",
                 return_value=(qur_return["results"], _base_rerank_meta),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._run_memory_retrieval",
+                "code_indexer.server.mcp.handlers.search.repo_search._run_memory_retrieval",
                 return_value=None,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search._load_category_map",
+                "code_indexer.server.mcp.handlers.search.repo_search._load_category_map",
                 return_value={},
             ),
             patch(
-                "code_indexer.server.mcp.handlers.search.get_config_service"
+                "code_indexer.server.mcp.handlers.search.repo_search.get_config_service"
             ) as mock_cfg_svc,
         ):
             mock_cfg_svc.return_value.get_config.return_value = mock_cfg_obj

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from code_indexer.utils.path_confinement import resolve_confined_path
+
 
 @dataclass
 class TreeNode:
@@ -93,7 +95,19 @@ class DirectoryExplorerService:
         """
         # Determine the starting path
         if path:
-            start_path = self.repo_path / path
+            # Bug #1891 round 2 (S2): confine `path` to self.repo_path
+            # BEFORE using it as the tree-walk root. The previous
+            # `self.repo_path / path` was unconfined -- a parent-directory
+            # traversal or a same-repo symlink pointing outside the repo
+            # would enumerate whatever it resolved to. A PermissionError
+            # (escape attempt) is mapped to the SAME ValueError message the
+            # pre-existing nonexistent-path check already raises, so an
+            # escape attempt cannot be distinguished from an ordinary
+            # missing path.
+            try:
+                start_path = resolve_confined_path(self.repo_path, path)
+            except PermissionError:
+                raise ValueError(f"Path does not exist: {path}")
             if not start_path.exists():
                 raise ValueError(f"Path does not exist: {path}")
         else:

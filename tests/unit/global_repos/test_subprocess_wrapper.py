@@ -173,9 +173,18 @@ class TestTimeoutAndCommand:
         assert full_cmd[4] == SCRIPT_NULL_DEVICE
 
     def test_repo_path_used_as_cwd(self, tmp_path):
-        """repo_path argument is passed as cwd= to subprocess.Popen."""
+        """repo_path is never the subprocess's own cwd, so the CLI does not
+        auto-load a CLAUDE.md there as configuration — a neutral scratch
+        directory is used instead, with repo_path reachable via --add-dir.
+        See test_repo_analyzer_agent_isolation.py for the full isolation
+        suite."""
         mock_popen, _, _ = _run_wrapper(tmp_path, {})
-        assert mock_popen.call_args[1]["cwd"] == str(tmp_path)
+        actual_cwd = mock_popen.call_args[1]["cwd"]
+        assert actual_cwd != str(tmp_path)
+        full_cmd = mock_popen.call_args[0][0]
+        inner_cmd = full_cmd[3]
+        assert "--add-dir" in inner_cmd
+        assert str(tmp_path) in inner_cmd
 
 
 class TestErrorHandling:

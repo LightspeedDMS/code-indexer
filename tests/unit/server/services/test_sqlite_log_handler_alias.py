@@ -41,6 +41,8 @@ class _FakeLogsBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         self.calls.append(
             {
@@ -54,17 +56,33 @@ class _FakeLogsBackend:
                 "extra_data": extra_data,
                 "node_id": node_id,
                 "alias": alias,
+                "trace_id": trace_id,
+                "span_id": span_id,
             }
         )
 
     def insert_log_batch(self, items: Any) -> None:
-        """Batch insert: expand each 10-tuple and delegate to insert_log.
+        """Batch insert: expand each 12-tuple and delegate to insert_log.
 
-        Issue #1241: _writer_loop now calls insert_log_batch; update the fake
-        backend so existing per-call assertions on self.calls remain valid.
+        Issue #1241: _writer_loop now calls insert_log_batch; Story #1676
+        AC2 appended trace_id/span_id to the tuple. Update the fake backend
+        so existing per-call assertions on self.calls remain valid.
         """
         for item in items:
-            (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+            (
+                ts,
+                lvl,
+                src,
+                msg,
+                cid,
+                uid,
+                rpath,
+                extra,
+                nid,
+                alias,
+                trace_id,
+                span_id,
+            ) = item
             self.insert_log(
                 timestamp=ts,
                 level=lvl,
@@ -76,6 +94,8 @@ class _FakeLogsBackend:
                 extra_data=extra,
                 node_id=nid,
                 alias=alias,
+                trace_id=trace_id,
+                span_id=span_id,
             )
 
     # Protocol completeness (not exercised by these tests)

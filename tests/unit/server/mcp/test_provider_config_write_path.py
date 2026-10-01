@@ -13,6 +13,8 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from code_indexer.server.auth.user_manager import UserRole
+
 # ProviderIndexService is imported inside functions via local import, so we must
 # patch at its source module path.
 _PROVIDER_INDEX_SERVICE_PATH = (
@@ -83,6 +85,7 @@ class TestBulkAddWritesConfigToBaseClone:
         mock_bjm.submit_job.return_value = "job-123"
         mock_user = MagicMock()
         mock_user.username = "admin"
+        mock_user.role = UserRole.ADMIN
 
         from code_indexer.server.mcp.handlers import bulk_add_provider_index
 
@@ -138,6 +141,7 @@ class TestBulkAddWritesConfigToBaseClone:
         mock_svc = _make_mock_service()
         mock_user = MagicMock()
         mock_user.username = "admin"
+        mock_user.role = UserRole.ADMIN
 
         from code_indexer.server.mcp.handlers import bulk_add_provider_index
 

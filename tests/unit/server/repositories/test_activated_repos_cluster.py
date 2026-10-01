@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 
@@ -101,6 +101,7 @@ class SqlitePoolAdapter:
                 ssh_key_used INTEGER DEFAULT 0,
                 is_composite INTEGER DEFAULT 0,
                 wiki_enabled INTEGER DEFAULT 0,
+                activation_id TEXT,
                 metadata_json TEXT,
                 UNIQUE(username, user_alias)
             )
@@ -375,7 +376,7 @@ class TestActivatedStorageSharedWarning:
     def test_warns_when_activated_on_different_device(self, tmp_path, caplog):
         import logging
         from unittest.mock import patch
-        from src.code_indexer.server.repositories import (
+        from code_indexer.server.repositories import (
             activated_repo_manager as arm_mod,
         )
 
@@ -403,7 +404,7 @@ class TestActivatedStorageSharedWarning:
     def test_no_warning_when_same_device(self, tmp_path, caplog):
         import logging
         from unittest.mock import patch
-        from src.code_indexer.server.repositories import (
+        from code_indexer.server.repositories import (
             activated_repo_manager as arm_mod,
         )
 

@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestAdminJobsCleanupCommand:
@@ -39,7 +39,7 @@ class TestAdminJobsCleanupCommand:
     def test_admin_jobs_has_cleanup_subcommand(self):
         """Test that cleanup subcommand is registered under admin jobs."""
         # Import the admin_jobs_group directly to check its commands
-        from src.code_indexer.cli import admin_jobs_group
+        from code_indexer.cli import admin_jobs_group
 
         # Get the commands registered under admin_jobs_group
         commands = admin_jobs_group.commands
@@ -51,7 +51,7 @@ class TestAdminJobsCleanupCommand:
 
     def test_admin_jobs_cleanup_has_options(self):
         """Test that cleanup command has the required options."""
-        from src.code_indexer.cli import admin_jobs_group
+        from code_indexer.cli import admin_jobs_group
 
         cleanup_cmd = admin_jobs_group.commands["cleanup"]
 
@@ -75,7 +75,7 @@ class TestAdminJobsCleanupCommand:
         import tempfile
         import os
         from pathlib import Path
-        from src.code_indexer.cli import admin_jobs_group
+        from code_indexer.cli import admin_jobs_group
 
         # Setup mock
         mock_response = MagicMock()
@@ -128,7 +128,7 @@ class TestAdminJobsCleanupCommand:
         import tempfile
         import os
         from pathlib import Path
-        from src.code_indexer.cli import admin_jobs_group
+        from code_indexer.cli import admin_jobs_group
 
         # Setup mock
         mock_response = MagicMock()

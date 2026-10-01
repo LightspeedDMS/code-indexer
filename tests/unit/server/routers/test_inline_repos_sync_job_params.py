@@ -14,7 +14,6 @@ import pathlib
 import time
 import pytest
 from unittest.mock import patch
-from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 # Named constants for sleep durations used in async job polling
 FIXTURE_CLEANUP_WAIT_SEC = 0.1
@@ -25,9 +24,9 @@ JOB_STATUS_POLL_INTERVAL_SEC = 0.05
 
 
 @pytest.fixture
-def job_manager():
+def job_manager(background_job_manager_factory):
     """Create a BackgroundJobManager for testing."""
-    manager = BackgroundJobManager()
+    manager = background_job_manager_factory()
     yield manager
     # Allow background threads to complete
     time.sleep(FIXTURE_CLEANUP_WAIT_SEC)

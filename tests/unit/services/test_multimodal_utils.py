@@ -4,7 +4,7 @@ import base64
 import pytest
 from pathlib import Path
 
-from src.code_indexer.services.multimodal_utils import (
+from code_indexer.services.multimodal_utils import (
     encode_image_to_base64,
     SUPPORTED_MEDIA_TYPES,
 )

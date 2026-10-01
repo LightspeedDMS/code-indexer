@@ -6,9 +6,34 @@ safety features, confirmation prompts, and error handling.
 Follows TDD methodology and MESSI Rule #1 (anti-mock).
 """
 
+import json
+import os
+
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
+
+
+def _invoke_remote(runner: CliRunner, args):
+    """Invoke the CLI inside an isolated filesystem containing a REAL,
+    valid .code-indexer/.remote-config file, so admin_group's
+    require_mode("remote") gate passes via genuine on-disk mode detection
+    (CommandModeDetector) rather than any mock. Without a remote-mode
+    project on disk, every admin_group invocation raises
+    DisabledCommandError before reaching the command's own real
+    validation/help logic (Foundation #1 anti-mock compliance).
+    """
+    with runner.isolated_filesystem():
+        os.makedirs(".code-indexer", exist_ok=True)
+        with open(".code-indexer/.remote-config", "w") as f:
+            json.dump(
+                {
+                    "server_url": "https://cidx.example.com",
+                    "encrypted_credentials": {"username": "test-fixture-user"},
+                },
+                f,
+            )
+        return runner.invoke(cli, args)
 
 
 class TestAdminReposDeleteE2EIntegration:
@@ -72,15 +97,15 @@ class TestAdminReposDeleteE2EIntegration:
         runner = CliRunner()
 
         # Test without required alias argument
-        result = runner.invoke(cli, ["admin", "repos", "delete"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete"])
 
         # Should fail with missing argument error
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "Usage:" in result.output
 
         # Test with invalid flags
-        result = runner.invoke(
-            cli, ["admin", "repos", "delete", "--invalid-flag", "test"]
+        result = _invoke_remote(
+            runner, ["admin", "repos", "delete", "--invalid-flag", "test"]
         )
 
         # Should fail with usage error, not reach remote API logic
@@ -138,7 +163,7 @@ class TestAdminReposDeleteE2EIntegration:
         """Test that delete command help has consistent formatting."""
         runner = CliRunner()
 
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
 
         # Should show help successfully
         assert result.exit_code == 0, "Help for delete should work"
@@ -175,7 +200,7 @@ class TestAdminReposDeleteE2EIntegration:
         runner = CliRunner()
 
         # Test that delete is listed in admin repos help
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+        repos_result = _invoke_remote(runner, ["admin", "repos", "--help"])
         assert repos_result.exit_code == 0
         assert "delete" in repos_result.output, "Delete should be listed in repos help"
 
@@ -219,14 +244,14 @@ class TestAdminReposDeleteE2EIntegration:
         runner = CliRunner()
 
         # Test that help command completes quickly and doesn't hang
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0, "Delete help should complete successfully"
 
     def test_admin_repos_delete_force_flag_behavior(self):
         """Test force flag behavior and documentation."""
         runner = CliRunner()
 
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
         assert "--force" in result.output
 
@@ -246,7 +271,7 @@ class TestAdminReposDeleteSafetyFeatures:
         """Test that safety features are properly documented."""
         runner = CliRunner()
 
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should document safety features
@@ -265,7 +290,7 @@ class TestAdminReposDeleteSafetyFeatures:
         """Test that destructive operation warnings are prominent."""
         runner = CliRunner()
 
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should have prominent warnings about destructive nature
@@ -283,7 +308,7 @@ class TestAdminReposDeleteSafetyFeatures:
         runner = CliRunner()
 
         # Should follow same pattern as other admin repos commands
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should have Args section
@@ -300,7 +325,7 @@ class TestAdminReposDeleteSafetyFeatures:
         runner = CliRunner()
 
         # Should be listed alongside other commands
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+        repos_result = _invoke_remote(runner, ["admin", "repos", "--help"])
         assert repos_result.exit_code == 0
 
         expected_commands = ["add", "list", "show", "refresh", "delete"]
@@ -344,7 +369,7 @@ class TestAdminReposDeleteWorkflowValidation:
         runner = CliRunner()
 
         # Test basic command structure
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should describe complete workflow
@@ -361,7 +386,7 @@ class TestAdminReposDeleteWorkflowValidation:
         runner = CliRunner()
 
         # Test help shows proper parameter structure
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should show alias as required parameter
@@ -377,7 +402,7 @@ class TestAdminReposDeleteWorkflowValidation:
         runner = CliRunner()
 
         # Delete should follow similar patterns to other admin commands
-        delete_help = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        delete_help = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert delete_help.exit_code == 0
 
         # Should have professional tone and clear warnings
@@ -395,7 +420,7 @@ class TestAdminReposDeleteWorkflowValidation:
         """Test that help content is comprehensive and useful."""
         runner = CliRunner()
 
-        result = runner.invoke(cli, ["admin", "repos", "delete", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "delete", "--help"])
         assert result.exit_code == 0
 
         # Should cover all essential aspects

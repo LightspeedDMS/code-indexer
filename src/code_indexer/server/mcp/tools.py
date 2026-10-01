@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from code_indexer.server.auth.user_manager import User
+from .tool_access import _ALWAYS_AVAILABLE_TOOLS
 
 
 # =============================================================================
@@ -79,7 +80,39 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = _build_registry()
 
 
-def filter_tools_by_role(user: User, config=None) -> List[Dict[str, Any]]:
+def tool_passes_config_gate(tool_def: Dict[str, Any], config: Any) -> bool:
+    """Story #185: whether `tool_def`'s optional `requires_config` condition
+    is satisfied by `config` -- e.g. a tracing tool declaring
+    `requires_config: langfuse_enabled` is gated on `config.langfuse_config
+    .enabled`. A tool with no `requires_config` always passes.
+
+    Bug #1955 item 6: extracted out of `filter_tools_by_role` (the ONLY
+    place this gate was applied) so `guides.py`'s tool-COUNTING helpers
+    (`quick_reference`, `get_tool_categories`) can apply the IDENTICAL
+    gate -- before this fix, `cidx_quick_reference()`'s `total_tools`
+    counted every Langfuse-gated tool unconditionally, silently disagreeing
+    with what the real `tools/list` (this function) would actually serve
+    on a deployment with Langfuse disabled (Rule 4, anti-duplication: one
+    gate, never two copies that can drift).
+    """
+    requires_config = tool_def.get("requires_config")
+    if not requires_config:
+        return True
+    if not config:
+        return False  # Fail-closed: no config available.
+    if requires_config == "langfuse_enabled":
+        return bool(config.langfuse_config.enabled)
+    # Add more config checks here as needed.
+    return True
+
+
+def filter_tools_by_role(
+    user: User,
+    config=None,
+    *,
+    session_state=None,
+    tool_access_memo=None,
+) -> List[Dict[str, Any]]:
     """
     Filter tools based on user role, permissions, and configuration requirements.
 
@@ -94,25 +127,30 @@ def filter_tools_by_role(user: User, config=None) -> List[Dict[str, Any]]:
     Returns:
         List of MCP-compliant tool definitions (name, description, inputSchema only)
     """
+    from .tool_access import ToolAccessMemo, resolve_effective_user
+
+    if tool_access_memo is None:
+        tool_access_memo = ToolAccessMemo()
+    effective_user = resolve_effective_user(user, session_state)
     filtered_tools = []
 
     for tool_name, tool_def in TOOL_REGISTRY.items():
         required_permission = tool_def["required_permission"]
-        if not user.has_permission(required_permission):
+        group_decision = (
+            True
+            if tool_name in _ALWAYS_AVAILABLE_TOOLS
+            else tool_access_memo.is_allowed(tool_name, effective_user)
+        )
+        if group_decision is False:
+            continue
+        if group_decision is None and not effective_user.has_permission(
+            required_permission
+        ):
             continue
 
         # Story #185: Check if tool requires specific configuration
-        requires_config = tool_def.get("requires_config")
-        if requires_config:
-            # Fail-closed: if tool requires config but no config available, hide the tool
-            if not config:
-                continue  # Skip tool when config is None (fail-closed)
-
-            # Check if required config is enabled
-            if requires_config == "langfuse_enabled":
-                if not config.langfuse_config.enabled:
-                    continue  # Skip tool if Langfuse not enabled
-            # Add more config checks here as needed
+        if not tool_passes_config_gate(tool_def, config):
+            continue
 
         # Only include MCP-valid fields (name, description, inputSchema)
         # Filter out internal fields (required_permission, outputSchema, requires_config)

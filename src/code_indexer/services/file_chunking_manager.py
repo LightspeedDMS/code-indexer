@@ -18,6 +18,7 @@ Architecture:
 import contextvars
 import hashlib
 import logging
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
@@ -27,6 +28,10 @@ from dataclasses import dataclass
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
+from ..storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    is_fatal_chunk_store_write_error,
+)
 import threading
 
 # Token counting for large file handling - using embedded tokenizer
@@ -52,6 +57,25 @@ class FileProcessingResult:
     processing_time: float
     error: Optional[str] = None
     vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
+
+
+def _vector_storage_failure_result(
+    file_path: Path, error: BaseException, start_time: float
+) -> FileProcessingResult:
+    """Bug #1746 H1/H2: build the ordinary per-file failure result for a
+    NON-fatal vector-storage write error (e.g. transient sqlite lock
+    contention, or any other non-fatal exception). Shared by both the
+    reclassified-non-fatal branch and the generic except-Exception branch
+    in _process_file_clean_lifecycle() so the two stay byte-identical.
+    """
+    logger.error(f"Vector storage write failed for {file_path}: {error}")
+    return FileProcessingResult(
+        success=False,
+        file_path=file_path,
+        chunks_processed=0,
+        processing_time=time.time() - start_time,
+        error=f"Vector storage write failed: {error}",
+    )
 
 
 class FileChunkingManager:
@@ -636,6 +660,13 @@ class FileChunkingManager:
                         )
                     raise
 
+            # Bug #1502 (Codex M6): multimodal points are QUEUED here and
+            # only actually persisted in Phase 4, AFTER all regular
+            # embeddings have been validated -- never upserted eagerly,
+            # which would violate file atomicity if a later regular
+            # embedding turned out falsy and failed the whole file.
+            pending_multimodal_points: List[Dict[str, Any]] = []
+
             # MULTIMODAL PROCESSING: Handle chunks with images
             if (
                 multimodal_chunks
@@ -762,19 +793,19 @@ class FileChunkingManager:
                             )
                             continue
 
-                        success = self.vector_store_client.upsert_points(
-                            points=[vector_point],
-                            collection_name=multimodal_collection_name,
+                        # Bug #1502 M6: QUEUE, don't write yet -- the
+                        # actual upsert happens in Phase 4, only after
+                        # every regular embedding has been validated.
+                        pending_multimodal_points.append(
+                            {
+                                "collection_name": multimodal_collection_name,
+                                "vector_point": vector_point,
+                            }
                         )
 
-                        if not success:
-                            raise RuntimeError(
-                                "Failed to store multimodal vector point"
-                            )
-
                         logger.debug(
-                            f"Stored multimodal embedding for chunk {chunk.get('chunk_index')} "
-                            f"in {multimodal_collection_name} collection"
+                            f"Queued multimodal embedding for chunk {chunk.get('chunk_index')} "
+                            f"for deferred atomic write to {multimodal_collection_name} collection"
                         )
 
                     except Exception as e:
@@ -784,7 +815,19 @@ class FileChunkingManager:
                         # Continue processing other chunks rather than failing entire file
                         continue
 
-            if not batch_futures and not multimodal_chunks and not cached_points:
+            # Bug #1502 (Codex finding 4): pending_multimodal_points is the
+            # POST-embedding-attempt result -- unlike multimodal_chunks
+            # (the pre-embedding list, always non-empty when multimodal
+            # chunks existed regardless of whether every one of their
+            # embedding attempts later failed), it correctly reflects
+            # whether anything was actually produced. A multimodal-only
+            # file whose every embedding attempt failed must be detected
+            # here, never silently reported as a successful no-op.
+            if (
+                not batch_futures
+                and not pending_multimodal_points
+                and not cached_points
+            ):
                 logger.warning(f"No batches created for {file_path}")
                 return FileProcessingResult(
                     success=False,
@@ -850,25 +893,50 @@ class FileChunkingManager:
                     )
 
                 # Create points with preserved order: regular_chunks[i] → embeddings[i] → points[i]
-                for i, (chunk, embedding) in enumerate(
-                    zip(regular_chunks, all_embeddings)
-                ):
-                    if embedding:  # Validate individual embedding
-                        file_points.append(
-                            {
-                                "text": chunk["text"],
-                                "vector": embedding,  # Direct embedding from batch result
-                                "metadata": {
-                                    **metadata,
-                                    "line_start": chunk["line_start"],
-                                    "line_end": chunk["line_end"],
-                                },
-                            }
+                #
+                # Bug #1502: chunk_index/total_chunks MUST be the chunker's
+                # own positional values (chunk["chunk_index"], set once by
+                # FixedSizeChunker before any embedding/caching happens),
+                # NEVER an enumerate() position among whichever chunks
+                # happened to survive to a fresh embedding this run. A
+                # falsy embedding fails the WHOLE file loudly instead of
+                # being silently dropped -- silently skipping a chunk used
+                # to also shift every LATER chunk's re-derived
+                # position-based label, forging colliding point_ids with
+                # different content across runs (the confirmed root cause
+                # of issue #1502).
+                for chunk, embedding in zip(regular_chunks, all_embeddings):
+                    if not embedding:  # Validate individual embedding
+                        logger.error(
+                            f"Invalid/empty embedding for chunk_index="
+                            f"{chunk['chunk_index']} in {file_path} -- "
+                            f"failing the file (Bug #1502: never silently "
+                            f"skip a chunk, it forges duplicate point_ids "
+                            f"by shifting every later chunk's label)"
                         )
-                    else:
-                        logger.warning(
-                            f"Skipping chunk {i} with invalid embedding in {file_path}"
+                        return FileProcessingResult(
+                            success=False,
+                            file_path=file_path,
+                            chunks_processed=0,
+                            processing_time=time.time() - start_time,
+                            error=(
+                                f"Invalid embedding for chunk_index="
+                                f"{chunk['chunk_index']}"
+                            ),
                         )
+                    file_points.append(
+                        {
+                            "text": chunk["text"],
+                            "vector": embedding,  # Direct embedding from batch result
+                            "chunk_index": chunk["chunk_index"],
+                            "total_chunks": chunk["total_chunks"],
+                            "metadata": {
+                                **metadata,
+                                "line_start": chunk["line_start"],
+                                "line_end": chunk["line_end"],
+                            },
+                        }
+                    )
 
             except Exception as e:
                 logger.error(f"Batch vector processing failed for {file_path}: {e}")
@@ -881,15 +949,20 @@ class FileChunkingManager:
                 )
 
             # Phase 4: Atomic write to vector storage if we have valid vectors
-            if file_points or cached_points:
+            if file_points or cached_points or pending_multimodal_points:
                 try:
                     points_data = []
-                    for i, point in enumerate(file_points):
-                        # Create proper Filesystem point using existing method
+                    for point in file_points:
+                        # Bug #1502: chunk_index/total_chunks come from the
+                        # chunker's own positional values carried through
+                        # file_points above -- NEVER re-derived from this
+                        # loop's own enumerate() position, which would
+                        # reintroduce the exact same identity-shifting bug
+                        # this fix closes.
                         chunk_data = {
                             "text": point["text"],
-                            "chunk_index": i,
-                            "total_chunks": len(file_points),
+                            "chunk_index": point["chunk_index"],
+                            "total_chunks": point["total_chunks"],
                             "line_start": point["metadata"].get("line_start"),
                             "line_end": point["metadata"].get("line_end"),
                             "file_extension": file_path.suffix.lstrip(".") or "txt",
@@ -905,14 +978,50 @@ class FileChunkingManager:
                     if cached_points:
                         points_data.extend(cached_points)
 
-                    # Atomic write to vector storage
-                    success = self.vector_store_client.upsert_points(
-                        points=points_data,
-                        collection_name=metadata.get("collection_name"),
-                    )
-                    if not success:
-                        raise RuntimeError(
-                            f"Failed to write {len(points_data)} points to vector storage"
+                    # Atomic write to vector storage (only if there ARE
+                    # regular/cached points -- a file consisting solely of
+                    # multimodal chunks legitimately has none).
+                    if points_data:
+                        success = self.vector_store_client.upsert_points(
+                            points=points_data,
+                            collection_name=metadata.get("collection_name"),
+                        )
+                        if not success:
+                            raise RuntimeError(
+                                f"Failed to write {len(points_data)} points to vector storage"
+                            )
+
+                    # Bug #1502 M6: multimodal points are written HERE --
+                    # only now that every regular embedding has been
+                    # validated (Phase 3) and, if any exist, successfully
+                    # written above. Never earlier: writing them before
+                    # regular-embedding validation would leave multimodal
+                    # points persisted even when a later falsy regular
+                    # embedding fails the whole file (file-atomicity
+                    # violation).
+                    if pending_multimodal_points:
+                        multimodal_by_collection: Dict[str, List[Dict[str, Any]]] = {}
+                        for entry in pending_multimodal_points:
+                            multimodal_by_collection.setdefault(
+                                entry["collection_name"], []
+                            ).append(entry["vector_point"])
+
+                        for (
+                            mm_collection_name,
+                            mm_points,
+                        ) in multimodal_by_collection.items():
+                            mm_success = self.vector_store_client.upsert_points(
+                                points=mm_points,
+                                collection_name=mm_collection_name,
+                            )
+                            if not mm_success:
+                                raise RuntimeError(
+                                    f"Failed to write {len(mm_points)} "
+                                    f"multimodal point(s) to vector storage"
+                                )
+                        logger.debug(
+                            f"Successfully wrote {len(pending_multimodal_points)} "
+                            f"multimodal point(s) for {file_path}"
                         )
 
                     logger.debug(
@@ -921,45 +1030,128 @@ class FileChunkingManager:
 
                     # Add FTS documents if FTS manager is available
                     if self.fts_manager:
-                        for i, point in enumerate(file_points):
-                            try:
-                                # Extract identifiers from chunk text (simple whitespace split)
-                                chunk_text = point.get("text", "")
-                                identifiers = chunk_text.split()
+                        # Bug #1761: delete any pre-existing FTS documents for
+                        # this file BEFORE adding the fresh chunks below (see
+                        # TantivyIndexManager.delete_document_deferred()'s
+                        # docstring for the commit-cost/legacy-index
+                        # rationale for using the deferred variant here
+                        # rather than delete_document()). Unlike the vector
+                        # store (deterministic point_id -> upsert naturally
+                        # dedups), Tantivy's add_document() has no
+                        # document-id concept -- every call appends a new
+                        # document. Idempotent no-op the first time a file
+                        # is indexed (nothing to delete yet).
+                        relative_path_for_fts = str(
+                            file_path.relative_to(self.codebase_dir)
+                        )
+                        fts_pre_delete_succeeded = True
+                        try:
+                            self.fts_manager.delete_document_deferred(
+                                relative_path_for_fts
+                            )
+                        except RuntimeError:
+                            # Code-review CRITICAL 3: a RuntimeError here
+                            # means the writer isn't initialized -- a
+                            # genuine wiring/lifecycle bug, not a transient
+                            # per-file issue. Swallowing it would silently
+                            # reproduce Bug #1761's duplicate-row defect for
+                            # every file processed this run.
+                            raise
+                        except Exception as e:
+                            # Code-review CRITICAL 3: any other (transient)
+                            # pre-delete failure must not fall through into
+                            # the add loop below -- doing so would add
+                            # fresh chunks on top of undeleted stale ones,
+                            # reproducing Bug #1761's exact symptom. Skip
+                            # re-indexing this file's FTS documents this
+                            # pass instead (stale-but-unique beats
+                            # duplicated); ERROR (not WARNING) so it's
+                            # visible to an operator.
+                            fts_pre_delete_succeeded = False
+                            logger.error(
+                                f"FTS pre-delete failed for {file_path}; "
+                                f"skipping FTS re-indexing for this file "
+                                f"this pass to avoid duplicate rows: {e}"
+                            )
 
-                                # Create FTS document
-                                fts_doc = {
-                                    "path": str(
-                                        file_path.relative_to(self.codebase_dir)
-                                    ),
-                                    "content": chunk_text,
-                                    "content_raw": chunk_text,
-                                    "identifiers": identifiers,
-                                    "line_start": point["metadata"].get(
-                                        "line_start", 0
-                                    ),
-                                    "line_end": point["metadata"].get("line_end", 0),
-                                    "language": file_path.suffix.lstrip(".") or "txt",
-                                }
+                        if fts_pre_delete_succeeded:
+                            for i, point in enumerate(file_points):
+                                try:
+                                    # Extract identifiers from chunk text (simple whitespace split)
+                                    chunk_text = point.get("text", "")
+                                    identifiers = chunk_text.split()
 
-                                # Add to FTS index
-                                self.fts_manager.add_document(fts_doc)
-                            except Exception as e:
-                                # Log FTS errors but don't fail semantic indexing
-                                logger.warning(
-                                    f"FTS indexing failed for chunk {i} of {file_path}: {e}"
-                                )
-                                # Continue with next chunk
+                                    # Create FTS document
+                                    fts_doc = {
+                                        "path": relative_path_for_fts,
+                                        "content": chunk_text,
+                                        "content_raw": chunk_text,
+                                        "identifiers": identifiers,
+                                        "line_start": point["metadata"].get(
+                                            "line_start", 0
+                                        ),
+                                        "line_end": point["metadata"].get(
+                                            "line_end", 0
+                                        ),
+                                        "language": file_path.suffix.lstrip(".")
+                                        or "txt",
+                                    }
 
+                                    # Add to FTS index
+                                    self.fts_manager.add_document(fts_doc)
+                                except Exception as e:
+                                    # Log FTS errors but don't fail semantic indexing
+                                    logger.warning(
+                                        f"FTS indexing failed for chunk {i} of {file_path}: {e}"
+                                    )
+                                    # Continue with next chunk
+
+                except (
+                    sqlite3.DatabaseError,
+                    OSError,
+                    ChunkStoreUnavailableError,
+                ) as e:
+                    # Bug #1746 Change 1 (H1/H2 code-review refinements):
+                    # a FATAL chunk-store-open/write failure (e.g. a
+                    # root-owned/unwritable chunks.db, a corrupt database,
+                    # or disk-full) must NEVER be silently converted into
+                    # an ordinary per-file failure result -- doing so let
+                    # the batch keep running to the end of the repo,
+                    # burning CPU on every remaining file for hours before
+                    # anyone noticed (production incident, see GitHub
+                    # issue #1746). Re-raise (wrapped, if not already the
+                    # typed error) so HighThroughputProcessor (Change 2)
+                    # and SmartIndexer (Change 3) can distinguish this
+                    # from a normal per-file failure and abort the whole
+                    # run instead of continuing.
+                    #
+                    # H1: sqlite3.DatabaseError/OperationalError caught
+                    # here can ALSO be transient lock contention (the
+                    # CHUNKS_DB write path opens a fresh connection per
+                    # upsert_points() call with no cross-thread
+                    # application lock -- expected under concurrent
+                    # writers, not exceptional). is_fatal_chunk_store_write_error()
+                    # excludes "database is locked"/"database table is
+                    # locked" from the fatal classification so a
+                    # transient lock failure only fails this one file.
+                    if isinstance(e, ChunkStoreUnavailableError):
+                        logger.error(
+                            f"Fatal chunk-store failure writing {file_path}: {e}"
+                        )
+                        raise
+                    if is_fatal_chunk_store_write_error(e):
+                        logger.error(
+                            f"Fatal chunk-store failure writing {file_path}: {e}"
+                        )
+                        raise ChunkStoreUnavailableError(
+                            f"Chunk store unavailable while writing {file_path}: {e}"
+                        ) from e
+                    # Not fatal (H1 transient lock contention) -- fail
+                    # only this file, exactly like the generic
+                    # except-Exception branch below.
+                    return _vector_storage_failure_result(file_path, e, start_time)
                 except Exception as e:
-                    logger.error(f"Vector storage write failed for {file_path}: {e}")
-                    return FileProcessingResult(
-                        success=False,
-                        file_path=file_path,
-                        chunks_processed=0,
-                        processing_time=time.time() - start_time,
-                        error=f"Vector storage write failed: {e}",
-                    )
+                    return _vector_storage_failure_result(file_path, e, start_time)
 
             processing_time = time.time() - start_time
 
@@ -988,6 +1180,13 @@ class FileChunkingManager:
                 error=None,
             )
 
+        except ChunkStoreUnavailableError:
+            # Bug #1746 Change 1: never let this fatal error be re-caught
+            # here and converted back into a per-file FileProcessingResult
+            # -- it must propagate all the way out of this method. The
+            # `finally` block below still runs (slot release) exactly as
+            # on every other exception path.
+            raise
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"File processing failed: {e}"

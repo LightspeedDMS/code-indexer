@@ -1,8 +1,17 @@
 """OIDC manager for orchestrating OIDC authentication flow."""
 
+import functools
 from pathlib import Path
+from typing import Any, Callable
+
+import anyio
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
+
+
+async def _off_loop(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a synchronous account / identity store call off the event loop."""
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
 
 
 class OIDCManager:
@@ -63,9 +72,8 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-004",
                         f"Failed to initialize SSO provider: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 # Don't set self.provider - leave it None so we can retry
                 raise
@@ -101,7 +109,6 @@ class OIDCManager:
                 format_error_log(
                     "AUTH-GENERAL-005",
                     f"Group manager not available, skipping SSO provisioning for {username}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -127,7 +134,6 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-006",
                         f"SSO provisioning returned False for user {username}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         except Exception as e:
@@ -137,7 +143,6 @@ class OIDCManager:
                     "AUTH-GENERAL-007",
                     f"SSO provisioning failed for user {username}: {e}. "
                     f"User will have fallback cidx-meta-only access.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -175,9 +180,13 @@ class OIDCManager:
 
     async def link_oidc_identity(self, username, subject, email):
         if self._oauth_backend:
-            # OAuthBackend.link_oidc_identity is synchronous (see protocols.py)
-            self._oauth_backend.link_oidc_identity(  # sync call - no await needed
-                username=username, subject=subject, email=email
+            # OAuthBackend.link_oidc_identity is synchronous (see protocols.py):
+            # run it off the event loop.
+            await _off_loop(
+                self._oauth_backend.link_oidc_identity,
+                username=username,
+                subject=subject,
+                email=email,
             )
             return
         import aiosqlite
@@ -226,7 +235,6 @@ class OIDCManager:
             format_error_log(
                 "AUTH-GENERAL-008",
                 f"Stale OIDC link found for subject={subject}, deleting",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return None
@@ -241,20 +249,27 @@ class OIDCManager:
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Every synchronous account / identity store call below runs off the
+        # event loop (_off_loop).
         # Check if OIDC subject already exists in database (fast path)
         if self._oauth_backend:
             # OAuthBackend methods are synchronous (see protocols.py)
-            identity = self._oauth_backend.get_oidc_identity(
-                user_info.subject
-            )  # sync call
+            identity = await _off_loop(
+                self._oauth_backend.get_oidc_identity, user_info.subject
+            )
             if identity:
-                user = self._handle_existing_oidc_link(
-                    identity["username"], user_info.subject, user_info
+                user = await _off_loop(
+                    self._handle_existing_oidc_link,
+                    identity["username"],
+                    user_info.subject,
+                    user_info,
                 )
                 if user:
                     return user
                 # Stale link - delete it so re-link is possible
-                self._oauth_backend.delete_oidc_identity(user_info.subject)  # sync call
+                await _off_loop(
+                    self._oauth_backend.delete_oidc_identity, user_info.subject
+                )
                 # Fall through to auto-link or JIT provisioning
         else:
             async with aiosqlite.connect(self.db_path) as db:
@@ -265,8 +280,11 @@ class OIDCManager:
                 result = await cursor.fetchone()
 
                 if result:
-                    user = self._handle_existing_oidc_link(
-                        result[0], user_info.subject, user_info
+                    user = await _off_loop(
+                        self._handle_existing_oidc_link,
+                        result[0],
+                        user_info.subject,
+                        user_info,
                     )
                     if user:
                         return user
@@ -282,7 +300,9 @@ class OIDCManager:
         # Respect require_email_verification config setting
         if user_info.email:
             if not self.config.require_email_verification or user_info.email_verified:
-                existing_user = self.user_manager.get_user_by_email(user_info.email)
+                existing_user = await _off_loop(
+                    self.user_manager.get_user_by_email, user_info.email
+                )
                 if existing_user:
                     # Auto-link OIDC identity to existing user
                     await self.link_oidc_identity(
@@ -291,8 +311,10 @@ class OIDCManager:
                         email=user_info.email,
                     )
                     # Story #708: Ensure group membership on every SSO login
-                    self._ensure_group_membership(
-                        existing_user.username, user_info.groups
+                    await _off_loop(
+                        self._ensure_group_membership,
+                        existing_user.username,
+                        user_info.groups,
                     )
                     return existing_user
 
@@ -313,7 +335,6 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-009",
                         f"Username claim '{self.config.username_claim}' not found in OIDC userinfo. Available claims: {list(user_info.__dict__.keys())}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return None
@@ -325,14 +346,13 @@ class OIDCManager:
             )
 
             # Check if username already exists (collision detection)
-            if self.user_manager.get_user(base_username):
+            if await _off_loop(self.user_manager.get_user, base_username):
                 logger.error(
                     format_error_log(
                         "AUTH-OIDC-001",
                         f"JIT provisioning failed: Username '{base_username}' already exists. "
                         f"OIDC subject={user_info.subject}, email={user_info.email}. "
                         f"Admin must manually link accounts or resolve username conflict.",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return None
@@ -346,12 +366,34 @@ class OIDCManager:
             }
 
             # Create new user
-            new_user = self.user_manager.create_oidc_user(
-                username=base_username,
-                role=UserRole[self.config.default_role.upper()],
-                email=user_info.email,
-                oidc_identity=oidc_identity,
-            )
+            # base_username
+            # comes from the OIDC username_claim, which this server does not
+            # control (the IdP decides its value, and a username_claim may point
+            # at a free-text field), so it is validated like any other input.
+            # UserManager.create_oidc_user enforces validate_username_path_safe
+            # and raises ValueError on rejection; that is
+            # a NORMAL JIT-provisioning denial here, exactly like the
+            # email-verification/username-claim/collision checks above, and
+            # must never propagate as an unhandled 500 to the SSO callback.
+            # The account write and its durable audit row are synchronous
+            # I/O: run them off the event loop.
+            try:
+                new_user = await _off_loop(
+                    self.user_manager.create_oidc_user,
+                    username=base_username,
+                    role=UserRole[self.config.default_role.upper()],
+                    email=user_info.email,
+                    oidc_identity=oidc_identity,
+                )
+            except ValueError as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTH-OIDC-002",
+                        f"JIT provisioning rejected unsafe username {base_username!r} "
+                        f"(OIDC subject={user_info.subject!r}): {e!r}",
+                    )
+                )
+                return None
 
             # Link OIDC identity in database
             await self.link_oidc_identity(
@@ -361,6 +403,8 @@ class OIDCManager:
             )
 
             # Story #708: Ensure group membership for new JIT-provisioned user
-            self._ensure_group_membership(new_user.username, user_info.groups)
+            await _off_loop(
+                self._ensure_group_membership, new_user.username, user_info.groups
+            )
 
             return new_user

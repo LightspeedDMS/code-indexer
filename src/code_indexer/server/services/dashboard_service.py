@@ -5,8 +5,6 @@ Aggregates data from various internal services for the admin dashboard.
 Following CLAUDE.md Foundation #1: No mocks - uses real service integrations.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -356,7 +354,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-019",
                     f"Failed to get health data: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             # Return degraded status on error
@@ -425,7 +422,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-020",
                     f"Failed to get job counts: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return JobCounts()
@@ -455,7 +451,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-021",
                     f"Failed to get golden repos count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -478,7 +473,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-022",
                     f"Failed to get activated repos count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -571,7 +565,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-023",
                     f"Failed to get recent jobs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -613,7 +606,21 @@ class DashboardService:
             from ..app import activated_repo_manager
 
             return activated_repo_manager
-        except Exception:
+        except Exception as exc:
+            # Round 2 remediation (Issue #1459), Finding C: this failure is
+            # now load-bearing for get_temporal_index_status's AC4
+            # resolver-based fallback -- silently returning None here
+            # previously produced a false-negative "no temporal index"
+            # status with zero diagnostic trace. Log (never raise --
+            # callers must still degrade gracefully to whatever comes
+            # next; only the diagnostic signal was missing, not the
+            # graceful-degradation behavior itself).
+            logger.warning(
+                format_error_log(
+                    "DASHBOARD-ACTIVATED-REPO-001",
+                    f"Failed to resolve activated_repo_manager: {exc}",
+                )
+            )
             return None
 
     def _parse_datetime(self, dt_str: str) -> Optional[datetime]:
@@ -718,7 +725,6 @@ class DashboardService:
                 format_error_log(
                     "DASHBOARD-LANGFUSE-001",
                     f"Failed to get Langfuse metrics: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return {
@@ -892,7 +898,60 @@ class DashboardService:
             None,
         )
 
+        if (
+            temporal_collection_path is not None
+            and not (temporal_collection_path / "hnsw_index.bin").exists()
+        ):
+            # Issue #1459 Finding 1b Site A: a name-matched local directory
+            # is not sufficient to report a positive status -- it must also
+            # have a working HNSW. Without this check, a genuine
+            # crash-window state (real committed rows, no hnsw_index.bin
+            # yet) or an incomplete/stale directory would be reported as a
+            # false-positive v1/v2 status. Reset to None so execution falls
+            # through into the SAME resolver-based fallback block below
+            # that already handles "nothing found locally" -- never a
+            # third code path.
+            temporal_collection_path = None
+
         if temporal_collection_path is None or not temporal_collection_path.exists():
+            # Resolver-aware fallback (GitHub Issue #1459 AC4): the local
+            # clone scan found nothing -- check whether temporal data has
+            # relocated to Story #1457's golden-owned sister location
+            # before concluding "no temporal index". Routes through the
+            # SAME TemporalShardResolver/catalog mechanism the query path
+            # uses, never a parallel sister-root scan.
+            golden_repo_alias_for_temporal = (
+                repo_alias
+                if username == "_global"
+                else repo_info.get("golden_repo_alias")
+            )
+            if golden_repo_alias_for_temporal:
+                activated_manager_for_temporal = self._get_activated_repo_manager()
+                if activated_manager_for_temporal is not None:
+                    from code_indexer.services.temporal.temporal_status import (
+                        get_temporal_repo_status,
+                    )
+
+                    golden_repos_dir = (
+                        Path(activated_manager_for_temporal.activated_repos_dir).parent
+                        / "golden-repos"
+                    )
+                    temporal_status = get_temporal_repo_status(
+                        golden_repos_dir=golden_repos_dir,
+                        repo_alias=golden_repo_alias_for_temporal,
+                        legacy_index_path=index_dir,
+                    )
+                    if temporal_status.is_queryable:
+                        return {
+                            "format": "v2",
+                            "file_count": 0,
+                            "needs_reindex": False,
+                            "message": (
+                                "Temporal indexing active (relocated to "
+                                "golden-owned sister location)"
+                            ),
+                        }
+
             return {
                 "format": "none",
                 "file_count": 0,

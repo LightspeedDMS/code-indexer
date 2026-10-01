@@ -4,8 +4,8 @@ import tempfile
 import json
 import os
 from datetime import datetime, timezone
-from src.code_indexer.server.auth.user_manager import UserManager, User, UserRole
-from src.code_indexer.server.utils.datetime_parser import DateTimeParser
+from code_indexer.server.auth.user_manager import UserManager, User, UserRole
+from code_indexer.server.utils.datetime_parser import DateTimeParser
 
 
 def test_user_model_has_email_field():
@@ -237,7 +237,7 @@ def test_get_user_by_email_returns_user_with_email():
 def test_validate_user_api_key_returns_user_with_email():
     """Test that validate_user_api_key() returns user with email populated."""
     import secrets
-    from src.code_indexer.server.auth.password_manager import PasswordManager
+    from code_indexer.server.auth.password_manager import PasswordManager
 
     temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
     json.dump({}, temp_file)

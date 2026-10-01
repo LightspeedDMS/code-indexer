@@ -2,7 +2,7 @@
 
 HNSWIndexManager.remove_vector raises RuntimeError: "The requested to delete
 element is already deleted" when temporal_indexer.close() runs
-_apply_incremental_hnsw_batch_update on a point whose label has already been
+_apply_visibility_aware_incremental_update on a point whose label has already been
 soft-deleted in the on-disk HNSW index.
 
 The same hazard exists in add_or_update_vector which also calls mark_deleted
@@ -73,7 +73,7 @@ class TestRemoveVectorAlreadyDeletedBug962:
         """remove_vector() does not raise when mark_deleted raises the real hnswlib error.
 
         Regression guard: temporal_indexer.close() -> end_indexing ->
-        _apply_incremental_hnsw_batch_update -> remove_vector must not crash.
+        _apply_visibility_aware_incremental_update -> remove_vector must not crash.
         """
         manager = _make_manager()
         mock_index = _make_mock_index()
@@ -202,7 +202,7 @@ class TestReloadCycleDoubleDeleteBug962:
     """Regression tests for the exact Bug #962 stack trace: delete -> reload -> delete-again.
 
     This is the specific failure mode reported:
-    temporal_indexer.close() runs _apply_incremental_hnsw_batch_update on a point
+    temporal_indexer.close() runs _apply_visibility_aware_incremental_update on a point
     whose label has already been soft-deleted in the on-disk HNSW index from a
     previous batch pass. load_for_incremental_update rebuilds id_to_label from
     label_to_id metadata, which carries no soft-delete state, so the second call

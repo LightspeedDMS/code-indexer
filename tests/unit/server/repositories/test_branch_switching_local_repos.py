@@ -14,13 +14,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
 )
-from src.code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
 
 @pytest.mark.e2e

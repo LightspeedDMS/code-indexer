@@ -8,10 +8,19 @@ ONLY the storage engine (schema/operations are identical to the SQLite
 backend) with PostgreSQL -- eliminating the NFS bottleneck.
 
 Satisfies the TemporalMetadataBackend Protocol
-(code_indexer/storage/temporal_metadata_backend.py). Table created on first
-use via the migration (033_temporal_metadata.sql); ``_ensure_schema`` also
-runs a CREATE TABLE IF NOT EXISTS defensively (mirrors
-payload_cache_backend.py, which has no separate migration).
+(code_indexer/storage/temporal_metadata_backend.py). Schema (the
+``temporal_metadata`` table and its two indexes) is owned entirely by the
+SQL migration (storage/postgres/migrations/sql/033_temporal_metadata.sql)
+-- this backend does NOT create or alter any table. `service_init.py`
+always runs `MigrationRunner` before `StorageFactory.create_backends()`
+builds the backend_registry, and this backend's only production
+construction path (a factory installed in `startup/lifespan.py`) runs
+strictly after that same backend_registry already exists -- so schema is
+guaranteed present by the time any instance is constructed (Issue #1697,
+mirroring Bug #1655/#1662: the previous defensive
+``CREATE TABLE IF NOT EXISTS`` self-heal here -- byte-identical to the
+migration -- was dead code in every real deployment, removed rather than
+kept as a second copy of the schema).
 
 Unlike SQLite (one .db file per collection), one PostgreSQL table holds every
 collection's rows -- all operations are scoped by ``collection_key`` (derived
@@ -21,6 +30,7 @@ from the collection path by TemporalMetadataStore, see temporal_metadata_store.p
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from code_indexer.storage.temporal_metadata_store import (
     COLLECTION_KEY_LENGTH,
+    canonical_content_digest_rows,
     generate_hash_prefix,
 )
 
@@ -42,7 +53,10 @@ class TemporalMetadataPostgresBackend:
     """
 
     def __init__(self, pool: Any, collection_key: str) -> None:
-        """Initialize with a shared connection pool and ensure the table exists.
+        """Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: A psycopg v3 ConnectionPool instance (see connection_pool.py).
@@ -55,63 +69,6 @@ class TemporalMetadataPostgresBackend:
         """
         self._pool = pool
         self._collection_key = collection_key
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create the temporal_metadata table and indexes if not already
-        present.
-
-        Additive/idempotent -- the migration (033_temporal_metadata.sql) is
-        the primary path; this is a defensive fallback mirroring
-        payload_cache_backend.py's _ensure_schema. The DDL below is
-        byte-consistent with 033_temporal_metadata.sql (same table, same
-        columns/types, same primary key, same two indexes).
-
-        Bug #1313 round-2 rework (Codex Finding B): a failure here MUST NOT
-        be swallowed. Previously this method caught every exception, logged
-        a warning, and returned a constructed backend anyway -- so a missing
-        migration, wrong DB permissions, or a broken table would defer the
-        failure to the first temporal write/read instead of failing at
-        storage initialization. Log at ERROR then re-raise so construction
-        itself fails loudly.
-        """
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS temporal_metadata (
-                        collection_key TEXT NOT NULL,
-                        hash_prefix TEXT NOT NULL,
-                        point_id TEXT NOT NULL,
-                        commit_hash TEXT,
-                        file_path TEXT,
-                        chunk_index INTEGER,
-                        created_at TEXT,
-                        format_version INTEGER NOT NULL DEFAULT 2,
-                        PRIMARY KEY (collection_key, hash_prefix)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_temporal_meta_pointid
-                        ON temporal_metadata (collection_key, point_id)
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_temporal_meta_commit
-                        ON temporal_metadata (collection_key, commit_hash)
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.error(
-                "TemporalMetadataPostgresBackend: schema setup failed: %s",
-                exc,
-                exc_info=True,
-            )
-            raise
 
     # Bug #1313 review Finding 4: hash_prefix is deterministically derived
     # from point_id via generate_hash_prefix (sha256(point_id)[:16]); since
@@ -293,6 +250,94 @@ class TemporalMetadataPostgresBackend:
                 (self._collection_key,),
             ).fetchone()
         return row[0] if row else 0
+
+    def content_digest(self) -> str:
+        """Deterministic sha256 digest of every row this scope holds.
+
+        Issue #1548 round-4 exploit fix: mirrors
+        ``TemporalMetadataSqliteBackend.content_digest`` exactly (same
+        selected columns, same ordering, same JSON encoding) so a legacy
+        SQLite scope and a fixed-root PostgreSQL scope holding the SAME
+        rows always produce the SAME digest, regardless of which concrete
+        backend either side happens to use. See the SQLite implementation's
+        docstring for why ``created_at``/``format_version`` are excluded.
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path, chunk_index
+                FROM temporal_metadata
+                WHERE collection_key = %s
+                ORDER BY hash_prefix, point_id, commit_hash, file_path, chunk_index
+                """,
+                (self._collection_key,),
+            ).fetchall()
+        # Issue #1548 round-5 secondary finding 4: re-sort in Python with a
+        # NULL-order-neutral key, independent of PostgreSQL's own NULL-last
+        # ORDER BY default -- see canonical_content_digest_rows()'s
+        # docstring for why the bare ORDER BY above alone cannot guarantee
+        # agreement with the SQLite backend's digest for the SAME rows.
+        rows = canonical_content_digest_rows(rows)
+        encoded = json.dumps(
+            [list(row) for row in rows],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Additively re-key rows; retain the source key for compatibility.
+
+        Issue #1548 round-10 Finding 1: ``pre_commit_check`` (if given) is
+        invoked immediately before this transaction's own ``conn.
+        commit()`` -- the narrowest achievable window between "rows
+        written" and "durably committed". Raising here, before the
+        commit, triggers ``psycopg``'s own automatic rollback-on-exception
+        for a connection borrowed via ``pool.connection()`` as a context
+        manager -- no explicit ``conn.rollback()`` is needed; the
+        exception propagates unchanged and the write is never committed.
+        """
+        target_key = hashlib.sha256(str(target_collection_path).encode()).hexdigest()[
+            : len(self._collection_key)
+        ]
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO temporal_metadata
+                    (collection_key, hash_prefix, point_id, commit_hash,
+                     file_path, chunk_index, created_at, format_version)
+                SELECT %s, hash_prefix, point_id, commit_hash, file_path,
+                       chunk_index, created_at, format_version
+                FROM temporal_metadata
+                WHERE collection_key = %s
+                ON CONFLICT (collection_key, hash_prefix) DO UPDATE SET
+                    point_id = EXCLUDED.point_id,
+                    commit_hash = EXCLUDED.commit_hash,
+                    file_path = EXCLUDED.file_path,
+                    chunk_index = EXCLUDED.chunk_index,
+                    created_at = EXCLUDED.created_at,
+                    format_version = EXCLUDED.format_version
+                """,
+                (target_key, self._collection_key),
+            )
+            if pre_commit_check is not None:
+                pre_commit_check()
+            conn.commit()
+
+    def delete_collection_scope(self) -> None:
+        """Delete this collection key; callers provide the authorization gate."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM temporal_metadata WHERE collection_key = %s",
+                (self._collection_key,),
+            )
+            conn.commit()
 
 
 def make_postgres_temporal_metadata_factory(

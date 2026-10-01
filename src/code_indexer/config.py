@@ -2,14 +2,88 @@
 
 import json
 import logging
+import os
+import tempfile
 import threading as _threading
 import yaml  # type: ignore
 from pathlib import Path
 from typing import List, Optional, Any, Literal, Tuple, Dict
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def write_json_atomic(
+    path: Path,
+    data: Any,
+    *,
+    trailing_newline: bool = False,
+    **dump_kwargs: Any,
+) -> None:
+    """Write JSON without exposing readers to a partial target file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target_exists = path.exists()
+    if target_exists:
+        target_stat = os.stat(path)
+        target_mode = target_stat.st_mode & 0o777
+        target_uid = target_stat.st_uid
+        target_gid = target_stat.st_gid
+    else:
+        target_mode = 0o644
+        target_uid = None
+        target_gid = None
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as destination:
+            json.dump(data, destination, **dump_kwargs)
+            if trailing_newline:
+                destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(tmp_name, target_mode)
+        # Bug #1896 (P1, clustered staging): mkstemp+os.replace creates a
+        # NEW inode owned by the writer. Preserving mode alone is not
+        # enough when the writer runs as a different user than the file's
+        # real owner (e.g. the root auto-updater rewriting a code-indexer
+        # server's bootstrap config.json) -- the preserved (often 0600)
+        # mode plus writer (root) ownership locks the real owner out of
+        # its own config and crash-loops the server. Restore the
+        # PRE-EXISTING owner/group on the temp file before the replace.
+        # Only attempted when the target pre-existed (a brand-new file has
+        # no prior owner to preserve -- leave it writer-owned). A
+        # non-root writer replacing a file it already owns cannot chown
+        # to a different owner and does not need to -- degrade
+        # gracefully, matching the pre-#1894 in-place open("w") semantics.
+        if target_exists:
+            # target_uid/target_gid are always set (non-None) together with
+            # target_exists above; the assert only narrows the Optional[int]
+            # type for mypy and can never fail at runtime.
+            assert target_uid is not None and target_gid is not None
+            try:
+                os.chown(tmp_name, target_uid, target_gid)
+            except PermissionError:
+                logger.debug(
+                    "write_json_atomic: cannot chown %s to (%s, %s) -- "
+                    "non-root writer, keeping writer ownership",
+                    tmp_name,
+                    target_uid,
+                    target_gid,
+                )
+        os.replace(tmp_name, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # Story #1082 Scenario 3: codebase_dir mismatch WARNING de-spam.
@@ -718,16 +792,6 @@ class Config(BaseModel):
         description="Vector storage backend configuration (default: filesystem)",
     )
 
-    # Multi-provider / dual-embed settings
-    secondary_provider: Optional[str] = Field(
-        default=None,
-        description="Secondary embedding provider for dual-embed mode",
-    )
-    dual_embed_enabled: bool = Field(
-        default=False,
-        description="Enable dual embedding in server mode",
-    )
-
     # Provider-specific configurations
     voyage_ai: VoyageAIConfig = Field(default_factory=VoyageAIConfig)
     cohere: CohereConfig = Field(default_factory=CohereConfig)
@@ -786,6 +850,24 @@ class Config(BaseModel):
     health_latency_p95_threshold_ms: float = 5000.0
     health_availability_threshold: float = 0.95
 
+    # Runtime-only server-context marker: never read from or written to
+    # config.json (a pydantic private attribute), so a repository cannot set
+    # it. When set, file discovery and read-time checks confine every indexed
+    # or read file to the resolved codebase root -- symlinks resolving
+    # outside it are skipped. Set only by the server seam
+    # (enforce_server_managed_provider_settings / confine_to_codebase_root);
+    # local CLI indexing leaves it unset and follows symlinks.
+    _confined_to_codebase_root: bool = PrivateAttr(default=False)
+
+    @property
+    def confined_to_codebase_root(self) -> bool:
+        """True when this config was loaded for server-context indexing."""
+        return self._confined_to_codebase_root
+
+    def confine_to_codebase_root(self) -> None:
+        """Mark this config as server context (see the attribute above)."""
+        self._confined_to_codebase_root = True
+
     @field_validator("codebase_dir", mode="before")
     @classmethod
     def convert_path(cls, v: Any) -> Path:
@@ -841,6 +923,39 @@ class Config(BaseModel):
         return v
 
 
+class ConfigVerificationError(ValueError):
+    """Raised by `ConfigManager.load_verified_config()` when the config
+    resolved via `create_with_backtrack()` does not genuinely describe the
+    requested target directory (Bug #1690).
+
+    Subclasses `ValueError` (not a bare `RuntimeError`) so it integrates
+    with existing "orphaned repo -> skip gracefully" `except ValueError`
+    handling already present at call sites such as
+    `search_service.py::search_similar` ("Skipping repo: no valid index
+    configured"), rather than requiring every caller to special-case a new
+    exception type.
+    """
+
+
+class ConfigCorruptionError(ValueError):
+    """Raised by `ConfigManager.load()` ONLY for genuine config.json
+    corruption -- invalid JSON, or valid JSON that is not a top-level
+    object (Bug #1894 P2 review finding).
+
+    Deliberately NARROW: PermissionError/OSError and pydantic schema
+    validation failures (e.g. a legacy field, an out-of-range value) are
+    NOT corruption and must propagate with their native type instead of
+    being wrapped here. `cidx init --force`'s self-heal (which runs
+    autonomously across ~900 production repos via RefreshScheduler) catches
+    ONLY this exception before blindly regenerating a config with defaults
+    -- an over-broad catch would silently destroy recoverable user config
+    on a transient permission error (Anti-Fallback / Anti-Silent-Failure).
+
+    Subclasses `ValueError` so existing `except ValueError` callers that
+    only cared about "load failed" keep working unchanged.
+    """
+
+
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
 
@@ -863,58 +978,78 @@ class ConfigManager:
     def load(self) -> Config:
         """Load configuration from file or create default with dynamic path resolution."""
         if self.config_path.exists():
-            try:
-                with open(self.config_path, "r") as f:
+            # Bug #1894 P2 review finding: only genuine corruption (invalid
+            # JSON, or valid JSON that isn't a top-level object) is
+            # classified as ConfigCorruptionError. PermissionError/OSError
+            # opening the file, and schema/legacy-field ValueErrors below,
+            # are NOT corruption and must propagate with their native type
+            # so `cidx init --force`'s self-heal (Bug #1894 RC2) never
+            # mistakes a transient/recoverable failure for corruption and
+            # blindly regenerates a config with defaults across the fleet
+            # (Anti-Fallback / Anti-Silent-Failure).
+            with open(self.config_path, "r") as f:
+                try:
                     data = json.load(f)
+                except json.JSONDecodeError as e:
+                    raise ConfigCorruptionError(
+                        f"Failed to load config from {self.config_path}: {e}"
+                    ) from e
 
-                # Validate no legacy configuration options BEFORE attempting to parse
-                _validate_no_legacy_config(data)
+            if not isinstance(data, dict):
+                raise ConfigCorruptionError(
+                    f"Failed to load config from {self.config_path}: "
+                    "config.json does not contain a JSON object"
+                )
 
-                # Ensure absolute path for codebase_dir
-                if "codebase_dir" in data:
-                    # Convert to absolute path if needed
-                    path = Path(data["codebase_dir"])
-                    if not path.is_absolute():
-                        # If relative, resolve relative to config directory
-                        config_dir = self.config_path.parent.parent
-                        path = (config_dir / path).resolve()
-                    data["codebase_dir"] = str(path)
-                    # Bug #1033: reconcile against actual config file location.
-                    # On NFS clusters, nodes may mount the same share at different paths.
-                    actual_dir = self.config_path.resolve().parent.parent
-                    if path.is_absolute() and actual_dir != path.resolve():
-                        # Story #1082: the reconciliation (override) below is
-                        # LOAD-BEARING and runs every load; only the WARNING is
-                        # de-spammed to at most once per distinct config path so
-                        # the per-query hot path no longer floods the log
-                        # (e.g. 9,634 warnings in one run). No normalized
-                        # codebase_dir is persisted to shared state -- the memo
-                        # is process-local config-path bookkeeping only.
-                        if _should_warn_codebase_dir_mismatch(str(self.config_path)):
-                            logger.warning(
-                                "codebase_dir mismatch: stored=%s, actual=%s. "
-                                "Using actual path (config at %s). This warning "
-                                "is logged once per config path; the per-node "
-                                "override is applied on every load.",
-                                path,
-                                actual_dir,
-                                self.config_path,
-                            )
-                        path = actual_dir
-                        data["codebase_dir"] = str(path)
+            # Validate no legacy configuration options BEFORE attempting to parse.
+            # Raises native ValueError (recoverable -- not corruption).
+            _validate_no_legacy_config(data)
 
-                self._config = Config(**data)
-
-                # Ensure codebase_dir is absolute even when absent from JSON.
-                # Config() defaults codebase_dir to Path(".") which is relative.
-                # Resolve it against the project root (parent of .code-indexer/).
-                if not self._config.codebase_dir.is_absolute():
+            # Ensure absolute path for codebase_dir
+            if "codebase_dir" in data:
+                # Convert to absolute path if needed
+                path = Path(data["codebase_dir"])
+                if not path.is_absolute():
+                    # If relative, resolve relative to config directory
                     config_dir = self.config_path.parent.parent
-                    self._config.codebase_dir = (
-                        config_dir / self._config.codebase_dir
-                    ).resolve()
-            except Exception as e:
-                raise ValueError(f"Failed to load config from {self.config_path}: {e}")
+                    path = (config_dir / path).resolve()
+                data["codebase_dir"] = str(path)
+                # Bug #1033: reconcile against actual config file location.
+                # On NFS clusters, nodes may mount the same share at different paths.
+                actual_dir = self.config_path.resolve().parent.parent
+                if path.is_absolute() and actual_dir != path.resolve():
+                    # Story #1082: the reconciliation (override) below is
+                    # LOAD-BEARING and runs every load; only the WARNING is
+                    # de-spammed to at most once per distinct config path so
+                    # the per-query hot path no longer floods the log
+                    # (e.g. 9,634 warnings in one run). No normalized
+                    # codebase_dir is persisted to shared state -- the memo
+                    # is process-local config-path bookkeeping only.
+                    if _should_warn_codebase_dir_mismatch(str(self.config_path)):
+                        logger.warning(
+                            "codebase_dir mismatch: stored=%s, actual=%s. "
+                            "Using actual path (config at %s). This warning "
+                            "is logged once per config path; the per-node "
+                            "override is applied on every load.",
+                            path,
+                            actual_dir,
+                            self.config_path,
+                        )
+                    path = actual_dir
+                    data["codebase_dir"] = str(path)
+
+            # Config(**data) raises pydantic ValidationError (a ValueError
+            # subclass) natively on schema violations -- NOT wrapped here.
+            self._config = Config(**data)
+
+            # Ensure codebase_dir is absolute even when absent from JSON.
+            # Config() defaults codebase_dir to Path(".") which is relative.
+            # Resolve it against the project root (parent of .code-indexer/).
+            if not self._config.codebase_dir.is_absolute():
+                config_dir = self.config_path.parent.parent
+                self._config.codebase_dir = (
+                    config_dir / self._config.codebase_dir
+                ).resolve()
         else:
             self._config = Config()
 
@@ -948,8 +1083,7 @@ class ConfigManager:
         # Store absolute path for clarity and reliability
         config_dict["codebase_dir"] = str(Path(config.codebase_dir).absolute())
 
-        with open(self.config_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
+        write_json_atomic(self.config_path, config_dict, indent=2)
 
     def save_with_documentation(self, config: Optional[Config] = None) -> None:
         """Save configuration with documentation and helpful comments."""
@@ -1065,8 +1199,7 @@ code-indexer index --clear
 """
 
         # Write clean JSON config (no comments to avoid parsing issues)
-        with open(self.config_path, "w") as f:
-            json.dump(config_dict, f, indent=2, sort_keys=True)
+        write_json_atomic(self.config_path, config_dict, indent=2, sort_keys=True)
 
         # Create a separate README file with documentation
         readme_path = self.config_path.parent / "README.md"
@@ -1254,6 +1387,78 @@ code-indexer index --clear
 
         # DEFENSIVE: Ensure we always return a ConfigManager with the first found config
         return cls(config_path)
+
+    @classmethod
+    def load_verified_config(cls, target_dir: "Path") -> "Config":
+        """Load a Config for target_dir via create_with_backtrack(),
+        verifying the resolved config genuinely describes target_dir
+        itself -- not a backtracked-from ANCESTOR's config, nor a
+        defaulted fallback (Bug #1690).
+
+        `create_with_backtrack()` walks UP the directory tree from
+        target_dir looking for `.code-indexer/config.json`, and silently
+        returns a bare `Config()` (codebase_dir=".") when nothing is found
+        anywhere. Both outcomes leave `config.codebase_dir` pointing
+        somewhere OTHER than target_dir. A caller that then uses the
+        returned Config to resolve THIS directory's settings (embedding
+        provider, vector_store provider, exclusions, etc.) would silently
+        apply an unrelated repo's configuration instead of failing loud.
+
+        Establishes the same verification Bug #1683 round 4 applied to
+        `AutoWatchManager.start_watch`: STRICT equality between the
+        resolved target and the resolved codebase_dir (never
+        "equal-or-ancestor" -- round 4's own lesson is that permitting
+        codebase_dir to be a strict ancestor of the target is the UNSAFE
+        direction, since it lets a caller silently operate on the
+        ancestor instead of the intended directory).
+
+        Args:
+            target_dir: The directory whose OWN config is required.
+
+        Returns:
+            The verified Config.
+
+        Raises:
+            ConfigVerificationError: resolved config.codebase_dir does not
+                exactly match target_dir (backtracked ancestor OR
+                defaulted). Subclasses ValueError -- see
+                ConfigVerificationError's docstring.
+        """
+        resolved_target = Path(target_dir).resolve()
+        config_manager = cls.create_with_backtrack(resolved_target)
+
+        # Defense-in-depth (Bug #1690 code-review finding, mirrors
+        # auto_watch_manager.py's round-3 guard): the strict-equality
+        # check below is NOT sufficient on its own. When no config exists
+        # ANYWHERE, create_with_backtrack() returns a ConfigManager whose
+        # config_path does not exist; get_config() then returns a bare
+        # Config() whose codebase_dir defaults to the RELATIVE path ".".
+        # Path(".").resolve() equals Path.cwd() -- not target_dir. If the
+        # caller's CWD happens to equal target_dir (e.g. a server process
+        # whose CWD IS the repo it is querying), that coincidental path
+        # aliasing would satisfy the equality check below even though NO
+        # real config was ever found. Checking config_path.exists() first
+        # closes that gap unconditionally, independent of CWD.
+        if not config_manager.config_path.exists():
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found at '{resolved_target}' "
+                "or any parent (create_with_backtrack() defaulted to a "
+                "bare Config with codebase_dir='.'). Refusing to use it "
+                "(Bug #1690)."
+            )
+
+        config = config_manager.get_config()
+        resolved_codebase_dir = Path(config.codebase_dir).resolve()
+        if resolved_codebase_dir != resolved_target:
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found directly at "
+                f"'{resolved_target}' (create_with_backtrack() resolved "
+                f"codebase_dir='{resolved_codebase_dir}' instead -- either "
+                "backtracked onto an unrelated ancestor config, or "
+                "defaulted with no config found anywhere). Refusing to use "
+                "it for a different directory (Bug #1690)."
+            )
+        return config
 
     def enable_daemon(self, ttl_minutes: int = 10) -> None:
         """Enable daemon mode for repository.

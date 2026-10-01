@@ -132,7 +132,9 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             mock_get_cfg_svc.return_value.get_config.return_value = server_config
 
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["temporal"]
+                alias="test-repo",
+                index_types=["temporal"],
+                submitter_username="example-admin",
             )
             _run_captured_worker(manager)
 
@@ -177,7 +179,9 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             mock_get_cfg_svc.return_value.get_config.return_value = server_config
 
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["semantic"]
+                alias="test-repo",
+                index_types=["semantic"],
+                submitter_username="example-admin",
             )
             _run_captured_worker(manager)
 
@@ -239,7 +243,9 @@ class TestAddIndexesTemporalPopenGetsPostgresEnvInClusterMode:
             mock_get_cfg_svc.return_value.get_config.return_value = server_config
 
             manager.add_indexes_to_golden_repo(
-                alias="test-repo", index_types=["temporal"]
+                alias="test-repo",
+                index_types=["temporal"],
+                submitter_username="example-admin",
             )
             _run_captured_worker(manager)
 

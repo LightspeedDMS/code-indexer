@@ -1,0 +1,139 @@
+{
+  "Q1_commit_message_multi_shard": {
+    "applicable": true,
+    "chunk_type": "commit_message",
+    "true_user_limit": 10,
+    "natural_search_limit": 1200,
+    "capped_search_limit": 600,
+    "natural_window_survivors": 20,
+    "capped_window_survivors": 20,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1",
+      "code-indexer-temporal-voyage_context_4-2024Q3"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 252
+      },
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+        "candidates_returned": 360
+      }
+    ]
+  },
+  "Q2_commit_message_small_limit": {
+    "applicable": true,
+    "chunk_type": "commit_message",
+    "true_user_limit": 5,
+    "natural_search_limit": 600,
+    "capped_search_limit": 300,
+    "natural_window_survivors": 20,
+    "capped_window_survivors": 18,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1",
+      "code-indexer-temporal-voyage_context_4-2024Q3"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 252
+      },
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+        "candidates_returned": 360
+      }
+    ]
+  },
+  "Q3_commit_diff": {
+    "applicable": true,
+    "chunk_type": "commit_diff",
+    "true_user_limit": 10,
+    "natural_search_limit": 45,
+    "capped_search_limit": 45,
+    "natural_window_survivors": 90,
+    "capped_window_survivors": 90,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1",
+      "code-indexer-temporal-voyage_context_4-2024Q3"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 45
+      },
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+        "candidates_returned": 45
+      }
+    ]
+  },
+  "Q4_no_chunk_type": {
+    "applicable": false,
+    "reason": "chunk_type=None performs no is_head post-filter; the AC1 cap is a documented no-op for this query."
+  },
+  "Q5_commit_message_larger_limit": {
+    "applicable": true,
+    "chunk_type": "commit_message",
+    "true_user_limit": 20,
+    "natural_search_limit": 2400,
+    "capped_search_limit": 1200,
+    "natural_window_survivors": 20,
+    "capped_window_survivors": 20,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1",
+      "code-indexer-temporal-voyage_context_4-2024Q3"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 252
+      },
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+        "candidates_returned": 360
+      }
+    ]
+  },
+  "Q6_commit_diff_single_shard": {
+    "applicable": true,
+    "chunk_type": "commit_diff",
+    "true_user_limit": 10,
+    "natural_search_limit": 45,
+    "capped_search_limit": 45,
+    "natural_window_survivors": 45,
+    "capped_window_survivors": 45,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 45
+      }
+    ]
+  },
+  "Q7_commit_message_worst_case_small_limit": {
+    "applicable": true,
+    "chunk_type": "commit_message",
+    "true_user_limit": 3,
+    "natural_search_limit": 360,
+    "capped_search_limit": 180,
+    "natural_window_survivors": 20,
+    "capped_window_survivors": 20,
+    "shards_queried": [
+      "code-indexer-temporal-voyage_context_4-2024Q1",
+      "code-indexer-temporal-voyage_context_4-2024Q3"
+    ],
+    "per_shard": [
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q1",
+        "candidates_returned": 252
+      },
+      {
+        "shard": "code-indexer-temporal-voyage_context_4-2024Q3",
+        "candidates_returned": 360
+      }
+    ]
+  }
+}

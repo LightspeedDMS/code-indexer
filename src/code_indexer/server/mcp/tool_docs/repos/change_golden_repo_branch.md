@@ -2,8 +2,8 @@
 name: change_golden_repo_branch
 category: repos
 required_permission: manage_golden_repos
-tl_dr: Change the active branch of a golden repository with automatic re-indexing (async, returns job_id).
-slim_description: "Switch a golden repository to a different branch with automatic re-indexing."
+tl_dr: '[ADMIN ONLY] Change the active branch of a golden repository with automatic re-indexing (async, returns job_id). Requires MCP elevation when enforcement is on.'
+slim_description: "[ADMIN ONLY] Switch a golden repository to a different branch with automatic re-indexing. Requires MCP elevation (TOTP step-up) when enforcement is on."
 inputSchema:
   type: object
   properties:
@@ -51,3 +51,9 @@ DUPLICATE JOB: If a change_branch job is already running for this repository, re
 ERROR CASES: Repository not found (alias does not exist). Invalid branch name (syntactically invalid). Duplicate job already running (use existing_job_id to poll). Git operation failure (network, permissions) — job status will be 'failed'.
 
 RELATED TOOLS: get_job_details (poll job status), refresh_golden_repo (pull latest on same branch), repository_status (check current branch), get_job_statistics (monitor background jobs).
+
+ELEVATION: Matches the Web twin (POST /admin/golden-repos/{alias}/change-branch): requires the admin role and, when elevation enforcement is on, an active elevation window (call `elevate_session` first; MCP-credential and OAuth callers are elevated automatically).
+
+ERRORS:
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)

@@ -12,7 +12,17 @@ import subprocess
 import time
 import threading
 from pathlib import Path
-from typing import Optional, Union, Callable, Dict, Any, List, Literal, cast
+from typing import (
+    Optional,
+    Union,
+    Callable,
+    Dict,
+    Any,
+    List,
+    Literal,
+    cast,
+    TYPE_CHECKING,
+)
 
 import click
 from rich.console import Console
@@ -21,7 +31,13 @@ from rich.table import Table
 
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
-from .config import ConfigManager, Config
+from .config import ConfigManager, Config, ConfigCorruptionError
+
+# CRITICAL: TYPE_CHECKING-only import -- Tantivy must NOT load eagerly at
+# CLI-startup import time (see the "Tantivy lazy import" perf rule).
+# TYPE_CHECKING imports are erased at runtime (mypy-only), so this is safe.
+if TYPE_CHECKING:
+    from .services.tantivy_index_manager import TantivyIndexManager
 from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
 from .disabled_commands import get_command_mode_icons
 from .utils.enhanced_messaging import (
@@ -2307,16 +2323,37 @@ def init(
 
     # Check if config already exists
     if config_manager.config_path.exists():
-        # Load existing config to check for backend changes
-        existing_config = config_manager.load()
+        # Load existing config to check for backend changes. Bug #1894: a
+        # corrupt/truncated config.json (e.g. left 0 bytes by an interrupted
+        # write) must not permanently block repair -- with --force, treat it
+        # as ABSENT so the self-heal path (RefreshScheduler.
+        # _repair_uninitialized_local_repo, which always calls `cidx init
+        # --force`) can converge without operator intervention, exactly like
+        # a first-time init.
+        try:
+            existing_config = config_manager.load()
+        except ConfigCorruptionError as e:
+            if not force:
+                console.print(
+                    f"❌ Existing configuration at {config_manager.config_path} "
+                    f"is invalid or corrupted: {e}"
+                )
+                console.print("Use --force to regenerate it")
+                sys.exit(1)
+            console.print(
+                f"⚠️  Existing configuration at {config_manager.config_path} "
+                "is invalid or corrupted; regenerating",
+                style="yellow",
+            )
+            existing_config = None
         existing_backend = (
             existing_config.vector_store.provider
-            if existing_config.vector_store
+            if existing_config and existing_config.vector_store
             else "filesystem"  # Default if not set
         )
 
         # Check if switching backends with --force
-        if force and existing_backend != vector_store:
+        if force and existing_config is not None and existing_backend != vector_store:
             console.print(
                 "⚠️  Backend switch detected: {} → {}".format(
                     existing_backend, vector_store
@@ -2353,6 +2390,7 @@ def init(
         if not force and create_override_file:
             # Load existing config and create override file
             config = existing_config
+            assert config is not None
             project_root = config.codebase_dir
             if _create_default_override_file(project_root, force=False):
                 console.print(
@@ -2789,7 +2827,9 @@ def set_global_refresh_interval(interval: int):
 
     ops = GlobalRepoOperations(golden_repos_dir)
     try:
-        ops.set_config(interval)
+        # Standalone CLI: the process is not a server, so no audit row is
+        # written; the fixed local actor only satisfies the required argument.
+        ops.set_config(interval, actor="cli-local")
         console.print(
             f"[green]Updated global refresh interval to {interval} seconds[/green]"
         )
@@ -2827,11 +2867,29 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
     Returns config_dir / f"metadata-{provider_name}.json".
 
     Migration for voyage-ai: if metadata-voyage-ai.json does not exist but
-    metadata.json does, a symlink is created so existing incremental state is
-    preserved. If the filesystem does not support symlinks (PermissionError,
-    NotImplementedError, AttributeError), the file is copied instead and a
-    warning is logged. New providers always receive a fresh metadata file,
-    which forces a full index on first use.
+    metadata.json does, the legacy file is copied (byte-for-byte) to the
+    provider path so existing incremental state is preserved. New
+    providers always receive a fresh metadata file, which forces a full
+    index on first use.
+
+    Bug #1624 (reverted): an earlier version of this migration normalized
+    a stale status=in_progress/failed recorded in the legacy file to
+    "completed" in the copy, on the theory that a frozen stale status
+    would otherwise force a reconcile forever once the status check
+    became provider-aware (Bug #1623). Code review rejected that as
+    actively dangerous -- `status` is the SOLE gate on
+    ProgressiveMetadata.can_resume_interrupted_operation(), which
+    SmartIndexer branches on to decide whether to resume an interrupted
+    index; normalizing it silently disabled that resume path while the
+    actual files_to_index/current_file_index/completed_files resume
+    payload was still copied over intact and now unused, causing files
+    that were mid-index at migration time to permanently never get
+    indexed while the metadata falsely claimed "completed" -- a silent
+    partial index. The premise was also false: complete_indexing()/
+    start_indexing() overwrite status on every single index run, so a
+    migrated stale status self-heals on the very next index run with no
+    special-casing needed here. The migration copy is therefore a plain,
+    unconditional byte-for-byte copy with no status manipulation.
     """
     provider_metadata = config_dir / f"metadata-{provider_name}.json"
     if provider_metadata.exists():
@@ -2940,6 +2998,110 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+def reject_sharded_json_for_temporal(
+    *, index_commits: bool, new_collection_layout: Optional[str]
+) -> None:
+    """Refuse `--index-commits` with `--new-collection-layout=sharded_json`.
+
+    Bug #1529 finding #3. Bug #1528's binding rule is that temporal indexing
+    never writes another legacy `vector_*.json` file -- that explosion
+    (487,076 files for one real repo) is why Epic #1454 exists. `sharded_json`
+    defeated it through two independent doors: it SKIPPED the temporal
+    branch's pre-index in-place consolidation, and
+    `FilesystemVectorStore.create_collection` honors an explicit `False` for
+    temporal collections, so brand-new shards were built legacy too.
+
+    This CLI flag is the only production route to that explicit `False` for
+    temporal (the server always passes chunks_db; the daemon refuses legacy
+    shards outright), so refusing the combination here closes both doors.
+
+    Refused rather than silently upgraded to `chunks_db`: an operator who
+    asked for a layout that must not exist should be told, not quietly
+    overridden (Messi #2 -- no silent fallbacks).
+
+    Raises:
+        ValueError: when the two are combined.
+    """
+    if index_commits and new_collection_layout == "sharded_json":
+        raise ValueError(
+            "--new-collection-layout=sharded_json is not supported with "
+            "--index-commits: temporal indexing must never write legacy "
+            "vector_*.json files (Bug #1528). Use chunks_db, or omit the "
+            "flag -- temporal defaults to the consolidated chunks.db layout."
+        )
+
+
+def _resolve_new_collection_layout(
+    choice: Optional[str], *, clear: bool = False
+) -> Optional[bool]:
+    """Story #1488: map the `--new-collection-layout` Click choice to the
+    FilesystemVectorStore/BackendFactory `use_chunks_db_for_new_collections`
+    param.
+
+    - None (flag absent), `clear=False` -> None, so the store falls back to
+      the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var (default SHARDED_JSON).
+    - "chunks_db" -> True (fresh collections built as consolidated chunks.db).
+    - "sharded_json" -> False (legacy per-chunk vector_*.json files).
+
+    Bug #1979 (round 6): the maintainer's own acceptance criteria for this
+    issue are explicit and unconditional -- every `--clear` run must rebuild
+    every configured collection (all providers, plus multimodal) as
+    CHUNKS_DB, without requiring the caller to also pass
+    `--new-collection-layout=chunks_db`. This is a deliberate, issue-scoped
+    exception to the general CLI/daemon SHARDED_JSON-default rule above,
+    specific to `--clear`:
+
+    - None (flag absent), `clear=True` -> True. An EXPLICIT `chunks_db`
+      choice still wins over this clear-implied default the same way (see
+      test_cli_clear_recovers_damaged_layout_1979.py's mechanism, reused
+      here rather than replaced).
+
+    Bug #1979 (round 7): an explicit `sharded_json` choice together with
+    `clear=True` is REJECTED earlier, by a dedicated guard in the `index`
+    command body (before this helper is ever called), because the
+    maintainer's acceptance criterion for this issue is unconditional --
+    every successful `--clear` run must leave every collection on
+    CHUNKS_DB, with no legacy-layout escape hatch. That guard makes the
+    `choice == "sharded_json"` branch below UNREACHABLE with `clear=True`
+    in production; this function still returns `False` for it (as a pure,
+    directly-testable mapping) rather than asserting, since callers other
+    than the `index` command's own guarded call sites could in principle
+    pass `clear=True` deliberately to probe that mapping.
+
+    Only governs the layout of BRAND-NEW collections; an existing
+    collection's committed on-disk discriminator always wins (resolved
+    downstream by resolve_chunk_layout / _is_chunks_db_collection) UNLESS
+    this returns True, in which case `clear_collection()` treats it as an
+    explicit request and recovers even a legacy on-disk collection to
+    CHUNKS_DB (see `FilesystemVectorStore.clear_collection`'s
+    `_new_collection_layout_explicit` check).
+    """
+    if choice is None:
+        return True if clear else None
+    return choice == "chunks_db"
+
+
+def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
+    """Bug #1575 Part C review fix (Defect 3a, temporal-path bypass): a
+    standalone CLI process has no ``app.state`` to inspect via
+    ``is_postgres_storage_mode()`` -- when this CLI is actually a child
+    spawned by the server (e.g. `cidx index --index-commits`), the parent
+    signals postgres/cluster mode via ``CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE``
+    (the SAME env var ``FilesystemBackend.get_vector_store_client()``
+    already honors for the semantic `--fts` path, via the ``os`` module
+    already imported at the top of this file). Mirrors that check exactly
+    so the temporal construction below fails closed identically.
+
+    Returns True (mechanism enabled -- standalone CLI / non-cluster server
+    default) unless the env var is explicitly set to "1".
+    """
+    from .storage.shared.hnsw_sync_state import (
+        CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+    )
+
+    return os.environ.get(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV) != "1"
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -3034,6 +3196,54 @@ def _install_embedding_stats_writer_for_index() -> None:
     help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
     "Used by the server's background worker to stream progress updates.",
 )
+@click.option(
+    "--new-collection-layout",
+    type=click.Choice(["sharded_json", "chunks_db"]),
+    default=None,
+    help="Chunk-storage layout for BRAND-NEW collections only (Story #1488): "
+    "'sharded_json' (legacy per-chunk vector_*.json files) or 'chunks_db' "
+    "(consolidated SQLite chunks.db). An existing collection's on-disk "
+    "layout always wins. Omit to fall back to CIDX_CHUNKS_DB_NEW_COLLECTIONS "
+    "(default: sharded_json).",
+)
+@click.option(
+    "--migrate-chunks-to-sqlite",
+    is_flag=True,
+    default=False,
+    help="Migrate ALL existing sharded (vector_*.json) collections in this "
+    "repository to the consolidated SQLite chunks.db layout, IN PLACE, then "
+    "exit (Story #1488). Runs no indexing pass and cannot be combined with "
+    "indexing-pass options. Durable-before-delete: legacy files are removed "
+    "only after a verified, crash-safe chunks.db is committed. Idempotent and "
+    "crash-resumable; exits non-zero if any collection failed/was skipped.",
+)
+@click.option(
+    "--ignore-resume-state",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: trust a stored interrupted-operation resume state "
+    "(.code-indexer/metadata-<provider>.json) only when it carries a valid "
+    "server-held seal, i.e. a previous server-spawned run wrote it; this "
+    "run's resume state is sealed the same way. Unsealed state is ignored "
+    "and an interrupted operation is completed with a reconcile. Used by "
+    "the server for repos whose working tree a tenant/committer can "
+    "write to. Does NOT force a full reindex (unlike --clear).",
+)
+@click.option(
+    "--server-managed-provider-settings",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="Internal: reset the embedding-provider endpoint(s) and daemon-"
+    "mode selection to fixed, server-managed values before indexing, "
+    "ignoring whatever a repository's own .code-indexer/config.json set "
+    "for those fields. Used by the server for repos whose working tree a "
+    "tenant/committer can write to, since that config cannot be trusted "
+    "to choose where the server's provider requests are sent or whether "
+    "indexing delegates to a daemon. Every other provider setting (model, "
+    "timeout, retries, ...) is left untouched.",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -3054,6 +3264,10 @@ def index(
     since_date: Optional[str],
     diff_context: Optional[int],
     progress_json: bool = False,
+    new_collection_layout: Optional[str] = None,
+    migrate_chunks_to_sqlite: bool = False,
+    ignore_resume_state: bool = False,
+    server_managed_provider_settings: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -3134,6 +3348,36 @@ def index(
     """
     config_manager = ctx.obj["config_manager"]
 
+    def _load_config_for_index() -> Config:
+        """Load config for this `cidx index` invocation.
+
+        A repository's own .code-indexer/config.json must never choose the
+        embedding-provider endpoint or daemon-mode delegation for a
+        server-spawned run. `config_manager.load()`
+        re-parses config.json from disk and returns a NEW object every
+        call, and this command's branches call it more than once (the
+        initial daemon-delegation decision, the temporal branch, the
+        --rebuild-fts-index early exit, and the main indexing path) -- so
+        the override is applied HERE, at the single shared load point,
+        rather than once after an early call whose result a later reload
+        would silently discard. Every other provider setting is left
+        exactly as loaded.
+
+        Either server flag also marks the config as server context, so
+        indexed files stay inside the repository root; a plain local run
+        follows symlinks wherever they point.
+        """
+        loaded_config = cast(Config, config_manager.load())
+        if server_managed_provider_settings:
+            from .server.utils.server_managed_provider_settings import (
+                enforce_server_managed_provider_settings,
+            )
+
+            enforce_server_managed_provider_settings(loaded_config)
+        if ignore_resume_state:
+            loaded_config.confine_to_codebase_root()
+        return loaded_config
+
     # Story #1418: install the embedding-stats writer BEFORE any
     # embedding-provider client is constructed, and BEFORE any
     # --index-commits branching (unlike CIDX_TEMPORAL_PG_BOOTSTRAP_DIR,
@@ -3146,6 +3390,74 @@ def index(
     global console
     if progress_json:
         console = Console(stderr=True)
+
+    # A clear must index from source; rebuild-only modes return before that pass.
+    if clear:
+        for enabled, flag in (
+            (rebuild_fts_index, "--rebuild-fts-index"),
+            (rebuild_index, "--rebuild-index"),
+            (rebuild_indexes, "--rebuild-indexes"),
+        ):
+            if enabled:
+                console.print(
+                    get_conflicting_flags_message("--clear", flag), style="red"
+                )
+                sys.exit(1)
+
+        # Bug #1979 (P2, round 3): reject --clear + --reconcile BEFORE the
+        # daemon_enabled split below, not just in the foreground branch --
+        # otherwise daemon mode forwards both flags straight to
+        # _index_via_daemon and never sees this guard. One check here
+        # covers daemon and foreground identically; the old duplicate
+        # inside the foreground branch is removed.
+        if reconcile:
+            console.print(
+                get_conflicting_flags_message("--clear", "--reconcile"),
+                style="red",
+            )
+            sys.exit(1)
+
+        # Bug #1979 (P2, round 7): the maintainer's acceptance criterion for
+        # this issue is unconditional -- "every configured collection ...
+        # uses the CHUNKS_DB layout" after a successful clear=true run. An
+        # explicit --new-collection-layout=sharded_json request cannot be
+        # honored together with --clear (it would leave legacy
+        # vector_*.json collections in place after a "successful" run), so
+        # reject the combination BEFORE any indexing or daemon delegation --
+        # same place/style as the --reconcile guard above, covering daemon
+        # and foreground identically. Plain --clear and
+        # --clear --new-collection-layout=chunks_db remain allowed.
+        #
+        # Bug #1979 (round 9): this is a SEMANTIC-only concern (Bug #1979 is
+        # about semantic collections). `not index_commits` so a temporal
+        # `--index-commits --clear --new-collection-layout=sharded_json`
+        # falls through to `reject_sharded_json_for_temporal` a few lines
+        # below instead -- temporal already has its OWN Bug #1529 rejection
+        # for exactly this combination, with its own message. Firing THIS
+        # guard first would double-reject with the wrong (semantic) message
+        # for a temporal request, changing pre-#1979 temporal behavior.
+        if new_collection_layout == "sharded_json" and not index_commits:
+            console.print(
+                get_conflicting_flags_message(
+                    "--clear", "--new-collection-layout=sharded_json"
+                ),
+                style="red",
+            )
+            sys.exit(1)
+
+    # Bug #1529 finding #3: refuse an impossible flag combination BEFORE any
+    # indexing work begins, so no legacy temporal shard is ever created.
+    # Sits beside the sibling --diff-context validation below, and after the
+    # `global console` block above (referencing console before that statement
+    # is a SyntaxError).
+    try:
+        reject_sharded_json_for_temporal(
+            index_commits=index_commits,
+            new_collection_layout=new_collection_layout,
+        )
+    except ValueError as exc:
+        console.print(f"❌ {exc}", style="red")
+        sys.exit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3178,8 +3490,48 @@ def index(
             )
 
     # Check if daemon mode is enabled and delegate accordingly
-    config = config_manager.load()
+    config = _load_config_for_index()
+
+    # Story #1488: `--migrate-chunks-to-sqlite` is a one-shot in-place storage
+    # migration that runs BEFORE any daemon delegation (it must never trigger
+    # an indexing pass) and then exits. AC11 rejects it alongside any
+    # indexing-pass option; AC7 fails closed if a live daemon/watch is active.
+    if migrate_chunks_to_sqlite:
+        from .services.chunk_migration_cli import (
+            MigrationLockError,
+            run_chunk_migration,
+            validate_migrate_flag_exclusivity,
+        )
+
+        validate_migrate_flag_exclusivity(
+            clear=clear,
+            reconcile=reconcile,
+            reconcile_embedder=reconcile_embedder,
+            detect_deletions=detect_deletions,
+            rebuild_indexes=rebuild_indexes,
+            rebuild_index=rebuild_index,
+            fts=fts,
+            rebuild_fts_index=rebuild_fts_index,
+            index_commits=index_commits,
+            all_branches=all_branches,
+            max_commits=max_commits,
+            since_date=since_date,
+            diff_context=diff_context,
+            new_collection_layout=new_collection_layout,
+            files_count_to_process=files_count_to_process,
+            progress_json=progress_json,
+            batch_size=batch_size,
+        )
+        try:
+            exit_code = run_chunk_migration(config, config_manager, console=console)
+        except MigrationLockError as exc:
+            console.print(f"❌ {exc}", style="red")
+            sys.exit(1)
+        sys.exit(exit_code)
+
     daemon_enabled = config.daemon and config.daemon.enabled
+    if ignore_resume_state:
+        daemon_enabled = False
 
     # Handle --rebuild-fts-index BEFORE general daemon delegation
     if rebuild_fts_index and daemon_enabled:
@@ -3203,12 +3555,78 @@ def index(
             )
             sys.exit(1)
 
+        # Bug #1979 (P2, round 4): the daemon only ever constructs a single
+        # provider/SmartIndexer (daemon/service.py), so a multi-provider
+        # --clear would silently leave every non-primary provider unrebuilt.
+        # Coordinator ruling: reject up front rather than add a daemon-side
+        # provider loop (filed separately) -- never delegate a clear the
+        # daemon cannot fully honor.
+        #
+        # Bug #1979 (round 9): this is a SEMANTIC-only concern. `not
+        # index_commits` so a temporal `--index-commits --clear` is never
+        # rejected here -- the daemon's temporal branch
+        # (`exposed_index_blocking`'s `if kwargs.get("index_commits",
+        # False):`) never touches embedding_providers/multi-provider
+        # concerns at all; it builds one FilesystemVectorStore directly and
+        # returns before ever reaching the semantic BackendFactory.create
+        # branch this guard protects.
+        if clear and not index_commits:
+            _daemon_guard_providers = config.get_embedding_providers()
+            if len(_daemon_guard_providers) > 1:
+                console.print(
+                    "❌ Multi-provider --clear is not supported in daemon mode",
+                    style="red",
+                )
+                console.print(
+                    "💡 Use local mode for multi-provider clear: cidx config --no-daemon",
+                    style="yellow",
+                )
+                sys.exit(1)
+            # Bug #1979 (P2, round 5): `len([]) > 1` is False, so an EMPTY
+            # embedding_providers list bypassed the guard above entirely --
+            # the rebuild check below then iterates zero providers and
+            # reports success with no verification performed. A single
+            # entry can also legitimately name a DIFFERENT provider than
+            # `config.embedding_provider` (no cross-field validator ties
+            # them together -- see Config.get_embedding_providers()), while
+            # the daemon (daemon/service.py's
+            # EmbeddingProviderFactory.create(config=config)) always
+            # constructs its provider from config.embedding_provider alone.
+            # A mismatch would make the rebuild check below verify a
+            # completely different provider's metadata/rows than the one
+            # the daemon actually indexed. Reject both up front so the
+            # rebuild check is always verifying the SAME single provider
+            # the daemon is guaranteed to have just indexed.
+            elif _daemon_guard_providers != [config.embedding_provider]:
+                console.print(
+                    "❌ --clear in daemon mode requires embedding_providers to be "
+                    f"exactly [{config.embedding_provider!r}] (found "
+                    f"{_daemon_guard_providers!r}) -- the daemon only ever indexes "
+                    "config.embedding_provider",
+                    style="red",
+                )
+                console.print(
+                    "💡 Use local mode for multi-provider clear: cidx config --no-daemon",
+                    style="yellow",
+                )
+                sys.exit(1)
+
         # Delegate to daemon with all parameters
         from .cli_daemon_delegation import _index_via_daemon
 
+        # Bug #1979 (P1, round 3): captured BEFORE delegating, so the
+        # post-delegation rebuild check below (same one the foreground path
+        # runs) can tell "genuinely reindexed this run" apart from "stale
+        # metadata from a previous run" -- mirrors the foreground path's
+        # `_clear_start_time = time.time()`.
+        _daemon_clear_start_time = time.time()
+        _daemon_all_providers = config.get_embedding_providers()
+
         exit_code = _index_via_daemon(
             force_reindex=clear,
-            daemon_config=config.daemon.model_dump(),  # config.daemon is guaranteed to exist here
+            daemon_config=cast(
+                Any, config.daemon
+            ).model_dump(),  # config.daemon is guaranteed to exist here
             enable_fts=fts,
             batch_size=batch_size,
             reconcile=reconcile,
@@ -3219,7 +3637,63 @@ def index(
             max_commits=max_commits,
             since_date=since_date,
             diff_context=diff_context,
+            # Story #1488 (Codex Finding): resolve the new-collection layout ONCE
+            # here (same helper as the foreground path) and thread it through the
+            # daemon so an explicit --new-collection-layout is honored by the
+            # daemon's collection creation. None (flag absent) passes through so
+            # the daemon-side env/default applies -- precedence identical to the
+            # foreground path. Bug #1979 (round 6): `clear=clear` so a daemon-mode
+            # `--clear` with no explicit flag also defaults to CHUNKS_DB.
+            use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                new_collection_layout, clear=clear
+            ),
         )
+
+        # Bug #1979 (P1, round 3): the daemon writes to the SAME on-disk
+        # collections the foreground path reads, so this check can run here
+        # in the CLI process, right after delegation returns. Only when the
+        # daemon itself reported success -- a daemon failure is already a
+        # loud non-zero exit and must not be double-reported as a rebuild-
+        # check failure too.
+        # Bug #1979 (round 9): SEMANTIC-only check -- skip for a temporal
+        # (--index-commits) clear, whose daemon branch never writes the
+        # TEXT collection rows/metadata this check inspects.
+        if clear and not index_commits and exit_code == 0:
+            from .services.provider_rebuild_check import (
+                find_providers_not_rebuilt_since,
+            )
+
+            _daemon_backend = BackendFactory.create(
+                config=config,
+                project_root=Path(config.codebase_dir),
+                use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                    new_collection_layout, clear=clear
+                ),
+            )
+            _daemon_vector_store_client = _daemon_backend.get_vector_store_client()
+            # Bug #1979 (round 4): daemon_mode=True -- the daemon writes
+            # the bare legacy "metadata.json" (reverted from round 3's
+            # per-provider filename; see daemon/service.py), not the
+            # foreground path's metadata-<provider>.json. Safe because
+            # the multi-provider daemon-clear guard above guarantees
+            # exactly one provider reaches this call.
+            _daemon_stale_or_missing = find_providers_not_rebuilt_since(
+                config_manager.config_path.parent,
+                _daemon_all_providers,
+                _daemon_clear_start_time,
+                config=config,
+                vector_store=_daemon_vector_store_client,
+                daemon_mode=True,
+            )
+            if _daemon_stale_or_missing:
+                console.print(
+                    "❌ clear=true did not genuinely rebuild configured "
+                    f"provider(s) {_daemon_stale_or_missing} (skipped, stale, or "
+                    "empty TEXT collection) — index is not a full rebuild.",
+                    style="red",
+                )
+                sys.exit(1)
+
         sys.exit(exit_code)
     else:
         # Display mode indicator
@@ -3326,6 +3800,10 @@ def index(
             # constructing any TemporalMetadataStore. Absence means today's
             # SQLite behavior (CLI/solo byte-unchanged).
             _temporal_pg_pool = None
+            # Story #1488 Codex Finding 1: the shared repo-scoped index-mutation
+            # lock held for the temporal mutation lifecycle. None until entered;
+            # released in the finally below on EVERY exit path.
+            _temporal_index_lock_ctx = None
             _temporal_pg_bootstrap_dir = os.environ.get(
                 "CIDX_TEMPORAL_PG_BOOTSTRAP_DIR"
             )
@@ -3353,11 +3831,36 @@ def index(
                     sys.exit(1)
 
             try:
+                # Story #1488 Codex Finding 1 (CRITICAL, reproduced data loss):
+                # acquire the SAME repo-scoped index-mutation lock the chunk
+                # migration uses, as the FIRST step -- BEFORE any chunk mutation
+                # (--clear temporal wipe, index_commits). A foreground temporal
+                # index previously ran UNLOCKED (it exits this branch before the
+                # semantic path's lock acquisition), letting a concurrent
+                # temporal writer overwrite an already-verified deterministic
+                # shard pathname mid-migration -> silent data loss. Non-blocking:
+                # fail CLOSED with an actionable message if another writer holds
+                # it. Released in the finally below on EVERY exit path.
+                from .services.chunk_migration_cli import (
+                    MigrationLockError as _ForegroundIndexLockError,
+                    acquire_index_mutation_lock as _acquire_foreground_index_lock,
+                )
+
+                _temporal_lock = _acquire_foreground_index_lock(
+                    config_manager.config_path.parent
+                )
+                try:
+                    _temporal_lock.__enter__()
+                except _ForegroundIndexLockError as _idx_lock_exc:
+                    console.print(f"❌ {_idx_lock_exc}", style="red")
+                    sys.exit(1)
+                _temporal_index_lock_ctx = _temporal_lock
+
                 # Lazy import temporal indexing components
                 from .services.temporal.temporal_indexer import TemporalIndexer
                 from .storage.filesystem_vector_store import FilesystemVectorStore
 
-                config = config_manager.load()
+                config = _load_config_for_index()
 
                 # Apply diff_context override if provided
                 if diff_context is not None:
@@ -3373,9 +3876,36 @@ def index(
                     config_manager._config = config
 
                 # Initialize vector store
-                index_dir = config.codebase_dir / ".code-indexer" / "index"
+                #
+                # Bug #1529: in SERVER context a golden repo's temporal data
+                # must live OUTSIDE its own cloned tree at a fixed,
+                # deterministic path -- otherwise every per-user CoW
+                # activation clone copies the whole temporal history and then
+                # queries that frozen-at-clone-time copy forever. This ONE
+                # seam decides the location for the entire temporal branch
+                # below (clear, migrate, consolidate, index, reconcile), and
+                # the read side derives the identical path from the same
+                # module. Standalone CLI (no server marker) is byte-identical
+                # to before: the in-repo index directory.
+                from .services.temporal.temporal_server_paths import (
+                    resolve_temporal_index_dir,
+                )
+
+                index_dir = resolve_temporal_index_dir(config.codebase_dir)
+                # Bug #1528: thread the requested new-collection layout through
+                # to the temporal store, exactly as the semantic paths already
+                # do. Omitting it here silently discarded every explicit
+                # --new-collection-layout choice on the temporal path --
+                # including the server's own --new-collection-layout=chunks_db,
+                # appended to every server-spawned temporal index child by
+                # append_server_layout_args.
                 vector_store = FilesystemVectorStore(
-                    base_path=index_dir, project_root=config.codebase_dir
+                    base_path=index_dir,
+                    project_root=config.codebase_dir,
+                    use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                        new_collection_layout
+                    ),
+                    hnsw_sync_epoch_enabled=_resolve_hnsw_sync_epoch_enabled_for_cli(),
                 )
 
                 # Check if --clear flag is set for temporal collection
@@ -3399,6 +3929,48 @@ def index(
                 # path before the legacy directory has been renamed, so temporal_meta.json
                 # is not found and last_commit = None -> full git log with no limit.
                 migrate_legacy_temporal_collection(index_dir, config)
+
+                # Bug #1528: temporal must never write another legacy
+                # vector_*.json file. The write-path fix only governs BRAND-NEW
+                # collections -- an existing collection's committed on-disk
+                # layout always wins -- so a repo indexed before that fix would
+                # otherwise keep growing its legacy tree on every incremental
+                # run. Migrate those shards IN PLACE first, reusing the same
+                # engine `--migrate-chunks-to-sqlite` drives, under the
+                # index-mutation lock already held above.
+                #
+                # Bug #1529 finding #3: this is now UNCONDITIONAL. It used to
+                # be skipped for `--new-collection-layout=sharded_json`, which
+                # let a repo with pre-existing legacy shards keep growing its
+                # legacy tree on every incremental run. That combination is
+                # now refused at the top of this command, so the skip could
+                # only ever be dead code that silently reopened Bug #1528.
+                from .services.chunk_migration_cli import (
+                    consolidate_legacy_temporal_shards,
+                )
+
+                _migrated, _failed = consolidate_legacy_temporal_shards(
+                    index_dir, console=console
+                )
+                if _failed:
+                    # Fail LOUD: a failed shard is still authoritative in
+                    # its legacy layout, so proceeding would write more
+                    # legacy rows into it.
+                    console.print(
+                        f"❌ {_failed} legacy temporal shard(s) could not "
+                        "be consolidated to chunks.db storage. Refusing to "
+                        "index, because that would keep adding "
+                        "vector_*.json files to them. Fix or remove the "
+                        "reported shard(s) and retry.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                if _migrated:
+                    console.print(
+                        f"✅ Consolidated {_migrated} legacy temporal "
+                        "shard(s) to chunks.db storage",
+                        style="green",
+                    )
 
                 # Initialize temporal indexer with provider-aware collection name.
                 # Story #1290 (E2E-discovered bug): the actual collection_name MUST
@@ -3426,7 +3998,7 @@ def index(
 
                 resolve_temporal_collection_from_config(config)
                 _temporal_coll_name = resolve_temporal_collection_name(
-                    config.temporal.active_embedder
+                    cast(str, config.temporal.active_embedder)
                 )
                 temporal_indexer = TemporalIndexer(
                     config_manager, vector_store, collection_name=_temporal_coll_name
@@ -3714,6 +4286,15 @@ def index(
                     console.print(traceback.format_exc())
                 sys.exit(1)
             finally:
+                # Story #1488 Codex Finding 1: release the shared index-mutation
+                # lock on EVERY exit path (normal return, sys.exit -> SystemExit,
+                # or any exception). No-op if it was never entered (the lock was
+                # already held by another writer -> we fail-closed exited before
+                # setting the sentinel). Direct __exit__ mirrors the semantic
+                # foreground path; the acquire context manager's own finally
+                # handles fd close / unlock cleanup.
+                if _temporal_index_lock_ctx is not None:
+                    _temporal_index_lock_ctx.__exit__(None, None, None)
                 # Bug #1313 round-3: undo this process's PG temporal wiring
                 # regardless of success (sys.exit(0) above) or failure
                 # (sys.exit(1) above) -- SystemExit still runs finally
@@ -3730,7 +4311,7 @@ def index(
     # Handle --rebuild-fts-index flag (early exit path)
     if rebuild_fts_index:
         try:
-            config = config_manager.load()
+            config = _load_config_for_index()
 
             # EVO-66445: the FTS index is (re)built ENTIRELY from files discovered on
             # disk via FileFinder below — it never reads the semantic index or
@@ -3859,8 +4440,37 @@ def index(
                 console.print(traceback.format_exc(), style="dim")
             sys.exit(1)
 
+    # Codex Finding 1a (Story #1488, AC7 data loss): the standalone foreground
+    # `cidx index` semantic mutation acquires the SAME repo-scoped index-
+    # mutation lock the chunk migration uses, so a foreground index and a
+    # migration are MUTUALLY EXCLUSIVE -- a migration can never delete a legacy
+    # point a concurrent foreground index just wrote. Non-blocking: fail CLOSED
+    # with an actionable message if another writer holds it. Held for the whole
+    # foreground mutation lifecycle (released in the `finally` at the end of the
+    # try below). Deliberately NOT applied to the daemon-delegation branch (a
+    # single long-lived daemon is already covered by the migration's socket-
+    # liveness probe) or to `cidx watch`.
+    from .services.chunk_migration_cli import (
+        MigrationLockError as _ForegroundIndexLockError,
+        acquire_index_mutation_lock as _acquire_foreground_index_lock,
+    )
+
+    _index_mutation_lock_ctx = _acquire_foreground_index_lock(
+        config_manager.config_path.parent
+    )
     try:
-        config = config_manager.load()
+        _index_mutation_lock_ctx.__enter__()
+    except _ForegroundIndexLockError as _idx_lock_exc:
+        console.print(f"❌ {_idx_lock_exc}", style="red")
+        sys.exit(1)
+
+    try:
+        config = _load_config_for_index()
+        # Bug #1979: captured before any provider is touched, so the
+        # post-loop rebuild check below can tell "genuinely reindexed this
+        # run" apart from "stale metadata from a previous run" for every
+        # configured provider, not just the primary one.
+        _clear_start_time = time.time()
 
         # Multi-provider loop (Story #620): read embedding_providers, check API keys.
         # config.json is never mutated on disk — only in-memory override is used.
@@ -3879,8 +4489,20 @@ def index(
         from .services.smart_indexer import SmartIndexer
 
         embedding_provider = EmbeddingProviderFactory.create(config, console)
+        # Codex Finding D2: resolve the new-collection layout ONCE so the SAME
+        # value reaches every provider's backend (primary AND every secondary
+        # provider in the multi-provider loop below), never just the primary.
+        # Bug #1979 (round 6): `clear=clear` so a plain foreground `--clear`
+        # (no explicit --new-collection-layout flag) also defaults to
+        # CHUNKS_DB for every provider, per the maintainer's own acceptance
+        # criteria for this issue.
+        _resolved_new_collection_layout = _resolve_new_collection_layout(
+            new_collection_layout, clear=clear
+        )
         backend = BackendFactory.create(
-            config=config, project_root=Path(config.codebase_dir)
+            config=config,
+            project_root=Path(config.codebase_dir),
+            use_chunks_db_for_new_collections=_resolved_new_collection_layout,
         )
         vector_store_client = backend.get_vector_store_client()
 
@@ -4120,11 +4742,9 @@ def index(
                 lambda: progress_manager.reset_progress_timers()
             )
 
-        # Check for conflicting flags
-        if clear and reconcile:
-            error_message = get_conflicting_flags_message("--clear", "--reconcile")
-            console.print(error_message, style="red")
-            sys.exit(1)
+        # Bug #1979 (P2, round 3): the --clear + --reconcile conflict check
+        # now runs BEFORE the daemon_enabled split above (so daemon mode is
+        # covered too) -- removed here to avoid a second copy of the guard.
 
         # Use graceful interrupt handling for the indexing operation
         operation_name = "Indexing"
@@ -4237,6 +4857,7 @@ def index(
                     vector_thread_count=config.voyage_ai.parallel_requests,
                     detect_deletions=detect_deletions,
                     enable_fts=fts,
+                    trust_resume_state=not ignore_resume_state,
                 )
 
                 # Show final completion state (if not interrupted)
@@ -4263,6 +4884,8 @@ def index(
         if stats is None:
             # Early cancellation before stats were initialized
             console.print("🛑 Operation cancelled before completion", style="yellow")
+            if clear:
+                sys.exit(1)
             return
 
         if getattr(stats, "cancelled", False):
@@ -4288,6 +4911,9 @@ def index(
             console.print(
                 f"🚀 Throughput: {files_per_min:.1f} files/min, {chunks_per_min:.1f} chunks/min"
             )
+
+        if clear and getattr(stats, "cancelled", False):
+            sys.exit(1)
 
         if stats.failed_files > 0:
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
@@ -4325,7 +4951,9 @@ def index(
                 )
                 continue
             _extra_backend = BackendFactory.create(
-                config=config, project_root=Path(config.codebase_dir)
+                config=config,
+                project_root=Path(config.codebase_dir),
+                use_chunks_db_for_new_collections=_resolved_new_collection_layout,
             )
             _extra_client = _extra_backend.get_vector_store_client()
             _extra_metadata = _get_provider_metadata_path(
@@ -4348,6 +4976,7 @@ def index(
                 ),
                 detect_deletions=detect_deletions,
                 enable_fts=False,
+                trust_resume_state=not ignore_resume_state,
             )
             if _extra_stats is not None:
                 console.print(
@@ -4356,9 +4985,102 @@ def index(
                     style="green",
                 )
 
+        # Bug #1979: clear=true is "index from scratch" -- a configured
+        # provider skipped for ANY reason (missing key, a failed health
+        # check, or anything else) must not let this operation exit 0.
+        # Mirrors the same check the server's ActivatedRepoIndexManager
+        # runs for the activated-repo clear path (Story via
+        # provider_rebuild_check.find_providers_not_rebuilt_since) so both
+        # front doors enforce one identical rule.
+        if clear:
+            from .services.provider_rebuild_check import (
+                find_providers_not_rebuilt_since,
+            )
+
+            _stale_or_missing = find_providers_not_rebuilt_since(
+                config_manager.config_path.parent,
+                _all_providers,
+                _clear_start_time,
+                config=config,
+                vector_store=vector_store_client,
+            )
+            if _stale_or_missing:
+                console.print(
+                    "❌ clear=true did not genuinely rebuild configured "
+                    f"provider(s) {_stale_or_missing} (skipped, stale, or "
+                    "empty TEXT collection) — index is not a full rebuild.",
+                    style="red",
+                )
+                sys.exit(1)
+
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
         sys.exit(1)
+    finally:
+        # Codex Finding 1a: release the foreground index-mutation lock on
+        # EVERY exit path (normal return, sys.exit -> SystemExit, or any
+        # exception) so it is never leaked past the mutation lifecycle.
+        _index_mutation_lock_ctx.__exit__(None, None, None)
+
+
+def _populate_fts_index_from_disk(
+    config: Config,
+    fts_manager: "TantivyIndexManager",
+    console: Optional[Console] = None,
+) -> int:
+    """Bug #1763 (CRITICAL-2, code review): fully repopulate an FTS index
+    from every file currently on disk.
+
+    Used by `cidx watch`'s FTS handler initialization when a stale-schema
+    or brand-new Tantivy index was just wiped/created empty (see the
+    fts_needs_full_population check in watch() below). This watch-mode
+    entry point does not always run through smart_index() first (e.g.
+    semantic indexing disabled, or this is not the initial sync), so it
+    cannot rely on SmartIndexer._populate_fts_from_all_files() having
+    already repopulated the index -- this mirrors that method's discover
+    + add_document approach as a standalone helper since no SmartIndexer
+    instance is guaranteed to exist here.
+
+    Args:
+        config: Loaded Config instance (codebase_dir + file discovery
+            rules).
+        fts_manager: An initialized TantivyIndexManager (writer already
+            created via initialize_index()).
+        console: Optional Rich console for a completion message.
+
+    Returns:
+        Number of files successfully added to the FTS index.
+    """
+    from .indexing.file_finder import FileFinder
+
+    file_finder = FileFinder(config)
+    discovered_files = list(file_finder.find_files())
+    codebase = Path(config.codebase_dir)
+    count = 0
+    for file_path in discovered_files:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            rel_path = str(file_path.relative_to(codebase))
+            language = file_path.suffix.lstrip(".") or "txt"
+            fts_manager.add_document(
+                {
+                    "path": rel_path,
+                    "content": text,
+                    "content_raw": text,
+                    "identifiers": text.split(),
+                    "line_start": 1,
+                    "line_end": max(len(lines), 1),
+                    "language": language,
+                }
+            )
+            count += 1
+        except Exception as e:
+            logger.warning(f"FTS: skipping {file_path}: {e}")
+    fts_manager.commit()
+    if console is not None:
+        console.print(f"✅ FTS index repopulated from {count} files", style="green")
+    return count
 
 
 @cli.command()
@@ -4434,6 +5156,26 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         sys.exit(1)
 
     console.print(f"🔍 Detected {detected_count} index(es) to watch:", style="blue")
+
+    # Story #1488 Codex Finding 1: a standalone watch session mutates chunks
+    # (initial smart_index sync + the git-aware/FTS/temporal watch handlers), so
+    # acquire the SAME repo-scoped index-mutation lock the chunk migration uses
+    # and hold it for the whole session -- mutually exclusive with a migration
+    # and a foreground index. Non-blocking: fail CLOSED with an actionable
+    # message if another writer holds it. Released in the finally below.
+    from .services.chunk_migration_cli import (
+        MigrationLockError as _ForegroundIndexLockError,
+        acquire_index_mutation_lock as _acquire_foreground_index_lock,
+    )
+
+    _watch_index_lock_ctx = _acquire_foreground_index_lock(
+        config_manager.config_path.parent
+    )
+    try:
+        _watch_index_lock_ctx.__enter__()
+    except _ForegroundIndexLockError as _idx_lock_exc:
+        console.print(f"❌ {_idx_lock_exc}", style="red")
+        sys.exit(1)
 
     try:
         from watchdog.observers import Observer
@@ -4572,11 +5314,66 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
             fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
             tantivy_manager = TantivyIndexManager(fts_index_dir)
 
-            # Initialize or open existing index
-            if fts_index_dir.exists():
-                tantivy_manager.initialize_index(create_new=False)
-            else:
-                tantivy_manager.initialize_index(create_new=True)
+            # Initialize or open existing index. Bug #1763: an existing
+            # index built before Bug #1761 introduced _PATH_EXACT_FIELD
+            # lacks that field forever unless forced through a one-time
+            # rebuild -- self-heal it here too, same as smart_indexer.py.
+            fts_index_exists = (fts_index_dir / "meta.json").exists()
+            fts_schema_stale = (
+                fts_index_exists and tantivy_manager.schema_needs_rebuild()
+            )
+            # CRITICAL-2 (#1763 code review): this init runs independently
+            # of smart_index()'s own initial-sync FTS bootstrap -- e.g.
+            # when semantic indexing is disabled, or this is not the
+            # initial sync -- so it cannot assume that path already
+            # repopulated a wiped/brand-new index. Track whether a full
+            # from-disk repopulation is needed here too.
+            fts_needs_full_population = fts_schema_stale or not fts_index_exists
+            if fts_schema_stale:
+                logger.warning(
+                    f"FTS index at {fts_index_dir} has a stale pre-#1761 "
+                    f"schema -- clearing for a one-time rebuild so the "
+                    f"dedup fix takes effect (existing entries will be "
+                    f"re-added from disk)"
+                )
+                console.print(
+                    "🔧 FTS index has a stale schema -- rebuilding from "
+                    "disk (existing entries will be re-added)...",
+                    style="yellow",
+                )
+                import shutil
+
+                try:
+                    shutil.rmtree(fts_index_dir)
+                except OSError as e:
+                    # MEDIUM-4-equivalent hardening: a mid-rmtree failure
+                    # (disk full, EACCES) must not propagate raw and
+                    # unhandled -- log distinctly (the index directory may
+                    # be left partially deleted) before re-raising. The
+                    # surrounding try/except at the bottom of this command
+                    # already prints "Git-aware watch failed" and exits
+                    # non-zero on any exception here, so this re-raise is
+                    # still caught loudly rather than crashing raw.
+                    logger.error(
+                        f"FTS stale-schema rebuild failed while clearing "
+                        f"{fts_index_dir} -- the index directory may be "
+                        f"left in a partially-deleted state: {e}"
+                    )
+                    raise
+
+            tantivy_manager.initialize_index(
+                create_new=(not fts_index_exists) or fts_schema_stale
+            )
+
+            # CRITICAL-1/2 (#1763 code review): a stale-schema or
+            # brand-new FTS index was just wiped/created empty above --
+            # repopulate ALL files from disk now so untouched files' FTS
+            # entries aren't silently lost. This watch-mode entry point
+            # has no SmartIndexer instance available when FTS is enabled
+            # without semantic indexing, so it cannot delegate to
+            # SmartIndexer._populate_fts_from_all_files().
+            if fts_needs_full_population:
+                _populate_fts_index_from_disk(config, tantivy_manager, console)
 
             fts_watch_handler = FTSWatchHandler(
                 tantivy_index_manager=tantivy_manager,
@@ -4690,6 +5487,15 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
             if semantic_handler:
                 semantic_handler.stop_watching()
 
+            # Bug #1825: observer.stop() only stops the watchdog Observer's
+            # inotify-event thread -- the temporal handler's polling
+            # fallback (when active) runs on its OWN independent thread
+            # that observer.stop() never touches. Without this, a session
+            # that fell back to polling leaked that thread for the rest of
+            # the process's life.
+            if temporal_watch_handler:
+                temporal_watch_handler.stop()
+
             observer.stop()
             observer.join()
 
@@ -4718,6 +5524,13 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
 
         console.print(traceback.format_exc())
         sys.exit(1)
+    finally:
+        # Story #1488 Codex Finding 1: release the shared index-mutation lock
+        # when the standalone watch session ends (normal stop, sys.exit, or any
+        # exception) so a subsequent migration / foreground index / daemon can
+        # acquire it. The acquire context manager's own finally handles fd
+        # close / unlock cleanup.
+        _watch_index_lock_ctx.__exit__(None, None, None)
 
 
 # Story 2.1 Display Helper Functions
@@ -5550,6 +6363,52 @@ def query(
             for d in index_dir.iterdir()
             if d.is_dir()
         )
+
+        # Bug #1482 extension: the local-clone scan above cannot see
+        # temporal data relocated to the golden-owned sister location
+        # (Story #1457 AC1). The ONE genuine standalone case where this
+        # matters is an operator running `cidx query` directly inside a
+        # golden repo's own clone (bypassing the server) --
+        # detect_golden_repo_sister_root() recognizes ONLY that exact,
+        # pre-existing structural layout and returns None for an
+        # ordinary standalone repo, so this is entirely inert (and
+        # correctly so) for the overwhelmingly common case. Fail-open:
+        # any detection/resolution error leaves _has_temporal at its
+        # local-scan value.
+        if not _has_temporal:
+            try:
+                # Bug #1529: same structural golden-repo detection, now from
+                # temporal_server_paths (the single location authority).
+                from code_indexer.services.temporal.temporal_server_paths import (
+                    resolve_golden_repo_coordinates,
+                )
+                from code_indexer.services.temporal.temporal_status import (
+                    get_temporal_repo_status,
+                )
+
+                _coords = resolve_golden_repo_coordinates(config.codebase_dir)
+                if _coords is not None:
+                    _sister_status = get_temporal_repo_status(
+                        _coords[0],
+                        _coords[1],
+                        index_dir,
+                    )
+                    _has_temporal = _sister_status.has_data
+            except Exception:
+                # NOTE: uses logging.getLogger(...) directly, NOT the bare
+                # `logger` name -- query()'s function body later assigns a
+                # LOCAL `logger` (pre-existing, unrelated to this change),
+                # which makes `logger` a local for this whole function and
+                # would trip "referenced before assignment" here.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "cidx query temporal: sister-relocated temporal "
+                    "detection failed (isolated, non-fatal); using "
+                    "local-scan-only result",
+                    exc_info=True,
+                )
+
         if not _has_temporal:
             console.print("[yellow]⚠️  Temporal index not available[/yellow]")
             console.print()
@@ -7650,12 +8509,32 @@ def _status_impl(ctx):
                                     "HNSW Index: ⚠️ Missing (queries will be slow)"
                                 )
 
-                            # ID index check (binary file that persists to disk)
+                            # ID index check (binary file that persists to disk).
+                            # Issue #1459 AC1/AC5: id_index.bin is PERMANENTLY,
+                            # DELIBERATELY never written for a CHUNKS_DB-layout
+                            # collection (Story #1456) -- its absence there is
+                            # the correct, expected state, not a warning
+                            # condition. Layout decision routes through the
+                            # single canonical resolver, never an independent
+                            # flag/file check.
+                            from .storage.shared.chunk_layout import (
+                                ChunkLayout,
+                                resolve_chunk_layout,
+                            )
+
+                            semantic_chunk_layout = resolve_chunk_layout(
+                                collection_path
+                            )
                             id_index_file = collection_path / "id_index.bin"
                             if id_index_file.exists():
                                 size_kb = id_index_file.stat().st_size / 1024
                                 index_files_status.append(
                                     f"ID Index: ✅ {size_kb:.0f} KB"
+                                )
+                            elif semantic_chunk_layout == ChunkLayout.CHUNKS_DB:
+                                index_files_status.append(
+                                    "ID Index: ➖ N/A (retired -- consolidated "
+                                    "chunks.db storage)"
                                 )
                             else:
                                 index_files_status.append(
@@ -7781,7 +8660,14 @@ def _status_impl(ctx):
                                 missing_components.append("projection_matrix")
                             if not has_hnsw_index:
                                 missing_components.append("hnsw")
-                            if not has_id_index:
+                            # Issue #1459 AC1: a CHUNKS_DB-layout collection's
+                            # missing id_index.bin is permanent/expected, not a
+                            # recoverable gap -- never surface the bogus
+                            # "rebuild id_index" recovery instruction for it.
+                            if (
+                                not has_id_index
+                                and semantic_chunk_layout != ChunkLayout.CHUNKS_DB
+                            ):
                                 missing_components.append("id_index")
 
                             # Store for later display
@@ -7869,11 +8755,30 @@ def _status_impl(ctx):
                                 "HNSW Index: ⚠️ Missing"
                             )
 
-                        # ID index
+                        # ID index. Issue #1459 AC1/AC5: same layout-aware
+                        # treatment as the semantic collection above --
+                        # id_index.bin is permanently retired for a
+                        # CHUNKS_DB-layout collection, so its absence there is
+                        # not a warning condition.
+                        from .storage.shared.chunk_layout import (
+                            ChunkLayout as _MultimodalChunkLayout,
+                            resolve_chunk_layout as _resolve_multimodal_chunk_layout,
+                        )
+
+                        multimodal_chunk_layout = _resolve_multimodal_chunk_layout(
+                            multimodal_collection
+                        )
                         if multimodal_id_index.exists():
                             size_kb = multimodal_id_index.stat().st_size / 1024
                             multimodal_index_files_status.append(
                                 f"ID Index: ✅ {size_kb:.0f} KB"
+                            )
+                        elif (
+                            multimodal_chunk_layout == _MultimodalChunkLayout.CHUNKS_DB
+                        ):
+                            multimodal_index_files_status.append(
+                                "ID Index: ➖ N/A (retired -- consolidated "
+                                "chunks.db storage)"
                             )
                         else:
                             multimodal_index_files_status.append("ID Index: ⚠️ Missing")
@@ -7906,7 +8811,53 @@ def _status_impl(ctx):
 
                     temporal_collections = _get_temporal_collections(config, index_path)
 
+                    # Bug #1482 extension: the local scan above cannot see
+                    # temporal data relocated to the golden-owned sister
+                    # location (Story #1457 AC1). detect_golden_repo_sister_root()
+                    # recognizes ONLY the one genuine standalone case (an
+                    # operator running `cidx status` directly inside a
+                    # golden repo's own clone) and returns None for an
+                    # ordinary standalone repo, so this is entirely inert
+                    # for the common case. Fail-open on any error.
+                    _sister_temporal_status = None
                     if not temporal_collections:
+                        try:
+                            from .services.temporal.temporal_server_paths import (
+                                resolve_golden_repo_coordinates,
+                            )
+                            from .services.temporal.temporal_status import (
+                                get_temporal_repo_status,
+                            )
+
+                            _coords = resolve_golden_repo_coordinates(
+                                config.codebase_dir
+                            )
+                            if _coords is not None:
+                                _sister_temporal_status = get_temporal_repo_status(
+                                    _coords[0],
+                                    _coords[1],
+                                    index_path,
+                                )
+                        except Exception as e_sister:
+                            logger.warning(
+                                f"cidx status: sister-relocated temporal "
+                                f"detection failed (isolated, non-fatal): "
+                                f"{e_sister}"
+                            )
+
+                    if _sister_temporal_status and _sister_temporal_status.has_data:
+                        _sister_state = (
+                            "✅ Queryable"
+                            if _sister_temporal_status.is_queryable
+                            else "⏳ Indexed (not yet queryable)"
+                        )
+                        table.add_row(
+                            "Temporal Index",
+                            f"{_sister_state} (sister location)",
+                            "Relocated to golden-owned sister storage -- "
+                            "query via the server, not this standalone CLI",
+                        )
+                    elif not temporal_collections:
                         # No temporal collections found — show "not configured" row
                         table.add_row(
                             "Temporal Index",
@@ -11008,6 +11959,201 @@ def server_status(ctx, verbose: bool, server_dir: Optional[str]):
         sys.exit(1)
 
 
+def _resolve_temporal_legacy_migration_settings():
+    """Read temporal_legacy_migration_config via ConfigService (Issue #1548
+    blocker 6). Raises loudly if the config section is unavailable --
+    ServerConfig.__post_init__ guarantees it is always populated in
+    practice, so this is a defensive invariant check, not a normal path.
+    """
+    from .server.services.config_service import get_config_service
+
+    settings = get_config_service().get_config().temporal_legacy_migration_config
+    if settings is None:
+        raise click.ClickException("temporal_legacy_migration_config is unavailable")
+    return settings
+
+
+def _resolve_temporal_legacy_migration_candidates(manager, repo_alias: Optional[str]):
+    from .server.services.temporal_legacy_migration.discovery import (
+        discover_candidates,
+    )
+
+    candidates = list(discover_candidates(manager))
+    if repo_alias is not None:
+        candidates = [item for item in candidates if item.alias == repo_alias]
+        if not candidates:
+            raise click.ClickException(
+                f"golden repository alias not found: {repo_alias}"
+            )
+    return candidates
+
+
+def _migrate_one_cli_candidate(
+    candidate, *, cleanup_authorized: bool, refresh_scheduler, backend_factory
+):
+    """Migrate one candidate under the refresh-safe write lock.
+
+    Issue #1548 review finding 3: the CLI previously called
+    ``migrate_temporal_shards`` with NO locking at all -- only the
+    scheduler's ``run_once`` path was guarded. Mirrors
+    ``scheduler.py``'s ``_migrate_one_candidate`` exactly: acquire the
+    lock, migrate, and on ``WriteLockHeldError``/``RefreshInProgressError``
+    skip this candidate for this pass (never raise) rather than corrupt
+    data by racing a live refresh.
+    """
+    from .server.services.temporal_legacy_migration.locking import (
+        RefreshInProgressError,
+        WriteLockHeldError,
+        guarded_by_refresh_lock,
+    )
+    from .server.services.temporal_legacy_migration.mover import (
+        migrate_temporal_shards,
+    )
+
+    try:
+        with guarded_by_refresh_lock(
+            refresh_scheduler, candidate.alias
+        ) as lock_loss_signal:
+            return migrate_temporal_shards(
+                candidate.legacy_root,
+                candidate.fixed_root,
+                relocation_enabled=True,
+                cleanup_authorized=cleanup_authorized,
+                metadata_backend_factory=backend_factory,
+                lock_lost_check=lock_loss_signal,
+            )
+    except (WriteLockHeldError, RefreshInProgressError) as exc:
+        console.print(f"{candidate.alias}: skipped this pass ({exc})", style="yellow")
+        return None
+
+
+def _run_temporal_legacy_migration_candidates(
+    candidates, *, cleanup_authorized: bool, refresh_scheduler
+):
+    from .storage.temporal_metadata_backend_registry import (
+        get_temporal_metadata_backend_factory,
+    )
+
+    if refresh_scheduler is None:
+        raise click.ClickException(
+            "temporal legacy migration requires a wired RefreshScheduler "
+            "(golden_repo_manager._refresh_scheduler is None) -- the "
+            "server must be fully started before this command can run"
+        )
+
+    # get_temporal_metadata_backend_factory() returns None by design in
+    # solo/CLI context (see that module's own docstring); mover.py's
+    # _sync_metadata_scope already no-ops on a None factory, so passing it
+    # straight through is correct and requires no special-casing here.
+    backend_factory = get_temporal_metadata_backend_factory()
+    totals = {
+        "published": 0,
+        "deleted": 0,
+        "collisions": 0,
+        "failed": 0,
+        "lock_skipped": 0,
+    }
+    for candidate in candidates:
+        result = _migrate_one_cli_candidate(
+            candidate,
+            cleanup_authorized=cleanup_authorized,
+            refresh_scheduler=refresh_scheduler,
+            backend_factory=backend_factory,
+        )
+        if result is None:
+            # Issue #1548 third-round review blocker 5: a lock-held/
+            # refresh-in-progress skip must be VISIBLE in the run's
+            # totals and reflected in the exit code -- a candidate that
+            # could not be processed this pass must never look identical
+            # to a fully clean run.
+            totals["lock_skipped"] += 1
+            continue
+        totals["published"] += result.published
+        totals["deleted"] += result.deleted
+        totals["collisions"] += result.collisions
+        totals["failed"] += result.failed
+        style = "red" if result.failed else ("yellow" if result.collisions else None)
+        console.print(
+            f"{candidate.alias}: published={result.published}, "
+            f"already_complete={result.already_complete}, "
+            f"deleted={result.deleted}, collisions={result.collisions}, "
+            f"failed={result.failed}",
+            style=style,
+        )
+    console.print(
+        f"Migration complete: published={totals['published']}, "
+        f"deleted={totals['deleted']}, collisions={totals['collisions']}, "
+        f"failed={totals['failed']}, lock_skipped={totals['lock_skipped']}"
+    )
+    if totals["failed"]:
+        raise click.ClickException(
+            f"{totals['failed']} temporal shard migration failure(s) occurred"
+        )
+    if totals["collisions"] or totals["lock_skipped"]:
+        # Blocker 5: an unresolved collision (deferred to manual review)
+        # or a lock-skipped candidate (never even attempted this pass)
+        # are both "this run did not fully succeed" outcomes -- a
+        # non-zero exit distinguishes them from a genuinely clean run,
+        # even though neither is a hard per-shard failure.
+        raise click.ClickException(
+            f"{totals['collisions']} unresolved collision(s) and "
+            f"{totals['lock_skipped']} lock-skipped candidate(s) remain -- "
+            "rerun after resolving lock conflicts, or review collisions "
+            "manually"
+        )
+
+
+@server_group.command("temporal-migrate-legacy")
+@click.option("--alias", "repo_alias", default=None, help="Migrate only this alias")
+@click.option(
+    "--cleanup",
+    is_flag=True,
+    help="Delete each legacy shard only after verification succeeds",
+)
+@click.pass_context
+def server_temporal_migrate_legacy(ctx, repo_alias: Optional[str], cleanup: bool):
+    """Relocate legacy temporal shards into fixed server-owned storage.
+
+    Issue #1548 blocker 6: respects the two independent, Web-UI-gated
+    temporal_legacy_migration_config flags (relocation_enabled /
+    cleanup_authorized) -- this command NEVER proceeds against operator
+    intent just because it was invoked.
+    """
+    try:
+        settings = _resolve_temporal_legacy_migration_settings()
+        if not settings.relocation_enabled:
+            console.print(
+                "Temporal legacy migration is disabled "
+                "(temporal_legacy_migration_config.relocation_enabled is "
+                "False in the Web UI Config Screen) -- doing nothing.",
+                style="yellow",
+            )
+            return
+        cleanup_authorized = cleanup and settings.cleanup_authorized
+        if cleanup and not settings.cleanup_authorized:
+            console.print(
+                "--cleanup was requested but "
+                "temporal_legacy_migration_config.cleanup_authorized is "
+                "False in the Web UI Config Screen -- legacy shards will "
+                "be published but NOT deleted.",
+                style="yellow",
+            )
+        from .server.repositories.golden_repo_manager import get_golden_repo_manager
+
+        manager = get_golden_repo_manager()
+        refresh_scheduler = manager._refresh_scheduler
+        candidates = _resolve_temporal_legacy_migration_candidates(manager, repo_alias)
+        _run_temporal_legacy_migration_candidates(
+            candidates,
+            cleanup_authorized=cleanup_authorized,
+            refresh_scheduler=refresh_scheduler,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(f"temporal migration failed: {exc}") from exc
+
+
 @server_group.command("restart")
 @click.option(
     "--server-dir",
@@ -11571,6 +12717,11 @@ def server_auto_update_status(ctx):
 
 
 # SSH Key Management commands
+# Actor passed to the audited SSH key operations from the standalone CLI.  The
+# CLI is never a server process, so these operations record no audit row.
+_CLI_LOCAL_ACTOR = "cli-local"
+
+
 @cli.group("ssh-key")
 @click.pass_context
 def ssh_key_group(ctx):
@@ -11618,11 +12769,13 @@ def ssh_key_create(ctx, name: str, key_type: str, email: str, description: str):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.create_key(
-            name=name,
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.create_key_audited(
+            name,
             key_type=key_type,
             email=email,
             description=description,
+            actor=_CLI_LOCAL_ACTOR,
         )
 
         console.print(f"[green]SSH key '{name}' created successfully[/green]")
@@ -11703,7 +12856,8 @@ def ssh_key_delete(ctx, name: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        manager.delete_key(name)
+        # Standalone CLI: no server process, so no audit row is written.
+        manager.delete_key_audited(name, actor=_CLI_LOCAL_ACTOR)
 
         console.print(f"[green]SSH key '{name}' deleted successfully[/green]")
 
@@ -11758,7 +12912,10 @@ def ssh_key_assign(ctx, name: str, host: str, force: bool):
         from .server.services.ssh_key_manager import SSHKeyManager
 
         manager = SSHKeyManager()
-        metadata = manager.assign_key_to_host(name, host, force=force)
+        # Standalone CLI: no server process, so no audit row is written.
+        metadata = manager.assign_key_to_host_audited(
+            name, host, force=force, actor=_CLI_LOCAL_ACTOR
+        )
 
         console.print(f"[green]Key '{name}' assigned to '{host}'[/green]")
         console.print()
@@ -19046,6 +20203,7 @@ def global_regex_search(
                 ],
                 "total_matches": result.total_matches,
                 "truncated": result.truncated,
+                "read_capped": result.read_capped,
                 "search_engine": result.search_engine,
                 "search_time_ms": result.search_time_ms,
             }
@@ -19058,10 +20216,21 @@ def global_regex_search(
                 )
                 return
 
-            console.print(
-                f"[green]Found {result.total_matches} matches[/green] "
-                f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
-            )
+            if result.read_capped:
+                # Issue #1601 Priority 8: a human-readable CLI user has
+                # no other way to know the scan stopped early -- disclose
+                # it explicitly instead of silently implying total_matches
+                # is a complete, exact count.
+                console.print(
+                    f"[yellow]Found at least {result.total_matches} matches "
+                    f"(scan capped)[/yellow] "
+                    f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
+                )
+            else:
+                console.print(
+                    f"[green]Found {result.total_matches} matches[/green] "
+                    f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
+                )
             console.print()
 
             for match in result.matches:

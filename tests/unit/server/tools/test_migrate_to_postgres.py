@@ -786,10 +786,19 @@ class TestPsycopgLazyImport:
         # Remove psycopg from sys.modules to simulate it being absent
         psycopg_backup = sys.modules.pop("psycopg", None)
         psycopg_rows_backup = sys.modules.pop("psycopg.rows", None)
+        # Bug found via issue #1696 Session 1: this test forces a fresh
+        # re-import of migrate_to_postgres below, which replaces the
+        # module object (and its SqliteToPostgresMigrator class) cached
+        # in sys.modules. Without restoring the ORIGINAL module object
+        # here, every other test file that imported SqliteToPostgresMigrator
+        # at collection time keeps using the OLD class, while any
+        # patch("code_indexer.server.tools.migrate_to_postgres.psycopg")
+        # resolves against the NEW module object -- so the patch silently
+        # stops intercepting calls for the rest of the pytest process.
+        migrate_module_name = "code_indexer.server.tools.migrate_to_postgres"
+        migrate_module_backup = sys.modules.pop(migrate_module_name, None)
         try:
             # Force re-import
-            if "code_indexer.server.tools.migrate_to_postgres" in sys.modules:
-                del sys.modules["code_indexer.server.tools.migrate_to_postgres"]
             # Should not raise ImportError
             import code_indexer.server.tools.migrate_to_postgres  # noqa: F401
         finally:
@@ -797,6 +806,23 @@ class TestPsycopgLazyImport:
                 sys.modules["psycopg"] = psycopg_backup
             if psycopg_rows_backup is not None:
                 sys.modules["psycopg.rows"] = psycopg_rows_backup
+            if migrate_module_backup is not None:
+                sys.modules[migrate_module_name] = migrate_module_backup
+                # Repair parent package attribute: the plain `import
+                # code_indexer.server.tools.migrate_to_postgres` statement
+                # above also sets the NEW module as an attribute on the
+                # parent `code_indexer.server.tools` package object.
+                # unittest.mock's target-string resolution (_importer())
+                # traverses parent-package ATTRIBUTES via getattr(), not
+                # sys.modules, for each dotted segment -- so restoring
+                # only the sys.modules dict entry above is not enough;
+                # the parent's attribute must point back at the ORIGINAL
+                # module object too, or patch("code_indexer.server.tools.
+                # migrate_to_postgres.psycopg") keeps resolving to the
+                # stale new module regardless of sys.modules' state.
+                import code_indexer.server.tools as _tools_pkg
+
+                _tools_pkg.migrate_to_postgres = migrate_module_backup
 
     def test_get_pg_connection_raises_import_error_when_psycopg_absent(
         self, tmp_path: Path, migrator_class

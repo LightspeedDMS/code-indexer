@@ -27,11 +27,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepo,
     GoldenRepoManager,
 )
@@ -993,11 +993,11 @@ class TestCacheInvalidationAfterBranchDeltaReindex:
 
     def _make_real_caches(self):
         """Return fresh, isolated HNSWIndexCache and IdIndexCache instances."""
-        from src.code_indexer.server.cache.hnsw_index_cache import (
+        from code_indexer.server.cache.hnsw_index_cache import (
             HNSWIndexCache,
             HNSWIndexCacheConfig,
         )
-        from src.code_indexer.server.cache.id_index_cache import (
+        from code_indexer.server.cache.id_index_cache import (
             IdIndexCache,
             IdIndexCacheConfig,
         )
@@ -1059,11 +1059,11 @@ class TestCacheInvalidationAfterBranchDeltaReindex:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.get_global_cache",
+                "code_indexer.server.repositories.activated_repo_manager.get_global_cache",
                 return_value=hnsw_cache,
             ),
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.get_global_id_index_cache",
+                "code_indexer.server.repositories.activated_repo_manager.get_global_id_index_cache",
                 return_value=id_cache,
             ),
         ):
@@ -1109,11 +1109,11 @@ class TestCacheInvalidationAfterBranchDeltaReindex:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.get_global_cache",
+                "code_indexer.server.repositories.activated_repo_manager.get_global_cache",
                 return_value=hnsw_cache,
             ),
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.get_global_id_index_cache",
+                "code_indexer.server.repositories.activated_repo_manager.get_global_id_index_cache",
                 return_value=id_cache,
             ),
         ):

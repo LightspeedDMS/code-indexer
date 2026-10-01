@@ -13,7 +13,7 @@ from pathlib import Path
 
 def test_concurrent_file_display_class_does_not_exist():
     """FAILING TEST: Verify ConcurrentFileDisplay class is completely deleted."""
-    from src.code_indexer.progress import multi_threaded_display
+    from code_indexer.progress import multi_threaded_display
 
     # This should fail initially - class should not exist after elimination
     assert not hasattr(multi_threaded_display, "ConcurrentFileDisplay"), (
@@ -23,7 +23,7 @@ def test_concurrent_file_display_class_does_not_exist():
 
 def test_file_processing_line_dataclass_does_not_exist():
     """FAILING TEST: Verify FileProcessingLine dataclass is completely deleted."""
-    from src.code_indexer.progress import multi_threaded_display
+    from code_indexer.progress import multi_threaded_display
 
     # This should fail initially - dataclass should not exist after elimination
     assert not hasattr(multi_threaded_display, "FileProcessingLine"), (
@@ -60,7 +60,7 @@ def test_no_dictionary_operations_in_multi_threaded_display():
 
 def test_multi_threaded_progress_manager_uses_direct_array_access():
     """FAILING TEST: Verify MultiThreadedProgressManager uses direct array access."""
-    from src.code_indexer.progress.multi_threaded_display import (
+    from code_indexer.progress.multi_threaded_display import (
         MultiThreadedProgressManager,
     )
     from rich.console import Console
@@ -77,12 +77,12 @@ def test_multi_threaded_progress_manager_uses_direct_array_access():
 
 def test_display_reads_slot_tracker_array_directly():
     """FAILING TEST: Display should read CleanSlotTracker status_array directly."""
-    from src.code_indexer.services.clean_slot_tracker import (
+    from code_indexer.services.clean_slot_tracker import (
         CleanSlotTracker,
         FileData,
         FileStatus,
     )
-    from src.code_indexer.progress.multi_threaded_display import (
+    from code_indexer.progress.multi_threaded_display import (
         MultiThreadedProgressManager,
     )
     from rich.console import Console
@@ -108,8 +108,8 @@ def test_display_reads_slot_tracker_array_directly():
 
 def test_single_data_structure_architecture():
     """FAILING TEST: Only CleanSlotTracker.status_array should exist for tracking AND display."""
-    from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
-    from src.code_indexer.progress.multi_threaded_display import (
+    from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+    from code_indexer.progress.multi_threaded_display import (
         MultiThreadedProgressManager,
     )
     from rich.console import Console
@@ -132,12 +132,12 @@ def test_single_data_structure_architecture():
 
 def test_threadcount_plus_two_array_scanning():
     """FAILING TEST: Display should scan array[0] to array[threadcount+1]."""
-    from src.code_indexer.services.clean_slot_tracker import (
+    from code_indexer.services.clean_slot_tracker import (
         CleanSlotTracker,
         FileData,
         FileStatus,
     )
-    from src.code_indexer.progress.multi_threaded_display import (
+    from code_indexer.progress.multi_threaded_display import (
         MultiThreadedProgressManager,
     )
     from rich.console import Console
@@ -200,12 +200,12 @@ def test_no_insert_remove_operations():
 
 def test_stale_data_problem_eliminated():
     """FAILING TEST: Stale display data should be impossible with single array."""
-    from src.code_indexer.services.clean_slot_tracker import (
+    from code_indexer.services.clean_slot_tracker import (
         CleanSlotTracker,
         FileData,
         FileStatus,
     )
-    from src.code_indexer.progress.multi_threaded_display import (
+    from code_indexer.progress.multi_threaded_display import (
         MultiThreadedProgressManager,
     )
     from rich.console import Console

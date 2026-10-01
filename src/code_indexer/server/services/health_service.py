@@ -19,12 +19,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from ..models.api_models import (
+    AuditHealthInfo,
     HealthCheckResponse,
     ServiceHealthInfo,
     SystemHealthInfo,
     HealthStatus,
     VolumeInfo,
 )
+from code_indexer.server.services import audit_capture
 from ...config import ConfigManager
 from .database_health_service import (
     DatabaseHealthStatus,
@@ -36,6 +38,10 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.services.golden_repo_reconciler import (
     CIRCUIT_BREAKER_CONFIRMATION_THRESHOLD,
+)
+from code_indexer.server.services.fleet_migration.quarantine import (
+    UNRECOVERABLE_FAILURE_CAUSE,
+    reconcile_stale_quarantine_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +58,12 @@ DISK_CRITICAL_THRESHOLD_PERCENT = 90.0  # 90% used = 10% free = critical
 RESPONSE_TIME_WARNING = 1000  # 1 second
 RESPONSE_TIME_CRITICAL = 5000  # 5 seconds
 MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
+FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES = 50  # Story #1560 AC16
 PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
+
+# Bug #1864: distinguish a clean scheduler startup from a process that never
+# reached the lifespan startup block while keeping the health probe fail-open.
+_HNSW_STARTUP_ERROR_ABSENT = object()
 
 # CPU sustained threshold detection (Story #727 AC4)
 CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detection
@@ -111,6 +122,14 @@ def _load_thresholds_from_config() -> None:
         )
 
 
+def _audit_health_info() -> AuditHealthInfo:
+    """This process's audit capture telemetry (O(1), no I/O)."""
+    return AuditHealthInfo(
+        records_dropped_since_boot=audit_capture.records_dropped_since_boot(),
+        node_id=audit_capture.audit_node_id(),
+    )
+
+
 class HealthCheckService:
     """Service for system health monitoring."""
 
@@ -139,8 +158,17 @@ class HealthCheckService:
             config_manager = ConfigManager.create_with_backtrack()
             self.config = config_manager.get_config()
 
-            # Server data directory
-            self.data_dir = Path.home() / ".cidx-server" / "data"
+            # Server data directory. Bug #1569: honor CIDX_SERVER_DATA_DIR
+            # exactly as ServerConfigManager does (server/utils/config_manager.py),
+            # rather than hardcoding ~/.cidx-server -- otherwise this service
+            # reads a different server instance's database when the data
+            # directory has been relocated (e.g. Bug #879 IPC path alignment).
+            server_dir = Path(
+                os.environ.get(
+                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                )
+            )
+            self.data_dir = server_dir / "data"
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
             # Real database URL for health checks (SQLite mode)
@@ -175,7 +203,6 @@ class HealthCheckService:
                 format_error_log(
                     "DEPLOY-GENERAL-040",
                     f"Failed to initialize real dependencies: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Cannot initialize health check service: {e}")
@@ -217,6 +244,11 @@ class HealthCheckService:
         # rather than only via the internal helper method.
         auto_heal_event = self.get_golden_repo_reconcile_auto_heal_event()
 
+        # Story #1560 AC13: unlike auto_heal_event above (historical),
+        # this field's content DOES feed into overall_status/
+        # failure_reasons via _calculate_overall_status() -- see AC15.
+        dedup_state_summary = self.get_fleet_migration_dedup_state_summary()
+
         end_time = time.time()
         logger.info(
             f"Health check completed in {end_time - start_time:.3f} seconds",
@@ -230,6 +262,8 @@ class HealthCheckService:
             system=system_info,
             failure_reasons=failure_reasons,
             last_golden_repo_reconcile_auto_heal=auto_heal_event,
+            fleet_migration_dedup_state=dedup_state_summary,
+            audit=_audit_health_info(),
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -268,7 +302,6 @@ class HealthCheckService:
                 format_error_log(
                     "DEPLOY-GENERAL-041",
                     f"Database health check failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -406,6 +439,301 @@ class HealthCheckService:
             ],
         )
 
+    def _collect_hnsw_orphan_sweep_startup_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """Report a failed local HNSW orphan-sweep scheduler startup.
+
+        Bug #1864: the scheduler is the mechanism that repairs the existing
+        orphan backlog, so a startup failure is a current, unresolved node
+        condition and belongs in ``failure_reasons``.  This is deliberately
+        separate from ``auto_heal_event``, which records something that has
+        already happened and is therefore not a current failure.
+
+        The app-state attribute is set explicitly by lifespan on both the
+        successful and failed paths.  A missing attribute means this process
+        never reached that startup block (for example, a unit-test or CLI
+        process); it is kept as a distinct branch and fails open rather than
+        manufacturing a health alarm.  The read is O(1) and any accessor error
+        is also fail-open so this hot health path cannot raise.
+        """
+        try:
+            from ..app import app as app_module
+
+            startup_error = getattr(
+                app_module.state,
+                "hnsw_orphan_repair_sweep_startup_error",
+                _HNSW_STARTUP_ERROR_ABSENT,
+            )
+        except Exception as exc:
+            logger.debug(
+                "HNSW orphan-sweep startup health check skipped: %s",
+                exc,
+            )
+            return False, False, []
+
+        if startup_error is _HNSW_STARTUP_ERROR_ABSENT:
+            logger.debug(
+                "HNSW orphan-sweep startup state absent; lifespan startup "
+                "block was never reached."
+            )
+            return False, False, []
+
+        if startup_error is None:
+            return False, False, []
+
+        reason = (
+            "HNSW orphan sweep startup failure: this node will NOT repair "
+            "orphaned HNSW indexes; see GET /api/admin/hnsw-orphan-sweep/"
+            "stats -> local_scheduler for local_process detail; reason: "
+            f"{startup_error}"
+        )
+        return True, False, [reason]
+
+    def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
+        """
+        Read every golden_alias currently recorded with the PERMANENT
+        UNRECOVERABLE_FAILURE_CAUSE ("unrecoverable_corruption") in the
+        fleet_migration_quarantine_state table (Bug #1486, written by
+        quarantine.py's record_unrecoverable_corruption()).
+
+        Raises on any DB error (including "table does not exist yet") --
+        the caller is responsible for fail-open handling. Mirrors
+        _read_golden_repo_reconcile_breaker_state's storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return []
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                rows = conn.execute(
+                    "SELECT golden_alias FROM fleet_migration_quarantine_state "
+                    "WHERE failure_cause = %s",
+                    (UNRECOVERABLE_FAILURE_CAUSE,),
+                ).fetchall()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT golden_alias FROM fleet_migration_quarantine_state "
+                    "WHERE failure_cause = ?",
+                    (UNRECOVERABLE_FAILURE_CAUSE,),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [row[0] for row in rows]
+
+    _DEDUP_STATE_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    @staticmethod
+    def _normalize_dedup_timestamp(value: Any) -> Optional[str]:
+        """Story #1560 R2: ISO-8601 UTC string regardless of backend --
+        SQLite already returns a string; PostgreSQL's psycopg driver
+        returns a native datetime for a TIMESTAMPTZ column. Mirrors
+        get_golden_repo_reconcile_auto_heal_event()'s established
+        normalization exactly (Issue #1383)."""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if value is None:
+            return None
+        return str(value)
+
+    def _read_fleet_migration_dedup_state_rows(self) -> List[Dict[str, Any]]:
+        """
+        Story #1560 AC13/AC14: read every CURRENTLY ACTIVE (uncleared,
+        AC8) fleet_migration_dedup_state row.
+
+        Raises on any DB error (including "table does not exist yet")
+        -- the caller is responsible for fail-open handling. Mirrors
+        _read_fleet_migration_unrecoverable_aliases's exact storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return []
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                rows = conn.execute(
+                    f"SELECT {self._DEDUP_STATE_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE cleared_at IS NULL"
+                ).fetchall()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    f"SELECT {self._DEDUP_STATE_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE cleared_at IS NULL"
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [
+            {
+                "golden_alias": row[0],
+                "duplicate_groups": row[1],
+                "records_before": row[2],
+                "records_deleted": row[3],
+                "winner_kept_groups": row[4],
+                "whole_group_deleted_groups": row[5],
+                "collection_total": row[6],
+                "first_dropped_at": self._normalize_dedup_timestamp(row[7]),
+                "dropped_at": self._normalize_dedup_timestamp(row[8]),
+                "cleared_at": self._normalize_dedup_timestamp(row[9]),
+                "cleared_reason": row[10],
+            }
+            for row in rows
+        ]
+
+    def _collect_fleet_migration_dedup_failures(self) -> Tuple[bool, bool, List[str]]:
+        """
+        Story #1560 AC15: surface a repo with dropped duplicate records
+        as a DEGRADED health signal -- ALWAYS, regardless of the loss
+        ratio (maintainer decision 5: "mark it DEGRADED as soon as the
+        condition exists"). Mirrors
+        _collect_fleet_migration_unrecoverable_failures()'s exact
+        fail-open contract.
+
+        Fail-open: any error reading the table (including "table does
+        not exist yet" on a fresh install) is treated as "nothing to
+        report".
+        """
+        try:
+            rows = self._read_fleet_migration_dedup_state_rows()
+        except Exception as exc:
+            logger.debug("Fleet-migration dedup-state health check skipped: %s", exc)
+            return False, False, []
+
+        if not rows:
+            return False, False, []
+
+        reasons = []
+        for row in sorted(rows, key=lambda r: r["golden_alias"]):
+            collection_total = row["collection_total"] or 0
+            records_deleted = row["records_deleted"] or 0
+            loss_ratio = (
+                records_deleted / collection_total if collection_total > 0 else 0.0
+            )
+            reasons.append(
+                f"Fleet migration: repo '{row['golden_alias']}' dropped "
+                f"{records_deleted} duplicate record(s) out of "
+                f"{collection_total} (loss ratio {loss_ratio:.4%}) -- "
+                f"index completeness affected, repo remains fully "
+                f"queryable (Story #1560)."
+            )
+        return True, False, reasons
+
+    def _reconcile_fleet_migration_quarantine_state(self) -> None:
+        """
+        Bug #1564: re-validate and reap stale fleet-migration quarantine
+        rows BEFORE this health check reports (or, via the SAME shared
+        persisted backend, before FleetMigrationScheduler's next tick
+        skips) based on them.
+
+        HealthCheckService holds no `golden_repo_manager` reference by
+        design (a minimal, self-contained /health surface) -- the
+        manager is resolved here via the module-level
+        `get_golden_repo_manager()` accessor (app.state). This must
+        degrade gracefully (log at DEBUG, do nothing) when the server
+        has not finished starting up yet, or in a unit-test context
+        that never wired `app.state.golden_repo_manager` -- /health
+        must remain resilient regardless.
+        """
+        try:
+            from code_indexer.server.repositories.golden_repo_manager import (
+                get_golden_repo_manager,
+            )
+
+            golden_repo_manager = get_golden_repo_manager()
+        except Exception as exc:
+            logger.debug(
+                "Bug #1564: fleet-migration quarantine reconciliation "
+                "skipped -- golden_repo_manager unavailable: %s",
+                exc,
+            )
+            return
+
+        try:
+            reconcile_stale_quarantine_rows(golden_repo_manager)
+        except Exception as exc:  # pragma: no cover -- defense in depth
+            logger.warning(
+                "Bug #1564: fleet-migration quarantine reconciliation "
+                "failed unexpectedly -- /health will report the PRE-"
+                "reconciliation state this cycle: %s",
+                exc,
+            )
+
+    def _collect_fleet_migration_unrecoverable_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Bug #1486 High Finding 4: surface a permanently-unrecoverable
+        fleet-migration repo (chunks.db corrupt, legacy source already
+        gone) as a DEGRADED health signal, mirroring
+        _collect_golden_repo_reconcile_breaker_failures() (Bug #1382) --
+        the same established pattern for "something has been wrong for a
+        while and needs an admin to notice", reusing the EXISTING
+        /health failure_reasons surface rather than inventing a new
+        alerting mechanism.
+
+        Fail-open: any error reading the table (including "table does
+        not exist yet" on a fresh install, or the DB not being ready) is
+        treated as "nothing to report" -- this is a best-effort
+        visibility aid, never a source of false health alarms.
+
+        Bug #1564: BEFORE reading, re-validates and reaps stale
+        quarantine rows (see `_reconcile_fleet_migration_quarantine_
+        state()`) -- otherwise a manually/out-of-band repaired repo, or
+        one whose golden repo no longer exists, stays permanently
+        reported here.
+        """
+        self._reconcile_fleet_migration_quarantine_state()
+
+        try:
+            aliases = self._read_fleet_migration_unrecoverable_aliases()
+        except Exception as exc:
+            logger.debug(
+                "Fleet-migration unrecoverable-corruption health check skipped: %s",
+                exc,
+            )
+            return False, False, []
+
+        if not aliases:
+            return False, False, []
+
+        alias_list = ", ".join(sorted(aliases))
+        return (
+            True,
+            False,
+            [
+                f"Fleet migration: {len(aliases)} golden repo(s) "
+                f"permanently UNRECOVERABLE (chunks.db corrupt, legacy "
+                f"source already gone) -- requires manual data recovery: "
+                f"{alias_list} (Bug #1486)."
+            ],
+        )
+
     def _read_golden_repo_reconcile_auto_heal_event(
         self,
     ) -> Optional[Dict[str, Any]]:
@@ -494,6 +822,72 @@ class HealthCheckService:
 
         return event
 
+    @staticmethod
+    def _order_dedup_rows_for_health(
+        rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Story #1560 AC16/AC17/R3: explicit, backend-agnostic ordering
+        -- (dropped_at DESC, alias ASC), NULL dropped_at sorted LAST
+        regardless of backend. Done in PYTHON (never a SQL ORDER BY) so
+        PostgreSQL's and SQLite's differing NULL-ordering semantics can
+        never cause the two backends to disagree. ISO-8601 strings sort
+        lexicographically in chronological order, so a plain string
+        sort with reverse=True achieves DESC; pre-sorting by alias first
+        gives the ASC tie-break (stable sort preserves it)."""
+        with_ts = sorted(
+            (r for r in rows if r.get("dropped_at")),
+            key=lambda r: r["golden_alias"],
+        )
+        with_ts.sort(key=lambda r: r["dropped_at"], reverse=True)
+        without_ts = sorted(
+            (r for r in rows if not r.get("dropped_at")),
+            key=lambda r: r["golden_alias"],
+        )
+        return with_ts + without_ts
+
+    @staticmethod
+    def _dedup_row_to_health_entry(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Story #1560 AC14: per-repo health entry with an explicit
+        loss_ratio and incomplete=True flag (Messi #13 anti-silent-
+        failure -- a healthy HTTP status must never imply complete
+        search coverage)."""
+        collection_total = row["collection_total"] or 0
+        records_deleted = row["records_deleted"] or 0
+        loss_ratio = records_deleted / collection_total if collection_total > 0 else 0.0
+        return {
+            "golden_alias": row["golden_alias"],
+            "records_deleted": records_deleted,
+            "collection_total": collection_total,
+            "loss_ratio": loss_ratio,
+            "incomplete": True,
+            "dropped_at": row.get("dropped_at"),
+        }
+
+    def get_fleet_migration_dedup_state_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        Story #1560 AC13/AC14/AC16/AC17: independently queryable /health
+        surface for duplicate-point-id auto-resolution outcomes.
+
+        Returns None on any read error (fail-open) or when there are NO
+        currently-active (uncleared) rows -- distinct from an empty
+        dict, so a caller can tell "nothing to report" from "the
+        feature reported zero repos".
+        """
+        try:
+            rows = self._read_fleet_migration_dedup_state_rows()
+        except Exception as exc:
+            logger.debug("Fleet-migration dedup-state summary read skipped: %s", exc)
+            return None
+
+        if not rows:
+            return None
+
+        ordered = self._order_dedup_rows_for_health(rows)
+        bounded = ordered[:FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES]
+        repos = [self._dedup_row_to_health_entry(row) for row in bounded]
+
+        return {"affected_total": len(rows), "repos": repos}
+
     def _check_storage_health(self) -> ServiceHealthInfo:
         """
         Check storage system health and availability.
@@ -570,7 +964,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-043",
                     f"Storage health check failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1023,6 +1416,40 @@ class HealthCheckService:
         has_error = has_error or grb_err
         failure_reasons.extend(grb_reasons)
 
+        # Bug #1864: a failed local sweep startup is CURRENT and UNRESOLVED,
+        # so escalate it alongside the reconcile-breaker and fleet-migration
+        # failures.  It is not an auto_heal_event, which records history only.
+        hos_warn, hos_err, hos_reasons = (
+            self._collect_hnsw_orphan_sweep_startup_failures()
+        )
+        has_warning = has_warning or hos_warn
+        has_error = has_error or hos_err
+        failure_reasons.extend(hos_reasons)
+
+        # Bug #1539's cidx-meta conflict-resolution quarantine escalation
+        # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made
+        # CidxMetaBackupSync.sync() a plain mirror-push that can never
+        # raise ConflictResolutionFailedError, so this condition can never
+        # occur again -- see cidx_meta_backup/sync.py's module docstring.
+
+        # Bug #1486 High Finding 4: fleet-migration permanent
+        # unrecoverable-corruption escalation (see quarantine.py's
+        # record_unrecoverable_corruption()/is_permanently_unrecoverable()).
+        fmu_warn, fmu_err, fmu_reasons = (
+            self._collect_fleet_migration_unrecoverable_failures()
+        )
+        has_warning = has_warning or fmu_warn
+        has_error = has_error or fmu_err
+        failure_reasons.extend(fmu_reasons)
+
+        # Story #1560 AC15: duplicate-point-id auto-resolution outcome
+        # escalation (maintainer decision 5 -- DEGRADED as soon as the
+        # condition exists, unconditionally, regardless of loss ratio).
+        fmd_warn, fmd_err, fmd_reasons = self._collect_fleet_migration_dedup_failures()
+        has_warning = has_warning or fmd_warn
+        has_error = has_error or fmd_err
+        failure_reasons.extend(fmd_reasons)
+
         # Bug #1433: golden-repos storage readability (bounded-timeout
         # probe) -- see _collect_golden_repos_storage_failures() docstring.
         grs_warn, grs_err, grs_reasons = self._collect_golden_repos_storage_failures()
@@ -1049,6 +1476,23 @@ class HealthCheckService:
             status = HealthStatus.DEGRADED
         else:
             status = HealthStatus.HEALTHY
+
+        # Codex review Finding F8: whenever active Story #1560 dedup-state
+        # reasons exist, RESERVE/PRIORITIZE them ahead of every other
+        # category before truncating -- staging's real /health already
+        # carries MAX_FAILURE_REASONS non-dedup reasons (2 volume-usage +
+        # 1 fleet-migration-unrecoverable), so positional truncation
+        # alone silently swallowed the dedup reason into "+N more" on
+        # every observation, making it permanently invisible on /health.
+        # `fmd_reasons` is `failure_reasons`'s own subset (Story #1560
+        # AC15's block above), so this preserves every OTHER reason's
+        # relative order unchanged -- only the dedup reasons move to the
+        # front.
+        if fmd_reasons:
+            fmd_reason_set = set(fmd_reasons)
+            failure_reasons = fmd_reasons + [
+                reason for reason in failure_reasons if reason not in fmd_reason_set
+            ]
 
         # AC5: Limit to MAX_FAILURE_REASONS with "+N more" indicator
         if len(failure_reasons) > MAX_FAILURE_REASONS:
@@ -1160,7 +1604,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-044",
                     f"Failed to get mounted volumes: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1230,7 +1673,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-045",
                     f"Failed to get active job count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 

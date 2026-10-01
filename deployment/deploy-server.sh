@@ -52,11 +52,11 @@ show_usage() {
     echo ""
     echo "Examples:"
     echo "  Local development:"
-    echo "    sudo $0 --voyage-key pa-xxx --user jsbattig --working-dir /home/jsbattig/Dev/code-indexer"
+    echo "    sudo $0 --voyage-key pa-xxx --user opuser --working-dir /home/opuser/Dev/code-indexer"
     echo ""
     echo "  Production with OAuth:"
-    echo "    sudo $0 --voyage-key pa-xxx --anthropic-key sk-ant-xxx --user jsbattig \\"
-    echo "      --working-dir /home/jsbattig/code-indexer --issuer-url https://linner.ddns.net:8383"
+    echo "    sudo $0 --voyage-key pa-xxx --anthropic-key sk-ant-xxx --user opuser \\"
+    echo "      --working-dir /home/opuser/code-indexer --issuer-url https://cidx.example.com:8383"
     exit 1
 }
 

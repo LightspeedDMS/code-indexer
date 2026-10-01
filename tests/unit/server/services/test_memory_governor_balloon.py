@@ -17,10 +17,14 @@ Tests:
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock
 
 import pytest
 
+from code_indexer.server.cache.hnsw_index_cache import (
+    HNSWIndexCache,
+    HNSWIndexCacheConfig,
+    HNSWIndexCacheEntry,
+)
 from code_indexer.server.services.memory_governor import (
     MemoryBand,
     MemoryGovernor,
@@ -44,10 +48,14 @@ TIGHT_RED_PCT = 15.0
 TIGHT_HYSTERESIS_PCT = 2.0
 NO_RED_DWELL_SECONDS = 0.0
 
-# LRU floor for eviction test (balloon live during call)
+# LRU floor for eviction test (balloon live during call). Uses a REAL
+# HNSWIndexCache (not a mock) — HNSWIndexCacheStats is a dataclass exposing
+# .cached_repositories (attribute access), so a MagicMock().get_stats()
+# returning a dict silently no-ops evict_lru_to_floor's internal try/except.
 LRU_FLOOR = 1
-MOCK_CACHE_SIZE = 5
-MOCK_EVICTED_COUNT = MOCK_CACHE_SIZE - LRU_FLOOR  # 4
+REAL_CACHE_SIZE = 5
+REAL_EVICTED_COUNT = REAL_CACHE_SIZE - LRU_FLOOR  # 4
+LONG_TTL_MINUTES = 60.0
 
 # Recovery watermarks — safe to be GREEN after balloon release on any machine
 SAFE_YELLOW_PCT = 95.0
@@ -90,6 +98,24 @@ def _touch_balloon(balloon: bytearray) -> None:
         balloon[i] = 1
 
 
+def _real_cache(entry_count: int) -> HNSWIndexCache:
+    """Return a real HNSWIndexCache pre-populated with `entry_count` fake
+    entries (mirrors test_memory_governor_lru_eviction.py's helper) so
+    get_stats() returns the genuine HNSWIndexCacheStats dataclass rather
+    than a stale mock-shaped dict."""
+    cfg = HNSWIndexCacheConfig(ttl_minutes=LONG_TTL_MINUTES)
+    cache = HNSWIndexCache(config=cfg)
+    for i in range(entry_count):
+        entry = HNSWIndexCacheEntry(
+            hnsw_index=None,
+            id_mapping={},
+            repo_path=f"/fake/repo/{i}",
+            ttl_minutes=LONG_TTL_MINUTES,
+        )
+        cache._cache[f"/fake/repo/{i}"] = entry
+    return cache
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -116,20 +142,22 @@ class TestBalloonGated:
         del balloon
 
     def test_evict_lru_to_floor_called_correctly_while_balloon_live(self):
-        """evict_lru_to_floor calls evict_lru_entries with (size - floor) while
-        200 MB balloon is allocated and live."""
+        """evict_lru_to_floor evicts (size - floor) real entries while a
+        200 MB balloon is allocated and live -- against the REAL
+        HNSWIndexCache API, not a mock."""
         gov = _tight_gov()
         gov._tick()
 
         balloon = bytearray(BALLOON_BYTES)
         _touch_balloon(balloon)
 
-        cache = MagicMock()
-        cache.get_stats.return_value = {"size": MOCK_CACHE_SIZE, "capacity": 100}
-        cache.evict_lru_entries.return_value = MOCK_EVICTED_COUNT
+        cache = _real_cache(REAL_CACHE_SIZE)
+        before_lru = gov.counters.lru_evictions
 
         gov.evict_lru_to_floor(cache, floor_entries=LRU_FLOOR)
-        cache.evict_lru_entries.assert_called_once_with(MOCK_EVICTED_COUNT)
+
+        assert gov.counters.lru_evictions == before_lru + REAL_EVICTED_COUNT
+        assert cache.get_stats().cached_repositories == LRU_FLOOR
 
         del balloon
 

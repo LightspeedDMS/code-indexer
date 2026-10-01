@@ -19,12 +19,14 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
+import contextvars
 import functools
 import time
 import uuid
 import json
 import logging
 from code_indexer import __version__
+from .tool_access import ToolAccessMemo, resolve_effective_user
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,52 @@ _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 # Finding 3.5 (v10.4.4): deactivate_repository passes user_alias which is NOT
 # a golden alias, causing false "Access denied" for the rightful owner.
 _OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
+
+# depmap_find_consumers and depmap_get_repo_domains identify a single repo
+# via a `repo_name` parameter, distinct from the generic alias-param names
+# scanned below. Mapped PER TOOL, never globally: manage_group_repos ALSO
+# takes a top-level `repo_name` (its single-repo 'remove' action) with
+# unrelated semantics -- a repo being revoked from a GROUP's access, not
+# one the calling admin must already be able to access themselves.
+# Checking manage_group_repos's repo_name against the caller's own
+# accessible-repos set would break that legitimate admin flow, so this set
+# is opt-in per tool name.
+_REPO_NAME_PARAM_TOOLS: frozenset = frozenset(
+    {"depmap_find_consumers", "depmap_get_repo_domains"}
+)
+
+# activate_repository's user_alias is the alias of the NEW repo being
+# created; manage_composite_repository's user_alias is the composite's
+# own self-chosen name. Neither is an existing golden-repo alias the
+# caller must already hold, so user_alias is excluded from the check for
+# these two tools specifically. Any OTHER recognized parameter present
+# for these tools (e.g. golden_repo_alias(es) on activate_repository) is
+# still checked normally.
+_NEW_ALIAS_PARAM_TOOLS: frozenset = frozenset(
+    {"activate_repository", "manage_composite_repository"}
+)
+
+
+def _recognized_repo_param_names(tool_name: str) -> Tuple[str, ...]:
+    """The full set of argument keys _check_repository_access() recognizes
+    as identifying a repository, for a given tool.
+
+    Shared with handle_tools_call()'s fail-closed branch so both stay in
+    lockstep -- a param recognized by one but not the other would let an
+    unavailable access_filtering_service fail OPEN for that param.
+    """
+    names: Tuple[str, ...] = (
+        "golden_repo_aliases",
+        "golden_repo_alias",
+        "repository_alias",
+        "alias",
+        "user_alias",
+        "repo_alias",
+    )
+    if tool_name in _REPO_NAME_PARAM_TOOLS:
+        names = names + ("repo_name",)
+    return names
+
 
 # Timeout in seconds for sync tool handlers executed via run_in_executor.
 # Bug #1008: git_blame on repos with deep history can block indefinitely.
@@ -80,9 +128,106 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
 }
 
+# Membership in this set is a property of the TOOL, not of the dispatch
+# branch: an exempt tool gets NO asyncio.wait_for on either branch.
+#
+# regex_search -- DELIBERATE, DOCUMENTED DEVIATION from AC2's literal
+# wording (Story #1491 review item 8). AC2's scenario text says "the regex
+# search is subject to the dispatcher's timeout guard"; it is not, and that
+# is an intentional decision rather than an oversight:
+#
+#   * As of AC2 regex_search is SYNC-dispatched (the registry entry is the
+#     plain-def handle_regex_search_sync), so it now takes the executor
+#     branch. Its synchronous work leaving the event loop -- the actual
+#     starvation hazard report Finding B2 identified -- is fully achieved by
+#     that change alone, independently of any deadline.
+#   * _omni_regex_search loops repos SEQUENTIALLY, each repo bounded by its
+#     own search_limits_config.timeout_seconds subprocess call, so an omni
+#     search over N repos has a legitimate cumulative runtime of
+#     N x single-repo-floor. No single fixed outer deadline (however
+#     derived) can accommodate an unbounded N without truncating correct
+#     work.
+#   * An outer wait_for around run_in_executor cannot cancel the worker
+#     thread anyway: on expiry it abandons a still-running thread while
+#     returning a timeout error. That is strictly worse than no deadline --
+#     the work continues, unbounded and now unobserved, and the client is
+#     told it failed.
+#
+# So regex_search remains governed solely by
+# search_limits_config.timeout_seconds plus its own ripgrep subprocess
+# timeout (Issue #1398 Group A) -- exactly its pre-#1491 semantics, which
+# this story preserves rather than changes. _resolve_handler_timeout's
+# result for "regex_search" is therefore computed but never used to bound
+# its dispatch. Any future change here must also update the "Query & Search
+# Timeouts Consolidation (Issue #1398)" section of CLAUDE.md, which records
+# the same deviation.
+#
+# Story #1491 AC6 code-review follow-up (secondary finding): the same
+# review that caught regex_search asked every OTHER async-dispatched MCP
+# tool be individually classified. Reading each handler's real
+# implementation (mcp/handlers/xray.py, mcp/handlers/cicd.py):
+#
+#   xray_search / xray_explore: the single-repo path accepts a client-
+#   supplied, server-validated await_seconds (range [0, 45.0] --
+#   _AWAIT_SECONDS_MAX in xray.py) and genuinely awaits the background
+#   job inline for up to that long before returning {"job_id": ...}.
+#   default_handler_timeout_seconds is Web-UI configurable down to 10s
+#   (config_manager.py validates [10, 300]) -- an operator lowering it
+#   for unrelated reasons would truncate a legitimate, server-approved
+#   45s xray wait and discard the job_id the client needs to poll. The
+#   multi-repo (list alias) path submits jobs with no inline wait at all
+#   and is unaffected either way, but the tool is exempted wholesale for
+#   simplicity (matches xray_search's own design: it already owns and
+#   validates its bound, so no outer generic cap should re-govern it).
+#
+#   gh_actions_search_logs / gitlab_ci_search_logs / ci_search_logs: each
+#   delegates to a client (GitHubActionsClient.search_logs /
+#   GitLabCIClient.search_logs) that fetches the job list for ONE
+#   run/pipeline, then loops SEQUENTIALLY over every job making one more
+#   HTTP GET (+ regex scan) per job -- structurally identical to
+#   _omni_regex_search's sequential fan-out bug. A workflow run/pipeline
+#   with dozens of matrix-build jobs has legitimate cumulative runtime
+#   that can exceed 60s.
+#
+#   Every OTHER cicd.py handler (list_runs, get_run, get_job_logs,
+#   retry_run, cancel_run, and their gitlab_ci_*/ci_* equivalents) makes
+#   exactly ONE bounded external API call with no per-item loop --
+#   genuinely safe under the 60s default, left ungoverned by this set.
+#
+#   analyze_graph (consolidated review finding C1, Issue #1811/Bug #1812):
+#   the handler (mcp/handlers/xray_graph.py) validates and clamps its own
+#   `timeout_seconds` param to [_TIMEOUT_MIN=10, _TIMEOUT_MAX=600] BEFORE
+#   ever reaching this dispatcher -- it already owns and enforces its own
+#   bound exactly like xray_search's await_seconds, so no outer generic
+#   cap should re-govern it (same rationale as the xray_search/xray_explore
+#   entry above). Leaving it OUT of this set is actively harmful, not just
+#   redundant: the whole graph-analysis pipeline (repo-alias resolution +
+#   file walk + rustc compile + --build-graph + --analyze-graph) runs
+#   inside `anyio.to_thread.run_sync`, which defaults to
+#   `abandon_on_cancel=False` -- an outer `asyncio.wait_for` firing at the
+#   generic `default_handler_timeout_seconds` (60s) CANNOT cancel that
+#   worker thread. The real analysis keeps running to completion in the
+#   background, unobserved, while the caller is told "timed out after 60
+#   seconds" and the computed result is silently discarded. Since
+#   `await_seconds`/job polling is not wired for this tool (Story #1811
+#   deliberately runs synchronously, not via BackgroundJobManager), that
+#   discarded result is unrecoverable. Every value above 60 in the tool's
+#   advertised 10..600s range would otherwise be unreachable in practice.
+_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS = frozenset(
+    {
+        "regex_search",
+        "xray_search",
+        "xray_explore",
+        "gh_actions_search_logs",
+        "gitlab_ci_search_logs",
+        "ci_search_logs",
+        "analyze_graph",
+    }
+)
+
 
 def _resolve_handler_timeout(tool_name: str) -> int:
-    """Return the effective timeout in seconds for a given tool's sync handler.
+    """Return the effective timeout in seconds for a given tool's handler.
 
     Issue #1398: reads the live, Web-UI-configurable SearchTimeoutsConfig
     instead of the module-level hardcoded constants below (which now exist
@@ -203,7 +348,32 @@ def create_jsonrpc_error(
     return {"jsonrpc": "2.0", "error": error_obj, "id": request_id}
 
 
-def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _new_tool_access_memo() -> ToolAccessMemo:
+    """Build one authorization memo for the current top-level request."""
+    try:
+        from code_indexer.server import app as app_module
+
+        manager = getattr(getattr(app_module.app, "state", None), "group_manager", None)
+    except Exception:
+        manager = None
+    return ToolAccessMemo(manager)
+
+
+def _get_session_state(session_id: Optional[str], user: Optional[User]) -> Any:
+    if not session_id or user is None:
+        return None
+    from .session_registry import get_session_registry
+
+    return get_session_registry().get_or_create_session(session_id, user)
+
+
+def handle_tools_list(
+    params: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
+) -> Dict[str, Any]:
     """
     Handle tools/list method.
 
@@ -218,7 +388,12 @@ def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #185: Pass config to filter tools based on configuration requirements
     config = get_config_service().get_config()
-    tools = filter_tools_by_role(user, config=config)
+    tools = filter_tools_by_role(
+        user,
+        config=config,
+        session_state=session_state,
+        tool_access_memo=tool_access_memo,
+    )
     return {"tools": tools}
 
 
@@ -234,6 +409,8 @@ async def _invoke_handler(
     timeout_seconds: float = HANDLER_TIMEOUT_SECONDS,
     http_request: Optional[Request] = None,
     http_response: Optional[Response] = None,
+    tool_name: Optional[str] = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -260,6 +437,12 @@ async def _invoke_handler(
         http_response: The real FastAPI Response object, injected into handlers
             that declare an `http_response` parameter (e.g. handle_authenticate,
             which needs it to set the HttpOnly cidx_session cookie).
+        tool_name: The MCP tool name being dispatched, used ONLY to check
+            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS -- which is honoured on BOTH
+            the async and the sync/executor branch, since membership is a
+            property of the tool rather than of the dispatch mechanism. See
+            that constant for the full per-tool rationale, including the
+            deliberate deviation from AC2's literal wording for regex_search.
 
     Returns:
         Handler result
@@ -268,6 +451,8 @@ async def _invoke_handler(
 
     if "session_state" in sig.parameters:
         extra_kwargs["session_state"] = session_state
+    if tool_access_memo is not None and "tool_access_memo" in sig.parameters:
+        extra_kwargs["tool_access_memo"] = tool_access_memo
 
     # Inject session_key ONLY from the canonical elevation_key (JWT jti for Bearer auth,
     # cookie jti for Web UI). session_id (MCP transport UUID) is intentionally NOT
@@ -305,24 +490,73 @@ async def _invoke_handler(
     )
 
     if is_async:
-        return await handler(*call_args, **extra_kwargs)
+        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+            # Story #1491 AC6 code-review fix: regex_search's
+            # _omni_regex_search loops repos SEQUENTIALLY, each bounded by
+            # its own search_limits_config.timeout_seconds subprocess
+            # call -- an omni search over N repos has legitimate
+            # cumulative runtime of N x single-repo-floor, which no fixed
+            # outer deadline can accommodate. regex_search stays fully
+            # unbounded here, governed solely by its own configured
+            # search_limits_config.timeout_seconds + ripgrep subprocess
+            # timeout (Issue #1398 Group A) -- never this MCP-layer value.
+            return await handler(*call_args, **extra_kwargs)
+        # Story #1491 AC6 (Finding B6, hardening): the async branch is now
+        # bounded by the same timeout_seconds/_resolve_handler_timeout
+        # mechanism the sync branch already uses, producing the identical
+        # timeout error shape on expiry. This does NOT interrupt
+        # synchronous work inside a coroutine (asyncio.wait_for can only
+        # cancel at an actual await point) -- it exists to bound handlers
+        # that are genuinely awaitable throughout, and to bound any future
+        # async handler that regresses into a long-running await.
+        try:
+            return await asyncio.wait_for(
+                handler(*call_args, **extra_kwargs),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Tool execution timed out after {timeout_seconds} seconds",
+            }
     else:
-        # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
-        # branch enforces an outer asyncio.wait_for timeout (the async
-        # branch has none, per the documented sync/async distinction), so
-        # only here is there a meaningful deadline to compute. A handler
-        # that declares handler_deadline_monotonic can use it to bound its
-        # own internal work (e.g. the temporal foreground waiter) so it
-        # always returns before THIS timeout fires with no job_id.
+        # Story #1400 CRITICAL 5 dynamic half: the sync-dispatch branch
+        # enforces an outer asyncio.wait_for timeout via executor offload
+        # (the async branch above uses a direct wait_for since it is
+        # already a coroutine). A handler that declares
+        # handler_deadline_monotonic can use it to bound its own internal
+        # work (e.g. the temporal foreground waiter) so it always returns
+        # before THIS timeout fires with no job_id.
         if "handler_deadline_monotonic" in sig.parameters:
             extra_kwargs["handler_deadline_monotonic"] = (
                 time.monotonic() + timeout_seconds
             )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, *call_args, **extra_kwargs)
+        # Bug #1755: loop.run_in_executor() does NOT propagate ContextVars
+        # into the executor thread on its own (unlike asyncio.create_task(),
+        # which copies context automatically for coroutines) -- the
+        # correlation_id ContextVar set by CorrelationBridgeMiddleware would
+        # otherwise be invisible to every sync MCP handler. Snapshot the
+        # calling coroutine's context once and run `bound` inside it on the
+        # worker thread, mirroring the identical pattern already used at
+        # semantic_query_manager.py:1942 and multi_search_service.py:236.
+        ctx = contextvars.copy_context()
+        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+            # Story #1491 AC2: the exemption is a property of the TOOL, not of
+            # the dispatch branch. regex_search became sync-dispatched so its
+            # synchronous work leaves the event loop; that offload must not
+            # also silently impose an MCP-layer deadline it never had. Exempt
+            # tools are offloaded WITHOUT an outer wait_for, staying governed
+            # solely by their own configured timeouts (for regex_search:
+            # search_limits_config.timeout_seconds plus the ripgrep subprocess
+            # timeout, Issue #1398 Group A). Note an outer wait_for could not
+            # have cancelled the executor's thread anyway -- it would only have
+            # abandoned it while returning a timeout error.
+            return await loop.run_in_executor(None, ctx.run, bound)
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, bound),
+                loop.run_in_executor(None, ctx.run, bound),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -386,30 +620,38 @@ def _check_repository_access(
     access_service: Any,
     scoped_repos: Optional[Set[str]] = None,
 ) -> None:
-    """Check if user has access to the repository specified in tool arguments.
+    """Check if user has access to EVERY repository identified in tool
+    arguments.
 
-    Extracts the repository identifier from the arguments dict using known
-    parameter names. Checks in this priority order:
-      1. 'golden_repo_aliases' (list) — activate_repository composite form;
-         each entry in the list is checked individually.
-      2. 'golden_repo_alias' (str) — activate_repository single form;
-         checked against accessible repos for the SOURCE repo, not the new
-         user_alias being created (Bug fix: user_alias is the new alias being
-         created and must NOT be checked here).
-      3. 'repository_alias', 'alias', 'user_alias', 'repo_alias' — all other
-         tools that identify an existing repo by these names.
+    Scans ALL recognized repo-identifying parameters PRESENT in arguments
+    (see _recognized_repo_param_names) and requires every one of them to
+    be authorised -- naming an accessible repo under one parameter never
+    excuses an inaccessible repo named under a different parameter
+    present in the SAME call. Both string and list-form values are
+    checked (a list is checked entry by entry).
 
-    Skips the check if no repo param is present or if the param is empty/None.
+    Deliberate exclusion: 'user_alias' is never checked for tools in
+    _NEW_ALIAS_PARAM_TOOLS (it names the NEW repo/composite being created,
+    or the composite's own self-owned name -- never an existing
+    golden-repo alias) or _OWNER_ENFORCED_TOOLS (it names a user-OWNED
+    activation whose ownership is enforced at the manager layer instead).
+    Any OTHER recognized parameter present for these tools is still
+    checked normally (e.g. golden_repo_alias(es) on activate_repository).
+
+    Skips the check entirely if no recognized parameter is present at all
+    (empty/None values do not count as present).
 
     Strips the '-global' suffix from aliases before checking, since accessible
     repos are stored without it.
 
-    Story #568: When scoped_repos is provided (acting_users flow), the repo
-    is checked against that set instead of the user's normal access. This
-    takes precedence over admin bypass to enforce acting_users scoping.
+    Story #568: When scoped_repos is provided (acting_users flow), every
+    alias is checked against that set instead of the user's normal
+    access. This takes precedence over admin bypass to enforce
+    acting_users scoping.
 
-    Raises ValueError if access is denied. Does nothing if user is admin
-    (and scoped_repos is None) or if no repo parameter is present.
+    Raises ValueError on the first alias found not to be authorised. Does
+    nothing if user is admin (and scoped_repos is None) or if no repo
+    parameter is present.
 
     Args:
         arguments: Tool arguments dict from the MCP tool call
@@ -440,34 +682,46 @@ def _check_repository_access(
             f" to the specified acting users"
         )
 
+    # is_admin_user()/get_accessible_repos() are computed AT MOST ONCE per
+    # call (memoized here), not once per checked alias -- multiple
+    # recognized repo params may be present and every one of them must be
+    # checked, but the underlying service lookups never need repeating.
+    _memo: Dict[str, Any] = {}
+
+    def _is_admin() -> bool:
+        if "is_admin" not in _memo:
+            _memo["is_admin"] = access_service.is_admin_user(effective_user.username)
+        return bool(_memo["is_admin"])
+
+    def _accessible() -> Any:
+        if "accessible" not in _memo:
+            _memo["accessible"] = access_service.get_accessible_repos(
+                effective_user.username
+            )
+        return _memo["accessible"]
+
+    def _check_one(raw_alias: str) -> None:
+        """Check ONE alias string against accessible/scoped repos."""
+        normalized = _normalize(raw_alias)
+        if scoped_repos is not None:
+            if normalized not in scoped_repos:
+                _deny_scoped(raw_alias)
+            return
+        if _is_admin():
+            return
+        if normalized not in _accessible():
+            _deny_single(raw_alias)
+
     def _check_alias_list(aliases: list) -> None:
         """Check each string entry in a list of aliases.
 
-        Shared by the golden_repo_aliases block and the omni list-form path
-        (v10.4.3 security fix). Admin bypass and scoped_repos are handled
-        identically for both callers.
+        Shared by the golden_repo_aliases param and the omni list-form
+        path (v10.4.3 security fix).
         """
-        # Admin bypass (only when scoped_repos is not active)
-        if scoped_repos is None and access_service.is_admin_user(
-            effective_user.username
-        ):
-            return
-        accessible = (
-            None
-            if scoped_repos is not None
-            else access_service.get_accessible_repos(effective_user.username)
-        )
         for entry in aliases:
             if not isinstance(entry, str) or not entry:
                 continue  # skip non-string / empty entries
-            normalized_entry = _normalize(entry)
-            if scoped_repos is not None:
-                if normalized_entry not in scoped_repos:
-                    _deny_scoped(entry)
-            else:
-                assert accessible is not None
-                if normalized_entry not in accessible:
-                    _deny_single(entry)
+            _check_one(entry)
 
     def _try_decode_json_array(value: Any) -> Any:
         """Return decoded list when value is a JSON-array string, else value.
@@ -489,83 +743,30 @@ def _check_repository_access(
                 )
         return value
 
-    # Bug fix (activate_repository): golden_repo_aliases (list) is the composite
-    # activation form. Check each alias in the list before the single-alias scan.
-    # This prevents user_alias (the new alias being created) from being checked.
-    golden_repo_aliases = arguments.get("golden_repo_aliases")
-    if (
-        golden_repo_aliases is not None
-        and isinstance(golden_repo_aliases, list)
-        and golden_repo_aliases
-    ):
-        _check_alias_list(golden_repo_aliases)
-        return
+    # Story #331 AC3: repo_alias protects enter_write_mode, exit_write_mode,
+    # and wiki_article_analytics. v10.4.3 security fix (Finding 1): list-form
+    # values (native Python list or JSON-encoded array string) fell through
+    # isinstance(value, str) unrecognized -- bypassing the access check
+    # entirely. The fix: decode JSON arrays, then dispatch list-form values
+    # to _check_alias_list, for EVERY recognized parameter present, not just
+    # the first one found.
+    skip_user_alias = (
+        tool_name in _NEW_ALIAS_PARAM_TOOLS or tool_name in _OWNER_ENFORCED_TOOLS
+    )
 
-    # Extract the repo identifier. 'golden_repo_alias' is checked BEFORE
-    # 'user_alias' so that activate_repository checks the source repo
-    # (golden_repo_alias) not the new alias being created (user_alias).
-    # Story #331 AC3: Added "repo_alias" to protect enter_write_mode,
-    # exit_write_mode, and wiki_article_analytics tools.
-    #
-    # v10.4.3 security fix (Finding 1): list-form values (native Python list
-    # or JSON-encoded array string) for repository_alias/alias/user_alias/
-    # repo_alias fell through isinstance(value, str) with raw_alias=None —
-    # bypassing the access check entirely. The fix: decode JSON arrays, then
-    # dispatch list-form values to _check_alias_list.
-    raw_alias: Optional[str] = None
-    list_aliases: Optional[list] = None
-
-    for param_name in (
-        "golden_repo_alias",
-        "repository_alias",
-        "alias",
-        "user_alias",
-        "repo_alias",
-    ):
+    for param_name in _recognized_repo_param_names(tool_name):
+        if param_name == "user_alias" and skip_user_alias:
+            continue
         value = arguments.get(param_name)
         if value is None:
             continue
         value = _try_decode_json_array(value)
         if isinstance(value, list):
             if value:  # non-empty list only
-                list_aliases = value
-            break  # found the param — stop scanning
+                _check_alias_list(value)
+            continue
         if isinstance(value, str) and value:
-            raw_alias = value
-            break
-
-    # List-form path — each entry checked via shared _check_alias_list helper
-    if list_aliases is not None:
-        _check_alias_list(list_aliases)
-        return
-
-    # Finding 3.5 (v10.4.4): tools in _OWNER_ENFORCED_TOOLS pass a user-owned
-    # activation alias (user_alias), not a golden-repo alias. The manager layer
-    # already enforces ownership — skip the group-access check entirely.
-    if tool_name in _OWNER_ENFORCED_TOOLS:
-        return
-
-    # No repo param present or empty - nothing to check
-    if not raw_alias:
-        return
-
-    normalized = _normalize(raw_alias)
-
-    # Story #568: When scoped_repos is provided (acting_users flow),
-    # check against the scoped set. This overrides admin bypass.
-    if scoped_repos is not None:
-        if normalized not in scoped_repos:
-            _deny_scoped(raw_alias)
-        return
-
-    # Admin users bypass the check entirely (original behavior)
-    if access_service.is_admin_user(effective_user.username):
-        return
-
-    # Check access
-    accessible = access_service.get_accessible_repos(effective_user.username)
-    if normalized not in accessible:
-        _deny_single(raw_alias)
+            _check_one(value)
 
 
 async def handle_tools_call(
@@ -575,6 +776,8 @@ async def handle_tools_call(
     elevation_key: Optional[str] = None,
     http_request: Optional[Request] = None,
     http_response: Optional[Response] = None,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
 ) -> Dict[str, Any]:
     """
     Handle tools/call method - dispatches to actual tool handlers.
@@ -600,7 +803,6 @@ async def handle_tools_call(
     """
     from .handlers import HANDLER_REGISTRY
     from .tools import TOOL_REGISTRY
-    from .session_registry import get_session_registry
     from code_indexer.server.services.langfuse_service import get_langfuse_service
 
     # Validate required 'name' parameter
@@ -614,22 +816,27 @@ async def handle_tools_call(
     if tool_name not in TOOL_REGISTRY:
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    # Get or create session state if session_id is provided
-    session_state = None
-    if session_id:
-        registry = get_session_registry()
-        session_state = registry.get_or_create_session(session_id, user)
+    # Get or create session state if session_id is provided.
+    if session_state is None:
+        session_state = _get_session_state(session_id, user)
 
     # Determine effective user for permission checks (CRITICAL 2 fix)
     # When impersonating, use the impersonated user's permissions
-    effective_user = user
-    if session_state and session_state.is_impersonating:
-        effective_user = session_state.effective_user
+    effective_user = resolve_effective_user(user, session_state)
+
+    if tool_access_memo is None:
+        tool_access_memo = _new_tool_access_memo()
+
+    group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
+    if group_decision is False:
+        raise ValueError(f"Permission denied: tool access denied for {tool_name}")
 
     # Check if user has permission for this tool
     tool_def = TOOL_REGISTRY[tool_name]
     required_permission = tool_def["required_permission"]
-    if not effective_user.has_permission(required_permission):
+    if group_decision is None and not effective_user.has_permission(
+        required_permission
+    ):
         raise ValueError(
             f"Permission denied: {required_permission} required for tool {tool_name}"
         )
@@ -676,11 +883,15 @@ async def handle_tools_call(
         # If the tool arguments contain a repository parameter, DENY access
         # rather than falling through (fail-open). Tools with no repo parameter
         # proceed normally.
+        # Uses the SAME recognized-parameter set as the main check above
+        # (_recognized_repo_param_names) so a parameter recognized there can
+        # never fail OPEN here for being missing from a separately
+        # maintained list.
+        _repo_param_names = _recognized_repo_param_names(tool_name)
         _has_repo_param = any(
-            arguments.get(p)
-            for p in ("repository_alias", "alias", "user_alias", "repo_alias")
-            if (isinstance(arguments.get(p), str) and arguments.get(p))
+            (isinstance(arguments.get(p), str) and arguments.get(p))
             or (isinstance(arguments.get(p), list) and arguments.get(p))
+            for p in _repo_param_names
         )
         if _has_repo_param:
             logger.warning(
@@ -741,7 +952,7 @@ async def handle_tools_call(
             return await _invoke_handler(
                 handler,
                 arguments,
-                user,
+                effective_user,
                 session_state,
                 sig,
                 is_async,
@@ -750,6 +961,7 @@ async def handle_tools_call(
                 timeout_seconds=handler_timeout,
                 http_request=http_request,
                 http_response=http_response,
+                tool_access_memo=tool_access_memo,
             )
 
         # Execute through span interceptor
@@ -774,7 +986,7 @@ async def handle_tools_call(
         result = await _invoke_handler(
             handler,
             arguments,
-            user,
+            effective_user,
             session_state,
             sig,
             is_async,
@@ -783,6 +995,8 @@ async def handle_tools_call(
             timeout_seconds=handler_timeout,
             http_request=http_request,
             http_response=http_response,
+            tool_name=tool_name,
+            tool_access_memo=tool_access_memo,
         )
 
     # Bug #350: Protocol-level API metrics tracking.
@@ -831,6 +1045,8 @@ async def process_jsonrpc_request(
 
     method = request["method"]
     params = request.get("params") or {}
+    session_state = _get_session_state(session_id, user)
+    tool_access_memo = _new_tool_access_memo()
 
     # Route to appropriate handler
     try:
@@ -863,7 +1079,12 @@ async def process_jsonrpc_request(
             # Return empty result (FastAPI will use 202 if we set it in route)
             return create_jsonrpc_response(None, request_id)
         elif method == "tools/list":
-            result = handle_tools_list(params, user)
+            result = handle_tools_list(
+                params,
+                user,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
+            )
             return create_jsonrpc_response(result, request_id)
         elif method == "prompts/list":
             # Per losvedir line 97-106 and README line 275
@@ -883,6 +1104,8 @@ async def process_jsonrpc_request(
                 elevation_key=elevation_key,
                 http_request=http_request,
                 http_response=http_response,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
             )
             return create_jsonrpc_response(result, request_id)
         else:
@@ -1187,7 +1410,12 @@ def get_optional_user_from_cookie(request: Request) -> Optional[User]:
         return None
 
 
-def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
+def handle_public_tools_list(
+    user: Optional[User],
+    *,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
+) -> Dict[str, Any]:
     """Handle tools/list for /mcp-public endpoint."""
     if user is None:
         return {
@@ -1213,7 +1441,14 @@ def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
 
     # Story #185: Pass config to filter tools based on configuration requirements
     config = get_config_service().get_config()
-    return {"tools": filter_tools_by_role(user, config=config)}
+    return {
+        "tools": filter_tools_by_role(
+            user,
+            config=config,
+            session_state=session_state,
+            tool_access_memo=tool_access_memo,
+        )
+    }
 
 
 async def process_public_jsonrpc_request(
@@ -1234,6 +1469,8 @@ async def process_public_jsonrpc_request(
 
     method = request_data["method"]
     params = request_data.get("params") or {}
+    session_state = _get_session_state(session_id, user)
+    tool_access_memo = _new_tool_access_memo()
 
     if not isinstance(params, dict):
         return create_jsonrpc_error(
@@ -1266,7 +1503,11 @@ async def process_public_jsonrpc_request(
             return create_jsonrpc_response(None, request_id)
 
         elif method == "tools/list":
-            result = handle_public_tools_list(user)
+            result = handle_public_tools_list(
+                user,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
+            )
             return create_jsonrpc_response(result, request_id)
 
         elif method == "prompts/list":
@@ -1304,10 +1545,16 @@ async def process_public_jsonrpc_request(
                     result = await handler(auth_arguments, http_request, http_response)
                 else:
                     loop = asyncio.get_running_loop()
+                    # Bug #1755 (code-review follow-up): this is a THIRD,
+                    # independent run_in_executor call site sharing the same
+                    # missing-copy_context() bug as _invoke_handler's two
+                    # sync branches -- ContextVars (correlation_id, etc.) do
+                    # not cross into the executor thread on their own.
+                    ctx = contextvars.copy_context()
                     bound = functools.partial(
                         handler, auth_arguments, http_request, http_response
                     )
-                    result = await loop.run_in_executor(None, bound)
+                    result = await loop.run_in_executor(None, ctx.run, bound)
                 return create_jsonrpc_response(result, request_id)
 
             if user is None:
@@ -1318,7 +1565,12 @@ async def process_public_jsonrpc_request(
                 )
 
             result = await handle_tools_call(
-                params, user, session_id=session_id, elevation_key=elevation_key
+                params,
+                user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
             )
             return create_jsonrpc_response(result, request_id)
 

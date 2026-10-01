@@ -154,7 +154,6 @@ class ClaudeCliManager:
                     format_error_log(
                         "APP-GENERAL-063",
                         f"API key sync failed: {result.error}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         except Exception as e:
@@ -162,9 +161,8 @@ class ClaudeCliManager:
                 format_error_log(
                     "APP-GENERAL-064",
                     f"Failed to sync API key via ApiKeySyncService: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     def sync_api_key(self) -> None:
@@ -205,7 +203,6 @@ class ClaudeCliManager:
                         "APP-GENERAL-065",
                         f"ApiKeySyncService sync failed: {result.error}, "
                         "falling back to legacy sync",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         except ImportError:
@@ -218,7 +215,6 @@ class ClaudeCliManager:
                 format_error_log(
                     "APP-GENERAL-066",
                     f"ApiKeySyncService error: {e}, falling back to legacy sync",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -240,7 +236,6 @@ class ClaudeCliManager:
                                 format_error_log(
                                     "APP-GENERAL-067",
                                     f"Invalid JSON in {json_path}, overwriting",
-                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
 
@@ -258,9 +253,8 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-010",
                     f"Failed to sync API key: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise
 
@@ -462,7 +456,6 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-011",
                         f"Catch-up failed for {alias}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 error_msg = str(e)
@@ -517,7 +510,6 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-012",
                     f"Failed to process fallback for {alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -560,7 +552,6 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-013",
                     f"Git commit failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -572,18 +563,30 @@ class ClaudeCliManager:
             from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
                 build_embedding_stats_child_env,
             )
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                resolve_hnsw_sync_epoch_env_var,
+            )
 
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            # Bug #1575 Part C independent re-review: this spawn previously
+            # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
+            _reindex_env = build_cidx_subprocess_env(
+                build_embedding_stats_child_env(
+                    get_config_service().get_config(),
+                    golden_repo_alias="cidx-meta",
+                    job_id=job_id,
+                )
+            )
+            _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
             _result = subprocess.run(
-                ["cidx", "index"],
+                append_server_layout_args(["cidx", "index"]),
                 cwd=str(self._meta_dir),
                 capture_output=True,
-                env=build_cidx_subprocess_env(
-                    build_embedding_stats_child_env(
-                        get_config_service().get_config(),
-                        golden_repo_alias="cidx-meta",
-                        job_id=job_id,
-                    )
-                ),
+                env=_reindex_env,
                 check=False,
             )
             if _result.returncode == 0:
@@ -597,7 +600,6 @@ class ClaudeCliManager:
                         "AUTH-GENERAL-014",
                         f"Re-index failed with exit code {_result.returncode}: "
                         f"{_result.stderr.decode(errors='replace') if _result.stderr else ''}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         except Exception as e:
@@ -605,7 +607,6 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-014",
                     f"Re-index failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -661,7 +662,6 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-015",
                         f"Worker thread {t.name} did not stop within timeout",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -704,9 +704,8 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-016",
                         f"{thread_name} error: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         logger.debug(
@@ -755,7 +754,6 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-017",
                         f"Claude CLI not available for {repo_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 callback(False, "Claude CLI not available")
@@ -778,9 +776,8 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-018",
                     f"Error processing {repo_path}: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             callback(False, str(e))
 

@@ -12,7 +12,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 
@@ -33,7 +33,7 @@ def mock_config_manager():
 @pytest.fixture
 def mock_vector_store():
     """Mock vector store client."""
-    from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
     store = Mock(spec=FilesystemVectorStore)
     store.collection_exists = Mock(return_value=True)
@@ -209,7 +209,7 @@ class TestIncludeRemovedRemoval:
         EXPECTED FAILURE: This test will fail until --include-removed is removed from CLI.
         """
         from click.testing import CliRunner
-        from src.code_indexer.cli import query
+        from code_indexer.cli import query
 
         runner = CliRunner()
         result = runner.invoke(query, ["--help"])
@@ -368,7 +368,7 @@ class TestDiffTypeParameter:
         EXPECTED FAILURE: This test will fail until --diff-type is added to CLI.
         """
         from click.testing import CliRunner
-        from src.code_indexer.cli import query
+        from code_indexer.cli import query
 
         runner = CliRunner()
         result = runner.invoke(query, ["--help"])

@@ -8,11 +8,11 @@ import pytest
 from unittest.mock import MagicMock
 from httpx import Response
 
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     ActivationError,
 )
-from src.code_indexer.api_clients.remote_query_client import (
+from code_indexer.api_clients.remote_query_client import (
     RemoteQueryClient,
     APIClientError,
 )
@@ -83,7 +83,7 @@ class TestRepositoryListEndpointDeepInvestigation:
         repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
         # This should raise AuthenticationError for 401, not ActivationError
-        from src.code_indexer.api_clients.base_client import AuthenticationError
+        from code_indexer.api_clients.base_client import AuthenticationError
 
         with pytest.raises(AuthenticationError) as exc_info:
             repository_client.list_user_repositories()
@@ -150,7 +150,7 @@ class TestRepositoryListEndpointDeepInvestigation:
     ):
         """Investigate if network errors appear as 404."""
         # Mock network connection error - use direct exception (sync method)
-        from src.code_indexer.api_clients.base_client import APIClientError
+        from code_indexer.api_clients.base_client import APIClientError
 
         repository_client._authenticated_request = MagicMock(
             side_effect=APIClientError("Connection failed", status_code=None)
@@ -266,7 +266,7 @@ class TestRepositoryListEndpointDeepInvestigation:
                 print(f"SCENARIO {scenario_name}: SUCCESS")
             elif status_code == 401:
                 # Should fail with AuthenticationError
-                from src.code_indexer.api_clients.base_client import AuthenticationError
+                from code_indexer.api_clients.base_client import AuthenticationError
 
                 with pytest.raises(AuthenticationError):
                     repository_client.list_user_repositories()
@@ -303,7 +303,7 @@ class TestRepositoryListEndpointDeepInvestigation:
 
             if status_code == 401:
                 # Should raise AuthenticationError
-                from src.code_indexer.api_clients.base_client import AuthenticationError
+                from code_indexer.api_clients.base_client import AuthenticationError
 
                 with pytest.raises(AuthenticationError) as exc_info:
                     repository_client.list_user_repositories()

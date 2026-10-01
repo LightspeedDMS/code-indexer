@@ -66,7 +66,7 @@ class TestLoadRepoConfigImmutabilityGuard:
         snapshot = (
             mount
             / ".versioned"
-            / "langfuse_Claude_Code_seba_battig_lightspeeddms_com"
+            / "langfuse_Claude_Code_jane_doe_example_com"
             / "v_1717000000"
         )
         _write_config(snapshot)

@@ -235,12 +235,14 @@ class GlobalRepoOperations:
                 "externally_managed": False,
             }
 
-    def set_config(self, refresh_interval: int) -> None:
+    def set_config(self, refresh_interval: int, *, actor: str) -> None:
         """
-        Update global configuration.
+        Update global configuration on behalf of *actor*.
 
         Args:
             refresh_interval: Refresh interval in seconds (minimum 60)
+            actor: The authenticated caller, recorded as the audit actor of
+                the one ``config_changed`` row (a server process only).
 
         Raises:
             ValueError: If refresh_interval < 60 seconds
@@ -252,17 +254,21 @@ class GlobalRepoOperations:
         # Story #3: Use ConfigService for centralized configuration
         from code_indexer.server.services.config_service import get_config_service
 
-        # Validate refresh interval (matches ConfigService validation rules)
-        if refresh_interval < MINIMUM_REFRESH_INTERVAL:
-            raise ValueError(
-                f"Refresh interval must be at least {MINIMUM_REFRESH_INTERVAL} seconds. "
-                f"Got: {refresh_interval} seconds."
+        config_service = get_config_service()
+
+        def _set_interval(candidate: Any) -> None:
+            # Validate refresh interval (matches ConfigService validation rules)
+            if refresh_interval < MINIMUM_REFRESH_INTERVAL:
+                raise ValueError(
+                    f"Refresh interval must be at least {MINIMUM_REFRESH_INTERVAL} "
+                    f"seconds. Got: {refresh_interval} seconds."
+                )
+            config_service._apply_setting(
+                candidate, "golden_repos", "refresh_interval_seconds", refresh_interval
             )
 
-        # Update via ConfigService
-        config_service = get_config_service()
-        config_service.update_setting(
-            "golden_repos", "refresh_interval_seconds", refresh_interval
+        config_service.apply_audited_change(
+            _set_interval, actor=actor, target_id="golden_repos"
         )
 
         logger.info(f"Updated global config: refresh_interval={refresh_interval}s")

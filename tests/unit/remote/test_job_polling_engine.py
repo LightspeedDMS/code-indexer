@@ -5,8 +5,7 @@ progress display integration, and keyboard interrupt handling.
 """
 
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 from code_indexer.remote.polling import (
     JobPollingEngine,
@@ -28,9 +27,9 @@ from code_indexer.api_clients.base_client import (
 @pytest.fixture
 def mock_api_client():
     """Create mock API client for testing."""
-    client = AsyncMock(spec=CIDXRemoteAPIClient)
-    client.get_job_status = AsyncMock()
-    client.close = AsyncMock()
+    client = Mock(spec=CIDXRemoteAPIClient)
+    client.get_job_status = Mock()
+    client.close = Mock()
     return client
 
 
@@ -110,8 +109,7 @@ class TestJobPollingEngine:
         assert engine.config == polling_config
         assert engine.config.base_interval == 0.1
 
-    @pytest.mark.asyncio
-    async def test_start_polling_success_immediate_completion(
+    def test_start_polling_success_immediate_completion(
         self, mock_api_client, mock_progress_callback, polling_config, sample_job_status
     ):
         """Test polling for job that completes immediately."""
@@ -131,7 +129,7 @@ class TestJobPollingEngine:
             config=polling_config,
         )
 
-        result = await engine.start_polling("test-job-123")
+        result = engine.start_polling("test-job-123")
 
         assert result == completed_status
         assert engine.is_polling is False
@@ -139,8 +137,7 @@ class TestJobPollingEngine:
         mock_api_client.get_job_status.assert_called_once_with("test-job-123")
         mock_progress_callback.assert_called()
 
-    @pytest.mark.asyncio
-    async def test_start_polling_success_with_progress_updates(
+    def test_start_polling_success_with_progress_updates(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test polling with multiple progress updates before completion."""
@@ -184,7 +181,7 @@ class TestJobPollingEngine:
             config=polling_config,
         )
 
-        result = await engine.start_polling("test-job-123")
+        result = engine.start_polling("test-job-123")
 
         assert result.status == "completed"
         assert result.progress == 1.0
@@ -200,8 +197,7 @@ class TestJobPollingEngine:
         # Last call should show completion
         assert "completed" in str(progress_calls[-1])
 
-    @pytest.mark.asyncio
-    async def test_start_polling_job_failure(
+    def test_start_polling_job_failure(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test polling for job that fails with error status."""
@@ -223,13 +219,12 @@ class TestJobPollingEngine:
         )
 
         with pytest.raises(JobPollingError, match="Job failed"):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         assert engine.is_polling is False
         assert engine.current_job_id is None
 
-    @pytest.mark.asyncio
-    async def test_start_polling_timeout(self, mock_api_client, mock_progress_callback):
+    def test_start_polling_timeout(self, mock_api_client, mock_progress_callback):
         """Test polling timeout when job takes too long."""
         # Mock job that never completes
         running_status = JobStatus(
@@ -254,12 +249,11 @@ class TestJobPollingEngine:
         )
 
         with pytest.raises(JobTimeoutError, match="timed out after .+ seconds"):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         assert engine.is_polling is False
 
-    @pytest.mark.asyncio
-    async def test_network_error_handling_with_retry(
+    def test_network_error_handling_with_retry(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test network error handling with exponential backoff retry."""
@@ -284,13 +278,12 @@ class TestJobPollingEngine:
             config=polling_config,
         )
 
-        result = await engine.start_polling("test-job-123")
+        result = engine.start_polling("test-job-123")
 
         assert result == completed_status
         assert mock_api_client.get_job_status.call_count == 3
 
-    @pytest.mark.asyncio
-    async def test_network_error_exhausted_retries(
+    def test_network_error_exhausted_retries(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test network error handling when retries are exhausted."""
@@ -308,14 +301,13 @@ class TestJobPollingEngine:
         with pytest.raises(
             NetworkConnectionError, match="Network error after 3 retry attempts"
         ):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Should have made initial attempt + retries
         expected_calls = 1 + polling_config.network_retry_attempts
         assert mock_api_client.get_job_status.call_count == expected_calls
 
-    @pytest.mark.asyncio
-    async def test_authentication_error_no_retry(
+    def test_authentication_error_no_retry(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test that authentication errors are not retried."""
@@ -330,13 +322,12 @@ class TestJobPollingEngine:
         )
 
         with pytest.raises(AuthenticationError, match="Token expired"):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Should only make one attempt (no retries for auth errors)
         assert mock_api_client.get_job_status.call_count == 1
 
-    @pytest.mark.asyncio
-    async def test_keyboard_interrupt_handling(
+    def test_keyboard_interrupt_handling(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test graceful handling of keyboard interrupts (Ctrl+C)."""
@@ -349,32 +340,30 @@ class TestJobPollingEngine:
             message="Processing files...",
         )
 
-        async def slow_status_check(job_id):
-            await asyncio.sleep(0.1)
-            return running_status
-
-        mock_api_client.get_job_status.side_effect = slow_status_check
-
         engine = JobPollingEngine(
             api_client=mock_api_client,
             progress_callback=mock_progress_callback,
             config=polling_config,
         )
 
-        # Start polling in background task
-        polling_task = asyncio.create_task(engine.start_polling("test-job-123"))
+        def status_check_then_interrupt(job_id):
+            # Simulate a Ctrl+C arriving while the status request was in
+            # flight: the real signal handler (_handle_interrupt) just flips
+            # this flag; the NEXT loop iteration inside start_polling notices
+            # it and raises InterruptedPollingError.
+            engine._interrupted = True
+            return running_status
 
-        # Give it time to start
-        await asyncio.sleep(0.05)
+        mock_api_client.get_job_status.side_effect = status_check_then_interrupt
 
-        # Cancel the task (simulates Ctrl+C)
-        polling_task.cancel()
-
-        with pytest.raises(InterruptedPollingError, match="Polling was interrupted"):
-            await engine.stop_polling()
+        with pytest.raises(
+            InterruptedPollingError, match="Polling was interrupted by user"
+        ):
+            engine.start_polling("test-job-123")
 
         assert engine.is_polling is False
         assert engine.current_job_id is None
+        assert mock_api_client.get_job_status.call_count == 1
 
     def test_progress_display_formatting(
         self, mock_api_client, mock_progress_callback, sample_job_status
@@ -412,8 +401,7 @@ class TestJobPollingEngine:
         assert "5.2 emb/s" in progress_call[1]["info"]
         assert "Processing src/main.py" in progress_call[1]["info"]
 
-    @pytest.mark.asyncio
-    async def test_exponential_backoff_calculation(
+    def test_exponential_backoff_calculation(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test exponential backoff calculation for retry intervals."""
@@ -461,10 +449,9 @@ class TestJobPollingEngine:
         engine.current_job_id = "active-job"
 
         with pytest.raises(JobPollingError, match="Already polling job"):
-            asyncio.run(engine.start_polling("new-job"))
+            engine.start_polling("new-job")
 
-    @pytest.mark.asyncio
-    async def test_cleanup_on_completion(
+    def test_cleanup_on_completion(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test proper cleanup when polling completes."""
@@ -483,14 +470,13 @@ class TestJobPollingEngine:
             config=polling_config,
         )
 
-        await engine.start_polling("test-job-123")
+        engine.start_polling("test-job-123")
 
         # Verify cleanup
         assert engine.is_polling is False
         assert engine.current_job_id is None
 
-    @pytest.mark.asyncio
-    async def test_cleanup_on_error(
+    def test_cleanup_on_error(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test proper cleanup when polling encounters error."""
@@ -503,7 +489,7 @@ class TestJobPollingEngine:
         )
 
         with pytest.raises(JobPollingError):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Verify cleanup even on error
         assert engine.is_polling is False
@@ -571,10 +557,7 @@ class TestJobPollingEngine:
 class TestJobPollingEngineIntegration:
     """Integration tests for JobPollingEngine with real scenarios."""
 
-    @pytest.mark.asyncio
-    async def test_full_sync_job_lifecycle(
-        self, mock_api_client, mock_progress_callback
-    ):
+    def test_full_sync_job_lifecycle(self, mock_api_client, mock_progress_callback):
         """Test complete sync job lifecycle from start to finish."""
         # Create realistic job progression
         job_progression = [
@@ -662,7 +645,7 @@ class TestJobPollingEngineIntegration:
             config=config,
         )
 
-        result = await engine.start_polling("sync-job-456")
+        result = engine.start_polling("sync-job-456")
 
         # Verify final result
         assert result.status == "completed"
@@ -683,8 +666,7 @@ class TestJobPollingEngineIntegration:
         assert len(setup_calls) >= 2  # queued, git_pull phases
         assert len(progress_calls_filtered) >= 2  # indexing phases
 
-    @pytest.mark.asyncio
-    async def test_network_resilience_realistic_scenario(
+    def test_network_resilience_realistic_scenario(
         self, mock_api_client, mock_progress_callback
     ):
         """Test network resilience with realistic network issues."""
@@ -741,7 +723,7 @@ class TestJobPollingEngineIntegration:
             config=config,
         )
 
-        result = await engine.start_polling("test-job")
+        result = engine.start_polling("test-job")
 
         assert result.status == "completed"
         # Should have made the expected number of calls (6 items in responses list)
@@ -751,8 +733,7 @@ class TestJobPollingEngineIntegration:
 class TestJobPollingEngineErrorScenarios:
     """Test error scenarios and edge cases."""
 
-    @pytest.mark.asyncio
-    async def test_malformed_job_status_response(
+    def test_malformed_job_status_response(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test handling of malformed job status responses."""
@@ -768,10 +749,9 @@ class TestJobPollingEngineErrorScenarios:
         )
 
         with pytest.raises(JobPollingError, match="Failed to get job status"):
-            await engine.start_polling("test-job")
+            engine.start_polling("test-job")
 
-    @pytest.mark.asyncio
-    async def test_job_not_found_error(
+    def test_job_not_found_error(
         self, mock_api_client, mock_progress_callback, polling_config
     ):
         """Test handling when job ID is not found on server."""
@@ -786,7 +766,7 @@ class TestJobPollingEngineErrorScenarios:
         )
 
         with pytest.raises(JobPollingError, match="Job not found"):
-            await engine.start_polling("nonexistent-job")
+            engine.start_polling("nonexistent-job")
 
     def test_progress_callback_exception_handling(
         self, mock_api_client, polling_config

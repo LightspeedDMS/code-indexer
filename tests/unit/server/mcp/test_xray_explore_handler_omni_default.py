@@ -84,23 +84,23 @@ class TestXrayExploreHandlerOmni:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                "code_indexer.server.mcp.handlers.xray._explore._resolve_repo_path",
                 side_effect=fake_resolve,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                "code_indexer.server.mcp.handlers.xray._explore._get_background_job_manager",
                 return_value=mock_bjm,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+                "code_indexer.server.mcp.handlers.xray._explore._get_job_tracker",
                 return_value=mock_jt,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+                "code_indexer.server.mcp.handlers.xray._explore._get_xray_executor",
                 return_value=mock_exec,
             ),
             patch(
-                "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator",
+                "code_indexer.server.mcp.handlers.xray._explore.validate_rust_evaluator",
                 return_value=MagicMock(ok=True),
             ),
             patch("asyncio.get_running_loop", return_value=loop_instance),

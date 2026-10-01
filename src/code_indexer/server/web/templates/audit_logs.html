@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Audit Logs - CIDX Admin{% endblock %}
+
+{% block content %}
+<style>
+    .audit-view-switch { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    .audit-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 0 1rem; }
+    .audit-summary { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: baseline; }
+    .audit-table { font-size: 0.85rem; }
+    .audit-table td { vertical-align: top; word-break: break-word; }
+    .audit-outcome { font-weight: 600; white-space: nowrap; }
+    .audit-outcome-success, .audit-outcome-submitted { color: var(--pico-ins-color, #2e7d32); }
+    .audit-outcome-failure, .audit-outcome-denied { color: var(--pico-del-color, #c62828); }
+    .audit-outcome-pending, .audit-outcome-attempted { color: var(--pico-muted-color, #888); }
+    .audit-outcome-unknown { color: #e08a00; text-decoration: underline dotted; cursor: help; }
+    .audit-actor-badge { font-size: 0.75rem; padding: 0 0.3rem; border: 1px solid currentColor; border-radius: 0.25rem; margin-right: 0.3rem; }
+    .audit-actor-marker { font-size: 0.75rem; color: #e08a00; margin-left: 0.3rem; }
+    .audit-details pre { white-space: pre-wrap; max-height: 20rem; overflow: auto; margin: 0.3rem 0; }
+    .audit-pager { display: flex; gap: 0.5rem; }
+    .audit-error { padding: 0.75rem 1rem; border: 1px solid var(--pico-del-color, #c62828); border-radius: 0.25rem; }
+</style>
+
+<div class="logs-header">
+    <h1>Audit Logs</h1>
+    <div class="logs-actions">
+        <select id="audit-export-format" aria-label="Export format">
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+        </select>
+        <button id="audit-export-btn" type="button" class="secondary">Export</button>
+    </div>
+</div>
+<p id="audit-export-status" role="status" class="audit-export-status"></p>
+
+<div class="audit-view-switch" role="group" aria-label="View">
+    <button type="button" class="audit-view-btn{% if view != 'security' %} outline{% endif %}"
+            data-view="security" aria-pressed="{{ 'true' if view == 'security' else 'false' }}">Security</button>
+    <button type="button" class="audit-view-btn{% if view != 'auth_activity' %} outline{% endif %}"
+            data-view="auth_activity" aria-pressed="{{ 'true' if view == 'auth_activity' else 'false' }}">Authentication activity</button>
+</div>
+
+<section id="audit-filters" class="filters-section">
+    <form id="audit-filter-form" method="get" action="/admin/audit-logs">
+        <input type="hidden" name="view" id="audit-view" value="{{ view }}">
+        <div class="audit-filter-grid">
+            <label for="audit-window">Time window
+                <select id="audit-window" name="window">
+                    {% for value, label in windows %}
+                    <option value="{{ value }}" {% if selected_window == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label for="audit-date-from" class="audit-custom-range">From (UTC)
+                <input type="datetime-local" id="audit-date-from" name="date_from" value="{{ selected.date_from or '' }}">
+            </label>
+            <label for="audit-date-to" class="audit-custom-range">To (UTC)
+                <input type="datetime-local" id="audit-date-to" name="date_to" value="{{ selected.date_to or '' }}">
+            </label>
+            <label for="audit-actor">Actor
+                <input type="text" id="audit-actor" name="actor" list="audit-actor-options" value="{{ selected.actor or '' }}" autocomplete="off">
+            </label>
+            <label for="audit-action-type">Action
+                <input type="text" id="audit-action-type" name="action_type" list="audit-action-options" value="{{ selected.action_type or '' }}" autocomplete="off">
+            </label>
+            <label for="audit-target-type">Target type
+                <select id="audit-target-type" name="target_type">
+                    <option value="">Any</option>
+                    {% for t in target_types %}
+                    <option value="{{ t }}" {% if selected.target_type == t %}selected{% endif %}>{{ t }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label for="audit-target-id">Target id
+                <input type="text" id="audit-target-id" name="target_id" value="{{ selected.target_id or '' }}">
+            </label>
+            <label for="audit-outcome">Outcome
+                <select id="audit-outcome" name="outcome">
+                    <option value="">Any</option>
+                    {% for o in outcomes %}
+                    <option value="{{ o }}" {% if selected.outcome == o %}selected{% endif %}>{{ o }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label for="audit-source">Source
+                <select id="audit-source" name="source">
+                    <option value="">Any</option>
+                    {% for s in sources %}
+                    <option value="{{ s }}" {% if selected.source == s %}selected{% endif %}>{{ s }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label for="audit-ip">IP address
+                <input type="text" id="audit-ip" name="ip_address" value="{{ selected.ip_address or '' }}">
+            </label>
+            <label for="audit-correlation">Correlation id
+                <input type="text" id="audit-correlation" name="correlation_id" value="{{ selected.correlation_id or '' }}">
+            </label>
+        </div>
+        <div class="audit-pager">
+            <button type="submit">Apply</button>
+            <button type="button" id="audit-clear-btn" class="outline">Clear</button>
+        </div>
+    </form>
+    <datalist id="audit-action-options">
+        {% for a in action_types %}
+        <option value="{{ a }}"></option>
+        {% endfor %}
+    </datalist>
+</section>
+
+<section id="audit-list-section" hx-get="{{ initial_url }}" hx-trigger="load" hx-swap="innerHTML">
+    <p aria-busy="true">Loading audit events...</p>
+</section>
+
+<script type="application/json" id="audit-logs-config">{{ page_config | tojson }}</script>
+<script src="/admin/static/js/audit_logs.js?v={{ static_version }}" defer></script>
+{% endblock %}

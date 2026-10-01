@@ -1,10 +1,11 @@
 ---
 name: feedback_no_commit_during_background_agent
 description: "Never git-add/commit a background agent's files while it is still running — the add can snapshot a reverse-applied (broken) intermediate state"
-metadata: 
+metadata:
   node_type: memory
   type: feedback
   originSessionId: ffe9e7f2-e6bc-4fbe-b9f5-45e1f7b8661d
+  modified: 2026-09-06T07:11:14.516Z
 ---
 
 Do NOT `git add`/commit files that a still-running background subagent (e.g. tdd-engineer) is editing. `git add` snapshots whatever is on disk at that instant, and a TDD agent's RED->GREEN dance momentarily REVERSE-APPLIES its own patch (to prove the test fails) before forward-applying it. If your commit lands during that window, you capture a broken intermediate: e.g. the new TEST file committed but the SRC fix absent, so the committed unit fails at import/collection.
@@ -15,4 +16,5 @@ Do NOT `git add`/commit files that a still-running background subagent (e.g. tdd
 - Wait for the background agent's REAL completion (its actual final report, not tangled relay notifications) before staging its files. Verify the deliverable on disk first.
 - After committing an agent's work, VERIFY the commit content, not just the working tree: `git show HEAD:<path> | grep <expected-symbol>` for each src file, and `git show HEAD --stat` to confirm every expected file is in the commit.
 - If a broken commit is already made and UNPUSHED, `git commit --amend` after `git add`-ing the missing files is the clean repair (rewrites local history only). Confirm `origin/<branch>` is still behind the broken SHA before amending.
+- **Committing UNRELATED files is not safe either.** `pre-commit` stashes all tracked-but-unstaged changes before running hooks and restores them after (`[INFO] Stashing unstaged files to ~/.cache/pre-commit/patchNNNN` / `[INFO] Restored changes`). That stash covers the running agent's tracked files even when you staged only your own, so a commit made mid-write can reverse-apply and re-apply the agent's work underneath it. Observed 2026-09-06 committing `slow-automation.sh`+`CLAUDE.md` while a tdd-engineer was editing `rust/xray-core/`; the work survived, but only because the agent happened not to write during the stash window. Untracked files (a brand-new module directory) are NOT stashed and are unaffected. Rule: while any agent is actively writing to tracked files in this repo, do not commit ANYTHING — wait, or hold the commit until it lands.
 - Agent-framework relay can send confused/duplicate "finished" notifications (meta-messages like "I'll wait for the tdd-engineer") — treat the FILES ON DISK + your own verification as ground truth, not the notification text. Related: [[feedback_faithful_db_mocks]], [[project_test_gates_flake_under_load]].

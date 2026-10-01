@@ -12,6 +12,7 @@ Story #510 — CloneBackend Abstraction and CoW Daemon Integration.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -19,8 +20,12 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
+from code_indexer.global_repos.snapshot_deletion_errors import (
+    SnapshotDeleteError,
+    SnapshotInUseError,
+)
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
@@ -32,6 +37,8 @@ from code_indexer.server.utils.cancellable_subprocess import (
 )
 
 if TYPE_CHECKING:
+    from requests import Response  # pragma: no cover
+
     from code_indexer.server.utils.config_manager import (
         CowDaemonConfig,
         OntapConfig,
@@ -54,6 +61,15 @@ _MAX_COW_DAEMON_POLL_INTERVAL_SECONDS = 30
 # Allowed characters for namespace and name path components (no traversal chars)
 _SAFE_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+#: Bug #1844: errnos meaning "the tree could not be removed because something
+#: still holds it", as opposed to "this delete is broken". ENOTEMPTY is the
+#: shape an NFS silly-rename leaves behind (unlinking a file the client still
+#: holds open renames it to .nfsXXXX, so the parent is not empty at rmdir
+#: time); EBUSY and ETXTBSY are the local equivalents. Deliberately identical
+#: to the CoW daemon's own _RETRYABLE_DELETE_ERRNOS so both ends of the REST
+#: call agree on what "still in use" means.
+_RETRYABLE_DELETE_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EBUSY, errno.ETXTBSY})
+
 
 def _validate_path_component(value: str, field: str) -> None:
     """Raise ValueError if *value* contains characters unsafe for path construction."""
@@ -61,6 +77,43 @@ def _validate_path_component(value: str, field: str) -> None:
         raise ValueError(
             f"{field} contains invalid characters. "
             f"Only alphanumeric, '.', '_', and '-' are allowed. Got: {value!r}"
+        )
+
+
+class CloneDestinationExistsError(FileExistsError):
+    """Raised when create_clone_at_path refuses an already-existing
+    DIRECTORY destination.
+
+    A DEDICATED subtype (not a bare FileExistsError) so callers such as
+    ActivatedRepoManager._clone_with_copy_on_write can catch it
+    SPECIFICALLY, before their generic `except Exception` clause, and
+    skip the destructive shutil.rmtree(dest_path)/orphan-cleanup-grace-
+    loop path entirely -- dest_path here is a PRE-EXISTING directory
+    that was never touched by this clone attempt, not a partial/failed
+    clone of THIS attempt's own making, so it must never be deleted.
+    """
+
+
+def _reject_existing_directory_destination(dest_path: str, backend_name: str) -> None:
+    """Refuse to clone into an already-existing DIRECTORY destination.
+
+    ``cp --reflink=auto -a src existing_dir`` copies src INTO existing_dir
+    as a subdirectory and exits 0 instead of failing -- exactly the
+    behaviour that would let a traversed
+    activation destination "succeed" instead of erroring loudly (e.g. a
+    traversed activation landing inside the shared golden-repos tree).
+
+    Deliberately scoped to an existing DIRECTORY only: refresh_integrity_gate.py's
+    restore_chunks_db_via_reflink / restore_metadata_files_via_reflink
+    intentionally clone a healthy file ONTO an existing corrupt/stale
+    regular file (self-heal, overwrite-in-place) -- ordinary `cp -a`
+    file-to-file semantics, not a merge, and must remain allowed.
+    """
+    if os.path.isdir(dest_path):
+        raise CloneDestinationExistsError(
+            f"{backend_name}.create_clone_at_path: destination '{dest_path}' "
+            "already exists as a directory -- refusing to clone into it "
+            "(cp -a would silently merge into it instead of failing)"
         )
 
 
@@ -184,7 +237,14 @@ class LocalCloneBackend:
         partial dest_path on any exception from this method. The existing
         `timeout` deadline (Bug #1285's cow_clone_timeout) is preserved
         alongside cancel_check -- either one can end the clone.
+
+        Refuses an already-existing
+        DIRECTORY destination before running `cp` at all -- see
+        _reject_existing_directory_destination for the exact rationale. An
+        existing regular file destination remains allowed (overwrite,
+        refresh_integrity_gate.py's restore use case).
         """
+        _reject_existing_directory_destination(dest_path, "LocalCloneBackend")
         attr_flag = "-a" if preserve_attrs else "-r"
         logger.info(
             "LocalCloneBackend: creating clone at path '%s' from '%s'",
@@ -212,7 +272,13 @@ class LocalCloneBackend:
         """Remove the clone directory tree.
 
         Returns True when deletion succeeded or the path did not exist.
-        Returns False when an OSError other than ENOENT occurs.
+
+        Bug #1844: an OSError is RAISED (classified), never reported by
+        returning False. The old falsey return was discarded by
+        ``CleanupManager._delete_index``, so a failed deletion was recorded
+        as a success -- the path left the cleanup queue and its durable
+        pending-deletion row was deleted, leaking the directory permanently
+        and silently. Messi Rule #13.
         """
         path = Path(clone_path)
         if not path.exists():
@@ -226,7 +292,19 @@ class LocalCloneBackend:
                 clone_path,
                 exc,
             )
-            return False
+            errno_name = (
+                errno.errorcode.get(exc.errno, str(exc.errno))
+                if exc.errno is not None
+                else type(exc).__name__
+            )
+            message = f"Failed to delete clone '{clone_path}': {exc}"
+            if exc.errno in _RETRYABLE_DELETE_ERRNOS:
+                raise SnapshotInUseError(
+                    message, errno_name=errno_name, detail=str(exc)
+                ) from exc
+            raise SnapshotDeleteError(
+                message, errno_name=errno_name, detail=str(exc)
+            ) from exc
 
     def list_clones(self, namespace: str) -> List[dict]:
         """Return one dict per subdirectory of ``.versioned/{namespace}/``."""
@@ -366,6 +444,14 @@ class CowDaemonBackend:
         self._mount_point = config.mount_point.rstrip("/")
         self._poll_interval = config.poll_interval_seconds
         self._timeout = config.timeout_seconds
+        # Bug #1513: per-HTTP-call timeout (connect+read), applied to EVERY
+        # requests.* call below. Distinct from self._timeout (the overall
+        # job-completion poll deadline) -- this bounds each individual round
+        # trip so a lost/dropped daemon response fails loudly and fast
+        # instead of hanging the caller forever (production symptom: a
+        # CLOSE-WAIT connection and a repo-activation job stuck at 40%
+        # indefinitely, with no error ever surfaced).
+        self._request_timeout = config.request_timeout_seconds
         self._daemon_storage_path = (config.daemon_storage_path or "").rstrip("/")
         # Bug #1084 read-after-create barrier: the daemon creates the snapshot
         # on its local XFS; this (scheduler) node reaches it over NFS and may
@@ -401,7 +487,7 @@ class CowDaemonBackend:
         The daemon's own server-side validation requires namespace/name
         values to contain only alphanumeric characters, hyphens, and
         underscores. Real cluster usernames are email addresses (e.g.
-        ``Seba.Battig@lightspeeddms.com``), so any character outside that
+        ``Jane.Doe@example.com``), so any character outside that
         allowed set -- not just dots -- must be replaced, or the daemon
         rejects the request with HTTP 400 VALIDATION_ERROR (Issue #1465).
         Every disallowed character maps to a single underscore.
@@ -437,7 +523,7 @@ class CowDaemonBackend:
         #
         # On the CoW daemon host (e.g. cluster node 23), the same logical
         # filesystem is reached via daemon_storage_path directly
-        # (/home/jsbattig/cow-storage/...) — the symlink resolves there
+        # (/home/opuser/cow-storage/...) — the symlink resolves there
         # because the local layout points to the source rather than the
         # bind mount. Such paths are ALREADY in daemon-local form, return
         # as-is without re-prefixing.
@@ -476,8 +562,8 @@ class CowDaemonBackend:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
 
         The daemon job response contains clone_path as the daemon-local absolute path
-        (e.g. ``home/jsbattig/cow-storage/ns/name`` without leading slash, or
-        ``/home/jsbattig/cow-storage/ns/name`` with leading slash).
+        (e.g. ``home/opuser/cow-storage/ns/name`` without leading slash, or
+        ``/home/opuser/cow-storage/ns/name`` with leading slash).
 
         When daemon_storage_path is configured we strip it and replace with mount_point.
         When daemon_storage_path is empty the clone_path is already relative (``ns/name``)
@@ -527,7 +613,7 @@ class CowDaemonBackend:
         unaffected by the extra ``.versioned`` path segment.
 
         Sanitizes namespace and name (dots->underscores) so aliases containing
-        dots (e.g. ``langfuse_Claude_Code_seba.battig_...``) pass daemon
+        dots (e.g. ``langfuse_Claude_Code_jane.doe_...``) pass daemon
         validation. Returns the canonical CIDX mount-point path.
         """
         sanitized_namespace = self._sanitize_identifier(namespace)
@@ -567,7 +653,14 @@ class CowDaemonBackend:
         masks the cancellation. poll_interval exists for CloneBackend
         Protocol symmetry with LocalCloneBackend; the daemon keeps its own
         exponential-backoff poll cadence regardless.
+
+        Refuses an already-existing
+        DIRECTORY destination BEFORE any daemon call, mirroring
+        LocalCloneBackend -- this codebase's own filesystem view of
+        dest_path (over the same NFS mount the daemon serves) is checked
+        client-side rather than trusting the remote daemon to enforce it.
         """
+        _reject_existing_directory_destination(dest_path, "CowDaemonBackend")
         requests = self._requests()
         # Translate CIDX-view paths to daemon-local paths so daemon validation passes and reflink works
         daemon_source = self._translate_to_daemon_path(source_path)
@@ -599,6 +692,7 @@ class CowDaemonBackend:
             f"{self._daemon_url}/api/v1/clones",
             json=body,
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         response.raise_for_status()
 
@@ -652,6 +746,7 @@ class CowDaemonBackend:
             resp = requests.get(
                 f"{self._daemon_url}/api/v1/jobs/{job_id}",
                 headers=self._headers(),
+                timeout=self._request_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -707,11 +802,47 @@ class CowDaemonBackend:
         resp = requests.delete(
             f"{self._daemon_url}/api/v1/clones/{namespace}/{name}",
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
-        if resp.status_code == 404:
+        if resp.status_code == 404 or resp.ok:
             return True
-        resp.raise_for_status()
-        return True
+
+        # Bug #1844: classify instead of raise_for_status(). That call
+        # produced an HTTPError carrying only the status line and the URL,
+        # so the daemon's real cause never left the daemon host -- which is
+        # why this bug's root cause could not be established from here at
+        # all -- and a transient "still in use" was indistinguishable from a
+        # permanently broken delete, so both got the same five-attempt
+        # budget and the snapshot was abandoned either way.
+        errno_name, detail = self._parse_daemon_error(resp)
+        message = (
+            f"CoW daemon refused DELETE of clone '{namespace}/{name}' "
+            f"(HTTP {resp.status_code}, errno={errno_name}): {detail}"
+        )
+        if resp.status_code == 409:
+            raise SnapshotInUseError(message, errno_name=errno_name, detail=detail)
+        raise SnapshotDeleteError(message, errno_name=errno_name, detail=detail)
+
+    @staticmethod
+    def _parse_daemon_error(resp: "Response") -> Tuple[Optional[str], str]:
+        """Extract ``(errno_name, detail)`` from a CoW daemon error response.
+
+        The daemon's ``http_exception_handler`` returns ``exc.detail`` as the
+        WHOLE body when it is a dict, so an error body is flat:
+        ``{"error", "code", "errno", "detail"}``. A body that is not JSON (a
+        reverse proxy's HTML error page, say) must still yield something
+        actionable rather than be swallowed, so the raw text is used as the
+        detail in that case.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return None, (resp.text or "").strip()[:500]
+        errno_name = body.get("errno")
+        detail = body.get("detail") or body.get("error") or str(body)
+        return errno_name, str(detail)
 
     def list_clones(self, namespace: str) -> List[dict]:
         """GET /api/v1/clones?namespace={namespace}. Returns list of clone dicts.
@@ -725,6 +856,7 @@ class CowDaemonBackend:
             f"{self._daemon_url}/api/v1/clones",
             params={"namespace": sanitized_namespace},
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         resp.raise_for_status()
         return list(resp.json())
@@ -741,6 +873,7 @@ class CowDaemonBackend:
         resp = requests.get(
             f"{self._daemon_url}/api/v1/clones/{sanitized_namespace}/{sanitized_name}",
             headers=self._headers(),
+            timeout=self._request_timeout,
         )
         if resp.status_code == 404:
             return False

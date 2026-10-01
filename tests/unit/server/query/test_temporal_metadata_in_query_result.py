@@ -12,11 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import (
+from code_indexer.server.query.semantic_query_manager import (
     QueryResult,
     SemanticQueryManager,
 )
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResult,
     TemporalSearchResults,
 )
@@ -277,13 +277,13 @@ class TestExecuteTemporalQueryMetadataExtraction:
         # (not TemporalSearchService directly). Patch at the fusion dispatch module.
         with (
             patch(
-                "src.code_indexer.proxy.config_manager.ConfigManager"
+                "code_indexer.proxy.config_manager.ConfigManager"
             ) as MockConfigManager,
             patch(
-                "src.code_indexer.backends.backend_factory.BackendFactory"
+                "code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
                 return_value=temporal_results,
             ),
         ):
@@ -371,13 +371,13 @@ class TestExecuteTemporalQueryMetadataExtraction:
         # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
-                "src.code_indexer.proxy.config_manager.ConfigManager"
+                "code_indexer.proxy.config_manager.ConfigManager"
             ) as MockConfigManager,
             patch(
-                "src.code_indexer.backends.backend_factory.BackendFactory"
+                "code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
                 return_value=temporal_results,
             ),
         ):
@@ -432,7 +432,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "commit_hash": "0b7b331",
                 "commit_date": "2025-05-28",
                 "author_name": "Ryan Pearson",
-                "author_email": "ryan.pearson@lightspeeddms.com",
+                "author_email": "ryan.pearson@example.com",
                 "commit_message": "EVO-45522 Making changes to the PartsTransferPanel Layout.",
                 "diff_type": "modified",
             },
@@ -462,13 +462,13 @@ class TestExecuteTemporalQueryMetadataExtraction:
         # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
-                "src.code_indexer.proxy.config_manager.ConfigManager"
+                "code_indexer.proxy.config_manager.ConfigManager"
             ) as MockConfigManager,
             patch(
-                "src.code_indexer.backends.backend_factory.BackendFactory"
+                "code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
                 return_value=temporal_results,
             ),
         ):
@@ -514,10 +514,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result_dict["metadata"]["commit_hash"] == "0b7b331"
             assert result_dict["metadata"]["commit_date"] == "2025-05-28"
             assert result_dict["metadata"]["author_name"] == "Ryan Pearson"
-            assert (
-                result_dict["metadata"]["author_email"]
-                == "ryan.pearson@lightspeeddms.com"
-            )
+            assert result_dict["metadata"]["author_email"] == "ryan.pearson@example.com"
             assert (
                 result_dict["metadata"]["commit_message"]
                 == "EVO-45522 Making changes to the PartsTransferPanel Layout."
@@ -572,13 +569,13 @@ class TestExecuteTemporalQueryMetadataExtraction:
         # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
-                "src.code_indexer.proxy.config_manager.ConfigManager"
+                "code_indexer.proxy.config_manager.ConfigManager"
             ) as MockConfigManager,
             patch(
-                "src.code_indexer.backends.backend_factory.BackendFactory"
+                "code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
                 return_value=temporal_results,
             ),
         ):

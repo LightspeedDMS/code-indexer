@@ -15,7 +15,7 @@ Metrics exported:
 - cidx.repos.refresh.duration (Histogram) - Repository refresh duration
 
 Usage:
-    from src.code_indexer.server.telemetry.job_metrics import (
+    from code_indexer.server.telemetry.job_metrics import (
         get_job_metrics,
     )
 
@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
-    from src.code_indexer.server.telemetry.manager import TelemetryManager
+    from code_indexer.server.telemetry.manager import TelemetryManager
 
 logger = logging.getLogger(__name__)
 

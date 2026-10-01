@@ -11,7 +11,6 @@ import tempfile
 import shutil
 from pathlib import Path
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
-from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
 @pytest.fixture
@@ -32,9 +31,9 @@ def temp_dirs():
 
 
 @pytest.fixture
-def managers(temp_dirs):
+def managers(temp_dirs, background_job_manager_factory):
     """Create manager instances for testing."""
-    job_manager = BackgroundJobManager(storage_path=temp_dirs["job_storage"])
+    job_manager = background_job_manager_factory(storage_path=temp_dirs["job_storage"])
     golden_manager = GoldenRepoManager(data_dir=temp_dirs["golden_repos_dir"])
 
     # Bug #1317: global activation is now mandatory for add_golden_repo() to

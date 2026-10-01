@@ -3,6 +3,7 @@ Tests for ElevatedSessionManager - SQLite (solo) backend (Story #923 AC1).
 Also covers cluster-mode wiring: set_connection_pool(), data-dir path, PG backend.
 """
 
+import os
 import sqlite3
 import time
 from typing import Optional
@@ -637,17 +638,42 @@ def test_set_connection_pool_exists_and_stores_pool(manager, pg_pool):
 # ---------------------------------------------------------------------------
 
 
-def test_db_path_uses_cidx_data_dir_env_var(tmp_path, monkeypatch):
-    """When CIDX_DATA_DIR is set, the SQLite DB must be placed inside it."""
-    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path))
+def test_db_path_ignores_cidx_data_dir_env_var_alone(tmp_path, monkeypatch):
+    """Bug #1780 regression guard: CIDX_DATA_DIR alone (with CIDX_SERVER_DATA_DIR
+    unset) must NOT redirect the SQLite DB path. CIDX_SERVER_DATA_DIR is the
+    correct env var here, consistent with jwt_secret_manager.py, audit_logger.py,
+    concurrency_protection.py, and ~20+ other sibling modules. Falls through to
+    the ~/.cidx-server default instead.
+
+    HOME is redirected to an isolated tmp_path subdirectory so the fallback
+    branch's os.path.expanduser("~/.cidx-server") resolution (and the
+    makedirs()/_ensure_schema() calls that follow it) never touch the real
+    local developer machine's ~/.cidx-server directory.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
+    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path / "wrong"))
+    mgr = ElevatedSessionManager()
+    assert not mgr._db_path.startswith(str(tmp_path / "wrong")), (
+        "CIDX_DATA_DIR alone must not redirect _db_path after Bug #1780 fix; "
+        "only CIDX_SERVER_DATA_DIR should."
+    )
+    assert mgr._db_path.startswith(os.path.expanduser("~/.cidx-server"))
+
+
+def test_db_path_uses_cidx_server_data_dir_env_var(tmp_path, monkeypatch):
+    """Bug #1780: When CIDX_SERVER_DATA_DIR is set, the SQLite DB must be
+    placed inside it."""
+    monkeypatch.delenv("CIDX_DATA_DIR", raising=False)
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
     mgr = ElevatedSessionManager()
     assert mgr._db_path.startswith(str(tmp_path))
     assert "elevated_sessions" in mgr._db_path
 
 
 def test_db_path_constructor_override_wins_over_env_var(tmp_path, monkeypatch):
-    """Constructor db_path must win even when CIDX_DATA_DIR is also set."""
-    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path / "from_env"))
+    """Constructor db_path must win even when CIDX_SERVER_DATA_DIR is also set."""
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "from_env"))
     custom_path = str(tmp_path / "custom.db")
     mgr = ElevatedSessionManager(db_path=custom_path)
     assert mgr._db_path == custom_path
@@ -883,6 +909,35 @@ def test_cross_instance_touch_atomic_shared_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# An elevation window is valid only for the user who created it --
+# touch_atomic_for_user() must reject a resolved session key when the
+# requested username does not own it, on both backends.
+# ---------------------------------------------------------------------------
+
+
+def test_touch_atomic_for_user_rejects_wrong_username(manager):
+    """touch_atomic_for_user() must return None when session_key exists but
+    belongs to a different username (SQLite backend)."""
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    result = manager.touch_atomic_for_user(_SESSION_KEY_A, "a-different-user")
+    assert result is None
+    # The window itself is untouched and still reachable by its real owner.
+    assert manager.touch_atomic_for_user(_SESSION_KEY_A, _USERNAME_ADMIN) is not None
+
+
+def test_cluster_touch_atomic_for_user_rejects_wrong_username(cluster_manager):
+    """touch_atomic_for_user() must return None when session_key exists but
+    belongs to a different username (PostgreSQL backend)."""
+    cluster_manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    result = cluster_manager.touch_atomic_for_user(_SESSION_KEY_A, "a-different-user")
+    assert result is None
+    assert (
+        cluster_manager.touch_atomic_for_user(_SESSION_KEY_A, _USERNAME_ADMIN)
+        is not None
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cross-instance PG visibility
 # ---------------------------------------------------------------------------
 
@@ -1044,3 +1099,69 @@ def test_fail_closed_store_error_denies_access(tmp_path, monkeypatch):
         "Fail-closed violated: get_status must return None (deny) on store error, "
         "not raise or grant access."
     )
+
+
+# ---------------------------------------------------------------------------
+# log_elevation_owner_mismatch() -- read-only, exception-safe diagnostic
+# ---------------------------------------------------------------------------
+
+
+def test_log_elevation_owner_mismatch_warns_on_mismatch(manager, caplog):
+    """Must log a WARNING when the resolved session belongs to someone else."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, _SESSION_KEY_A, "a-different-user")
+    assert any(
+        "not owned by the authenticating user" in rec.message for rec in caplog.records
+    )
+
+
+def test_log_elevation_owner_mismatch_silent_when_username_matches(manager, caplog):
+    """Must not log anything when the session belongs to the given username."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, _SESSION_KEY_A, _USERNAME_ADMIN)
+    assert caplog.records == []
+
+
+def test_log_elevation_owner_mismatch_silent_when_no_session(manager, caplog):
+    """Must not log anything when the session key does not exist at all."""
+    import logging
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        log_elevation_owner_mismatch(manager, "nonexistent-key", _USERNAME_ADMIN)
+    assert caplog.records == []
+
+
+def test_log_elevation_owner_mismatch_never_raises_on_store_error(manager, tmp_path):
+    """A broken store read must not propagate an exception onto the auth path."""
+    import shutil
+
+    from code_indexer.server.auth.elevated_session_manager import (
+        log_elevation_owner_mismatch,
+    )
+
+    broken = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=str(tmp_path / "will_be_broken" / "elevated_sessions.db"),
+    )
+    shutil.rmtree(tmp_path / "will_be_broken")
+    # No exception must escape this call.
+    log_elevation_owner_mismatch(broken, _SESSION_KEY_A, _USERNAME_ADMIN)

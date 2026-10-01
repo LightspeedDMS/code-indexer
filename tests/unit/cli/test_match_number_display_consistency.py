@@ -206,12 +206,12 @@ class TestTemporalCommitMessageQuietMode:
             "type": "commit_message",
             "commit_hash": "237d7361234567890abcdef",
             "commit_date": "2025-11-02",
-            "author_name": "Seba Battig",
-            "author_email": "seba.battig@lightspeeddms.com",
+            "author_name": "Jane Doe",
+            "author_email": "jane.doe@example.com",
         }
         mock_temporal_result.temporal_context = {
             "commit_date": "2025-11-02",
-            "author_name": "Seba Battig",
+            "author_name": "Jane Doe",
         }
 
         mock_temporal_results = Mock()

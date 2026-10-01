@@ -81,9 +81,9 @@ def _wait_for_job(
 
 
 @pytest.fixture
-def real_job_manager():
+def real_job_manager(background_job_manager_factory):
     """Real BackgroundJobManager with no SQLite backend (in-memory only)."""
-    return BackgroundJobManager()
+    return background_job_manager_factory()
 
 
 @pytest.fixture

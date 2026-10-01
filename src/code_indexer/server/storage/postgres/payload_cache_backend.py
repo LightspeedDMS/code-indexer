@@ -99,6 +99,45 @@ class PayloadCachePostgresBackend:
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: store failed: %s", exc)
 
+    def _execute_batch_insert(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str],
+    ) -> None:
+        """Build rows and run the ONE-transaction batch INSERT. Shared by
+        store_batch() (which catches and warning-logs a failure) and
+        store_batch_strict() (Bug #1928 round-3 P1, which lets a failure
+        propagate) so the SQL/transaction logic is defined exactly once.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (handle, content, preview, now, ttl_secs, node_id)
+            for handle, content, preview, ttl_secs in entries
+        ]
+        with self._pool.connection() as conn:
+            # Bug #1181: Relax WAL fsync for ephemeral payload_cache writes.
+            # SET LOCAL is per-transaction; does not affect other statement types.
+            conn.execute("SET LOCAL synchronous_commit = off")
+            # psycopg v3: executemany lives on the cursor, NOT the connection.
+            # Using the cursor keeps this in the SAME transaction as the
+            # SET LOCAL above and the single commit() below.
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO payload_cache
+                        (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (cache_handle) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        preview = EXCLUDED.preview,
+                        created_at = EXCLUDED.created_at,
+                        ttl_seconds = EXCLUDED.ttl_seconds,
+                        node_id = EXCLUDED.node_id
+                    """,
+                    rows,
+                )
+            conn.commit()
+
     def store_batch(
         self,
         entries: List[Tuple[str, str, str, int]],
@@ -109,9 +148,9 @@ class PayloadCachePostgresBackend:
         Bug #1181: Batch all per-query stores to avoid N fsync'd commits per query
         saturating the PostgreSQL WAL write lock at concurrency.
 
-        SET LOCAL synchronous_commit = off relaxes WAL fsync for these ephemeral
-        rows — the commit is still visible immediately; only crash durability is
-        relaxed, which is safe for TTL-evicted payload cache data.
+        A write failure here is caught and only warning-logged (best-effort
+        caching semantics for the many existing callers of this method --
+        see store_batch_strict() below for the propagating variant).
 
         Args:
             entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
@@ -119,38 +158,33 @@ class PayloadCachePostgresBackend:
         """
         if not entries:
             return
-
-        now = datetime.now(timezone.utc).isoformat()
-        rows = [
-            (handle, content, preview, now, ttl_secs, node_id)
-            for handle, content, preview, ttl_secs in entries
-        ]
         try:
-            with self._pool.connection() as conn:
-                # Bug #1181: Relax WAL fsync for ephemeral payload_cache writes.
-                # SET LOCAL is per-transaction; does not affect other statement types.
-                conn.execute("SET LOCAL synchronous_commit = off")
-                # psycopg v3: executemany lives on the cursor, NOT the connection.
-                # Using the cursor keeps this in the SAME transaction as the
-                # SET LOCAL above and the single commit() below.
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        """
-                        INSERT INTO payload_cache
-                            (cache_handle, content, preview, created_at, ttl_seconds, node_id)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (cache_handle) DO UPDATE SET
-                            content = EXCLUDED.content,
-                            preview = EXCLUDED.preview,
-                            created_at = EXCLUDED.created_at,
-                            ttl_seconds = EXCLUDED.ttl_seconds,
-                            node_id = EXCLUDED.node_id
-                        """,
-                        rows,
-                    )
-                conn.commit()
+            self._execute_batch_insert(entries, node_id)
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: store_batch failed: %s", exc)
+
+    def store_batch_strict(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Bug #1928 (round 3, P1 -- Codex REJECT): identical write to
+        store_batch() above, but PROPAGATES any failure instead of
+        swallowing it -- used for page-set writes (e.g. xray_truncation's
+        whole-entry pages + pages-v1 manifest) where the caller must
+        learn the write genuinely failed rather than receive a handle
+        pointing at data that was never durably written.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+            node_id: Optional cluster node identifier (NULL in standalone).
+
+        Raises:
+            Whatever the underlying psycopg connection/transaction raises.
+        """
+        if not entries:
+            return
+        self._execute_batch_insert(entries, node_id)
 
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.

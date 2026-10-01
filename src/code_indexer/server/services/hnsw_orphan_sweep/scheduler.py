@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -52,10 +52,60 @@ _DISABLED_POLL_SECONDS = 60
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
 
+# Bug #1529: _PERSISTENCE_OUTCOME_ALIASES existed solely to map the two
+# now-deleted sister-temporal outcomes onto the state backend's original
+# Story #1360 vocabulary. Fixed-path temporal shards produce ordinary
+# in-place outcomes, so no aliasing is needed any more.
+
 # Fail-open default operating-hours window: (0, 0) means "always on" (24x7),
 # matching the pre-#1397 default behavior.
 _DEFAULT_WINDOW_START_UTC = 0
 _DEFAULT_WINDOW_END_UTC = 0
+
+# Bug #1864: the liveness snapshot describes THIS SERVER PROCESS only -- the
+# scheduler runs in every worker of every node, and per-process RAM is the
+# only honest place for "is my loop thread alive". CLAUDE.md's Cluster-Aware
+# State rule forbids presenting such a value as a fleet-wide answer, so the
+# snapshot carries its own scope marker and the admin endpoint nests it under
+# a `local_scheduler` key rather than mixing it into the durable fleet
+# counters.
+_LIVENESS_SCOPE = "local_process"
+
+# Reasons a loop cycle deliberately submitted no tick (Story #1397 gates).
+# Distinguishing these from "the loop is not running at all" is the whole
+# point: a sweep that is OFF by configuration is a decision, not a failure.
+CYCLE_SKIPPED_DISABLED = "disabled"
+CYCLE_SKIPPED_OUTSIDE_WINDOW = "outside_operating_window"
+
+
+def absent_local_scheduler_liveness() -> Dict[str, Any]:
+    """Liveness snapshot for a process where the scheduler object does not
+    exist at all -- it was never constructed, or its construction/``start()``
+    failed at boot and ``lifespan.py`` recorded the reason on ``app.state``.
+
+    This is ALSO the key template ``get_liveness()`` fills in, so both render
+    the identical key set and a monitoring consumer never has to branch on
+    the payload's shape. Returns a fresh dict on every call: the admin
+    endpoint stamps per-request fields into it.
+    """
+    return {
+        "scope": _LIVENESS_SCOPE,
+        "scheduler_running": False,
+        "started_at": None,
+        "last_loop_cycle_at": None,
+        "last_cycle_skipped_reason": None,
+        "last_tick_at": None,
+        "last_tick_completed_at": None,
+        "last_tick_error": None,
+        "ticks_started": 0,
+        "ticks_completed": 0,
+        "tick_in_progress": False,
+    }
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    """JSON-safe timestamp rendering; None passes through unchanged."""
+    return None if value is None else value.isoformat()
 
 
 def _is_within_operating_window(current_hour_utc: int, start: int, end: int) -> bool:
@@ -116,7 +166,8 @@ class HNSWOrphanRepairSweepScheduler:
             config_service: Object with ``get_config()`` returning a config
                 exposing ``hnsw_orphan_repair_sweep_config`` (enabled,
                 batch_size, tick_interval_minutes).
-            process_fn: Injectable per-item processor (defaults to the real
+            process_fn: Injectable per-item processor for golden/activated
+                (in-repo) candidates (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
             now_fn: Injectable clock hook returning the current time (defaults
                 to the real UTC wall clock). Used by the operating-hours
@@ -134,6 +185,23 @@ class HNSWOrphanRepairSweepScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+        # Bug #1864 liveness state. Three different threads touch these --
+        # the scheduler loop thread (cycle heartbeat), a bgm-worker thread
+        # (tick start/finish, since trigger_now() submits _run_tick to the
+        # BackgroundJobManager) and an HTTP request thread (get_liveness) --
+        # so every read and write is taken under this lock. All operations
+        # are O(1) with no I/O: the admin stats endpoint must never walk
+        # repos (CLAUDE.md design-for-900-repos).
+        self._liveness_lock = threading.Lock()
+        self._started_at: Optional[datetime] = None
+        self._last_loop_cycle_at: Optional[datetime] = None
+        self._last_cycle_skipped_reason: Optional[str] = None
+        self._last_tick_at: Optional[datetime] = None
+        self._last_tick_completed_at: Optional[datetime] = None
+        self._last_tick_error: Optional[str] = None
+        self._ticks_started = 0
+        self._ticks_completed = 0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -141,6 +209,8 @@ class HNSWOrphanRepairSweepScheduler:
     def start(self) -> None:
         """Start the daemon thread."""
         self._stop_event.clear()
+        with self._liveness_lock:
+            self._started_at = self._now_fn()
         self._thread = threading.Thread(
             target=self._loop,
             daemon=True,
@@ -210,6 +280,40 @@ class HNSWOrphanRepairSweepScheduler:
             return _DEFAULT_BATCH_SIZE
 
     def _run_tick(self) -> Dict[str, Any]:
+        """Thin Bug #1864 liveness wrapper around :meth:`_run_tick_impl`.
+
+        Mirrors the established wrapper pattern used by Story #1586's
+        ``RefreshScheduler._execute_refresh``: the real body is renamed to
+        ``*_impl`` and this wrapper only times/records it, so the tick's own
+        contract (its per-outcome counts dict) is returned untouched.
+
+        A tick that raises is recorded as FINISHED-with-error and then
+        re-raised unchanged -- swallowing it here would hide the failure from
+        the BackgroundJobManager, and leaving ``tick_in_progress`` latched
+        True forever would make every later snapshot claim a wedge that is
+        not happening.
+        """
+        self._record_tick_started()
+        try:
+            result = self._run_tick_impl()
+        except Exception as exc:
+            self._record_tick_finished(error=f"{type(exc).__name__}: {exc}")
+            raise
+        self._record_tick_finished(error=None)
+        return result
+
+    def _record_tick_started(self) -> None:
+        with self._liveness_lock:
+            self._ticks_started += 1
+            self._last_tick_at = self._now_fn()
+
+    def _record_tick_finished(self, *, error: Optional[str]) -> None:
+        with self._liveness_lock:
+            self._ticks_completed += 1
+            self._last_tick_completed_at = self._now_fn()
+            self._last_tick_error = error
+
+    def _run_tick_impl(self) -> Dict[str, Any]:
         """Process up to ``batch_size`` candidates beyond the durable
         cursor, persisting progress after EACH item. Returns per-tick
         outcome counts."""
@@ -217,12 +321,16 @@ class HNSWOrphanRepairSweepScheduler:
         state = self._state_backend.get_state()
         cursor = state["last_completed_key"]
 
-        candidates = sorted(
+        all_candidates = list(
             enumerate_sweep_candidates(
                 self._golden_repo_manager, self._activated_repo_manager
-            ),
-            key=lambda c: c.sort_key,
+            )
         )
+        # Bug #1529: no separate sister enumeration. Server-context temporal
+        # shards live at a FIXED, mutable path and are yielded by
+        # enumerate_sweep_candidates above (kind="golden_temporal"), so they
+        # flow through the SAME in-place repair as every other collection.
+        candidates = sorted(all_candidates, key=lambda c: c.sort_key)
         pending = [c for c in candidates if cursor is None or c.sort_key > cursor]
         batch = pending[:batch_size]
 
@@ -260,8 +368,49 @@ class HNSWOrphanRepairSweepScheduler:
     def _process_one(self, candidate: Any) -> SweepOutcome:
         """Fail-soft wrapper: any unexpected exception from the per-item
         processor is loud (logged) but counted as ERROR, never aborting the
-        tick (AC2: a failure on one index does not abort the pass)."""
+        tick (AC2: a failure on one index does not abort the pass).
+
+        Bug #1529: there is no longer a second processor. Every candidate --
+        golden, activated, and the fixed-path ``golden_temporal`` shards --
+        is repaired IN PLACE by the same ``process_fn``.
+
+        Bug #1542 (Codex-review Q2 follow-up): the REAL ``process_candidate``
+        accepts an optional ``activated_repo_manager`` kwarg it uses to
+        resolve an activated-repo candidate's ``activation_id`` for correct
+        cache-key composition (Story #1458 AC11). Passing that kwarg to an
+        arbitrary injected ``process_fn`` (test fakes declared as
+        ``Callable[[Any], SweepOutcome]``, e.g. ``spy_process(candidate)``)
+        would break the single-argument injection contract those tests
+        rely on.
+
+        Dispatch is decided via a STRUCTURAL capability marker
+        (``process_candidate.supports_activated_repo_manager``), NOT an
+        identity check (``fn is process_candidate``) -- an identity check
+        is a silent-failure trap: any legitimate wrapper, ``functools
+        .partial``, decorator, or instrumentation layer around
+        ``process_candidate`` would fail it and silently fall back to the
+        "no activation_id" branch with zero diagnostic, even in real
+        production code. A plain function attribute survives
+        ``functools.wraps``-based wrapping (its ``WRAPPER_UPDATES`` copies
+        ``__dict__``, where this attribute lives), so a wrapper decorated
+        with ``@functools.wraps(process_candidate)`` inherits the marker
+        automatically and is dispatched exactly like the bare function --
+        test fakes that don't opt in (plain functions/lambdas with no such
+        attribute) fall through to the plain single-argument call below.
+        """
         try:
+            if getattr(self._process_fn, "supports_activated_repo_manager", False):
+                # `self._process_fn` is declared `Callable[[Any],
+                # SweepOutcome]`, which mypy takes literally (no extra
+                # kwarg) -- cast is safe here because the runtime check
+                # above is the actual contract enforcement, not the static
+                # type.
+                activation_aware_fn = cast(
+                    Callable[..., SweepOutcome], self._process_fn
+                )
+                return activation_aware_fn(
+                    candidate, activated_repo_manager=self._activated_repo_manager
+                )
             return self._process_fn(candidate)
         except Exception:
             logger.error(
@@ -281,6 +430,48 @@ class HNSWOrphanRepairSweepScheduler:
         by the same state_backend as the tick cursor, read independently of
         JobTracker."""
         return self._state_backend.get_state()  # type: ignore[no-any-return]
+
+    def get_liveness(self) -> Dict[str, Any]:
+        """Return this PROCESS's sweep liveness snapshot (Bug #1864).
+
+        Complements :meth:`get_stats`, which answers "what has the fleet
+        accomplished" from durable shared state. This answers the question
+        that had no answer anywhere: "is the thing that advances those
+        counters actually alive here, and when did it last do anything".
+
+        Deliberately per-process and never persisted -- a node's loop-thread
+        health is not fleet state, and writing it to the shared backend would
+        make the last node to write appear to speak for all of them.
+
+        ``tick_in_progress`` is the wedge discriminator: a snapshot showing a
+        tick still in flight with an old ``last_tick_at`` is a stuck tick,
+        while the same durable row with no tick in flight and a recent
+        ``last_tick_at`` is simply a long pass making normal progress.
+
+        O(1), lock-guarded, no I/O -- safe to call on every admin request.
+        """
+        snapshot = absent_local_scheduler_liveness()
+        with self._liveness_lock:
+            thread = self._thread
+            snapshot.update(
+                {
+                    "scheduler_running": (
+                        thread is not None
+                        and thread.is_alive()
+                        and not self._stop_event.is_set()
+                    ),
+                    "started_at": _iso(self._started_at),
+                    "last_loop_cycle_at": _iso(self._last_loop_cycle_at),
+                    "last_cycle_skipped_reason": self._last_cycle_skipped_reason,
+                    "last_tick_at": _iso(self._last_tick_at),
+                    "last_tick_completed_at": _iso(self._last_tick_completed_at),
+                    "last_tick_error": self._last_tick_error,
+                    "ticks_started": self._ticks_started,
+                    "ticks_completed": self._ticks_completed,
+                    "tick_in_progress": self._ticks_started > self._ticks_completed,
+                }
+            )
+        return snapshot
 
     # ------------------------------------------------------------------
     # Main loop
@@ -327,6 +518,20 @@ class HNSWOrphanRepairSweepScheduler:
             within_window = _is_within_operating_window(
                 current_hour, cycle_cfg["window_start"], cycle_cfg["window_end"]
             )
+
+            # Bug #1864: heartbeat every cycle, including the cycles that
+            # deliberately submit nothing. Without it, a sweep switched off
+            # in the Web UI and a sweep whose loop thread died look the same
+            # from outside -- both simply stop producing ticks.
+            if enabled and within_window:
+                skipped_reason = None
+            elif not enabled:
+                skipped_reason = CYCLE_SKIPPED_DISABLED
+            else:
+                skipped_reason = CYCLE_SKIPPED_OUTSIDE_WINDOW
+            with self._liveness_lock:
+                self._last_loop_cycle_at = self._now_fn()
+                self._last_cycle_skipped_reason = skipped_reason
 
             if enabled and within_window:
                 try:

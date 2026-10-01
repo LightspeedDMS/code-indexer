@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import logging
 import socket
-from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple, Any
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Any
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
+    from opentelemetry.metrics import Observation
+
     from code_indexer.server.telemetry.manager import TelemetryManager
 
 logger = logging.getLogger(__name__)
@@ -163,14 +165,32 @@ class MachineMetricsExporter:
         return get_system_metrics_collector()
 
     # Callback methods for observable gauges
-    # Each callback yields (value, attributes) tuples
+    # Each callback yields real opentelemetry.metrics.Observation objects
+    # (Bug #1606: the OTEL SDK's callback contract requires an Observation,
+    # not a bare (value, attributes) tuple -- see _create_observation()).
 
-    def _cpu_callback(self, options) -> Iterable[Tuple[float, Dict[str, str]]]:
+    def _create_observation(
+        self, value: Any, attributes: Dict[str, str]
+    ) -> Observation:
+        """Create a real ``Observation`` for an observable-gauge callback.
+
+        Mirrors ``job_metrics.py``'s ``_create_observation`` helper. Bug
+        #1606: every callback below used to ``yield (value, attributes)``
+        directly, but the OTEL SDK's real callback-invocation code accesses
+        ``.value``/``.attributes`` on what it receives -- a plain tuple has
+        neither, so the SDK logged an ERROR and dropped the data point on
+        every single export cycle for all 7 gauges.
+        """
+        from opentelemetry.metrics import Observation as _Observation
+
+        return _Observation(value, attributes)
+
+    def _cpu_callback(self, options) -> Iterable[Observation]:
         """Callback for CPU usage gauge."""
         try:
             collector = self._get_metrics_collector()
             value = collector.get_cpu_usage()
-            yield (value, self._get_attributes())
+            yield self._create_observation(value, self._get_attributes())
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -178,12 +198,12 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _memory_callback(self, options) -> Iterable[Tuple[float, Dict[str, str]]]:
+    def _memory_callback(self, options) -> Iterable[Observation]:
         """Callback for memory usage gauge."""
         try:
             collector = self._get_metrics_collector()
             memory = collector.get_memory_usage()
-            yield (memory["percent"], self._get_attributes())
+            yield self._create_observation(memory["percent"], self._get_attributes())
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -191,12 +211,12 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _disk_free_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
+    def _disk_free_callback(self, options) -> Iterable[Observation]:
         """Callback for disk free space gauge."""
         try:
             collector = self._get_metrics_collector()
             disk = collector.get_disk_metrics()
-            yield (disk["free_bytes"], self._get_attributes())
+            yield self._create_observation(disk["free_bytes"], self._get_attributes())
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -204,12 +224,12 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _disk_read_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
+    def _disk_read_callback(self, options) -> Iterable[Observation]:
         """Callback for disk read bytes gauge."""
         try:
             collector = self._get_metrics_collector()
             disk = collector.get_disk_metrics()
-            yield (disk["read_bytes"], self._get_attributes())
+            yield self._create_observation(disk["read_bytes"], self._get_attributes())
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -217,12 +237,12 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _disk_write_callback(self, options) -> Iterable[Tuple[int, Dict[str, str]]]:
+    def _disk_write_callback(self, options) -> Iterable[Observation]:
         """Callback for disk write bytes gauge."""
         try:
             collector = self._get_metrics_collector()
             disk = collector.get_disk_metrics()
-            yield (disk["write_bytes"], self._get_attributes())
+            yield self._create_observation(disk["write_bytes"], self._get_attributes())
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -230,14 +250,14 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _network_receive_callback(
-        self, options
-    ) -> Iterable[Tuple[int, Dict[str, str]]]:
+    def _network_receive_callback(self, options) -> Iterable[Observation]:
         """Callback for network receive bytes gauge."""
         try:
             collector = self._get_metrics_collector()
             network = collector.get_network_metrics()
-            yield (network["receive_bytes"], self._get_attributes())
+            yield self._create_observation(
+                network["receive_bytes"], self._get_attributes()
+            )
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -246,14 +266,14 @@ class MachineMetricsExporter:
                 )
             )
 
-    def _network_transmit_callback(
-        self, options
-    ) -> Iterable[Tuple[int, Dict[str, str]]]:
+    def _network_transmit_callback(self, options) -> Iterable[Observation]:
         """Callback for network transmit bytes gauge."""
         try:
             collector = self._get_metrics_collector()
             network = collector.get_network_metrics()
-            yield (network["transmit_bytes"], self._get_attributes())
+            yield self._create_observation(
+                network["transmit_bytes"], self._get_attributes()
+            )
         except Exception as e:
             logger.warning(
                 format_error_log(

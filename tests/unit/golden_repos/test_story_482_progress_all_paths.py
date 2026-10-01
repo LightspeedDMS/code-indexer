@@ -48,6 +48,7 @@ class TestPathAAddGoldenRepoProgressCallback:
                 alias="test-repo",
                 repo_url="https://github.com/example/test.git",
                 default_branch="main",
+                submitter_username="example-admin",
             )
 
             # Extract the func submitted to BackgroundJobManager

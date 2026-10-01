@@ -1,0 +1,14 @@
+{
+  "before": {
+    "num_concurrent": 8,
+    "total_wall_ms": 1371.6516476124525,
+    "per_query_avg_ms": 171.45645595155656,
+    "results_per_query": 1080
+  },
+  "after": {
+    "num_concurrent": 8,
+    "total_wall_ms": 125.25702500715852,
+    "per_query_avg_ms": 15.657128125894815,
+    "results_per_query": 30
+  }
+}

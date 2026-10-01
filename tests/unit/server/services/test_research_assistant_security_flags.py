@@ -200,17 +200,31 @@ class TestSecurityHardeningCommandFlags:
 
     def test_settings_allow_includes_cidx_meta_write_and_edit(self, research_service):
         """
-        AC3: permissions.allow must contain Write and Edit rules scoped to cidx-meta,
-        overriding the general deny rules for those paths.
+        AC3: permissions.allow must contain an Edit rule scoped to cidx-meta,
+        overriding the general deny rule for that path.
+
+        Bug #1451 (commit c33625f2): the bare Write(cidx-meta/**) allow rule
+        originally required here was removed from production code because
+        Claude CLI >= 2.1.215 hard-rejects bare Write(path) allow rules for
+        file-permission checks ("only Edit(path) rules are matched") --
+        confirmed live, this broke 100% of Research Assistant invocations in
+        production the moment the host's Claude CLI auto-updated to 2.1.215.
+        Edit(...) alone already grants the file-editing access the redundant
+        Write(...) rule was attempting to grant. The sibling test file
+        (test_research_assistant_permissions_bug738.py) was correctly updated
+        in that same commit (test_cidx_meta_write_in_allow ->
+        test_cidx_meta_write_not_in_allow); this test was missed and is
+        updated here to match the same, production-verified expectation.
         """
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
 
         allow_list = self._get_settings(calls[0])["permissions"]["allow"]
 
-        write_rules = [r for r in allow_list if "Write" in r and "cidx-meta" in r]
-        assert len(write_rules) >= 1, (
-            f"permissions.allow must contain Write rule scoped to cidx-meta. "
+        write_rules = [r for r in allow_list if "Write(" in r]
+        assert write_rules == [], (
+            f"Bug #1451: bare Write(...) allow rule must NOT be present -- "
+            f"Claude CLI >= 2.1.215 hard-rejects it for file-permission checks. "
             f"Got allow list: {allow_list}"
         )
 

@@ -38,7 +38,7 @@ class TestCancelJobHandler:
         handler = HANDLER_REGISTRY["cancel_job"]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._cancel_job._get_background_job_manager",
             return_value=mock_bjm,
         ):
             result = handler({"job_id": "test-job-123"}, user)
@@ -66,7 +66,7 @@ class TestCancelJobHandler:
         handler = HANDLER_REGISTRY["cancel_job"]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._cancel_job._get_background_job_manager",
             return_value=mock_bjm,
         ):
             result = handler({"job_id": "nonexistent"}, user)
@@ -84,7 +84,7 @@ class TestCancelJobHandler:
         handler = HANDLER_REGISTRY["cancel_job"]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._cancel_job._get_background_job_manager",
             return_value=mock_bjm,
         ):
             result = handler({"job_id": "done-job"}, user)
@@ -100,7 +100,7 @@ class TestCancelJobHandler:
         handler = HANDLER_REGISTRY["cancel_job"]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._cancel_job._get_background_job_manager",
             return_value=mock_bjm,
         ):
             handler({"job_id": "j1"}, user)
@@ -114,7 +114,7 @@ class TestCancelJobHandler:
         handler = HANDLER_REGISTRY["cancel_job"]
 
         with patch(
-            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            "code_indexer.server.mcp.handlers.xray._cancel_job._get_background_job_manager",
             return_value=mock_bjm,
         ):
             handler({"job_id": "j1"}, user)

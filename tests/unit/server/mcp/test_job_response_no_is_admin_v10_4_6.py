@@ -74,7 +74,10 @@ def sqlite_bjm_with_evicted_job() -> Generator[Dict[str, Any], None, None]:
         else:
             pytest.fail(f"Job {job_id} not evicted within {_COMPLETION_TIMEOUT_S}s")
 
-        yield {"bjm": bjm, "job_id": job_id, "username": username}
+        try:
+            yield {"bjm": bjm, "job_id": job_id, "username": username}
+        finally:
+            bjm.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +146,9 @@ def test_list_jobs_sqlite_merge_does_not_include_is_admin(
 # ---------------------------------------------------------------------------
 
 
-def test_internal_is_admin_field_still_works_for_priority() -> None:
+def test_internal_is_admin_field_still_works_for_priority(
+    background_job_manager_factory,
+) -> None:
     """BackgroundJob.is_admin still exists and cancel ownership-bypass still works.
 
     Removing is_admin from the public response projection must not break the
@@ -152,7 +157,7 @@ def test_internal_is_admin_field_still_works_for_priority() -> None:
     """
     from code_indexer.server.utils.config_manager import ServerResourceConfig
 
-    bjm = BackgroundJobManager(resource_config=ServerResourceConfig())
+    bjm = background_job_manager_factory(resource_config=ServerResourceConfig())
     owner_username = "owner@example.com"
     admin_username = "sysadmin@example.com"
 

@@ -159,7 +159,7 @@ class TestSanitizeBatchCreateError:
 
     def test_truncates_long_error_message_preserves_first_197_chars(self):
         """Error messages > 200 chars are trimmed: first 197 chars kept + '...' appended."""
-        from src.code_indexer.server.web.routes import _sanitize_batch_create_error
+        from code_indexer.server.web.routes import _sanitize_batch_create_error
 
         long_msg = "x" * 300
         result = _sanitize_batch_create_error(Exception(long_msg))
@@ -170,7 +170,7 @@ class TestSanitizeBatchCreateError:
 
     def test_short_message_unchanged(self):
         """Error messages <= 200 chars are returned stripped and unmodified."""
-        from src.code_indexer.server.web.routes import _sanitize_batch_create_error
+        from code_indexer.server.web.routes import _sanitize_batch_create_error
 
         result = _sanitize_batch_create_error(Exception("short error"))
 
@@ -178,7 +178,7 @@ class TestSanitizeBatchCreateError:
 
     def test_newlines_replaced_with_spaces_exact_output(self):
         """Newlines are replaced with spaces; other text is preserved exactly."""
-        from src.code_indexer.server.web.routes import _sanitize_batch_create_error
+        from code_indexer.server.web.routes import _sanitize_batch_create_error
 
         result = _sanitize_batch_create_error(Exception("line1\nline2\nline3"))
 
@@ -189,7 +189,7 @@ class TestSanitizeBatchCreateError:
 
     def test_exactly_200_chars_not_truncated(self):
         """Error message of exactly 200 chars is returned without truncation."""
-        from src.code_indexer.server.web.routes import _sanitize_batch_create_error
+        from code_indexer.server.web.routes import _sanitize_batch_create_error
 
         msg = "a" * 200
         result = _sanitize_batch_create_error(Exception(msg))
@@ -198,7 +198,7 @@ class TestSanitizeBatchCreateError:
 
     def test_201_chars_truncated_to_first_197_plus_ellipsis(self):
         """Error message of 201 chars is trimmed to first 197 chars + '...'."""
-        from src.code_indexer.server.web.routes import _sanitize_batch_create_error
+        from code_indexer.server.web.routes import _sanitize_batch_create_error
 
         msg = "b" * 201
         result = _sanitize_batch_create_error(Exception(msg))
@@ -219,8 +219,8 @@ class TestMaxBatchCreateReposCap:
     def test_batch_create_returns_400_when_over_limit(self):
         """batch_create_golden_repos returns 400 when repo count exceeds cap."""
         import json
-        from src.code_indexer.server.web.routes import batch_create_golden_repos
-        from src.code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
+        from code_indexer.server.web.routes import batch_create_golden_repos
+        from code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
 
         over_limit = [
             {"clone_url": f"https://github.com/org/repo{i}", "alias": f"repo{i}"}
@@ -235,11 +235,11 @@ class TestMaxBatchCreateReposCap:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
         ):
@@ -256,7 +256,7 @@ class TestMaxBatchCreateReposCap:
 
     def test_max_batch_create_repos_constant_is_50(self):
         """MAX_BATCH_CREATE_REPOS constant must be defined as 50."""
-        from src.code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
+        from code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
 
         assert MAX_BATCH_CREATE_REPOS == 50
 
@@ -267,8 +267,8 @@ class TestMaxBatchCreateReposCap:
         exactly MAX_BATCH_CREATE_REPOS times and HTTP 200 is returned.
         """
         import json
-        from src.code_indexer.server.web.routes import batch_create_golden_repos
-        from src.code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
+        from code_indexer.server.web.routes import batch_create_golden_repos
+        from code_indexer.server.web.routes import MAX_BATCH_CREATE_REPOS
 
         at_limit = [
             {"clone_url": f"https://github.com/org/repo{i}", "alias": f"repo{i}"}
@@ -287,15 +287,15 @@ class TestMaxBatchCreateReposCap:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -322,7 +322,7 @@ class TestBatchCreateReposLogging:
 
     def test_exception_triggers_logger_warning_with_exc_info(self):
         """When add_golden_repo raises, logger.warning is called with exc_info=True."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -330,7 +330,7 @@ class TestBatchCreateReposLogging:
 
         repos = [{"clone_url": "https://github.com/org/repo", "alias": "repo"}]
 
-        with patch("src.code_indexer.server.web.routes.logger") as mock_logger:
+        with patch("code_indexer.server.web.routes.logger") as mock_logger:
             _batch_create_repos(repos, "admin", mock_manager)
 
         mock_logger.warning.assert_called_once()
@@ -341,7 +341,7 @@ class TestBatchCreateReposLogging:
 
     def test_exception_includes_error_code_web_general_067(self):
         """logger.warning message must include WEB-GENERAL-067 error code."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -349,7 +349,7 @@ class TestBatchCreateReposLogging:
 
         repos = [{"clone_url": "https://github.com/org/repo", "alias": "my-repo"}]
 
-        with patch("src.code_indexer.server.web.routes.logger") as mock_logger:
+        with patch("code_indexer.server.web.routes.logger") as mock_logger:
             _batch_create_repos(repos, "admin", mock_manager)
 
         call_args = mock_logger.warning.call_args[0]
@@ -362,7 +362,7 @@ class TestBatchCreateReposLogging:
 
     def test_failed_repo_still_appended_to_results(self):
         """Even when exception is raised, the failed repo is added to results."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -370,7 +370,7 @@ class TestBatchCreateReposLogging:
 
         repos = [{"clone_url": "https://github.com/org/repo", "alias": "my-repo"}]
 
-        with patch("src.code_indexer.server.web.routes.logger"):
+        with patch("code_indexer.server.web.routes.logger"):
             result = _batch_create_repos(repos, "admin", mock_manager)
 
         assert result["success"] is False
@@ -380,7 +380,7 @@ class TestBatchCreateReposLogging:
 
     def test_error_message_is_sanitized_in_result(self):
         """The error field in results uses _sanitize_batch_create_error (no raw newlines)."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -388,7 +388,7 @@ class TestBatchCreateReposLogging:
 
         repos = [{"clone_url": "https://github.com/org/repo", "alias": "my-repo"}]
 
-        with patch("src.code_indexer.server.web.routes.logger"):
+        with patch("code_indexer.server.web.routes.logger"):
             result = _batch_create_repos(repos, "admin", mock_manager)
 
         error_msg = result["results"][0]["error"]
@@ -594,7 +594,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
 
     def test_success_result_includes_clone_url(self):
         """Success result dict must contain clone_url field matching repo_data clone_url."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -602,7 +602,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
 
         repos = [{"clone_url": "https://github.com/org/repo-a", "alias": "repo-a"}]
 
-        with patch("src.code_indexer.server.web.routes.logger"):
+        with patch("code_indexer.server.web.routes.logger"):
             result = _batch_create_repos(repos, "admin", mock_manager)
 
         assert result["results"][0]["status"] == "success"
@@ -613,7 +613,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
 
     def test_failure_result_includes_clone_url(self):
         """Failure result dict must contain clone_url field matching repo_data clone_url."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -621,7 +621,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
 
         repos = [{"clone_url": "https://github.com/org/repo-b", "alias": "repo-b"}]
 
-        with patch("src.code_indexer.server.web.routes.logger"):
+        with patch("code_indexer.server.web.routes.logger"):
             result = _batch_create_repos(repos, "admin", mock_manager)
 
         assert result["results"][0]["status"] == "failed"
@@ -632,7 +632,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
 
     def test_partial_success_both_results_include_clone_url(self):
         """When one repo succeeds and one fails, both results include clone_url."""
-        from src.code_indexer.server.web.routes import _batch_create_repos
+        from code_indexer.server.web.routes import _batch_create_repos
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -646,7 +646,7 @@ class TestBatchCreateResultsIncludeCloneUrl:
             {"clone_url": "https://github.com/org/repo-b", "alias": "repo-b"},
         ]
 
-        with patch("src.code_indexer.server.web.routes.logger"):
+        with patch("code_indexer.server.web.routes.logger"):
             result = _batch_create_repos(repos, "admin", mock_manager)
 
         assert result["results"][0]["status"] == "success"

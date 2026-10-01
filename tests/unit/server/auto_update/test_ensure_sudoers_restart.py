@@ -23,13 +23,13 @@ class TestEnsureSudoersRestart:
         )
 
         service_content = """[Service]
-User=jsbattig
+User=opuser
 WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
         expected_rule = (
-            "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+            "opuser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
         )
 
         with patch.object(Path, "exists", return_value=True):
@@ -55,13 +55,13 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-User=jsbattig
+User=opuser
 WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
         expected_rule = (
-            "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+            "opuser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
         )
 
         with patch.object(Path, "exists", return_value=True):
@@ -148,7 +148,7 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-User=jsbattig
+User=opuser
 WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
@@ -189,7 +189,7 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
         )
 
         service_content = """[Service]
-User=jsbattig
+User=opuser
 WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """

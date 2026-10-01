@@ -85,6 +85,8 @@ class LogExportFormatter:
             "correlation_id",
             "user_id",
             "request_path",
+            "trace_id",
+            "span_id",
         ]
 
         writer = csv.DictWriter(

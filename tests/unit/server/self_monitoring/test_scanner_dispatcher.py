@@ -143,6 +143,34 @@ def test_scanner_build_dispatcher_called_with_config(tmp_path: Path):
     )
 
 
+def test_scanner_forwards_log_db_path_to_dispatcher_factory(tmp_path: Path):
+    """
+    LogScanner._invoke_claude_cli must pass its own log_db_path
+    to build_dep_map_dispatcher, so the ClaudeInvoker it constructs can pin
+    the self-monitoring scan's --allowedTools rule to this exact log DB.
+    """
+    config = _make_mock_config()
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = _make_success_result()
+
+    mock_svc = MagicMock()
+    mock_svc.get_config.return_value = config
+
+    scanner = _make_scanner(tmp_path)
+    expected_log_db_path = str(tmp_path / "logs.db")
+
+    with (
+        patch(
+            f"{_MODULE}.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
+        ) as mock_build,
+        patch(f"{_MODULE}.get_config_service", return_value=mock_svc),
+    ):
+        scanner._invoke_claude_cli("Analyze these logs.")
+
+    assert mock_build.call_args.kwargs.get("log_db_path") == expected_log_db_path
+
+
 def test_scanner_dispatches_with_correct_flow_name(tmp_path: Path):
     """
     LogScanner._invoke_claude_cli routes through dispatcher.dispatch
@@ -204,14 +232,15 @@ def test_scanner_failed_result_raises_runtime_error(tmp_path: Path):
     )
 
 
-def test_scanner_failover_codex_to_claude_succeeds(tmp_path: Path):
+def test_scanner_never_reaches_codex_even_when_configured(tmp_path: Path):
     """
-    Failover coverage: when Codex primary invoke returns RETRYABLE_ON_OTHER,
-    the real CliDispatcher automatically falls back to Claude and
-    _invoke_claude_cli returns the Claude output.
+    Owner decision: self_monitoring_scan runs on Claude only. Even with
+    Codex enabled and codex_weight=1.0 (which would deterministically
+    select Codex as primary for every other flow), this flow must never
+    invoke CodexInvoker at all -- it goes straight to Claude.
 
     Patches the concrete invokers (CodexInvoker.invoke, ClaudeInvoker.invoke)
-    at the real seam so the real CliDispatcher failover logic is exercised.
+    at the real seam so the real CliDispatcher routing logic is exercised.
     """
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
     from code_indexer.server.services.codex_invoker import CodexInvoker
@@ -247,9 +276,7 @@ def test_scanner_failover_codex_to_claude_succeeds(tmp_path: Path):
         output = scanner._invoke_claude_cli("Analyze these logs.")
 
     assert output == '{"status": "SUCCESS"}', (
-        "_invoke_claude_cli must return the Claude fallback output"
+        "_invoke_claude_cli must return the Claude output"
     )
-    assert len(codex_calls) == 1, "Codex primary must be invoked once before failover"
-    assert len(claude_calls) == 1, (
-        "Claude fallback must be invoked once after Codex RETRYABLE_ON_OTHER"
-    )
+    assert codex_calls == [], "Codex must never be invoked for self_monitoring_scan"
+    assert len(claude_calls) == 1, "Claude must be invoked once"

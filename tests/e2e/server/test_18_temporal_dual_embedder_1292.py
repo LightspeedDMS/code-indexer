@@ -29,14 +29,16 @@ from __future__ import annotations
 
 import json
 import shutil
-import time
 from pathlib import Path
 from typing import Iterator, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.e2e.server.conftest import AdminTokenProvider
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 _PREBUILT_REPO = Path.home() / ".tmp" / "temporal_recall_full_repo"
@@ -93,23 +95,6 @@ _CORPUS_ACCEPTED_MISS: list[Tuple[str, str, str]] = [
 ]
 
 
-def _wait_for_job(client: TestClient, job_id: str, headers: dict, label: str) -> None:
-    deadline = time.monotonic() + _JOB_TIMEOUT
-    while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=headers)
-        assert resp.status_code < 500, (
-            f"{label}: job poll HTTP {resp.status_code}: {resp.text[:200]}"
-        )
-        if resp.status_code == 200:
-            body = resp.json()
-            status = body.get("status")
-            if status in ("completed", "failed", "cancelled"):
-                assert status == "completed", f"{label}: job {job_id} -> {body}"
-                return
-        time.sleep(_JOB_POLL)
-    raise TimeoutError(f"{label}: job {job_id} did not complete in {_JOB_TIMEOUT}s")
-
-
 @pytest.fixture(scope="module")
 def dual_embedder_repo(
     test_client: TestClient,
@@ -140,8 +125,13 @@ def dual_embedder_repo(
     )
     reg_job_id = reg_resp.json().get("job_id", "")
     assert reg_job_id
-    _wait_for_job(
-        test_client, reg_job_id, admin_token_provider.get_headers(), "register"
+    wait_for_terminal_job(
+        test_client,
+        reg_job_id,
+        admin_token_provider,
+        timeout=_JOB_TIMEOUT,
+        poll_interval=_JOB_POLL,
+        label="register",
     )
 
     # Step 2: seed the real, already-built dual-embedder temporal index +
@@ -150,8 +140,13 @@ def dual_embedder_repo(
     golden_repo_dir = test_client_data_dir / "data" / "golden-repos" / _ALIAS
     assert golden_repo_dir.exists(), f"golden repo clone missing at {golden_repo_dir}"
 
+    # Bug #1529: server-context temporal reads resolve to a FIXED path
+    # outside the repo clone (server_temporal_index_root), never the repo's
+    # own .code-indexer/index/ -- seed there or queries find nothing.
     src_index_dir = _PREBUILT_REPO / ".code-indexer" / "index"
-    dst_index_dir = golden_repo_dir / ".code-indexer" / "index"
+    golden_repos_dir = test_client_data_dir / "data" / "golden-repos"
+    dst_index_dir = server_temporal_index_root(golden_repos_dir, _ALIAS)
+    dst_index_dir.mkdir(parents=True, exist_ok=True)
     for shard_dir in src_index_dir.glob("code-indexer-temporal-*"):
         shutil.copytree(shard_dir, dst_index_dir / shard_dir.name, dirs_exist_ok=True)
 
@@ -174,8 +169,13 @@ def dual_embedder_repo(
     )
     act_job_id = act_resp.json().get("job_id", "")
     assert act_job_id
-    _wait_for_job(
-        test_client, act_job_id, admin_token_provider.get_headers(), "activate"
+    wait_for_terminal_job(
+        test_client,
+        act_job_id,
+        admin_token_provider,
+        timeout=_JOB_TIMEOUT,
+        poll_interval=_JOB_POLL,
+        label="activate",
     )
 
     yield _ALIAS

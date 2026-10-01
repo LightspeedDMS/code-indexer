@@ -16,12 +16,42 @@ Key requirements tested:
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from code_indexer.server.middleware.retry_handler import DatabaseRetryHandler
 from code_indexer.server.models.error_models import (
     RetryConfiguration,
     DatabaseRetryableError,
     DatabasePermanentError,
 )
+
+
+@pytest.fixture
+def cleared_main_thread_event_loop():
+    """Simulate the event-loop-policy state a huge test suite can leave
+    behind (Bug #1700).
+
+    In the FULL `tests/unit/server/` sweep (22000+ tests, ~2.5h), by the
+    time this file's tests run, some earlier test elsewhere in the suite
+    has called `asyncio.set_event_loop(None)` (a common pytest-asyncio
+    -style teardown action). Once that happens in the MainThread,
+    CPython's default event loop policy no longer auto-creates a loop on
+    `asyncio.get_event_loop()` -- it raises `RuntimeError: There is no
+    current event loop in thread 'MainThread'.` instead.
+
+    Saves whatever loop is currently registered (if any), clears it, then
+    restores the ORIGINAL loop afterward -- never creates or leaks a new
+    one.
+    """
+    try:
+        original_loop = asyncio.get_event_loop()
+    except RuntimeError:
+        original_loop = None
+    asyncio.set_event_loop(None)
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop(original_loop)
 
 
 def make_config(max_attempts=3, base_delay=0.1, max_delay=1.0):
@@ -77,7 +107,7 @@ class TestAsyncExecuteWithRetryUsesAsyncioSleep:
                 sleep_calls.extend(mock_sleep.call_args_list)
             return result
 
-        result = asyncio.get_event_loop().run_until_complete(run_test())
+        result = asyncio.run(run_test())
 
         assert result == "success", "Should return success after retry"
         assert len(sleep_calls) == 1, (
@@ -104,7 +134,7 @@ class TestAsyncExecuteWithRetryUsesAsyncioSleep:
                         "async_execute_with_retry must NOT call time.sleep"
                     )
 
-        asyncio.get_event_loop().run_until_complete(run_test())
+        asyncio.run(run_test())
 
 
 class TestAsyncExecuteWithRetryPreservesRetryLogic:
@@ -121,7 +151,7 @@ class TestAsyncExecuteWithRetryPreservesRetryLogic:
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 return await handler.async_execute_with_retry(always_succeeds)
 
-        result = asyncio.get_event_loop().run_until_complete(run_test())
+        result = asyncio.run(run_test())
         assert result == 42
 
     def test_retries_on_retryable_error(self):
@@ -140,7 +170,7 @@ class TestAsyncExecuteWithRetryPreservesRetryLogic:
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 return await handler.async_execute_with_retry(fail_twice_then_succeed)
 
-        result = asyncio.get_event_loop().run_until_complete(run_test())
+        result = asyncio.run(run_test())
         assert result == "done"
         assert len(attempts) == 3
 
@@ -162,7 +192,7 @@ class TestAsyncExecuteWithRetryPreservesRetryLogic:
                 except DatabasePermanentError:
                     pass
 
-        asyncio.get_event_loop().run_until_complete(run_test())
+        asyncio.run(run_test())
         assert len(attempts) == 1, "Must NOT retry on permanent error"
 
     def test_exhausts_max_attempts_and_raises(self):
@@ -183,8 +213,24 @@ class TestAsyncExecuteWithRetryPreservesRetryLogic:
                 except DatabaseRetryableError:
                     pass
 
-        asyncio.get_event_loop().run_until_complete(run_test())
+        asyncio.run(run_test())
         assert len(attempts) == make_config(max_attempts=2).max_attempts + 1
+
+
+class TestAsyncExecuteWithRetryEventLoopPolicyResilience:
+    """Regression guard (Bug #1700): retry-handler async tests must not
+    depend on `asyncio.get_event_loop()` implicitly auto-creating a loop.
+
+    See the `cleared_main_thread_event_loop` fixture docstring above for
+    the full failure-mode rationale. This directly invokes an EXISTING
+    test method above under the exact precondition a huge suite run
+    leaves behind, so it genuinely discriminates the bug: it fails while
+    that method still uses `asyncio.get_event_loop()`, and passes once
+    that method is switched to `asyncio.run()`.
+    """
+
+    def test_survives_prior_set_event_loop_none(self, cleared_main_thread_event_loop):
+        TestAsyncExecuteWithRetryUsesAsyncioSleep().test_uses_asyncio_sleep_not_time_sleep()
 
 
 class TestSyncExecuteWithRetryUnchanged:

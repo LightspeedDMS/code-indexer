@@ -16,6 +16,18 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import json
 
+from tests.unit.server._audit_read_support import stored_audit_rows
+
+
+def _stored(db_path):
+    """The rows AS STORED (newest first) and their count.
+
+    These tests pin the WRITE contract, including the full stored
+    ``details``; the read path shows readers only allowlisted fields.
+    """
+    rows = stored_audit_rows(db_path)
+    return rows, len(rows)
+
 
 class TestPasswordChangeAuditLoggerSQLiteInit:
     """Tests for PasswordChangeAuditLogger initialization with AuditLogService."""
@@ -49,6 +61,60 @@ class TestPasswordChangeAuditLoggerSQLiteInit:
         assert len(log_files) == 0
 
 
+class TestPasswordChangeAuditLoggerLegacyFilePathDataDir:
+    """Bug #1778: legacy flat-file default location must honor
+    CIDX_SERVER_DATA_DIR.
+
+    An isolated/test server instance sets CIDX_SERVER_DATA_DIR to a
+    throwaway directory. Without honoring it, PasswordChangeAuditLogger's
+    legacy (no log_file_path, no audit_service) branch hardcodes
+    Path.home() / ".cidx-server" for its default audit-log location,
+    leaking audit log lines into the real server's directory. Path.home()
+    is mocked to a temp "fake home" so this test never touches the real
+    ~/.cidx-server directory either way.
+    """
+
+    def test_uses_cidx_server_data_dir_env_var_when_no_explicit_path(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import patch
+        from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        isolated_data_dir = tmp_path / "isolated-server-instance"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(isolated_data_dir))
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            logger = PasswordChangeAuditLogger()
+
+        expected_path = str(isolated_data_dir / "password_audit.log")
+        real_default_path = str(fake_home / ".cidx-server" / "password_audit.log")
+
+        assert logger.log_file_path == expected_path
+        assert logger.log_file_path != real_default_path
+
+    def test_creates_nested_missing_directories_when_data_dir_has_no_parent(
+        self, tmp_path, monkeypatch
+    ):
+        """Bug #1778 remediation: CIDX_SERVER_DATA_DIR may point at a nested
+        path whose intermediate directories don't exist yet (operator/harness
+        supplied, unlike Path.home() which always exists). mkdir() must use
+        parents=True or this crashes with FileNotFoundError -- at import time
+        for the module-level password_audit_logger singleton.
+        """
+        from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
+
+        nested_dir = tmp_path / "missing" / "intermediate" / "server-data"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(nested_dir))
+
+        logger = PasswordChangeAuditLogger()
+
+        expected_path = str(nested_dir / "password_audit.log")
+        assert logger.log_file_path == expected_path
+        assert nested_dir.exists()
+
+
 class TestPasswordChangeSuccessMapping:
     """Tests for log_password_change_success() SQLite field mapping."""
 
@@ -63,7 +129,7 @@ class TestPasswordChangeSuccessMapping:
 
         logger.log_password_change_success(username="testuser", ip_address="127.0.0.1")
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         log = logs[0]
@@ -72,8 +138,10 @@ class TestPasswordChangeSuccessMapping:
         assert log["admin_id"] == "testuser"
         assert log["target_id"] == "testuser"
 
-    def test_details_contains_ip_address(self, tmp_path):
-        """log_password_change_success() stores ip_address in details JSON."""
+    def test_details_store_only_allowlisted_fields(self, tmp_path):
+        """log_password_change_success() stores only the read-side legacy
+        allowlist in details: the peer address and client string are not
+        stored there (the row's own attribution columns carry the peer)."""
         from code_indexer.server.services.audit_log_service import AuditLogService
         from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
 
@@ -85,12 +153,10 @@ class TestPasswordChangeSuccessMapping:
             username="alice", ip_address="10.0.0.1", user_agent="Mozilla/5.0"
         )
 
-        logs, _ = audit_service.query()
+        logs, _ = _stored(db_path)
         details = json.loads(logs[0]["details"])
 
-        assert details["ip_address"] == "10.0.0.1"
-        assert details["user_agent"] == "Mozilla/5.0"
-        assert "timestamp" in details
+        assert details == {"username": "alice"}
 
 
 class TestAuthenticationFailureMapping:
@@ -109,7 +175,7 @@ class TestAuthenticationFailureMapping:
             username="baduser", error_type="invalid_password", message="Wrong password"
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "authentication_failure"
@@ -136,7 +202,7 @@ class TestImpersonationMapping:
             ip_address="192.168.1.1",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         log = logs[0]
@@ -161,7 +227,7 @@ class TestImpersonationMapping:
             ip_address="192.168.1.1",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "impersonation_cleared"
@@ -184,7 +250,7 @@ class TestImpersonationMapping:
             ip_address="10.0.0.2",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "impersonation_denied"
@@ -212,7 +278,7 @@ class TestPRAndCleanupMapping:
             files_modified=["src/main.py"],
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         log = logs[0]
@@ -236,7 +302,7 @@ class TestPRAndCleanupMapping:
             reason="push rejected",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "pr_creation_failure"
@@ -253,7 +319,7 @@ class TestPRAndCleanupMapping:
 
         logger.log_pr_creation_disabled(job_id="job-3", repo_alias="disabled-repo")
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "pr_creation_disabled"
@@ -272,7 +338,7 @@ class TestPRAndCleanupMapping:
             files_cleared=["file1.py", "file2.py"],
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         log = logs[0]
@@ -300,7 +366,7 @@ class TestOAuthEventMapping:
             ip_address="1.2.3.4",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "oauth_client_registration"
@@ -321,7 +387,7 @@ class TestOAuthEventMapping:
             family_id="family-abc",
         )
 
-        logs, total = audit_service.query()
+        logs, total = _stored(db_path)
 
         assert total == 1
         assert logs[0]["action_type"] == "token_refresh_success"

@@ -541,6 +541,24 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "GIT-CAT-003": ErrorDefinition(
+        code="GIT-CAT-003",
+        description="Git cat (file-at-revision) request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
+    "GIT-BLAME-003": ErrorDefinition(
+        code="GIT-BLAME-003",
+        description="Git blame request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
+    "GIT-FILE-HISTORY-003": ErrorDefinition(
+        code="GIT-FILE-HISTORY-003",
+        description="Git file-history request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the rev value is a well-formed revision that resolves in the repository",
+    ),
     "GIT-GENERAL-001": ErrorDefinition(
         code="GIT-GENERAL-001",
         description="TODO",
@@ -2795,6 +2813,42 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "APP-GENERAL-068": ErrorDefinition(
+        code="APP-GENERAL-068",
+        description=(
+            "AutoWatchManager.start_watch refused: no .code-indexer/"
+            "config.json found for the repo path or any parent directory"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "Verify the repo path is a real, indexed repository -- refusing "
+            "prevents ConfigManager from silently defaulting codebase_dir "
+            "onto the server process's CWD (Bug #1683 round 3)"
+        ),
+    ),
+    "APP-GENERAL-069": ErrorDefinition(
+        code="APP-GENERAL-069",
+        description=(
+            "AutoWatchManager.start_watch refused: resolved config."
+            "codebase_dir does not exactly match the requested repo path"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "Reachable two ways: (1) a CODEBASE_DIR env-var override "
+            "pointing config discovery at an unrelated directory, "
+            "ignoring repo_path entirely; or (2) repo_path has no "
+            ".code-indexer/config.json of its own and ConfigManager's "
+            "directory walk found only an ANCESTOR's config instead -- "
+            "strict equality is required (never equal-or-ancestor) "
+            "because indexing/watching would otherwise target the "
+            "ancestor, not the repo (Bug #1683 round 4). A stored "
+            "foreign codebase_dir surviving on-disk reconciliation "
+            "(Bug #1033) is NOT a realistic trigger: config.py forces "
+            "codebase_dir = config_path.resolve().parent.parent on every "
+            "load, so a config's codebase_dir cannot diverge from where "
+            "the config.json actually sits"
+        ),
+    ),
     "AUTH-GENERAL-010": ErrorDefinition(
         code="AUTH-GENERAL-010",
         description="TODO",
@@ -3839,6 +3893,27 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.ERROR,
         action="Check forge token, repository remote URL, and write mode status",
     ),
+    "MCP-GENERAL-220": ErrorDefinition(
+        code="MCP-GENERAL-220",
+        description="pull_requests handler failed (list/get/comments)",
+        severity=Severity.ERROR,
+        action="Check forge token, repository remote URL, and PR/MR state filters",
+    ),
+    "MCP-GENERAL-223": ErrorDefinition(
+        code="MCP-GENERAL-223",
+        description=(
+            "Auto-watch skipped: repository_alias is not a registered "
+            "activated repo, or its resolved path does not exist"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "Verify repository_alias is activated (checked via "
+            "ActivatedRepoManager.user_has_activated_repo, not filesystem "
+            "existence, so an orphan directory from a partially-failed "
+            "activation cannot pass the guard) and not stale/deactivated on "
+            "another cluster node"
+        ),
+    ),
     "QUERY-GENERAL-008": ErrorDefinition(
         code="QUERY-GENERAL-008",
         description="TODO",
@@ -4439,6 +4514,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "STORE-GENERAL-051": ErrorDefinition(
+        code="STORE-GENERAL-051",
+        description="TODO",
+        severity=Severity.WARNING,
+        action="TODO",
+    ),
+    "STORE-GENERAL-052": ErrorDefinition(
+        code="STORE-GENERAL-052",
+        description="TODO",
+        severity=Severity.WARNING,
+        action="TODO",
+    ),
     "SVC-GENERAL-015": ErrorDefinition(
         code="SVC-GENERAL-015",
         description="TODO",
@@ -4589,6 +4676,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "SVC-GENERAL-040": ErrorDefinition(
+        code="SVC-GENERAL-040",
+        description="Git diff request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify from_revision/to_revision/file_paths values are well-formed",
+    ),
+    "SVC-GENERAL-041": ErrorDefinition(
+        code="SVC-GENERAL-041",
+        description="Git log request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify the branch value is well-formed",
+    ),
     "TELEM-GENERAL-009": ErrorDefinition(
         code="TELEM-GENERAL-009",
         description="TODO",
@@ -4708,6 +4807,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "TELEM-GENERAL-029": ErrorDefinition(
+        code="TELEM-GENERAL-029",
+        description="Git push request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote/branch values are well-formed and remote is configured",
+    ),
+    "TELEM-GENERAL-030": ErrorDefinition(
+        code="TELEM-GENERAL-030",
+        description="Git unstage request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify file_paths values are well-formed",
     ),
     "VALID-GENERAL-012": ErrorDefinition(
         code="VALID-GENERAL-012",
@@ -4840,6 +4951,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "VALID-GENERAL-034": ErrorDefinition(
+        code="VALID-GENERAL-034",
+        description="Git pull request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote/branch values are well-formed and remote is configured",
+    ),
+    "VALID-GENERAL-035": ErrorDefinition(
+        code="VALID-GENERAL-035",
+        description="Git fetch request rejected by argv validation",
+        severity=Severity.WARNING,
+        action="Verify remote value is well-formed and remote is configured",
     ),
     "WEB-GENERAL-042": ErrorDefinition(
         code="WEB-GENERAL-042",
@@ -4997,6 +5120,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="Review web logs for repository URL, alias, and stack trace",
     ),
+    "WEB-GENERAL-068": ErrorDefinition(
+        code="WEB-GENERAL-068",
+        description="Invalid git branch name argument on branch switch",
+        severity=Severity.WARNING,
+        action="Review the branch name in the request",
+    ),
+    "WEB-GENERAL-069": ErrorDefinition(
+        code="WEB-GENERAL-069",
+        description="Invalid git branch name argument on branch delete",
+        severity=Severity.WARNING,
+        action="Review the branch name in the request",
+    ),
     # Story #86: Migrated logger statements - AUTH subsystem
     "AUTH-AUDIT-010": ErrorDefinition(
         code="AUTH-AUDIT-010",
@@ -5131,6 +5266,24 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="FTS search error",
         severity=Severity.ERROR,
         action="Check FTS index",
+    ),
+    "QUERY-MIGRATE-013": ErrorDefinition(
+        code="QUERY-MIGRATE-013",
+        description="Partial multi-repo search failure (some repos degraded)",
+        severity=Severity.WARNING,
+        action="Check the named repos' index health; results are incomplete",
+    ),
+    "QUERY-MIGRATE-014": ErrorDefinition(
+        code="QUERY-MIGRATE-014",
+        description=(
+            "Query refused: repository access control is unavailable, so "
+            "global repository access cannot be verified"
+        ),
+        severity=Severity.ERROR,
+        action=(
+            "Check the startup log for the group access initialization "
+            "failure (APP-GENERAL-014) and restart the server once it is fixed"
+        ),
     ),
     # Story #86: Migrated logger statements - REPO subsystem (repository management)
     "REPO-MIGRATE-001": ErrorDefinition(

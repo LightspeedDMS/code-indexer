@@ -22,6 +22,7 @@ Test order (matters; pytest runs in file order):
 
 from __future__ import annotations
 
+import json
 import secrets
 import string
 import subprocess
@@ -37,6 +38,7 @@ from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import (
     GIT_SUBPROCESS_TIMEOUT,
     login,
+    mcp_call,
     rest_call,
     run_cidx,
     wait_for_repo_activation,
@@ -72,6 +74,16 @@ def _assert_ok(result: CompletedProcess[str], label: str) -> None:
         f"{label} failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def _mcp_tool(client: httpx.Client, token: str, name: str, args: dict) -> dict:
+    """Call an MCP tool and return its parsed result, asserting success."""
+    result = mcp_call(
+        client, "tools/call", {"name": name, "arguments": args}, token=token
+    )
+    inner = json.loads(result["content"][0]["text"])
+    assert inner.get("success") is True, f"{name} failed: {inner}"
+    return dict(inner)
 
 
 def _init_git_workspace(workspace: Path, remote_url: str) -> None:
@@ -169,6 +181,19 @@ def normal_user(
     )
     assert create_resp.status_code in (200, 201), (
         f"Create normal user failed: {create_resp.status_code} {create_resp.text}"
+    )
+    # Activation requires group access to the golden repository. New golden
+    # repos are granted to the 'powerusers' group, while a new normal user
+    # starts in the 'users' group, so place the user in 'powerusers'.
+    admin_token = e2e_admin_token_provider.get_token()
+    groups = _mcp_tool(e2e_http_client, admin_token, "list_groups", {})["groups"]
+    group_ids = [g["id"] for g in groups if g["name"] == "powerusers"]
+    assert group_ids, f"list_groups: no 'powerusers' group in {groups}"
+    _mcp_tool(
+        e2e_http_client,
+        admin_token,
+        "manage_group_members",
+        {"action": "add", "group_id": str(group_ids[0]), "user_id": username},
     )
 
     yield username, password

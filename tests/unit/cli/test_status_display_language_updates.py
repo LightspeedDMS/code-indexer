@@ -2,7 +2,7 @@
 Test cidx status command display language updates.
 
 Verifies:
-1. Temporal Index status shows "✅ Available" (not "✅ Active")
+1. Temporal Index status shows "✅ Idle" (not "✅ Active")
 2. Semantic index component name is "Semantic Index" (not "Index")
 3. Index Files status column has no icon (not "📊")
 """
@@ -103,7 +103,7 @@ def test_temporal_index_shows_available_not_active(
     filesystem_config_with_indexes,
     tmp_path,
 ):
-    """Test that Temporal Index status shows '✅ Available' not '✅ Active'."""
+    """Test that Temporal Index status shows '✅ Idle' not '✅ Active'."""
     config_manager, config, temporal_dir, semantic_dir = filesystem_config_with_indexes
 
     # Setup mocks
@@ -160,10 +160,10 @@ def test_temporal_index_shows_available_not_active(
 
     assert temporal_row is not None, "Temporal Index row should exist"
 
-    # Verify status is "✅ Available" not "✅ Active"
+    # Verify status is "✅ Idle" not "✅ Active"
     component, status, _ = temporal_row[0], temporal_row[1], temporal_row[2]
     assert component == "Temporal Index"
-    assert status == "✅ Available", f"Expected '✅ Available', got: '{status}'"
+    assert status == "✅ Idle", f"Expected '✅ Idle', got: '{status}'"
     assert "✅ Active" not in status, f"Should not contain '✅ Active', got: '{status}'"
 
 

@@ -14,15 +14,18 @@ resume-correctness property under candidate-set mutation between ticks
 same pass).
 """
 
+import json
 import sqlite3
 import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
+from code_indexer.server.cache.hnsw_index_cache import HNSWIndexCacheEntry
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.services.job_tracker import (
     DuplicateJobError as TrackerDuplicateJobError,
@@ -33,12 +36,14 @@ from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.storage.sqlite_backends import (
     HNSWOrphanSweepStateSqliteBackend,
 )
+from code_indexer.server.services.hnsw_orphan_sweep.discovery import SweepCandidate
 from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
     HNSWOrphanRepairSweepScheduler,
 )
 from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
     SweepOutcome,
 )
+from tests.utils.hnsw_orphan_corpus import build_hnsw_index, near_tie_corpus
 
 
 CORPUS_DIM = 8
@@ -423,3 +428,239 @@ class TestGetStats:
 
         assert stats["pass_id"] == 1
         assert stats["total_orphans_repaired_lifetime"] == 0
+
+
+# Bug #1542 Codex-review follow-up fixtures -- module-level helpers so the
+# test method itself stays focused on scheduler dispatch + assertions.
+_ACTIVATED_FIXTURE_DIM = 1024
+_ACTIVATED_FIXTURE_SIZE = 270
+
+
+def _plant_activated_prebroken_fixture(collection_path: Path) -> None:
+    """Plant a genuinely pre-broken, saved-then-loaded .bin fixture at
+    *collection_path* -- mirrors test_repair_executor_1360.py's own AC5
+    shape-matrix recipe (NOT built via HNSWIndexManager, which self-heals
+    per S2)."""
+    collection_path.mkdir(parents=True, exist_ok=True)
+    vectors = near_tie_corpus(
+        size=_ACTIVATED_FIXTURE_SIZE,
+        dim=_ACTIVATED_FIXTURE_DIM,
+        noise_scale=0.01,
+        pocket_fraction=1.0,
+        seed=42,
+    )
+    broken_index = build_hnsw_index(vectors, num_threads=1)
+    orphans_before = sum(
+        1 for e in broken_index.check_integrity()["errors"] if "orphan" in e
+    )
+    assert orphans_before > 0, "fixture recipe must start broken"
+    broken_index.save_index(str(collection_path / HNSWIndexManager.INDEX_FILENAME))
+    id_mapping = {str(i): f"vec_{i}" for i in range(_ACTIVATED_FIXTURE_SIZE)}
+    (collection_path / "collection_meta.json").write_text(
+        json.dumps(
+            {
+                "vector_dim": _ACTIVATED_FIXTURE_DIM,
+                "hnsw_index": {
+                    "vector_count": _ACTIVATED_FIXTURE_SIZE,
+                    "vector_dim": _ACTIVATED_FIXTURE_DIM,
+                    "space": "cosine",
+                    "M": 16,
+                    "ef_construction": 200,
+                    "id_mapping": id_mapping,
+                },
+            }
+        )
+    )
+
+
+def _seed_cache_entry(cache: Any, key: str) -> None:
+    """Directly insert a stub entry under *key* into the REAL global
+    HNSWIndexCache, bypassing the loader -- same pattern
+    test_invalidate_prefix.py uses."""
+    with cache._cache_lock:
+        cache._cache[key] = MagicMock(
+            spec=HNSWIndexCacheEntry, repo_path=key, is_expired=lambda: False
+        )
+
+
+class _FakeActivatedRepoManagerWithActivationId:
+    """Test double exposing exactly the two methods the scheduler +
+    ``_resolve_activation_id`` need: enumeration (unused here, empty since
+    this test drives ``_process_one`` directly) and ``get_activation_id``."""
+
+    def __init__(self, username: str, user_alias: str, activation_id: str):
+        self._username = username
+        self._user_alias = user_alias
+        self._activation_id = activation_id
+
+    def list_all_activated_repositories(self) -> List[Dict[str, Any]]:
+        return []
+
+    def get_activation_id(self, username: str, user_alias: str) -> str:
+        assert username == self._username
+        assert user_alias == self._user_alias
+        return self._activation_id
+
+
+def _make_activated_candidate(
+    repo_root: Path, username: str, user_alias: str
+) -> SweepCandidate:
+    relpath = ".code-indexer/index/voyage-code-3/hnsw_index.bin"
+    return SweepCandidate(
+        sort_key=f"activated:{username}/{user_alias}:{relpath}",
+        repo_root=repo_root,
+        index_relpath=Path(relpath),
+        kind="activated",
+        alias=f"{username}/{user_alias}",
+    )
+
+
+def _seed_activation_scoped_entry(
+    repo_root: Path, collection_path: Path, activation_id: str
+) -> str:
+    """Seed the REAL global cache under the activation-scoped canonical
+    key an activated-repo ``search()`` actually stores under, returning
+    that key for later assertion."""
+    from code_indexer.server.cache import get_global_cache
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = FilesystemVectorStore(base_path=repo_root, activation_id=activation_id)
+    canonical_key: str = store.hnsw_cache_key_for_collection(collection_path)
+    _seed_cache_entry(get_global_cache(), canonical_key)
+    return canonical_key
+
+
+def _make_activated_scheduler(
+    state_backend: Any,
+    username: str,
+    user_alias: str,
+    activation_id: str,
+    process_fn: Any = None,
+) -> HNSWOrphanRepairSweepScheduler:
+    kwargs: Dict[str, Any] = dict(
+        golden_repo_manager=_FakeGoldenRepoManager({}),
+        activated_repo_manager=_FakeActivatedRepoManagerWithActivationId(
+            username, user_alias, activation_id
+        ),
+        state_backend=state_backend,
+        background_job_manager=None,
+        config_service=_RecordingConfigService(),
+    )
+    if process_fn is not None:
+        kwargs["process_fn"] = process_fn
+    return HNSWOrphanRepairSweepScheduler(**kwargs)
+
+
+def _make_wrapped_process_candidate() -> Any:
+    """A ``functools.wraps``-wrapped ``process_candidate``, deliberately
+    NOT identical to the bare function, proving Codex-review Q2's
+    marker-based (not identity-based) dispatch fix. ``functools.wraps``
+    copies ``__dict__`` (``WRAPPER_UPDATES``), so the plain function
+    attribute ``supports_activated_repo_manager`` is inherited."""
+    import functools
+
+    from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
+        process_candidate,
+    )
+
+    @functools.wraps(process_candidate)
+    def wrapped(candidate: Any, **kwargs: Any) -> Any:
+        return process_candidate(candidate, **kwargs)
+
+    assert wrapped is not process_candidate
+    assert getattr(wrapped, "supports_activated_repo_manager", False)
+    return wrapped
+
+
+class TestActivatedRepoCacheInvalidationWiring:
+    """Bug #1542 Codex-review follow-up: the scheduler's default dispatch
+    (``self._process_fn is`` the real ``process_candidate``) must thread
+    ``activated_repo_manager`` through so an activated-repo candidate's
+    activation-scoped cache entry (Story #1458 AC11) is correctly evicted
+    after repair -- proving the wiring holds end-to-end through the
+    scheduler, not just when ``process_candidate()`` is called directly
+    (as test_repair_executor_1360.py already proves)."""
+
+    def test_process_one_resolves_activation_id_for_activated_candidate(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        try:
+            username = "alice"
+            user_alias = "myrepo"
+            activation_id = "11111111-2222-3333-4444-555555555555"
+            repo_root = tmp_path / "activated" / username / user_alias
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_activated_prebroken_fixture(collection_path)
+
+            store = FilesystemVectorStore(
+                base_path=repo_root, activation_id=activation_id
+            )
+            canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+            cache = get_global_cache()
+            _seed_cache_entry(cache, canonical_key)
+
+            scheduler = HNSWOrphanRepairSweepScheduler(
+                golden_repo_manager=_FakeGoldenRepoManager({}),
+                activated_repo_manager=_FakeActivatedRepoManagerWithActivationId(
+                    username, user_alias, activation_id
+                ),
+                state_backend=state_backend,
+                background_job_manager=None,
+                config_service=_RecordingConfigService(),
+            )
+            candidate = _make_activated_candidate(repo_root, username, user_alias)
+
+            outcome = scheduler._process_one(candidate)
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in cache._cache, (
+                "scheduler's default dispatch did not thread "
+                "activated_repo_manager through to process_candidate() -- "
+                "the activation-scoped cache entry was not evicted"
+            )
+        finally:
+            reset_global_cache()
+
+    def test_wrapped_process_candidate_still_gets_activation_id_via_capability_marker(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        """Codex-review Q2: a functools.wraps-wrapped, non-identical
+        callable must still get activated_repo_manager threaded through
+        via the inherited capability marker, not an identity check."""
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+
+        wrapped_process_candidate = _make_wrapped_process_candidate()
+        reset_global_cache()
+        try:
+            username, user_alias = "alice", "myrepo"
+            activation_id = "22222222-3333-4444-5555-666666666666"
+            repo_root = tmp_path / "activated" / username / user_alias
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_activated_prebroken_fixture(collection_path)
+            canonical_key = _seed_activation_scoped_entry(
+                repo_root, collection_path, activation_id
+            )
+
+            scheduler = _make_activated_scheduler(
+                state_backend,
+                username,
+                user_alias,
+                activation_id,
+                wrapped_process_candidate,
+            )
+            candidate = _make_activated_candidate(repo_root, username, user_alias)
+            outcome = scheduler._process_one(candidate)
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in get_global_cache()._cache, (
+                "wrapped process_candidate did not get activated_repo_manager "
+                "threaded through -- dispatch is still identity-based"
+            )
+        finally:
+            reset_global_cache()

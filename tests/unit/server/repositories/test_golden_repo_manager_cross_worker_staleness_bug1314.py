@@ -121,7 +121,7 @@ class TestCrossWorkerGoldenRepoStalenessBug1314:
         manager._refresh_scheduler = None
 
         job_id = manager.add_indexes_to_golden_repo(
-            alias=alias, index_types=["semantic"]
+            alias=alias, index_types=["semantic"], submitter_username="example-admin"
         )
 
         assert job_id == "job-1"
@@ -189,4 +189,8 @@ class TestCrossWorkerGoldenRepoStalenessBug1314:
         manager.background_job_manager = Mock()
 
         with pytest.raises(GoldenRepoError):
-            manager.add_golden_repo(repo_url="local://somewhere", alias=alias)
+            manager.add_golden_repo(
+                repo_url="local://somewhere",
+                alias=alias,
+                submitter_username="example-admin",
+            )

@@ -10,7 +10,7 @@ Four acceptance criteria:
         _batch_update_points.
   AC3 - end_indexing skips incremental HNSW update when _branch_isolation_did_filtered_rebuild
         is True (and resets the flag).
-  AC4 - _apply_incremental_hnsw_batch_update filters out points present in both
+  AC4 - _apply_visibility_aware_incremental_update filters out points present in both
         changes["added"] (or "updated") AND changes["deleted"], emitting no
         "Vector file not found" warning for those points.
 """
@@ -20,7 +20,7 @@ import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -255,20 +255,26 @@ class TestBatchHideFilesInBranchUsesPayloadOnlyPath:
 
 class TestEndIndexingSkipsIncrementalWhenFilteredRebuildFlagSet:
     """
-    AC3: When _branch_isolation_did_filtered_rebuild is True before end_indexing,
-    the incremental HNSW update path must NOT be entered, and the flag must be
-    reset to False afterward.
+    AC3 (Bug #1575 Part C superseded mechanism): a filtered rebuild that
+    already produced a clean, valid hnsw_sync epoch must NOT be redundantly
+    re-processed by a subsequent end_indexing() call for the SAME branch
+    context with no new mutations -- the decision engine's reuse path must
+    take precedence, proven here via a real, externally-observable artifact
+    identity check (no mocking of the system under test).
     """
 
-    def test_end_indexing_skips_incremental_when_filtered_rebuild_flag_set(
+    def test_end_indexing_reuses_instead_of_rebuilding_after_filtered_rebuild(
         self, tmp_path: Path
     ):
         """
-        GIVEN a collection with begin_indexing called and some changes tracked
-        AND _branch_isolation_did_filtered_rebuild is set to True
-        WHEN end_indexing is called
-        THEN _apply_incremental_hnsw_batch_update is NOT called
-        AND _branch_isolation_did_filtered_rebuild is reset to False
+        GIVEN a collection whose first end_indexing() performed a REAL
+              filtered rebuild (real point + branch context registered via
+              set_hnsw_branch_context)
+        WHEN a SECOND begin_indexing()/end_indexing() session registers the
+             SAME branch context with NO new mutations
+        THEN the HNSW artifact is reused byte-for-byte (unchanged rebuild
+             uuid) -- proving the reuse path took precedence over any
+             rebuild/incremental-update path.
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -276,37 +282,49 @@ class TestEndIndexingSkipsIncrementalWhenFilteredRebuildFlagSet:
         collection_name = "test_coll"
         store.create_collection(collection_name, vector_size=TEST_VECTOR_DIM)
 
-        # Simulate a session with some changes tracked
+        real_point = {
+            "id": "p1",
+            "vector": [0.1] * TEST_VECTOR_DIM,
+            "payload": {"path": "src/a.py", "type": "content", "hidden_branches": []},
+        }
+
+        # First session: real data + real branch context -> a genuine
+        # filtered=True rebuild with actual points to filter.
         store.begin_indexing(collection_name)
-        store._indexing_session_changes[collection_name]["added"].add("some_point_id")
+        store.upsert_points(collection_name, [real_point])
+        store.set_hnsw_branch_context(collection_name, "main", {"src/a.py"})
+        store.end_indexing(collection_name)
 
-        # Flag indicating a filtered HNSW rebuild already happened during branch isolation
-        store._branch_isolation_did_filtered_rebuild = True
+        meta_file = tmp_path / collection_name / "collection_meta.json"
+        hnsw_before = json.loads(meta_file.read_text())["hnsw_index"]
+        assert hnsw_before.get("filtered") is True, (
+            "setup must produce a real filtered rebuild"
+        )
+        uuid_before = hnsw_before["index_rebuild_uuid"]
 
-        with patch.object(
-            store,
-            "_apply_incremental_hnsw_batch_update",
-            wraps=store._apply_incremental_hnsw_batch_update,
-        ) as mock_incremental:
-            store.end_indexing(collection_name)
+        # Second session: SAME branch context, NO new mutations.
+        store.begin_indexing(collection_name)
+        store.set_hnsw_branch_context(collection_name, "main", {"src/a.py"})
+        store.end_indexing(collection_name)
 
-        # Incremental update must NOT have been called
-        mock_incremental.assert_not_called()
-
-        # Flag must have been reset
-        assert store._branch_isolation_did_filtered_rebuild is False
+        uuid_after = json.loads(meta_file.read_text())["hnsw_index"][
+            "index_rebuild_uuid"
+        ]
+        assert uuid_after == uuid_before, (
+            "HNSW artifact must be reused byte-for-byte, not rebuilt again"
+        )
 
 
 # ---------------------------------------------------------------------------
-# AC4 — _apply_incremental_hnsw_batch_update filters added-then-deleted points
+# AC4 — _apply_visibility_aware_incremental_update filters added-then-deleted points
 # ---------------------------------------------------------------------------
 
 
 class TestApplyIncrementalFiltersAddedMinusDeleted:
     """
     AC4: When a point appears in both changes["added"] (or "updated") AND
-    changes["deleted"], _apply_incremental_hnsw_batch_update must treat it as
-    a no-op and NOT emit a "Vector file not found" warning.
+    changes["deleted"], _apply_visibility_aware_incremental_update must treat
+    it as a no-op and NOT emit a "Vector file not found" warning.
     """
 
     def test_apply_incremental_filters_added_minus_deleted(
@@ -316,7 +334,8 @@ class TestApplyIncrementalFiltersAddedMinusDeleted:
         GIVEN a collection with an existing HNSW index built from a real prior pass
         AND changes["added"] = {"ghost_point"} AND changes["deleted"] = {"ghost_point"}
         (i.e., the point was added then deleted in the same session)
-        WHEN end_indexing is called (which drives _apply_incremental_hnsw_batch_update)
+        WHEN end_indexing is called (which drives
+        _apply_visibility_aware_incremental_update)
         THEN no "Vector file not found" warning is emitted for ghost_point
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore

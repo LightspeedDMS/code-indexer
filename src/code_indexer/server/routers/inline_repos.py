@@ -38,6 +38,7 @@ from ..repositories.repository_listing_manager import (
 from ..services.repository_discovery_service import (
     RepositoryDiscoveryError,
 )  # noqa: E402
+from . import repo_access_http
 from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
 from ..logging_utils import mask_url_credentials  # noqa: E402
 from ..repositories.golden_repo_manager import GitOperationError  # noqa: E402
@@ -88,6 +89,81 @@ from ..app_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _check_filesystem_backend_health(repo_path: str) -> Dict[str, Any]:
+    """Determine filesystem-backend health/status fields for a single
+    activated repo (extracted from get_repository_info's inline health
+    check for testability; Bug #1690).
+
+    Bug #1690: this used to blind-trust
+    ConfigManager.create_with_backtrack(repo_path).get_config() without
+    verifying the resolved config genuinely describes repo_path itself.
+    repo_path comes from activated_repo_manager.get_activated_repo_path(),
+    which should always carry its own .code-indexer/config.json -- but
+    when that invariant is violated (a dangling registry entry, a
+    partially-failed activation), create_with_backtrack silently
+    backtracks onto an unrelated ANCESTOR's config instead of failing
+    loud, and is_filesystem would then report container_status/query_ready
+    for the WRONG repository's configuration.
+
+    ConfigManager.load_verified_config() closes that gap by raising
+    ConfigVerificationError (a ValueError subclass) instead -- caught by
+    the except Exception below, which preserves the exact original
+    fail-open display semantics ("Unable to determine container status")
+    rather than crashing the whole health/status response, but now logs
+    a warning so the fallback is observable instead of fully silent.
+
+    Returns:
+        Partial health_info field updates: container_status, query_ready,
+        services, issues, recommendations.
+    """
+    updates: Dict[str, Any] = {
+        "container_status": "unknown",
+        "query_ready": False,
+        "services": {},
+        "issues": [],
+        "recommendations": [],
+    }
+
+    # Container status check removed (Story #506: container management deprecated)
+    # Filesystem backend is always ready
+    try:
+        from ...config import ConfigManager
+
+        config = ConfigManager.load_verified_config(Path(repo_path))
+
+        # Check if using filesystem backend
+        is_filesystem = (
+            hasattr(config, "vector_store")
+            and config.vector_store
+            and config.vector_store.provider == "filesystem"
+        )
+
+        if is_filesystem:
+            updates["container_status"] = "not_applicable"
+            updates["query_ready"] = True
+
+            # Filesystem backend doesn't have service dependencies
+            updates["services"]["vector_store"] = {
+                "status": "healthy",
+                "type": "filesystem",
+            }
+        else:
+            updates["container_status"] = "stopped"
+            updates["recommendations"].append(
+                "Containers are stopped. Query operations will auto-start them."
+            )
+
+    except Exception as e:
+        logger.warning(
+            "Unable to determine filesystem backend health for %s: %s",
+            repo_path,
+            e,
+        )
+        updates["issues"].append("Unable to determine container status")
+
+    return updates
+
+
 def register_repo_routes(
     app: FastAPI,
     *,
@@ -111,10 +187,26 @@ def register_repo_routes(
         background_job_manager: BackgroundJobManager instance
     """
 
+    def _access_service():
+        return getattr(app.state, "access_filtering_service", None)
+
+    def _enforce_repo_access(username: str, aliases: Any) -> None:
+        """Require group access to every golden repository in *aliases*
+        (shared guard; 403 access_denied, 500 when the service is
+        unavailable; admins bypass)."""
+        repo_access_http.enforce_repo_access(_access_service(), username, aliases)
+
     # Protected endpoints (require authentication)
     @app.get("/api/repos", response_model=RepositoryListResponse)
     def list_repositories(
         filter: Optional[str] = None,
+        include_sync_status: bool = Query(
+            False,
+            description="Bug #1743 perf: computing sync_status costs up to a "
+            "few git subprocesses per repo (worse under cluster NFS "
+            "cow-storage) -- opt in explicitly rather than paying that cost "
+            "on every listing.",
+        ),
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -122,6 +214,9 @@ def register_repo_routes(
 
         Args:
             filter: Optional filter pattern for repository aliases
+            include_sync_status: When True, compute and inline a real
+                per-repo sync_status (Bug #1740). Defaults to False so the
+                listing stays a cheap metadata read.
             current_user: Current authenticated user
 
         Returns:
@@ -171,8 +266,34 @@ def register_repo_routes(
                 # deact_map remains empty; deactivation_job fields degrade to None
 
             # Annotate each repo with its in-flight deactivation job (or None)
+            # and, when opted in, its REAL sync status (Bug #1740). sync_status
+            # computation is gated behind include_sync_status (Bug #1743 perf
+            # finding #4) since it costs real git subprocesses per repo.
+            # Any failure -- including an unexpected exception, not just
+            # ActivatedRepoError -- degrades that one repo's sync_status to
+            # None rather than failing the whole listing (Bug #1743 finding
+            # #1: an optional display column must never take down GET
+            # /api/repos for every user because one golden repo is
+            # registry-orphaned or one lookup misbehaves).
             for repo in repos:
                 repo["deactivation_job"] = deact_map.get(repo.get("user_alias", ""))
+                if not include_sync_status:
+                    continue
+                alias = repo.get("user_alias", "")
+                try:
+                    status_info = activated_repo_manager.compute_sync_status(
+                        current_user.username, alias
+                    )
+                    repo["sync_status"] = status_info["sync_status"]
+                except Exception as e:
+                    logger.warning(
+                        "Failed to compute sync status for '%s'/'%s' during "
+                        "repo listing: %s",
+                        current_user.username,
+                        alias,
+                        e,
+                    )
+                    repo["sync_status"] = None
 
             # Return wrapped in RepositoryListResponse for consistency
             return RepositoryListResponse(
@@ -204,8 +325,22 @@ def register_repo_routes(
             Job ID and message for tracking the async operation
 
         Raises:
+            HTTPException 403: caller lacks group access to a requested
+                golden repository.
+            HTTPException 500: access_filtering_service unavailable (fails
+                closed).
             HTTPException: If golden repository not found or already activated
         """
+        # Activation requires group access to EVERY golden repository named
+        # in the request (single, composite, or with a branch), checked with
+        # the shared guard before any activation job is submitted. The
+        # request's user_alias names the new activation, not an existing
+        # repository, so it is not checked (same as the MCP door).
+        _enforce_repo_access(
+            current_user.username,
+            request.golden_repo_aliases or request.golden_repo_alias,
+        )
+
         try:
             job_id = activated_repo_manager.activate_repository(
                 username=current_user.username,
@@ -255,9 +390,14 @@ def register_repo_routes(
             error_msg = str(e)
 
             if "not found" in error_msg:
-                # Provide repository suggestions
+                # Suggestions name only repositories the caller has access
+                # to (admins see all).
                 available_repos = golden_repo_manager.list_golden_repos()
-                suggestions = [repo.get("alias", "") for repo in available_repos[:5]]
+                suggestions = repo_access_http.accessible_repo_names(
+                    _access_service(),
+                    current_user.username,
+                    [repo.get("alias", "") for repo in available_repos],
+                )[:5]
 
                 detail: Dict[str, Any] = {
                     "error": error_msg,
@@ -578,6 +718,10 @@ def register_repo_routes(
         Raises:
             HTTPException: 400 if invalid URL, 401 if unauthorized, 500 if server error
         """
+        # Golden matches are returned only for repositories the caller has
+        # group access to (admins see all); fails closed without the
+        # access service.
+        _enforce_repo_access(current_user.username, None)
         try:
             # Initialize repository discovery service
             from ..services.repository_discovery_service import (
@@ -590,9 +734,26 @@ def register_repo_routes(
             )
 
             # Discover matching repositories
-            discovery_response = discovery_service.discover_repositories(
+            discovered = discovery_service.discover_repositories(
                 repo_url=source,
                 user=current_user,
+            )
+            accessible = set(
+                repo_access_http.accessible_repo_names(
+                    _access_service(),
+                    current_user.username,
+                    [m.alias for m in discovered.golden_repositories],
+                )
+            )
+            golden = [
+                m for m in discovered.golden_repositories if m.alias in accessible
+            ]
+            discovery_response = RepositoryDiscoveryResponse(
+                query_url=discovered.query_url,
+                normalized_url=discovered.normalized_url,
+                golden_repositories=golden,
+                activated_repositories=discovered.activated_repositories,
+                total_matches=len(golden) + len(discovered.activated_repositories),
             )
 
             logging.info(
@@ -755,7 +916,12 @@ def register_repo_routes(
                         if repo.get("actual_repo_id") == alias:
                             return alias  # Already resolved ID
 
-                    # Strategy 4: Fall back to repository listing manager for discovery
+                    # Strategy 4: Fall back to repository listing manager for discovery.
+                    # The alias names no activation of the caller, so it names a
+                    # golden repository: syncing it requires group access to it,
+                    # checked before the golden lookup and before any job work,
+                    # so an unknown and an ungranted alias are refused alike.
+                    _enforce_repo_access(username, alias)
                     try:
                         repository_listing_manager.get_repository_details(
                             alias, username
@@ -1034,8 +1200,13 @@ def register_repo_routes(
             Detailed repository information including activation status
 
         Raises:
+            HTTPException 403: caller lacks group access to the repository.
+            HTTPException 500: access service unavailable (fails closed).
             HTTPException: If repository not found
         """
+        # Reading a golden repository requires group access to it, checked
+        # before its existence is looked up.
+        _enforce_repo_access(current_user.username, alias)
         try:
             details = repository_listing_manager.get_repository_details(
                 alias=alias, username=current_user.username
@@ -1078,19 +1249,15 @@ def register_repo_routes(
         Raises:
             HTTPException: 404 if repository not found, 403 if access denied, 500 for errors
         """
+        # Reading a golden repository requires group access to it, checked
+        # before its existence is looked up.
+        _enforce_repo_access(current_user.username, alias)
         try:
             # Check if golden repository exists
             if not golden_repo_manager.golden_repo_exists(alias):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Golden repository '{alias}' not found",
-                )
-
-            # Check user permissions
-            if not golden_repo_manager.user_can_access_golden_repo(alias, current_user):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Permission denied: Cannot access golden repository '{alias}'",
                 )
 
             # Get branch information
@@ -1152,7 +1319,11 @@ def register_repo_routes(
 
         Raises:
             HTTPException: If query parameters are invalid
+            HTTPException 500: access service unavailable (fails closed).
         """
+        # The listing holds only repositories the caller has group access
+        # to (admins see all); fails closed without the access service.
+        _enforce_repo_access(current_user.username, None)
         try:
             result = repository_listing_manager.list_available_repositories(
                 username=current_user.username,
@@ -1160,23 +1331,18 @@ def register_repo_routes(
                 status_filter=repo_status,
             )
 
-            # Apply access filtering based on user's group membership (Story #707 AC4)
-            filtered_repos = result["repositories"]
-            if (
-                hasattr(app.state, "access_filtering_service")
-                and app.state.access_filtering_service
-            ):
-                repo_aliases = [repo["alias"] for repo in filtered_repos]
-                accessible_aliases = (
-                    app.state.access_filtering_service.filter_repo_listing(
-                        repo_aliases, current_user.username
-                    )
+            accessible_aliases = set(
+                repo_access_http.accessible_repo_names(
+                    _access_service(),
+                    current_user.username,
+                    [repo["alias"] for repo in result["repositories"]],
                 )
-                filtered_repos = [
-                    repo
-                    for repo in filtered_repos
-                    if repo["alias"] in accessible_aliases
-                ]
+            )
+            filtered_repos = [
+                repo
+                for repo in result["repositories"]
+                if repo["alias"] in accessible_aliases
+            ]
 
             # Convert to response model
             repositories = [
@@ -1220,6 +1386,10 @@ def register_repo_routes(
         - Available repositories for activation
         - Recent activity and recommendations
         """
+        # Available-repository counts cover only repositories the caller has
+        # group access to (admins see all); fails closed without the access
+        # service.
+        _enforce_repo_access(current_user.username, None)
         try:
             # Get activated repository manager
             activated_manager = activated_repo_manager
@@ -1271,8 +1441,18 @@ def register_repo_routes(
                 except (ValueError, AttributeError):
                     pass
 
-            # Get available repositories (golden repositories)
-            available_repos = golden_manager.list_golden_repos()
+            # Get available repositories (golden repositories the caller can access)
+            golden_repos = golden_manager.list_golden_repos()
+            accessible_aliases = set(
+                repo_access_http.accessible_repo_names(
+                    _access_service(),
+                    current_user.username,
+                    [repo.get("alias", "") for repo in golden_repos],
+                )
+            )
+            available_repos = [
+                repo for repo in golden_repos if repo.get("alias") in accessible_aliases
+            ]
             total_available = len(available_repos)
 
             # Count not activated repositories
@@ -1360,6 +1540,61 @@ def register_repo_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to get repository status: {str(e)}",
             )
+
+    # Bug #1743: bulk sync-status route. MUST be registered BEFORE the
+    # generic /api/repos/{user_alias} route below -- Starlette/FastAPI
+    # match registered routes in order, so a literal "/api/repos/sync-status"
+    # request would otherwise be captured by /api/repos/{user_alias} with
+    # user_alias="sync-status" (that route existed; this one previously did
+    # not, producing a live 404 "Repository 'sync-status' not found or not
+    # activated" for every caller of the "all repositories" branch of
+    # `cidx repos sync-status`).
+    @app.get("/api/repos/sync-status")
+    def get_all_repository_sync_status(
+        current_user: dependencies.User = Depends(dependencies.get_current_user),
+    ):
+        """
+        Return REAL sync status for all of the current user's activated
+        repositories in one call (Bug #1743).
+
+        Reuses ActivatedRepoManager.compute_sync_status() per repo -- the
+        same computation backing GET /api/repos/{user_alias}/sync-status
+        (Bug #1740) -- so there is no duplicated sync-status logic.
+
+        Returns:
+            JSON dict mapping user_alias -> {current_branch, sync_status,
+            last_sync_time, has_conflicts, conflict_details}. A repo whose
+            status cannot be computed (e.g. a race with deactivation, or
+            any other unexpected failure) is omitted rather than failing
+            the whole request.
+        """
+        arm = activated_repo_manager
+        repos = arm.list_activated_repositories(current_user.username)
+
+        result: Dict[str, Any] = {}
+        for repo in repos:
+            alias = repo.get("user_alias")
+            if not alias:
+                continue
+            try:
+                status_info = arm.compute_sync_status(current_user.username, alias)
+            except Exception as e:
+                logger.warning(
+                    "Skipping repo '%s' for user '%s' in bulk sync-status: %s",
+                    alias,
+                    current_user.username,
+                    e,
+                )
+                continue
+            result[alias] = {
+                "current_branch": status_info["current_branch"],
+                "sync_status": status_info["sync_status"],
+                "last_sync_time": status_info["last_sync_time"],
+                "has_conflicts": status_info["has_conflicts"],
+                "conflict_details": status_info["conflict_details"],
+            }
+
+        return result
 
     # Repository Information Endpoint (Story 6) - generic route MUST be last
     @app.get("/api/repos/{user_alias}")
@@ -1519,38 +1754,28 @@ def register_repo_routes(
                 }
 
                 # Container status check removed (Story #506: container management deprecated)
-                # Filesystem backend is always ready
+                # Filesystem backend is always ready.
+                # Bug #1690: delegated to the standalone
+                # _check_filesystem_backend_health() helper, which verifies
+                # the resolved config genuinely describes repo_path itself
+                # before trusting it (see the helper's own docstring). The
+                # helper already wraps its own body in try/except and never
+                # raises; this outer try/except is a defensive belt so the
+                # route handler stays resilient even if that contract ever
+                # changes.
                 try:
-                    from ...config import ConfigManager
-
-                    config_manager = ConfigManager.create_with_backtrack(
-                        Path(repo_path)
-                    )
-                    config = config_manager.get_config()
-
-                    # Check if using filesystem backend
-                    is_filesystem = (
-                        hasattr(config, "vector_store")
-                        and config.vector_store
-                        and config.vector_store.provider == "filesystem"
-                    )
-
-                    if is_filesystem:
-                        health_info["container_status"] = "not_applicable"
-                        health_info["query_ready"] = True
-
-                        # Filesystem backend doesn't have service dependencies
-                        health_info["services"]["vector_store"] = {
-                            "status": "healthy",
-                            "type": "filesystem",
-                        }
-                    else:
-                        health_info["container_status"] = "stopped"
-                        health_info["recommendations"].append(
-                            "Containers are stopped. Query operations will auto-start them."
-                        )
-
+                    fs_health = _check_filesystem_backend_health(repo_path)
+                    health_info["container_status"] = fs_health["container_status"]
+                    health_info["query_ready"] = fs_health["query_ready"]
+                    health_info["services"].update(fs_health["services"])
+                    health_info["issues"].extend(fs_health["issues"])
+                    health_info["recommendations"].extend(fs_health["recommendations"])
                 except Exception:
+                    logger.warning(
+                        "Unexpected failure computing filesystem backend health for %s",
+                        repo_path,
+                        exc_info=True,
+                    )
                     health_info["issues"].append("Unable to determine container status")
 
                 result["health"] = health_info
@@ -1775,30 +2000,48 @@ def register_repo_routes(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
-        Return sync status for an activated repository.
+        Return REAL sync status for an activated repository (Bug #1740).
+
+        Backed by ActivatedRepoManager.compute_sync_status(), a git-based
+        comparison between the activated repo's HEAD and its golden
+        repository's HEAD on the tracked branch (plus real merge-conflict
+        detection). Previously this read metadata.get("sync_status"), a
+        key nothing in the codebase ever wrote, so it always fell through
+        to a hardcoded "synced" default regardless of actual state.
 
         Returns:
-            JSON dict with current_branch, sync_status, last_sync_time, has_conflicts.
+            JSON dict with current_branch, sync_status, last_sync_time,
+            has_conflicts, conflict_details.
 
         Raises:
             HTTPException 404: alias not activated or not found
+            HTTPException 500: sync status could not be computed for any
+                other reason
         """
         arm = activated_repo_manager
-        metadata = arm._load_metadata(current_user.username, user_alias)
-        if metadata is None:
+        try:
+            result = arm.compute_sync_status(current_user.username, user_alias)
+        except ActivatedRepoError:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Repository '{user_alias}' not found or not activated",
             )
-
-        sync_status = metadata.get("sync_status") or "synced"
-        conflict_details = metadata.get("conflict_details")
-        has_conflicts = bool(conflict_details)
-        last_sync_time = metadata.get("last_accessed")
+        except Exception as e:
+            logger.warning(
+                "Failed to compute sync status for '%s'/'%s': %s",
+                current_user.username,
+                user_alias,
+                e,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to compute sync status: {str(e)}",
+            )
 
         return {
-            "current_branch": metadata.get("current_branch"),
-            "sync_status": sync_status,
-            "last_sync_time": last_sync_time,
-            "has_conflicts": has_conflicts,
+            "current_branch": result["current_branch"],
+            "sync_status": result["sync_status"],
+            "last_sync_time": result["last_sync_time"],
+            "has_conflicts": result["has_conflicts"],
+            "conflict_details": result["conflict_details"],
         }

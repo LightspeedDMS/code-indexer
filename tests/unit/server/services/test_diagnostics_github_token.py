@@ -24,16 +24,16 @@ class TestCheckGitHubToken:
     """Tests for check_github_token() method (AC2, AC7, AC8)."""
 
     @pytest.mark.asyncio
-    async def test_github_token_working_classic(self):
+    async def test_github_token_working_classic(self, tmp_path):
         """Test GitHub token working with classic token format (ghp_)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock CITokenManager returning valid classic token
         mock_token_data = MagicMock()
         mock_token_data.token = "ghp_" + "x" * 36
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -55,15 +55,15 @@ class TestCheckGitHubToken:
         assert "valid" in result.message.lower() or "working" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_github_token_working_fine_grained(self):
+    async def test_github_token_working_fine_grained(self, tmp_path):
         """Test GitHub token working with fine-grained token format (github_pat_)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "github_pat_" + "x" * 82
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -82,7 +82,7 @@ class TestCheckGitHubToken:
         assert result.status == DiagnosticStatus.WORKING
 
     @pytest.mark.asyncio
-    async def test_github_token_not_configured(self):
+    async def test_github_token_not_configured(self, tmp_path):
         """Test GitHub token not configured returns NOT_CONFIGURED (AC8).
 
         Bug #1304: patch target corrected to
@@ -93,7 +93,7 @@ class TestCheckGitHubToken:
         host's real GitHub token (e.g. from .local-testing) leak through,
         yielding WORKING instead of NOT_CONFIGURED.
         """
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         with patch(
             "code_indexer.server.services.ci_token_manager.CITokenManager"
@@ -107,12 +107,12 @@ class TestCheckGitHubToken:
         assert "not configured" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_github_token_invalid_format_warning(self):
+    async def test_github_token_invalid_format_warning(self, tmp_path):
         """Test GitHub token with invalid format returns WARNING.
 
         Bug #1304: same corrected patch target as test_github_token_not_configured.
         """
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "invalid_token_format"
@@ -129,15 +129,15 @@ class TestCheckGitHubToken:
         assert "format" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_github_token_api_call_fails_401(self):
+    async def test_github_token_api_call_fails_401(self, tmp_path):
         """Test GitHub token API call failing with 401 Unauthorized."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "ghp_" + "x" * 36
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -164,15 +164,15 @@ class TestCheckGitHubToken:
         assert "401" in result.message or "unauthorized" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_github_token_timeout(self):
+    async def test_github_token_timeout(self, tmp_path):
         """Test GitHub token API call timing out after 30 seconds (AC7)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "ghp_" + "x" * 36
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data

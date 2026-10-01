@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
-from src.code_indexer.services.high_throughput_processor import HighThroughputProcessor
+from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 
 
 @pytest.mark.unit
@@ -22,7 +22,7 @@ class TestTwelveThreadsIntegration:
         4. File display can show all 12 files simultaneously
         """
         # Test direct slot tracker creation logic
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,
@@ -104,7 +104,7 @@ class TestTwelveThreadsIntegration:
 
     def test_different_thread_counts_work_correctly(self):
         """Test that different thread counts (4, 8, 16, 24) all work correctly."""
-        from src.code_indexer.services.clean_slot_tracker import (
+        from code_indexer.services.clean_slot_tracker import (
             CleanSlotTracker,
             FileData,
             FileStatus,

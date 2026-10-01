@@ -592,10 +592,10 @@ class TestSanitization:
     def test_ip_addresses_replaced(self):
         from sanitizer import sanitize_report_content
 
-        content = "Server at 192.168.60.20:8000 responded with 200 OK"
+        content = "Server at 203.0.113.20:8000 responded with 200 OK"
         sanitized = sanitize_report_content(content)
 
-        assert "192.168.60.20" not in sanitized
+        assert "203.0.113.20" not in sanitized
         assert "<staging-server>" in sanitized or "<server>" in sanitized
 
     def test_password_literal_replaced(self):
@@ -617,11 +617,11 @@ class TestSanitization:
     def test_username_in_reproduction_command_replaced(self):
         from sanitizer import sanitize_reproduction_command
 
-        cmd = "python run_perf_suite.py --username admin --password secret123 --server-url http://192.168.60.20:8000"
+        cmd = "python run_perf_suite.py --username admin --password secret123 --server-url http://203.0.113.20:8000"
         sanitized = sanitize_reproduction_command(cmd)
 
         assert "secret123" not in sanitized
-        assert "192.168.60.20" not in sanitized
+        assert "203.0.113.20" not in sanitized
         assert "<password>" in sanitized
         assert "<staging-server>" in sanitized or "<server>" in sanitized
 
@@ -655,10 +655,10 @@ class TestSanitization:
     def test_sanitize_server_url_replaces_host(self):
         from sanitizer import sanitize_url_in_content
 
-        content = "Server: http://192.168.60.20:8000/api"
+        content = "Server: http://203.0.113.20:8000/api"
         sanitized = sanitize_url_in_content(content)
 
-        assert "192.168.60.20" not in sanitized
+        assert "203.0.113.20" not in sanitized
 
 
 # ---------------------------------------------------------------------------

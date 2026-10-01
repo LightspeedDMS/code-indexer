@@ -2,7 +2,6 @@
 /// These tests cover OwnedNode construction, helpers, language detection,
 /// Finding struct, and the built-in evaluators.
 use std::io::Write;
-use std::sync::Arc;
 use tempfile::TempDir;
 use xray_core::owned_node::OwnedNode;
 use xray_core::scanner::parse_file;
@@ -326,29 +325,11 @@ int main() {
 // ---------------------------------------------------------------------------
 
 fn make_leaf(kind: &str, text: &str, start_line: usize, is_named: bool) -> OwnedNode {
-    let source: Arc<str> = Arc::from(text);
-    OwnedNode {
-        kind: kind.to_string(),
-        start_line,
-        start_byte: 0,
-        end_byte: text.len(),
-        children: vec![],
-        is_named,
-        source,
-    }
+    OwnedNode::new_leaf_for_test(kind, text, start_line, is_named)
 }
 
 fn make_node(kind: &str, children: Vec<OwnedNode>) -> OwnedNode {
-    let source: Arc<str> = Arc::from("");
-    OwnedNode {
-        kind: kind.to_string(),
-        start_line: 1,
-        start_byte: 0,
-        end_byte: 0,
-        children,
-        is_named: true,
-        source,
-    }
+    OwnedNode::new_node_for_test(kind, "", 1, 0, 0, children, true)
 }
 
 #[test]

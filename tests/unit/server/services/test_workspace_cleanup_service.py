@@ -15,10 +15,7 @@ from datetime import datetime
 
 import pytest
 
-from code_indexer.server.repositories.background_jobs import (
-    BackgroundJobManager,
-    JobStatus,
-)
+from code_indexer.server.repositories.background_jobs import JobStatus
 from code_indexer.server.utils.config_manager import ServerConfig
 
 
@@ -38,10 +35,10 @@ def server_config(tmp_path):
 
 
 @pytest.fixture
-def job_manager(tmp_path):
+def job_manager(tmp_path, background_job_manager_factory):
     """Create test background job manager."""
     storage_path = str(tmp_path / "jobs.json")
-    return BackgroundJobManager(storage_path=storage_path)
+    return background_job_manager_factory(storage_path=storage_path)
 
 
 @pytest.fixture

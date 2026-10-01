@@ -60,6 +60,29 @@ def _safe_dump_iso_aware(data: Dict[str, Any], **kwargs: Any) -> str:
     return _ISO_TS_SINGLE_QUOTED_RE.sub(r"\1", raw)
 
 
+class _NoTimestampSafeLoader(yaml.SafeLoader):
+    """SafeLoader subclass that never converts ISO-8601 strings to datetime.
+
+    Mirrors the identical pattern already established in
+    dependency_map_service.py. Without this, yaml.safe_load auto-converts a
+    T-separated ISO timestamp string (e.g.
+    "2026-07-28T00:18:45.011486+00:00") into a datetime object; when that
+    object is later re-dumped by _safe_dump_iso_aware, PyYAML's default
+    datetime representer emits a SPACE separator instead of "T" (the
+    _ISO_TS_SINGLE_QUOTED_RE post-processing only un-quotes QUOTED T-format
+    STRINGS -- a bare datetime object is dumped unquoted and untouched by
+    it). That silent format drift is directly visible in Bug #1870's
+    reported corrupted file (`last_refined: 2026-07-28 00:18:45...`, space
+    not T) and violates render_md's documented round-trip contract.
+    """
+
+
+_NoTimestampSafeLoader.yaml_implicit_resolvers = {
+    k: [(tag, regexp) for tag, regexp in v if tag != "tag:yaml.org,2002:timestamp"]
+    for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
 def compute_delta_fingerprint(
     changed: List[Dict[str, Any]],
     new: List[Dict[str, Any]],
@@ -124,7 +147,7 @@ def parse_frontmatter(
     body = after_delimiter[1:] if after_delimiter.startswith("\n") else after_delimiter
 
     try:
-        parsed = yaml.safe_load(yaml_block)
+        parsed = yaml.load(yaml_block, Loader=_NoTimestampSafeLoader)
     except yaml.YAMLError as exc:
         hint = f" for domain '{domain_hint}'" if domain_hint else ""
         logger.warning(
@@ -166,6 +189,74 @@ def render_md(frontmatter: Dict[str, Any], body: str) -> str:
         frontmatter, sort_keys=False, default_flow_style=False
     )
     return f"---\n{yaml_text}---\n\n{body}"
+
+
+_FRONTMATTER_OPEN = "---\n"
+_FRONTMATTER_CLOSE = "\n---\n"
+
+
+def _parse_strict_frontmatter_block(
+    rendered: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Extract and strictly parse ONLY the delimited frontmatter block.
+
+    Unlike parse_frontmatter, never fails open -- returns (None, error) on
+    any structural or YAML problem instead of silently degrading. Internal
+    helper for validate_rendered_frontmatter (Bug #1870).
+    """
+    if not rendered.startswith(_FRONTMATTER_OPEN):
+        return None, "rendered content does not start with a frontmatter delimiter"
+    rest = rendered[len(_FRONTMATTER_OPEN) :]
+    close_idx = rest.find(_FRONTMATTER_CLOSE)
+    if close_idx == -1:
+        return None, "rendered content has no closing frontmatter delimiter"
+    yaml_block = rest[:close_idx]
+    try:
+        parsed = yaml.load(yaml_block, Loader=_NoTimestampSafeLoader)
+    except yaml.YAMLError as exc:
+        return None, f"rendered frontmatter block failed to parse: {exc}"
+    if not isinstance(parsed, dict):
+        return None, (
+            f"rendered frontmatter block is not a mapping (got {type(parsed).__name__})"
+        )
+    return parsed, None
+
+
+def validate_rendered_frontmatter(
+    rendered: str, expected_fm: Dict[str, Any]
+) -> Optional[str]:
+    """
+    Strictly validate a render_md() output before it is persisted (Bug #1870).
+
+    Fails CLOSED (unlike parse_frontmatter's read-path fail-OPEN): the
+    delimited block must parse to a mapping whose participating_repos
+    matches expected_fm's. Called from dependency_map_service.py's Story
+    #1053 rewrap write site, immediately before write_atomic -- a non-None
+    return means the caller must refuse the write and record an error.
+
+    Returns:
+        None if valid; otherwise an error string describing what failed.
+    """
+    if not isinstance(rendered, str):
+        return f"rendered content must be a string (got {type(rendered).__name__})"
+    if not isinstance(expected_fm, dict):
+        return f"expected_fm must be a mapping (got {type(expected_fm).__name__})"
+
+    parsed, error = _parse_strict_frontmatter_block(rendered)
+    if error is not None:
+        return error
+    assert (
+        parsed is not None
+    )  # invariant: _parse_strict_frontmatter_block guarantees this
+
+    if (
+        "participating_repos" in expected_fm
+        and parsed.get("participating_repos") != expected_fm["participating_repos"]
+    ):
+        return "rendered participating_repos does not match the intended value"
+
+    return None
 
 
 def write_atomic(path: Path, content: str) -> None:

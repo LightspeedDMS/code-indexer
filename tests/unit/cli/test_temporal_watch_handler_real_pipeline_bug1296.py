@@ -154,8 +154,16 @@ class TestWatchModeRealPipelineBug1296:
                 "expected the watch incremental path to create a real "
                 "per-commit shard collection on disk"
             )
-            vector_files = list(shard_dirs[0].rglob("vector_*.json"))
-            assert vector_files, "expected real vector files written to the shard"
+            # Bug #1528: the watch path is a temporal WRITE surface, so it now
+            # produces the consolidated chunks.db layout -- never another
+            # legacy vector_*.json file. Bug #1296's intent is unchanged: prove
+            # the real per-commit pipeline actually wrote data on disk.
+            assert (shard_dirs[0] / "chunks.db").is_file(), (
+                "expected real chunk data written to the shard's chunks.db"
+            )
+            assert list(shard_dirs[0].rglob("vector_*.json")) == [], (
+                "the watch path must never write legacy vector_*.json files"
+            )
         finally:
             unregister_embedder_for_tests(EMBEDDER_NAME)
 
@@ -212,7 +220,15 @@ class TestBranchSwitchCatchUpRealPipelineBug1296:
                 "expected the catch-up path to create a real per-commit "
                 "shard collection on disk"
             )
-            vector_files = list(shard_dirs[0].rglob("vector_*.json"))
-            assert vector_files, "expected real vector files written to the shard"
+            # Bug #1528: the watch path is a temporal WRITE surface, so it now
+            # produces the consolidated chunks.db layout -- never another
+            # legacy vector_*.json file. Bug #1296's intent is unchanged: prove
+            # the real per-commit pipeline actually wrote data on disk.
+            assert (shard_dirs[0] / "chunks.db").is_file(), (
+                "expected real chunk data written to the shard's chunks.db"
+            )
+            assert list(shard_dirs[0].rglob("vector_*.json")) == [], (
+                "the watch path must never write legacy vector_*.json files"
+            )
         finally:
             unregister_embedder_for_tests(EMBEDDER_NAME)

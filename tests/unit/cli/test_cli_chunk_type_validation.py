@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from unittest.mock import patch
 from pathlib import Path
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestChunkTypeValidation:
@@ -18,7 +18,7 @@ class TestChunkTypeValidation:
         runner = CliRunner()
 
         # Mock find_project_root to return a valid Path (not string)
-        with patch("src.code_indexer.cli.find_project_root") as mock_find_root:
+        with patch("code_indexer.cli.find_project_root") as mock_find_root:
             mock_find_root.return_value = Path("/tmp/test-project")
 
             # Act: Run query with --chunk-type but no temporal flags

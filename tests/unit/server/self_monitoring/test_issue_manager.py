@@ -526,7 +526,6 @@ class TestIssueManager:
     def test_create_issue_prepends_server_identity_to_body(self, temp_db):
         """Test IssueManager prepends server identity to issue body when server_name provided (Bug #87 - Issue #4)."""
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
-        import socket
 
         # Track the JSON payload sent to GitHub API
         captured_body = None
@@ -578,10 +577,8 @@ class TestIssueManager:
         assert "**Created by CIDX Server**" in captured_body
         assert "Production CIDX Server" in captured_body
         assert "test-scan-010" in captured_body
-        assert (
-            socket.gethostbyname(socket.gethostname()) in captured_body
-            or "Server IP:" in captured_body
-        )
+        assert "Scan ID:" in captured_body
+        assert "Server IP:" not in captured_body
 
         # Verify original body is still present after the identity section
         assert original_body in captured_body
@@ -591,35 +588,69 @@ class TestIssueManager:
         original_pos = captured_body.find(original_body)
         assert identity_pos < original_pos
 
-    def test_get_all_server_ips_returns_non_loopback_addresses(self, temp_db):
-        """Test _get_all_server_ips() returns all non-loopback IPv4 addresses (Issue 1 fix)."""
+    def test_create_issue_body_never_contains_ipv4_address(self, temp_db):
+        """Bug #1607: issue body must never contain a real IPv4 address.
+
+        Regression guard for the defect class (not just the removed literal
+        "Server IP:" line) -- scans the whole constructed body with an IPv4
+        shape regex so any future reintroduction of a network address, under
+        any label, is caught.
+        """
         from code_indexer.server.self_monitoring.issue_manager import IssueManager
+        import re
 
-        manager = IssueManager(
-            db_path=temp_db,
-            scan_id="test-scan-011",
-            github_repo="owner/repo",
-            github_token="ghp_test_token",
+        captured_body = None
+
+        def mock_post_side_effect(*args, **kwargs):
+            nonlocal captured_body
+            if "json" in kwargs:
+                captured_body = kwargs["json"].get("body")
+
+            return Mock(
+                status_code=201,
+                json=lambda: {
+                    "number": 999,
+                    "html_url": "https://github.com/owner/repo/issues/999",
+                },
+                headers={},
+                raise_for_status=lambda: None,
+            )
+
+        with patch(
+            "code_indexer.server.self_monitoring.issue_manager.httpx.post",
+            side_effect=mock_post_side_effect,
+        ):
+            manager = IssueManager(
+                db_path=temp_db,
+                scan_id="test-scan-013",
+                github_repo="owner/repo",
+                github_token="ghp_test_token",
+                server_name="Production CIDX Server",
+            )
+
+            manager.create_issue(
+                classification="server_bug",
+                title="[BUG] Something broke",
+                body="## Problem\nSomething went wrong.",
+                source_log_ids=[1],
+                source_files=["foo.py"],
+                error_codes=[],
+            )
+
+        assert captured_body is not None
+
+        ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        match = ipv4_pattern.search(captured_body)
+        assert match is None, (
+            "Issue body must never contain an IPv4-shaped address, found: "
+            f"{match.group(0)!r}"
         )
-
-        # Call the helper method
-        all_ips = manager._get_all_server_ips()
-
-        # Verify result is a string
-        assert isinstance(all_ips, str)
-
-        # If we have IPs, verify they are non-loopback
-        if all_ips and all_ips != "unknown":
-            ips = all_ips.split(", ")
-            # Should have at least one IP
-            assert len(ips) >= 1
-            # Should not include 127.0.0.1
-            assert "127.0.0.1" not in ips
-            # All should be valid IPv4 format
-            for ip in ips:
-                parts = ip.split(".")
-                assert len(parts) == 4
-                assert all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+        # Backup literal-string guard: the regex above would vacuously pass
+        # in the degenerate case where the old buggy helper's routing/DNS
+        # probes both failed and it returned the literal string "unknown"
+        # (no digits at all). Assert the removed field label itself is gone
+        # too, so that failure mode can't slip through unnoticed.
+        assert "Server IP:" not in captured_body
 
     def test_create_issue_server_identity_not_duplicated(self, temp_db):
         """Test server identity section appears exactly once in issue body (Issue 2 fix)."""
@@ -685,15 +716,12 @@ class TestIssueManager:
         scan_id_count = captured_body.count("test-scan-012")
         assert scan_id_count == 1, f"Expected Scan ID once, found {scan_id_count} times"
 
-        # Verify no duplicate "Server Name" or "Server IP" fields
+        # Verify no duplicate "Server Name" field; "Server IP" must never appear (Bug #1607)
         server_name_count = captured_body.count("Server Name:")
-        server_ip_count = captured_body.count("Server IP:")
         assert server_name_count == 1, (
             f"Expected 'Server Name:' once, found {server_name_count} times"
         )
-        assert server_ip_count == 1, (
-            f"Expected 'Server IP:' once, found {server_ip_count} times"
-        )
+        assert "Server IP:" not in captured_body
 
 
 class TestBug949IssueManagerHttpStatusErrorBody:

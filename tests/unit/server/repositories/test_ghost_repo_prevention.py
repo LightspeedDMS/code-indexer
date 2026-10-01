@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 
@@ -89,7 +89,7 @@ class TestGhostRepoPreventionSingle:
             raise OSError("simulated rename failure (e.g. trash swap)")
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+            "code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
             side_effect=fail_rename,
         ):
             result = manager._do_deactivate_single("alice", "ghost-test", metadata)
@@ -125,7 +125,7 @@ class TestGhostRepoPreventionComposite:
             raise OSError("simulated composite rename failure")
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+            "code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
             side_effect=fail_rename,
         ):
             with patch.object(manager, "_stop_composite_services"):
@@ -182,11 +182,11 @@ class TestPermissionErrorFalseNegativeBlocked:
             return original_exists(path)
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+            "code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
             side_effect=fail_rename,
         ):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.os.path.exists",
+                "code_indexer.server.repositories.activated_repo_manager.os.path.exists",
                 side_effect=lying_exists,
             ):
                 manager._do_deactivate_single("alice", "perm-test", metadata)

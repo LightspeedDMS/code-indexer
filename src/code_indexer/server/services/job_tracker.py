@@ -22,7 +22,19 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
+# Story #1586 AC3: cidx.jobs.* OTEL metrics -- no-op when telemetry is
+# disabled (JobMetrics.is_active gates every record_* call internally).
+# peek_telemetry_manager (not get_telemetry_manager) avoids winning the
+# "first call creates a disabled fallback" race from a background thread.
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.job_metrics import get_job_metrics
+
 logger = logging.getLogger(__name__)
+
+# Fallback error_type bucket used when a fail_job() caller does not pass one
+# (backward compatible -- existing callers only ever passed a free-text
+# error string, never a typed category).
+_UNKNOWN_ERROR_TYPE = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +66,53 @@ class TrackedJob:
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     actor_username: Optional[str] = None
+
+
+def _job_duration_seconds(job: "TrackedJob", now: datetime) -> float:
+    """Compute elapsed seconds for a terminating job (Story #1586 AC3).
+
+    Prefers started_at (set when the job transitioned to "running"); falls
+    back to created_at when the job never reached "running" (e.g. failed
+    while still pending) so a duration is always available.
+    """
+    reference = job.started_at or job.created_at
+    return max(0.0, (now - reference).total_seconds())
+
+
+def _record_job_metric(
+    job: "TrackedJob",
+    duration_seconds: float,
+    *,
+    error_type: Optional[str] = None,
+) -> None:
+    """Record a cidx.jobs.completed/failed + cidx.jobs.duration OTEL metric
+    for one JobTracker.complete_job()/fail_job() call (Story #1586 AC3).
+
+    error_type is None for the completion path and a (possibly defaulted)
+    string for the failure path. No-op when telemetry is disabled OR not
+    yet initialized this process; never raises into the job-completion/
+    failure path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        job_metrics = get_job_metrics(telemetry_manager)
+        if not job_metrics.is_active:
+            return
+        if error_type is None:
+            job_metrics.record_job_completed(
+                job_type=job.operation_type,
+                duration_seconds=duration_seconds,
+            )
+        else:
+            job_metrics.record_job_failed(
+                job_type=job.operation_type,
+                error_type=error_type,
+                duration_seconds=duration_seconds,
+            )
+    except Exception as e:
+        logger.debug(f"Failed to record job metrics: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +355,42 @@ _CLEANUP_JOB_FETCH_LIMIT = 10000
 # against this same set; a divergent copy here would let the raw-SQLite
 # _upsert_job path and the backend path disagree on what counts as terminal
 # for the SAME background_jobs table.
-_TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
+#
+# Bug #1950: "interrupted" is a terminal status distinct from "failed" for
+# a job whose worker process was killed by a server restart/shutdown
+# rather than by a genuine failure. It must be treated as terminal here
+# too so a stale non-terminal write can never resurrect/overwrite it, same
+# guarantee "failed"/"completed"/"cancelled" already get.
+_TERMINAL_JOB_STATUSES = (
+    "completed",
+    "completed_partial",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
+
+# Bug #1950: known error-message markers that identify a job terminated by
+# a server restart/shutdown rather than a genuine failure. The system
+# already writes one of these distinct messages at the moment a job is
+# reclaimed/aborted for this reason (JobTracker's own startup sweep,
+# BackgroundJobManager.fail_orphaned_jobs(), and the RuntimeError
+# global_repos/refresh_scheduler.py raises when a `cidx index` subprocess
+# is killed by SIGTERM during shutdown) -- this is the single source of
+# truth for recognizing them, shared with repositories/background_jobs.py.
+_RESTART_INTERRUPTION_MARKERS = (
+    "orphaned by server restart",
+    "job interrupted by server restart",
+    "interrupted by server shutdown",
+)
+
+
+def is_restart_interruption_error(error: Optional[str]) -> bool:
+    """True if *error* is one of the known restart/shutdown interruption
+    messages (Bug #1950) rather than a genuine job failure reason."""
+    if not error:
+        return False
+    lowered = error.lower()
+    return any(marker in lowered for marker in _RESTART_INTERRUPTION_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -582,10 +676,16 @@ class JobTracker:
         if result is not None:
             job.result = result
 
+        # Story #1586 AC3: record cidx.jobs.completed/duration BEFORE the
+        # persistence write below.
+        _record_job_metric(job, _job_duration_seconds(job, now))
+
         self._upsert_job(job)
         logger.debug(f"JobTracker: completed job {job_id}")
 
-    def fail_job(self, job_id: str, error: str) -> None:
+    def fail_job(
+        self, job_id: str, error: str, error_type: Optional[str] = None
+    ) -> None:
         """
         Mark job as failed.
 
@@ -595,6 +695,11 @@ class JobTracker:
         Args:
             job_id: Job to fail.
             error: Human-readable error description.
+            error_type: Optional typed error category (e.g. the failing
+                exception's class name) for the cidx.jobs.failed OTEL metric
+                (Story #1586 AC3). Defaults to "unknown" when omitted, so
+                existing callers that only ever passed a free-text error
+                string keep working unchanged (no new required field).
         """
         now = datetime.now(timezone.utc)
 
@@ -610,6 +715,14 @@ class JobTracker:
         job.status = "failed"
         job.completed_at = now
         job.error = error
+
+        # Story #1586 AC3: record cidx.jobs.failed/duration BEFORE the
+        # persistence write below.
+        _record_job_metric(
+            job,
+            _job_duration_seconds(job, now),
+            error_type=error_type or _UNKNOWN_ERROR_TYPE,
+        )
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: failed job {job_id}: {error}")
@@ -649,6 +762,46 @@ class JobTracker:
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: cancelled job {job_id}")
+
+    def interrupt_job(self, job_id: str, error: str) -> None:
+        """
+        Mark job as interrupted by a server restart/shutdown (Bug #1950).
+
+        Sets status="interrupted" (a terminal status DISTINCT from
+        "failed"), completed_at, and the restart-interruption error
+        message; persists to SQLite/backend and removes from the
+        in-memory dict. Mirrors fail_job's terminal-transition contract,
+        but for a restart artifact instead of a genuine failure --
+        /health's degraded computation counts ONLY status='failed' rows,
+        so this keeps a restart artifact from poisoning that count
+        forever.
+
+        No OTEL job-failure metric is recorded here, mirroring
+        cancel_job's existing behavior: this is not a genuine failure, so
+        it must not be attributed as one in job-failure telemetry either.
+
+        Args:
+            job_id: Job to mark interrupted.
+            error: Human-readable restart-interruption message (e.g.
+                "Job interrupted by server restart").
+        """
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            job = self._active_jobs.pop(job_id, None)
+
+        if job is None:
+            self._finalize_absent_job(
+                job_id, terminal_status="interrupted", now=now, error=error
+            )
+            return
+
+        job.status = "interrupted"
+        job.completed_at = now
+        job.error = error
+
+        self._upsert_job(job)
+        logger.debug(f"JobTracker: interrupted job {job_id}: {error}")
 
     def _finalize_absent_job(
         self,
@@ -775,12 +928,14 @@ class JobTracker:
                 )
                 return False
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT cancelled FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT cancelled FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return False
         return bool(row[0])
@@ -848,7 +1003,6 @@ class JobTracker:
         Updates seen_ids in-place for each accepted row to prevent intra-query
         duplicates. Caller is responsible for pre-validating limit > 0.
         """
-        conn = self._conn_manager.get_connection()
         where_parts: List[str] = []
         params: List[Any] = []
 
@@ -869,8 +1023,14 @@ class JobTracker:
             f"{where_clause} ORDER BY created_at DESC LIMIT ?"
         )
         params.append(limit)
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        # Only the actual DB access needs the lock; fetchall() materializes
+        # the rows into plain Python data before the lock is released.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
         rows: List[Dict[str, Any]] = []
-        for row in conn.execute(sql, params).fetchall():
+        for row in fetched:
             job = _row_to_tracked_job(row)
             if job.job_id not in seen_ids:
                 seen_ids.add(job.job_id)
@@ -998,11 +1158,11 @@ class JobTracker:
         )
         params.append(limit)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(sql, params)
-        return [
-            _tracked_job_to_dict(_row_to_tracked_job(row)) for row in cursor.fetchall()
-        ]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
+        return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in fetched]
 
     def check_operation_conflict(
         self,
@@ -1057,28 +1217,70 @@ class JobTracker:
                         existing_job_id=job.job_id,
                     )
 
-    def cleanup_orphaned_jobs_on_startup(self) -> int:
+    def _should_skip_unscoped_orphan_sweep(
+        self, backend_type_name: str, is_primary_instance: bool
+    ) -> bool:
+        """Bug #1549: the SQLite-flavored sweep is unscoped (no time/process
+        filter). Skip it when this process isn't confirmed as the sole live
+        instance. Postgres is already node_id-scoped -- never skip there."""
+        if is_primary_instance or backend_type_name == "BackgroundJobsPostgresBackend":
+            return False
+        # Finding 2b: under `uvicorn --workers N`, exactly one worker
+        # acquires the primary-instance lock and the other N-1 correctly
+        # take this branch on EVERY multi-worker startup -- routine, by
+        # design, not evidence of a caller bug. Demoted to DEBUG per the
+        # established Bug #1535 precedent (demote a happy-path log line
+        # rather than allowlisting it); a WARNING here broke the mandatory
+        # post-E2E log-audit gate on a normal multi-worker deployment.
+        logger.debug(
+            "JobTracker.cleanup_orphaned_jobs_on_startup: skipping unscoped "
+            "orphan-cleanup sweep -- this process could not confirm it is "
+            "the primary server instance (Bug #1549)"
+        )
+        return True
+
+    def cleanup_orphaned_jobs_on_startup(self, is_primary_instance: bool = True) -> int:
         """
-        Mark stale running/pending jobs as failed.
+        Mark stale running/pending jobs as interrupted.
 
         Called once on server startup to handle jobs that were in-flight when
-        the server last restarted.  In-memory dict is empty at startup, so
-        any job in running/pending state in the store is orphaned.
+        the server last restarted. See _should_skip_unscoped_orphan_sweep for
+        the is_primary_instance semantics (Bug #1549).
+
+        Bug #1950: marked 'interrupted' (not 'failed') -- a restart
+        artifact, distinct from a genuine failure.
 
         Returns:
-            Number of orphaned jobs marked as failed.
+            Number of orphaned jobs marked as interrupted.
         """
         if self._backend is not None:
+            if self._should_skip_unscoped_orphan_sweep(
+                type(self._backend).__name__, is_primary_instance
+            ):
+                return 0
             count: int = int(
                 self._backend.cleanup_orphaned_jobs_on_startup(node_id=self._node_id)
             )
             if count:
                 logger.info(
                     f"JobTracker.cleanup_orphaned_jobs_on_startup: "
-                    f"marked {count} orphaned job(s) as failed"
+                    f"marked {count} orphaned job(s) as interrupted"
                 )
             return count
 
+        if self._should_skip_unscoped_orphan_sweep("", is_primary_instance):
+            return 0
+        return self._cleanup_legacy_sqlite_orphans()
+
+    def _cleanup_legacy_sqlite_orphans(self) -> int:
+        """Direct-SQLite (no injected backend) orphan sweep body.
+
+        Bug #1950: writes status='interrupted' (not 'failed') -- a job
+        orphaned by this same process's own restart is a restart artifact,
+        never a genuine failure, so it must not poison /health's
+        get_failed_job_count() (which counts ONLY status='failed', with no
+        time window) forever.
+        """
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"
 
@@ -1089,7 +1291,7 @@ class JobTracker:
             orphaned_ids = [row[0] for row in cursor.fetchall()]
             if orphaned_ids:
                 conn.execute(
-                    "UPDATE background_jobs SET status = 'failed', "
+                    "UPDATE background_jobs SET status = 'interrupted', "
                     "completed_at = ?, error = ? "
                     "WHERE status IN ('running', 'pending')",
                     (now_iso, orphan_error),
@@ -1100,18 +1302,24 @@ class JobTracker:
         if sqlite_count:
             logger.info(
                 f"JobTracker.cleanup_orphaned_jobs_on_startup: "
-                f"marked {sqlite_count} orphaned job(s) as failed"
+                f"marked {sqlite_count} orphaned job(s) as interrupted"
             )
         return sqlite_count
 
     def _evict_stale_from_memory(self, operation_type: str, cutoff: datetime) -> None:
-        """Remove stale completed/failed/cancelled jobs from in-memory dict."""
+        """Remove stale terminal-status jobs from in-memory dict.
+
+        Bug #1950: uses _TERMINAL_JOB_STATUSES (completed/completed_partial/
+        failed/cancelled/interrupted) rather than a hardcoded subset -- an
+        interrupted or completed_partial job must be evicted exactly like a
+        completed/failed/cancelled one, or it leaks in _active_jobs forever.
+        """
         with self._lock:
             stale_ids = [
                 jid
                 for jid, j in self._active_jobs.items()
                 if j.operation_type == operation_type
-                and j.status in ("completed", "failed", "cancelled")
+                and j.status in _TERMINAL_JOB_STATUSES
                 and j.completed_at is not None
                 and j.completed_at < cutoff
             ]
@@ -1122,7 +1330,8 @@ class JobTracker:
         """
         Remove completed jobs of the given operation_type older than max_age_hours.
 
-        Deletes from the persistence store (completed/failed/cancelled status).
+        Deletes from the persistence store (any terminal status --
+        completed/completed_partial/failed/cancelled/interrupted, Bug #1950).
         Also removes matching entries from _active_jobs dict if present.
 
         Args:
@@ -1138,8 +1347,11 @@ class JobTracker:
         if self._backend is not None:
             # Backend cleanup_old_jobs has no operation_type filter, so we
             # enumerate candidates per terminal status and delete individually.
+            # Bug #1950: _TERMINAL_JOB_STATUSES includes completed_partial and
+            # interrupted -- omitting either here would leave those rows
+            # undeleted forever regardless of age.
             count = 0
-            for terminal_status in ("completed", "failed", "cancelled"):
+            for terminal_status in _TERMINAL_JOB_STATUSES:
                 candidates = self._backend.list_jobs(
                     operation_type=operation_type,
                     status=terminal_status,
@@ -1159,14 +1371,19 @@ class JobTracker:
                 )
             return count
 
+        # Bug #1950: build the IN(...) clause from _TERMINAL_JOB_STATUSES so
+        # completed_partial/interrupted rows are deleted too, not just the
+        # original 3 statuses.
+        _placeholders = ", ".join("?" for _ in _TERMINAL_JOB_STATUSES)
+
         def operation(conn) -> int:
             cursor = conn.execute(
-                """DELETE FROM background_jobs
+                f"""DELETE FROM background_jobs
                    WHERE operation_type = ?
-                   AND status IN ('completed', 'failed', 'cancelled')
+                   AND status IN ({_placeholders})
                    AND completed_at IS NOT NULL
                    AND completed_at < ?""",
-                (operation_type, cutoff_iso),
+                (operation_type, *_TERMINAL_JOB_STATUSES, cutoff_iso),
             )
             return cursor.rowcount  # type: ignore[no-any-return]
 
@@ -1447,14 +1664,16 @@ class JobTracker:
             )
             return result
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT job_id FROM background_jobs "
-            "WHERE operation_type = ? AND repo_alias = ? "
-            "AND status IN ('pending', 'running') LIMIT 1",
-            (operation_type, repo_alias),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT job_id FROM background_jobs "
+                "WHERE operation_type = ? AND repo_alias = ? "
+                "AND status IN ('pending', 'running') LIMIT 1",
+                (operation_type, repo_alias),
+            )
+            row = cursor.fetchone()
         return row[0] if row is not None else None
 
     def _insert_job(self, job: TrackedJob) -> None:
@@ -1580,12 +1799,14 @@ class JobTracker:
                 return None
             return _dict_to_tracked_job(d)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
         return _row_to_tracked_job(row)
@@ -1647,7 +1868,14 @@ class TrackedOperation:
         exc_tb: Any,
     ) -> None:
         if exc_type is not None:
-            self.tracker.fail_job(self.job_id, error=str(exc_val))
+            # Story #1586 code-review round 2: a real exception object is
+            # always available here (the context manager protocol hands it
+            # to us directly), so derive error_type from its class name
+            # rather than leaving fail_job() to fall back to "unknown".
+            error_type = type(exc_val).__name__ if exc_val is not None else None
+            self.tracker.fail_job(
+                self.job_id, error=str(exc_val), error_type=error_type
+            )
             return  # Do not suppress exception
         self.tracker.complete_job(self.job_id)
         return  # implicit None — do not suppress exceptions

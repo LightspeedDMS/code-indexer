@@ -13,7 +13,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import code_indexer
 from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+
+# Repo-relative src root, derived from the installed package rather than a
+# hardcoded absolute path -- works regardless of where the repo is checked out.
+_SRC_ROOT = Path(code_indexer.__file__).resolve().parents[1]
 
 
 class TestHashPhaseCallbacksIncludeConcurrentFiles:
@@ -22,8 +27,8 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
     def test_hash_initialization_callback_uses_slot_tracker_data(self):
         """Hash phase initialization must get concurrent_files from slot_tracker, not empty list."""
         # Read the actual source code to verify the pattern
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/services/high_throughput_processor.py"
+        source_file = (
+            _SRC_ROOT / "code_indexer" / "services" / "high_throughput_processor.py"
         )
         source_code = source_file.read_text()
 
@@ -57,8 +62,8 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
     def test_hash_completion_callback_uses_slot_tracker_data(self):
         """Hash phase completion must get concurrent_files from slot_tracker, not empty list."""
         # Read the actual source code
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/services/high_throughput_processor.py"
+        source_file = (
+            _SRC_ROOT / "code_indexer" / "services" / "high_throughput_processor.py"
         )
         source_code = source_file.read_text()
 
@@ -90,8 +95,8 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
     def test_final_completion_callback_includes_concurrent_files(self):
         """Final completion callback must include concurrent_files parameter (empty for completion)."""
         # Read the actual source code
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/services/high_throughput_processor.py"
+        source_file = (
+            _SRC_ROOT / "code_indexer" / "services" / "high_throughput_processor.py"
         )
         source_code = source_file.read_text()
 
@@ -125,9 +130,7 @@ class TestDaemonCallbacksFilterSlotTracker:
     def test_daemon_service_code_filters_slot_tracker(self):
         """Verify daemon/service.py correlated_callback filters out slot_tracker."""
         # Read the actual daemon service code
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/daemon/service.py"
-        )
+        source_file = _SRC_ROOT / "code_indexer" / "daemon" / "service.py"
         source_code = source_file.read_text()
 
         # Find the correlated_callback function
@@ -272,8 +275,8 @@ class TestMultiThreadedDisplayNoFallback:
     def test_get_integrated_display_no_fallback_to_slot_tracker(self):
         """get_integrated_display must NOT fallback to slot_tracker.get_concurrent_files_data()."""
         # Read the actual source code
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/progress/multi_threaded_display.py"
+        source_file = (
+            _SRC_ROOT / "code_indexer" / "progress" / "multi_threaded_display.py"
         )
         source_code = source_file.read_text()
 
@@ -302,8 +305,8 @@ class TestMultiThreadedDisplayNoFallback:
     def test_concurrent_files_handling_no_fallback(self):
         """Verify concurrent files handling uses self._concurrent_files only, no slot_tracker fallback."""
         # Read the actual source code
-        source_file = Path(
-            "/home/jsbattig/Dev/code-indexer/src/code_indexer/progress/multi_threaded_display.py"
+        source_file = (
+            _SRC_ROOT / "code_indexer" / "progress" / "multi_threaded_display.py"
         )
         source_code = source_file.read_text()
 

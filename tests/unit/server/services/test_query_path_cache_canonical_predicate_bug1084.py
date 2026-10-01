@@ -38,7 +38,7 @@ class TestCanonicalSnapshotsAreImmutable:
     def test_dotted_alias_canonical_cow_snapshot_is_immutable(self):
         assert is_immutable_versioned_snapshot(
             "/mnt/cow-storage/.versioned/"
-            "langfuse_Claude_Code_seba_battig_lightspeeddms_com/v_1717000000"
+            "langfuse_Claude_Code_jane_doe_example_com/v_1717000000"
         )
 
     def test_subpath_inside_canonical_snapshot_stays_immutable(self):

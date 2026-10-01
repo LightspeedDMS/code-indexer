@@ -19,10 +19,11 @@ import copy
 import logging
 import os
 import time
+from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from queue import Queue, Empty
 import threading
 
@@ -31,6 +32,8 @@ from ..services.git_aware_processor import GitAwareDocumentProcessor
 from .vector_calculation_manager import VectorCalculationManager
 from .clean_slot_tracker import CleanSlotTracker, FileStatus, FileData
 from .file_chunking_manager import FileChunkingManager, FileProcessingResult
+from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
+from ..storage.filesystem_vector_store import FilesystemVectorStore
 
 # SURGICAL FIX: Remove RealTimeFeedbackManager import - causes individual callback spam
 
@@ -348,6 +351,38 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
             ) as file_manager:
+                # Bug #1746 Change 4 (M1 fix): preflight the target chunk
+                # store's writability BEFORE any file is hashed, chunked,
+                # or embedded -- this genuinely runs first now, ahead of
+                # the parallel hash phase below (previously this check
+                # ran AFTER hashing, contradicting its own comment: a real
+                # repro showed every file hash before the abort fired).
+                # Only needs the embedding model name, no dependency on
+                # hash results.
+                #
+                # Bug #1746 M3 (code review finding): for the REAL
+                # production vector_store_client type
+                # (FilesystemVectorStore), the isinstance check below is
+                # always True, so short-circuit "or" evaluation calls the
+                # method UNCONDITIONALLY -- a future rename of
+                # preflight_chunk_store_writable fails LOUD
+                # (AttributeError) instead of this safety net silently
+                # vanishing. The hasattr() half of the condition (matching
+                # this module's established duck-typing convention, e.g.
+                # set_hnsw_branch_context below) only matters for
+                # lightweight test doubles that duck-type a different
+                # (non-FilesystemVectorStore) object.
+                _raw_model = self.embedding_provider.get_current_model()
+                collection_name = _raw_model.replace("/", "_").replace(":", "_")
+                if isinstance(
+                    self.vector_store_client, FilesystemVectorStore
+                ) or hasattr(
+                    self.vector_store_client, "preflight_chunk_store_writable"
+                ):
+                    self.vector_store_client.preflight_chunk_store_writable(
+                        collection_name
+                    )
+
                 # PARALLEL HASH CALCULATION - eliminate serial bottleneck
                 file_futures = []
 
@@ -630,18 +665,35 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
 
                 # FAST FILE SUBMISSION - No more I/O delays
-                # CRITICAL FIX: Get collection name for regular indexing
-                # When temporal collection exists, regular indexing needs explicit collection_name
-                # Compute directly from embedding_provider (same logic as
-                # FilesystemVectorStore.resolve_collection_name) so callers that use a
-                # lightweight vector-store client (e.g. test doubles) do not need to
-                # implement resolve_collection_name.
-                _raw_model = self.embedding_provider.get_current_model()
-                collection_name = _raw_model.replace("/", "_").replace(":", "_")
+                # collection_name was already computed (and the Bug #1746
+                # Change 4 preflight check already run) right after
+                # entering the FileChunkingManager context above, before
+                # the hash phase -- both stay in scope here.
+
+                # Bug #1969 Round 6 (P1-3): relative paths of files that
+                # failed THIS run, so the self-heal-reprocess sidecar clear
+                # logic can attribute a failure to a specific path instead
+                # of only knowing an aggregate count. Declared before the
+                # submission loop (not just the futures-collection loop
+                # below) so a submission-time failure -- e.g.
+                # `submit_file_for_processing` itself raising, before any
+                # future even exists -- is attributed too, not just a
+                # failure discovered later via a completed future.
+                _failed_relative_paths: set = set()
 
                 for file_path in files:
                     if self.cancelled:
                         break
+
+                    if file_path not in hash_results:
+                        # Bug #1118 TOCTOU: this file already vanished
+                        # during the hash phase, which logged its own
+                        # WARNING and excluded it from `hash_results` --
+                        # not a NEW failure to attribute here. Letting the
+                        # resulting KeyError fall into the except-Exception
+                        # handler below would double-count an already-
+                        # logged benign skip as a submission failure.
+                        continue
 
                     try:
                         # Get pre-calculated metadata and size (no I/O)
@@ -665,9 +717,17 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     except Exception as e:
                         logger.error(f"Failed to process file {file_path}: {e}")
                         # Continue with other files rather than failing completely
+                        stats.failed_files += 1
+                        try:
+                            _failed_relative_paths.add(
+                                str(file_path.relative_to(self.config.codebase_dir))
+                            )
+                        except ValueError:
+                            _failed_relative_paths.add(str(file_path))
 
                 if not file_futures:
                     logger.warning("No files to process")
+                    stats.failed_paths = frozenset(_failed_relative_paths)
                     return stats
 
                 logger.info(
@@ -676,6 +736,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # Collect file-level results
                 completed_files = 0
+                # Bug #1746 Change 2: set when a fatal ChunkStoreUnavailableError
+                # is observed from any in-flight file's future -- once set, the
+                # batch stops (not-yet-started futures cancelled) and this is
+                # re-raised to the caller instead of the run completing with a
+                # large failed_files count.
+                fatal_chunk_store_error: Optional[BaseException] = None
 
                 for file_future in as_completed(file_futures):
                     # SIMPLE BETWEEN-FILES-ONLY CANCELLATION:
@@ -769,13 +835,46 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         else:
                             stats.failed_files += 1
                             logger.error(f"File processing failed: {file_result.error}")
+                            try:
+                                _failed_relative_paths.add(
+                                    str(
+                                        file_result.file_path.relative_to(
+                                            self.config.codebase_dir
+                                        )
+                                    )
+                                )
+                            except ValueError:
+                                _failed_relative_paths.add(str(file_result.file_path))
 
+                    except ChunkStoreUnavailableError as e:
+                        # Bug #1746 Change 2: a fatal chunk-store failure
+                        # must abort the WHOLE batch, not just this one
+                        # file. Cancel every not-yet-started future so the
+                        # thread pool doesn't keep burning CPU processing
+                        # files that would just hit the same fatal error,
+                        # then stop iterating and propagate to the caller.
+                        logger.error(
+                            f"Fatal chunk-store failure observed -- "
+                            f"aborting batch, cancelling not-yet-started "
+                            f"futures: {e}"
+                        )
+                        fatal_chunk_store_error = e
+                        for not_started_future in file_futures:
+                            not_started_future.cancel()
+                        break
                     except Exception as e:
                         logger.error(f"Failed to get file result: {e}")
                         stats.failed_files += 1
                         continue
 
+        if fatal_chunk_store_error is not None:
+            # Bug #1746 Change 2: propagate to the caller (SmartIndexer)
+            # instead of letting the run complete with success semantics
+            # and a large failed_files count.
+            raise fatal_chunk_store_error
+
         stats.end_time = time.time()
+        stats.failed_paths = frozenset(_failed_relative_paths)
         # stats.files_processed already updated during processing
         logger.info(
             f"High-throughput processing completed: "
@@ -905,6 +1004,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         watch_mode: bool = False,
         fts_manager: Optional[Any] = None,
         skip_branch_isolation: bool = False,
+        defer_finalization: bool = False,
     ):
         """
         Process branch changes using high-throughput parallel processing.
@@ -922,6 +1022,20 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             vector_thread_count: Number of threads for parallel processing
             watch_mode: If True, skip HNSW rebuild (for watch mode performance)
             skip_branch_isolation: If True, skip branch isolation (used when caller handles it separately or for non-git repos)
+            defer_finalization: Bug #1575 Part C Defect 1 -- if True, skip
+                this method's own end_indexing()/multimodal finalization in
+                its ``finally`` block (see ``_finalize_indexing_session``
+                below, which already implements the shared finalize logic
+                and is what this flag gates). The caller MUST invoke
+                ``self._finalize_indexing_session(collection_name, ...)``
+                itself once it has finished establishing branch-isolation
+                context (e.g. via ``hide_files_not_in_branch_thread_safe()``
+                when ``skip_branch_isolation=True``) -- otherwise that
+                context is registered on a session this method already
+                finalized/discarded, orphaning it (the ghost-vector
+                regression this parameter exists to prevent). Default False
+                preserves byte-identical behavior for every pre-existing
+                caller.
 
         Returns:
             BranchIndexingResult with processing statistics
@@ -930,6 +1044,11 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
         start_time = time.time()
         result = BranchIndexingResult()
+        # Bug #1746 Change 3 (extended): set when the fatal
+        # ChunkStoreUnavailableError propagates from
+        # process_files_high_throughput() below, so the finally block
+        # aborts instead of finalizing.
+        fatal_chunk_store_error: Optional[BaseException] = None
 
         logger.info(
             f"Starting high-throughput branch processing: {old_branch} -> {new_branch}"
@@ -948,6 +1067,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 abs_path = self.config.codebase_dir / rel_path
                 if abs_path.exists():
                     absolute_changed_files.append(abs_path)
+
+            # This is the single choke point every relative-path-list
+            # caller (branch-switch detection's git-topology delta, the
+            # reconcile pass, the watch-mode incremental path) joins onto
+            # codebase_dir before handing files to chunking/embedding --
+            # reject any candidate whose resolved location is not inside
+            # the codebase root.
+            absolute_changed_files = self._filter_paths_within_codebase_root(
+                absolute_changed_files
+            )
 
             total_files = len(absolute_changed_files)
 
@@ -1051,47 +1180,120 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         except Exception as e:
             logger.error(f"High-throughput branch processing failed: {e}")
             result.processing_time = time.time() - start_time
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3 (extended): record the fatal error so
+                # the finally block below aborts instead of finalizing.
+                fatal_chunk_store_error = e
             raise
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info="Finalizing indexing session...",
+            # Bug #1575 Part C Defect 1 (dual-review corroborated): when
+            # defer_finalization=True, the CALLER (process_files_incrementally)
+            # still needs to register this refresh's branch-isolation
+            # context (via hide_files_not_in_branch_thread_safe(), called
+            # AFTER this method returns) before the session is finalized --
+            # finalizing here unconditionally closed/discarded the session
+            # before that context ever existed, orphaning it and producing
+            # an unfiltered (ghost-vector) HNSW rebuild. The caller is
+            # responsible for calling self._finalize_indexing_session(...)
+            # itself once branch isolation has run.
+            if not defer_finalization:
+                self._finalize_indexing_session(
+                    collection_name,
+                    progress_callback=progress_callback,
                     slot_tracker=slot_tracker,
+                    watch_mode=watch_mode,
+                    fatal_chunk_store_error=fatal_chunk_store_error,
                 )
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback, skip_hnsw_rebuild=watch_mode
+
+    def _abort_indexing_session(
+        self, collection_name: str, fatal_chunk_store_error: BaseException
+    ) -> None:
+        """Bug #1746 Change 3 (extended): abort_indexing() the primary and
+        any existing multimodal collection instead of finalizing -- no
+        watermark advance, no "indexing complete" state persisted for a
+        run that hit a fatal chunk-store failure."""
+        from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
+
+        logger.error(
+            f"Fatal chunk-store failure -- aborting indexing session "
+            f"instead of finalizing: {fatal_chunk_store_error}"
+        )
+        self.vector_store_client.abort_indexing(collection_name)
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                self.vector_store_client.abort_indexing(multimodal_collection)
+
+    def _finalize_indexing_session(
+        self,
+        collection_name: str,
+        progress_callback: Optional[Callable] = None,
+        slot_tracker: Optional[CleanSlotTracker] = None,
+        watch_mode: bool = False,
+        fatal_chunk_store_error: Optional[BaseException] = None,
+    ) -> None:
+        """Bug #1575 Part C Defect 1: finalize (``end_indexing()``) the
+        indexing session for ``collection_name``, plus any active
+        multimodal collection.
+
+        Extracted verbatim from ``process_branch_changes_high_throughput``'s
+        ``finally`` block so a caller using ``defer_finalization=True`` can
+        invoke this itself AFTER establishing branch-isolation context
+        (``hide_files_not_in_branch_thread_safe()``) -- ensuring the SAME
+        finalization pass that closes the session also consumes that
+        session's branch context: never orphaned in a session nothing will
+        finalize, never leaked into a later, unrelated cycle.
+
+        Bug #1746 Change 3 (extended): dispatches to
+        ``_abort_indexing_session()`` instead when ``fatal_chunk_store_error``
+        is not None. None (the default) preserves the finalize behavior
+        below, byte-identical to before this parameter existed.
+        """
+        if fatal_chunk_store_error is not None:
+            self._abort_indexing_session(collection_name, fatal_chunk_store_error)
+            return
+
+        # CRITICAL: Always finalize indexes, even on exception
+        # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info="Finalizing indexing session...",
+                slot_tracker=slot_tracker,
             )
-            if watch_mode:
-                logger.info("Watch mode: HNSW marked stale")
-            else:
-                logger.info(
-                    f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
+        end_result = self.vector_store_client.end_indexing(
+            collection_name, progress_callback, skip_hnsw_rebuild=watch_mode
+        )
+        if watch_mode:
+            logger.info("Watch mode: HNSW marked stale")
+        else:
+            logger.info(
+                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
+            )
+
+        # CRITICAL: Also finalize multimodal collection if it exists
+        # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
+        # Without this, multimodal HNSW index is never built and queries fail
+        from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
+
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection,
+                    progress_callback,
+                    skip_hnsw_rebuild=watch_mode,
                 )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
-
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection,
-                        progress_callback,
-                        skip_hnsw_rebuild=watch_mode,
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
+                logger.info(
+                    f"Multimodal index finalization complete ({multimodal_collection}): "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
 
     # =============================================================================
     # THREAD-SAFE GIT-AWARE METHODS
@@ -1229,6 +1431,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     },
                     limit=1000,
                     collection_name=collection_name,
+                    # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
+                    # path (it mutates hidden_branches on these points, or
+                    # is invoked as part of deleting the file) -- it must
+                    # self-heal a corrupt id_index.bin rather than
+                    # silently giving up and leaving the file's records
+                    # untouched.
+                    self_heal=True,
                 )
                 if not isinstance(content_points, list):
                     logger.error(
@@ -1277,6 +1486,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         offset = None
 
         while True:
+            # Bug #1969 Round 6 (P1-1 caller audit): this pre-fetch feeds
+            # write-adjacent call sites (batch branch-visibility ensure,
+            # branch-isolation hiding) in
+            # process_branch_changes_high_throughput -- self_heal=True so
+            # a corrupt-duplicate collection is repaired here rather than
+            # hard-failing the whole branch-change pass.
             points, next_offset = self.vector_store_client.scroll_points(
                 collection_name=collection_name,
                 filter_conditions={
@@ -1286,6 +1501,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,  # CRITICAL: No vectors - massive memory savings
+                self_heal=True,
             )
 
             if not points:
@@ -1340,7 +1556,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             points_to_update = []
 
             for point in all_content_points:
-                file_path = point.get("payload", {}).get("path")
+                raw_path = point.get("payload", {}).get("path")
+                # Bug #1575 AC6: normalize BEFORE comparing -- unchanged_set is
+                # always the relative/normalized form, but a stored
+                # payload.path may be absolute (see the symmetric fix in
+                # _batch_hide_files_in_branch).
+                file_path = (
+                    self._normalize_stored_path(raw_path)
+                    if raw_path is not None
+                    else raw_path
+                )
                 if file_path not in unchanged_set:
                     continue
 
@@ -1376,6 +1601,13 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     },
                     limit=1000,
                     collection_name=collection_name,
+                    # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
+                    # path (it mutates hidden_branches on these points, or
+                    # is invoked as part of deleting the file) -- it must
+                    # self-heal a corrupt id_index.bin rather than
+                    # silently giving up and leaving the file's records
+                    # untouched.
+                    self_heal=True,
                 )
                 if not isinstance(content_points, list):
                     logger.error(
@@ -1404,6 +1636,43 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
             return True
 
+    def _normalize_stored_path(self, path: str) -> str:
+        """Bug #1575 AC6: normalize a stored ``payload.path`` value to the
+        relative form used for branch set-difference/comparison logic
+        throughout this class.
+
+        An absolute stored path under the project root is converted to
+        relative; a path outside the project root is returned unchanged
+        (with a WARNING) since there is no meaningful relative form; an
+        already-relative path passes through unchanged. Shared by the
+        ``db_file_paths`` discovery loop and every downstream comparison
+        (``_batch_hide_files_in_branch``, ``_batch_ensure_files_visible_in_branch``)
+        so absolute and relative stored paths resolve identically
+        everywhere they are compared on this path.
+
+        Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2
+        remediation): delegates to the SAME shared
+        ``_normalize_stored_path_for_visibility`` function
+        ``hnsw_index_manager.py``'s HNSW-rebuild visibility-filter fix
+        uses, rather than maintaining a second, independently-drifting
+        reimplementation of this exact absolute-vs-relative logic.
+        """
+        from code_indexer.storage.hnsw_index_manager import (
+            _normalize_stored_path_for_visibility,
+        )
+
+        result = _normalize_stored_path_for_visibility(path, self.config.codebase_dir)
+        # path is declared non-Optional str here, so the shared helper
+        # (whose signature also accepts None, for the hnsw_index_manager.py
+        # caller) can never actually return None for this call.
+        assert result is not None
+        # mypy resolves this cross-package function-local import's return
+        # type as Any (a pre-existing src.-vs-code_indexer.-prefixed dual
+        # module-identity quirk in this project's mypy invocation, verified
+        # via --verbose; not a real type-safety gap -- the assert above
+        # already proves this is a str at runtime).
+        return result  # type: ignore[no-any-return]
+
     def _batch_hide_files_in_branch(
         self,
         file_paths: List[str],
@@ -1420,7 +1689,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         instead of making one scroll_points request per file (Bug 1 fix).
 
         Args:
-            file_paths: List of file paths to hide
+            file_paths: List of file paths to hide (relative/normalized form)
             branch: Branch name to add to hidden_branches
             collection_name: Filesystem collection name
             all_content_points: Pre-fetched content points from database (avoids N queries)
@@ -1457,7 +1726,20 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # IN-MEMORY FILTERING: Filter all_content_points instead of making N HTTP requests
                 for point in all_content_points:
-                    file_path = point.get("payload", {}).get("path")
+                    raw_path = point.get("payload", {}).get("path")
+
+                    # Bug #1575 AC6: normalize BEFORE comparing -- files_to_hide_set
+                    # is always the relative/normalized form (see
+                    # hide_files_not_in_branch_thread_safe's discovery loop), but
+                    # a stored payload.path may be absolute. Comparing the raw
+                    # value directly silently never matched an absolute stored
+                    # path, so it was never hidden despite being correctly
+                    # identified as removed from the current branch.
+                    file_path = (
+                        self._normalize_stored_path(raw_path)
+                        if raw_path is not None
+                        else raw_path
+                    )
 
                     # Skip points that aren't in our files_to_hide list
                     if file_path not in files_to_hide_set:
@@ -1496,6 +1778,141 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             except Exception as e:
                 logger.error(f"Batch hide operation failed: {e}")
 
+    def _resolve_normalized_to_raw_paths(
+        self,
+        collection_name: str,
+        all_content_points: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, set]]:
+        """Bug #1575 Part A: resolve the normalized(relative) -> raw
+        stored-path(s) mapping used for branch-isolation discovery.
+
+        Either derived from a caller-supplied pre-fetched
+        ``all_content_points`` list (backward-compatible, Fix D/Story #339),
+        or -- the refresh path's normal case -- from the store's
+        authoritative ``distinct_content_paths()`` enumeration, which
+        replaces materializing every content payload just to derive the
+        distinct path set. Every raw path is normalized via
+        ``_normalize_stored_path()`` (Bug #1575 AC6) so absolute and
+        relative stored paths resolve identically. Returns ``None`` on
+        failure (already logged).
+        """
+        if all_content_points is not None:
+            if not isinstance(all_content_points, list):
+                logger.error(
+                    f"Unexpected all_content_points type: {type(all_content_points)}"
+                )
+                return None
+            raw_paths = {
+                point["payload"]["path"]
+                for point in all_content_points
+                if "path" in point.get("payload", {})
+            }
+        else:
+            with self._database_lock:
+                try:
+                    raw_paths = self.vector_store_client.distinct_content_paths(
+                        collection_name
+                    )
+                    if not isinstance(raw_paths, (set, frozenset)):
+                        logger.error(
+                            f"Unexpected distinct_content_paths return type: {type(raw_paths)}"
+                        )
+                        return None
+                except Exception as e:
+                    logger.error(
+                        f"Failed to get distinct content paths from database: {e}"
+                    )
+                    return None
+
+        normalized_to_raw: Dict[str, set] = defaultdict(set)
+        for raw_path in raw_paths:
+            normalized_to_raw[self._normalize_stored_path(raw_path)].add(raw_path)
+        return normalized_to_raw
+
+    def _compute_files_to_hide(
+        self,
+        collection_name: str,
+        current_files: List[str],
+        all_content_points: Optional[List[Dict[str, Any]]],
+    ) -> Tuple[bool, set, Dict[str, set]]:
+        """Bug #1575 Part A: resolve the distinct stored-path mapping and
+        compute which of those paths are absent from ``current_files``.
+
+        Returns:
+            ``(success, files_to_hide, normalized_to_raw)``. ``success`` is
+            ``False`` (with the failure already logged) when the
+            underlying path resolution failed -- the caller must return
+            ``False`` without proceeding.
+        """
+        normalized_to_raw = self._resolve_normalized_to_raw_paths(
+            collection_name, all_content_points
+        )
+        if normalized_to_raw is None:
+            return False, set(), {}
+
+        db_file_paths = set(normalized_to_raw.keys())
+        files_to_hide = db_file_paths - set(current_files)
+        return True, files_to_hide, normalized_to_raw
+
+    def _fetch_points_to_hide(
+        self,
+        collection_name: str,
+        files_to_hide: set,
+        normalized_to_raw: Dict[str, set],
+        all_content_points: Optional[List[Dict[str, Any]]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Bug #1575 Part A: fetch ONLY the points that will actually be
+        hidden -- never the whole collection.
+
+        When a caller supplied a pre-fetched ``all_content_points`` list,
+        that list is returned unchanged (backward compatibility). Otherwise
+        the raw stored path values for ``files_to_hide`` are resolved via
+        ``normalized_to_raw`` and passed to the store's targeted
+        ``fetch_points_for_paths()``. Returns ``None`` on failure (already
+        logged).
+        """
+        if all_content_points is not None:
+            return all_content_points
+
+        raw_paths_to_hide: set = set()
+        for normalized in files_to_hide:
+            raw_paths_to_hide.update(normalized_to_raw.get(normalized, set()))
+
+        with self._database_lock:
+            try:
+                return list(
+                    self.vector_store_client.fetch_points_for_paths(
+                        collection_name,
+                        raw_paths_to_hide,
+                        # Bug #1969 Round 5 (R4-F2): write-adjacent (these
+                        # points are about to be hidden) -- self-heal a
+                        # corrupt id_index.bin rather than silently
+                        # giving up.
+                        self_heal=True,
+                    )
+                )
+            except Exception as e:
+                # Amendment 2c (Codex review correction, turn 10): a log
+                # line alone is not enough -- every caller of
+                # hide_files_not_in_branch_thread_safe() discarded a bare
+                # boolean return, so a caught-and-swallowed failure here
+                # let a run finish looking successful while leaving stale
+                # branch-visible points. Log the operational consequence
+                # for the log-audit trail, THEN re-raise so the failure
+                # actually reaches the caller instead of being silently
+                # absorbed.
+                logger.error(
+                    "Failed to fetch targeted points for hiding "
+                    "collection '%s' (%d file(s)): %s -- branch isolation "
+                    "for these files will be SKIPPED this pass; stale "
+                    "branch-visible points may remain until a later run "
+                    "succeeds",
+                    collection_name,
+                    len(raw_paths_to_hide),
+                    e,
+                )
+                raise
+
     def hide_files_not_in_branch_thread_safe(
         self,
         branch: str,
@@ -1519,9 +1936,11 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         and commit() is called once after all deletes. Errors on
                         individual files are logged but do not stop processing.
             all_content_points: Optional pre-fetched content points. When provided,
-                        the internal scroll_points fetch is skipped (Fix D, Story #339).
-                        Pass the result of _fetch_all_content_points to share the fetch
-                        with _batch_ensure_files_visible_in_branch.
+                        the internal distinct_content_paths()/fetch_points_for_paths()
+                        calls are skipped (Fix D, Story #339, superseded by Bug #1575
+                        Part A's targeted-fetch primitives for the normal no-prefetch
+                        case). Pass a pre-fetched content-points list to share it with
+                        _batch_ensure_files_visible_in_branch.
         """
         # Reset progress timers for branch isolation phase transition
         if progress_callback and hasattr(progress_callback, "reset_progress_timers"):
@@ -1536,62 +1955,40 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 slot_tracker=slot_tracker,
             )
 
-        # Fix D (Story #339): Use pre-fetched content points when available to avoid
-        # a redundant scroll_points call. Falls back to internal fetch if not provided.
-        if all_content_points is None:
-            with self._database_lock:
-                try:
-                    all_content_points = self._fetch_all_content_points(collection_name)
-                    if not isinstance(all_content_points, list):
-                        logger.error(
-                            f"Unexpected _fetch_all_content_points return type: {type(all_content_points)}"
-                        )
-                        return False
-                except Exception as e:
-                    logger.error(f"Failed to get all content points from database: {e}")
-                    return False
+        # Bug #1575 Part A: replaces the full-collection
+        # _fetch_all_content_points() materialization with the store's
+        # authoritative, memory-bounded distinct_content_paths() enumeration
+        # (or the caller-supplied pre-fetched list, unchanged).
+        success, files_to_hide, normalized_to_raw = self._compute_files_to_hide(
+            collection_name, current_files, all_content_points
+        )
+        if not success:
+            return False
 
-        # Extract unique file paths from database and NORMALIZE to relative
-        db_file_paths = set()
-        for point in all_content_points:
-            if "path" in point.get("payload", {}):
-                path = point["payload"]["path"]
-
-                # CRITICAL: Normalize to relative if absolute
-                # This handles paths stored as /tmp/flask/src/file.py
-                if os.path.isabs(path):
-                    try:
-                        # Convert to relative path from project root
-                        relative_path = str(
-                            Path(path).relative_to(self.config.codebase_dir)
-                        )
-                        db_file_paths.add(relative_path)
-                    except ValueError:
-                        # Path is outside project directory - keep as absolute for logging
-                        logger.warning(
-                            f"Found path outside project directory in database: {path}"
-                        )
-                        db_file_paths.add(path)
-                else:
-                    # Already relative, use as-is
-                    db_file_paths.add(path)
-
-        # Find files in DB that aren't in current branch
+        # Used both for the hide-decision above and by rebuild_hnsw_filtered
+        # further below.
         current_files_set = set(current_files)
-        files_to_hide = db_file_paths - current_files_set
 
         if files_to_hide:
             logger.info(
                 f"Branch isolation: hiding {len(files_to_hide)} files not in branch '{branch}'"
             )
 
-            # Batch process files to hide - pass pre-fetched all_content_points for in-memory filtering
-            # PERFORMANCE FIX: Avoids making N scroll_points requests (one per file)
+            # Bug #1575 Part A: fetch ONLY the points that will actually be
+            # modified via fetch_points_for_paths() -- PERFORMANCE FIX:
+            # avoids materializing the entire collection just to hide a
+            # handful of files.
+            points_for_hide = self._fetch_points_to_hide(
+                collection_name, files_to_hide, normalized_to_raw, all_content_points
+            )
+            if points_for_hide is None:
+                return False
+
             self._batch_hide_files_in_branch(
                 file_paths=list(files_to_hide),
                 branch=branch,
                 collection_name=collection_name,
-                all_content_points=all_content_points,
+                all_content_points=points_for_hide,
                 progress_callback=progress_callback,
                 slot_tracker=slot_tracker,
             )
@@ -1631,29 +2028,32 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     slot_tracker=slot_tracker,
                 )
 
-        # P0: HNSW filtered rebuild - rebuild HNSW index with only visible files
-        # This eliminates ghost vectors from search results without deleting vector files.
-        # Always done after semantic hiding (even when files_to_hide is empty) to ensure
-        # the HNSW index reflects the current branch state.
-        if hasattr(self.vector_store_client, "rebuild_hnsw_filtered"):
-            try:
-                self.vector_store_client.rebuild_hnsw_filtered(
-                    collection_name,
-                    visible_files=current_files_set,
-                    progress_callback=progress_callback,
-                    current_branch=branch,
-                )
-                logger.info(
-                    f"HNSW filtered rebuild complete for branch '{branch}': "
-                    f"{len(current_files_set)} visible files"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"HNSW filtered rebuild failed during branch isolation: {e}"
-                )
+        # Bug #1575 Part C item 5: register branch-isolation context on the
+        # vector store's session instead of performing an unconditional
+        # filtered HNSW rebuild here. The SAME begin_indexing()/
+        # end_indexing() bracket's end_indexing() call (later, once per
+        # session) reads this context to decide reuse / incremental /
+        # full-rebuild -- eliminating the whole-index rebuild on every
+        # refresh that this bug reports. Always called after semantic
+        # hiding (even when files_to_hide is empty) to ensure the decision
+        # engine has the current branch state, matching the prior
+        # unconditional-call contract. Failures PROPAGATE to the caller --
+        # no log-and-swallow (the prior try/except silently masked a real
+        # failure to register visibility state, which the caller must be
+        # able to detect and act on).
+        if hasattr(self.vector_store_client, "set_hnsw_branch_context"):
+            self.vector_store_client.set_hnsw_branch_context(
+                collection_name,
+                branch,
+                current_files_set,
+            )
+            logger.info(
+                f"HNSW branch context registered for branch '{branch}': "
+                f"{len(current_files_set)} visible files"
+            )
         else:
             logger.warning(
-                "vector_store_client does not support rebuild_hnsw_filtered - "
+                "vector_store_client does not support set_hnsw_branch_context - "
                 "ghost vectors may persist after branch isolation"
             )
 

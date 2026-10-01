@@ -9,8 +9,6 @@ Users can only see SCIP results from repositories their group has access to.
 Story #41: All routes delegate to SCIPQueryService for unified query execution and access control.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 from fastapi import APIRouter, Query, Depends, Request
 from typing import List, Optional, Dict, Any
@@ -18,12 +16,47 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.routers import repo_access_http
 from code_indexer.server.services.scip_query_service import SCIPQueryService
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/scip", tags=["SCIP Queries"])
+
+
+def _require_access_control(
+    request: Request, current_user: User = Depends(get_current_user)
+) -> None:
+    """Every SCIP route here filters results by the caller's group access,
+    so none may run without the access service: fails closed with 500
+    access_control_unavailable before any query work."""
+    repo_access_http.enforce_repo_access(
+        getattr(request.app.state, "access_filtering_service", None),
+        current_user.username,
+        None,
+    )
+
+
+router = APIRouter(
+    prefix="/scip",
+    tags=["SCIP Queries"],
+    dependencies=[Depends(_require_access_control)],
+)
+
+# Depth bounds for dependency/dependent traversal queries (Bug #1604 REST
+# audit). Used as the ge/le bounds on the depth Query parameters below, so
+# the HTTP boundary itself rejects an out-of-range depth rather than
+# relying on the downstream MCP-handler-layer clamp (scip.py's
+# _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH).
+_MIN_SCIP_DEPTH = 1
+_MAX_SCIP_DEPTH = 10
+
+# _MAX_CALLCHAIN_DEPTH is imported (aliased from MAX_DEPTH_CAP) above, not
+# redeclared here, so /scip/callchain's REST bound and the query layer's
+# cap can never drift apart (Bug #1603 code review Priority 4 / O1).
+# /scip/impact, /scip/dependents, and /scip/dependencies remain [1, 10],
+# unaffected by this change.
 
 
 # Response Models
@@ -168,7 +201,6 @@ def get_definition(
             format_error_log(
                 "WEB-GENERAL-022",
                 f"Definition query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -178,7 +210,12 @@ def get_definition(
 def get_references(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
-    limit: int = Query(100, description="Maximum number of results to return"),
+    limit: int = Query(
+        100,
+        ge=1,
+        le=10000,
+        description="Maximum number of results to return (default 100, max 10000)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -223,7 +260,6 @@ def get_references(
             format_error_log(
                 "WEB-GENERAL-023",
                 f"References query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -233,7 +269,12 @@ def get_references(
 def get_dependencies(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
-    depth: int = Query(1, description="Depth of transitive dependencies"),
+    depth: int = Query(
+        _MIN_SCIP_DEPTH,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_SCIP_DEPTH,
+        description="Depth of transitive dependencies (default 1, max 10)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -278,7 +319,6 @@ def get_dependencies(
             format_error_log(
                 "WEB-GENERAL-024",
                 f"Dependencies query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -288,7 +328,12 @@ def get_dependencies(
 def get_dependents(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
-    depth: int = Query(1, description="Depth of transitive dependents"),
+    depth: int = Query(
+        _MIN_SCIP_DEPTH,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_SCIP_DEPTH,
+        description="Depth of transitive dependents (default 1, max 10)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -333,7 +378,6 @@ def get_dependents(
             format_error_log(
                 "WEB-GENERAL-025",
                 f"Dependents query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -384,7 +428,6 @@ def get_impact(
             format_error_log(
                 "WEB-GENERAL-026",
                 f"Impact analysis failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -396,7 +439,10 @@ def get_callchain(
     from_symbol: str = Query(..., description="Starting symbol"),
     to_symbol: str = Query(..., description="Target symbol"),
     max_depth: int = Query(
-        10, ge=1, le=20, description="Maximum chain length (default 10, max 20)"
+        3,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_CALLCHAIN_DEPTH,
+        description="Maximum chain length (default 3, max 3)",
     ),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -407,7 +453,7 @@ def get_callchain(
     Args:
         from_symbol: Starting symbol
         to_symbol: Target symbol
-        max_depth: Maximum chain length (default 10, max 20)
+        max_depth: Maximum chain length (default 3, max 3)
         project: Optional project filter (repository alias)
         current_user: Authenticated user (injected by dependency)
 
@@ -416,13 +462,34 @@ def get_callchain(
     """
     try:
         service = _get_scip_query_service(request)
-        chains = service.trace_callchain(
+        chains, timeout_errors = service.trace_callchain(
             from_symbol=from_symbol,
             to_symbol=to_symbol,
             max_depth=max_depth,
             repository_alias=project,
             username=current_user.username,
         )
+
+        if timeout_errors:
+            # Bug #1603 code review Priority 1: a timeout must never be
+            # reported as an indistinguishable empty success.
+            logger.warning(
+                format_error_log(
+                    "WEB-GENERAL-027",
+                    f"Call chain tracing timeout for {from_symbol!r} -> "
+                    f"{to_symbol!r}: {timeout_errors}",
+                )
+            )
+            return {
+                "success": False,
+                "error": (
+                    "Query timeout exceeded while tracing call chain: "
+                    f"{timeout_errors[0]}"
+                ),
+                "from_symbol": from_symbol,
+                "to_symbol": to_symbol,
+                "chains": [],
+            }
 
         return {
             "success": True,
@@ -436,7 +503,6 @@ def get_callchain(
             format_error_log(
                 "WEB-GENERAL-027",
                 f"Call chain tracing failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -495,7 +561,6 @@ def get_context(
             format_error_log(
                 "WEB-GENERAL-028",
                 f"Smart context query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}

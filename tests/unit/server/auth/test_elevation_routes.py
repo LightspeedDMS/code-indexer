@@ -58,12 +58,12 @@ def admin_user():
 
 @pytest.fixture
 def app(admin_user):
-    """Minimal FastAPI app with the elevation router and admin auth overridden."""
+    """Minimal FastAPI app with the elevation router and auth overridden."""
     _app = FastAPI()
     _app.include_router(elevation_router)
     from code_indexer.server.auth import dependencies as _deps
 
-    _app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user
+    _app.dependency_overrides[_deps.get_current_user_hybrid] = lambda: admin_user
     return _app
 
 
@@ -317,6 +317,34 @@ def test_elevation_status_active_window_returns_elevated_and_does_not_touch(clie
     assert body["max_until"] == pytest.approx(_NOW + _MAX_AGE)
     esm.get_status.assert_called_once_with(_SESSION_JTI)
     esm.touch_atomic.assert_not_called()
+
+
+def test_elevation_status_returns_not_elevated_for_a_window_opened_by_a_different_user(
+    client,
+):
+    """An elevation window is valid only for the user who created it: a
+    resolved session key whose stored window belongs to a different user
+    must read back as {elevated: false}, never that other window's real
+    state or timestamps."""
+    from code_indexer.server.auth.elevated_session_manager import ElevatedSession
+
+    other_users_session = ElevatedSession(
+        session_key=_SESSION_JTI,
+        username="a-different-user",
+        elevated_at=_NOW,
+        last_touched_at=_NOW,
+        elevated_from_ip="127.0.0.1",
+        scope="full",
+    )
+    esm = _fake_esm()
+    esm.get_status.return_value = other_users_session
+    with _elevate_ctx(enforcement=True, esm=esm):
+        resp = client.get(
+            "/auth/elevation-status",
+            cookies={"cidx_session": _SESSION_JTI},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["elevated"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -186,7 +186,7 @@ class TestEnsureSudoersRestartRetry:
     visudo, and both cleanup rm -f calls."""
 
     SERVICE_CONTENT = """[Service]
-User=jsbattig
+User=opuser
 WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """

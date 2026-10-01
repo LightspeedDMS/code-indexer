@@ -28,7 +28,7 @@ _GOV002_MIN_INTERVAL_SECONDS = 5.0
 
 # Floor entry count for YELLOW proactive LRU eviction: retain at least this
 # many (hottest) HNSW entries so repeated queries stay warm.
-_YELLOW_LRU_FLOOR = 1
+YELLOW_LRU_FLOOR = 1
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,31 @@ class GovernorCounters:
     shards_evicted_after_use: int = 0
     lru_evictions: int = 0
     trim_calls: int = 0
+
+    # Query-path admission-gate counter (Story #1600). The first
+    # GovernorCounters field given EXPLICIT LOCK PROTECTION for its
+    # cross-thread mutation -- see MemoryGovernor._counters_lock /
+    # increment_query_admissions_denied(). NOT the first counter mutated
+    # from a request-handling thread overall: shards_evicted_after_use and
+    # trim_calls (above) are ALSO mutated from a request thread (the
+    # temporal dispatch path, services/temporal/temporal_fusion_dispatch.py)
+    # with no lock protection at all -- a pre-existing, out-of-scope
+    # condition. A plain `+= 1` on an int is GIL-atomic enough that this is
+    # a metrics-accuracy issue there, not a correctness one.
+    query_admissions_denied: int = 0
+
+    # Story #1787 AC17: X-Ray graph-build observability, surfaced through
+    # this SAME existing stats path (never a second/parallel one) so an
+    # operator running ~900 repositories can distinguish "no graph builds
+    # were requested" from "every graph build was denied admission" --
+    # two states with opposite remedies, otherwise indistinguishable from
+    # the outside. Incremented via record_graph_build_outcome(), guarded
+    # by the SAME _counters_lock query_admissions_denied uses.
+    graph_build_requests_total: int = 0
+    graph_gate1_denials: int = 0
+    graph_gate2_denials: int = 0
+    graph_red_aborts: int = 0
+    graph_memory_limit_aborts: int = 0
 
 
 class _MemoryReaders:
@@ -184,15 +209,35 @@ class MemoryGovernor:
         )
 
         # Band state — fail-safe RED before first successful sample.
-        # _red_entry_time is initialised to current time so that the dwell
-        # check can expire normally even on the pre-init RED band.  Tests with
-        # red_min_dwell_seconds=0 can exit RED on the very first sample.
+        # Story #1600 CRITICAL fix: _red_entry_time starts as None (NOT the
+        # construction timestamp). None marks this as the SYNTHETIC startup
+        # RED -- a fail-safe default, not a genuine observed-pressure entry
+        # -- so _advance_band() can let it exit on the very first sample
+        # that proves the server healthy, instead of forcing every process
+        # start to sit out the full red_min_dwell_seconds window (previously
+        # up to 30s of spurious admission denial on a perfectly healthy
+        # server -- see _advance_band()'s RED-state branch for the fix).
+        # _red_entry_time is set to a real timestamp only when RED is
+        # entered for a REAL reason: either the first sample itself still
+        # shows genuine pressure (handled in _advance_band()), or a later
+        # YELLOW->RED / GREEN->RED transition, or _apply_fail_safe_red().
         self._band: MemoryBand = MemoryBand.RED
         self._band_lock = threading.Lock()
-        self._red_entry_time: Optional[float] = self._time_fn()
+        self._red_entry_time: Optional[float] = None
 
         # Counters
         self.counters = GovernorCounters()
+        # Story #1600: guards query_admissions_denied, the first counter
+        # given EXPLICIT LOCK PROTECTION for its cross-thread mutation --
+        # NOT the first counter mutated from a request-handling thread
+        # overall: shards_evicted_after_use and trim_calls are ALSO
+        # mutated from a request thread (the temporal dispatch path,
+        # services/temporal/temporal_fusion_dispatch.py) with no lock at
+        # all -- a pre-existing, out-of-scope condition (see
+        # GovernorCounters' docstring). Kept separate from _band_lock
+        # (which protects _band/_red_entry_time/_sampler_thread) to avoid
+        # coupling an unrelated hot-path increment to the sampler's lock.
+        self._counters_lock = threading.Lock()
 
         # pswpin baseline for delta computation (None until first sample)
         self._prev_pswpin: Optional[int] = None
@@ -237,6 +282,18 @@ class MemoryGovernor:
     def last_used_pct(self) -> float:
         """Most-recently sampled used_pct (0.0 before the first tick)."""
         return getattr(self, "_last_used_pct", 0.0)
+
+    @property
+    def last_red_min_dwell_seconds(self) -> float:
+        """Most-recently effective RED min-dwell seconds (Story #1600).
+
+        Mirrors last_used_pct's getattr-with-default pattern: defaults to
+        30.0 (the constructor's own default) before the first successful
+        tick. Cached in _tick() so check_query_admission() can derive a
+        retry_after_seconds hint via an O(1) attribute read -- never
+        get_snapshot(), never psutil, never a live config re-read.
+        """
+        return getattr(self, "_last_red_min_dwell_seconds", 30.0)
 
     def attach_cache(self, cache: Any) -> None:
         """Attach a cache for YELLOW proactive LRU eviction (Story 4).
@@ -353,6 +410,58 @@ class MemoryGovernor:
             return False
         return self.last_used_pct < max_used_pct
 
+    def increment_query_admissions_denied(self) -> None:
+        """Thread-safe increment of the query-admission-gate deny counter.
+
+        Story #1600: called by check_query_admission() (services/
+        query_admission_gate.py) once per denied live-caller request. This
+        is the first GovernorCounters field given EXPLICIT LOCK PROTECTION
+        (self._counters_lock, set in __init__) for its cross-thread
+        mutation -- NOT the first counter mutated from a request-handling
+        thread overall. shards_evicted_after_use and trim_calls are ALSO
+        mutated from a request thread (the temporal dispatch path,
+        services/temporal/temporal_fusion_dispatch.py) with no lock
+        protection at all -- a pre-existing, out-of-scope condition left
+        unprotected here (a plain `+= 1` on an int is GIL-atomic enough
+        that this is a metrics-accuracy issue there, not a correctness
+        one). query_admissions_denied gets a real lock, unlike those two,
+        to avoid silently undercounting a real concurrent-deny storm.
+        """
+        with self._counters_lock:
+            self.counters.query_admissions_denied += 1
+
+    def record_graph_build_outcome(
+        self,
+        *,
+        denied_gate: Optional[str] = None,
+        red_abort: bool = False,
+        memory_limit_abort: bool = False,
+        estimated_peak_bytes: Optional[int] = None,
+        actual_peak_bytes: Optional[int] = None,
+    ) -> None:
+        """Story #1787 AC17: records ONE X-Ray graph-build outcome through
+        this EXISTING stats path. Real call sites:
+        server/services/xray_graph_governor/admission.py's
+        check_gate1/check_gate2/check_phase_boundary. `denied_gate` is
+        "gate1"/"gate2" or None; at most one of denied_gate/red_abort/
+        memory_limit_abort should be set per call (caller's discipline,
+        not re-validated here). Thread-safe; never raises.
+        """
+        with self._counters_lock:
+            self.counters.graph_build_requests_total += 1
+            if denied_gate == "gate1":
+                self.counters.graph_gate1_denials += 1
+            elif denied_gate == "gate2":
+                self.counters.graph_gate2_denials += 1
+            if red_abort:
+                self.counters.graph_red_aborts += 1
+            if memory_limit_abort:
+                self.counters.graph_memory_limit_aborts += 1
+            if estimated_peak_bytes is not None:
+                self._last_graph_estimated_peak_bytes = estimated_peak_bytes
+            if actual_peak_bytes is not None:
+                self._last_graph_actual_peak_bytes = actual_peak_bytes
+
     def get_snapshot(self) -> dict:
         """Return the full §3.5 snapshot dict for the admin endpoint (Story 4).
 
@@ -424,6 +533,19 @@ class MemoryGovernor:
             "shards_evicted_after_use": self.counters.shards_evicted_after_use,
             "lru_evictions": self.counters.lru_evictions,
             "trim_calls": self.counters.trim_calls,
+            "query_admissions_denied": self.counters.query_admissions_denied,
+            # Story #1787 AC17: X-Ray graph-build observability.
+            "graph_build_requests_total": self.counters.graph_build_requests_total,
+            "graph_gate1_denials": self.counters.graph_gate1_denials,
+            "graph_gate2_denials": self.counters.graph_gate2_denials,
+            "graph_red_aborts": self.counters.graph_red_aborts,
+            "graph_memory_limit_aborts": self.counters.graph_memory_limit_aborts,
+            "last_graph_estimated_peak_bytes": getattr(
+                self, "_last_graph_estimated_peak_bytes", None
+            ),
+            "last_graph_actual_peak_bytes": getattr(
+                self, "_last_graph_actual_peak_bytes", None
+            ),
             # Config echoes — live values when config_service is set, else constructor defaults
             "enabled": echo_enabled,
             "yellow_pct": echo_yellow_pct,
@@ -668,6 +790,12 @@ class MemoryGovernor:
         self._last_effective_used = sample.effective_used
         self._last_basis = sample.basis
         self._last_pswpin_rate = sample.pswpin_rate
+        # Story #1600: cache the effective RED min-dwell alongside the
+        # fields above so check_query_admission() can derive
+        # retry_after_seconds via last_red_min_dwell_seconds (an O(1)
+        # attribute read) instead of calling get_snapshot() on the hot
+        # admission-check path.
+        self._last_red_min_dwell_seconds = red_min_dwell
 
         self._advance_band(
             sample,
@@ -698,13 +826,13 @@ class MemoryGovernor:
 
         # YELLOW proactive LRU eviction (Story 4 Critical 2).
         # When the band is YELLOW and a cache has been attached via attach_cache(),
-        # evict the least-recently-used entries down to _YELLOW_LRU_FLOOR so the
+        # evict the least-recently-used entries down to YELLOW_LRU_FLOOR so the
         # hottest entries are retained.  Skipped silently when no cache is attached
         # (CLI/solo / pre-lifespan-wiring).
         if self.band == MemoryBand.YELLOW and self._attached_cache is not None:
             before_lru = self.counters.lru_evictions
             self.evict_lru_to_floor(
-                self._attached_cache, floor_entries=_YELLOW_LRU_FLOOR
+                self._attached_cache, floor_entries=YELLOW_LRU_FLOOR
             )
             evicted_this_tick = self.counters.lru_evictions - before_lru
             self.log_gov003_lru_evict(count=evicted_this_tick, freed_mb=0.0)
@@ -775,9 +903,19 @@ class MemoryGovernor:
         with self._band_lock:
             # --- RED state ---
             if self._band == MemoryBand.RED:
-                dwell_ok = _red_min_dwell <= 0.0 or (
-                    self._red_entry_time is not None
-                    and (now - self._red_entry_time) >= _red_min_dwell
+                # Story #1600 CRITICAL fix: a synthetic startup RED (no
+                # genuine entry ever recorded -- _red_entry_time is still
+                # None) must be allowed to exit on THIS sample regardless of
+                # red_min_dwell_seconds, so a healthy first sample is not
+                # forced to sit out the full dwell window. A RED entered for
+                # a REAL reason (this branch below, or the YELLOW/GREEN->RED
+                # transitions, or _apply_fail_safe_red()) always has a
+                # non-None _red_entry_time and still enforces its full dwell.
+                is_synthetic_startup_red = self._red_entry_time is None
+                dwell_ok = (
+                    _red_min_dwell <= 0.0
+                    or self._red_entry_time is None
+                    or (now - self._red_entry_time) >= _red_min_dwell
                 )
                 if used_pct < red_exit and not swap_forces_red and dwell_ok:
                     self._band = MemoryBand.YELLOW
@@ -793,6 +931,12 @@ class MemoryGovernor:
                             "GOV-001 band YELLOW->GREEN used_pct=%.1f (cascade from RED)",
                             used_pct,
                         )
+                elif is_synthetic_startup_red:
+                    # The first real sample still shows genuine RED-level
+                    # pressure (or swap forces RED): convert the synthetic
+                    # startup RED into a genuine entry so the dwell clock
+                    # starts NOW, not at construction time.
+                    self._red_entry_time = now
                 # No other RED transitions in a single tick
 
             # --- YELLOW state ---

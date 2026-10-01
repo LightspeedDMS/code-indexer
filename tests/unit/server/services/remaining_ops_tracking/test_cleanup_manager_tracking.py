@@ -34,6 +34,9 @@ def _make_cleanup_manager(job_tracker=None):
         query_tracker=query_tracker,
         check_interval=0.05,  # Fast interval for tests
         job_tracker=job_tracker,
+        min_retention_age_seconds=0.0,  # Story #1457 AC13: opt out of the
+        # new age floor -- these tests exercise job-registration timing,
+        # orthogonal to the minimum-retention-age concern.
     )
 
 

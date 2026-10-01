@@ -166,7 +166,11 @@ def _run_add_indexes_scenario(tmp_path):
         ) as mock_get_cfg_svc,
     ):
         mock_get_cfg_svc.return_value.get_config.return_value = server_config
-        manager.add_indexes_to_golden_repo(alias="test-repo", index_types=["semantic"])
+        manager.add_indexes_to_golden_repo(
+            alias="test-repo",
+            index_types=["semantic"],
+            submitter_username="example-admin",
+        )
         _run_captured_worker(manager)
     return run_calls, popen_calls
 

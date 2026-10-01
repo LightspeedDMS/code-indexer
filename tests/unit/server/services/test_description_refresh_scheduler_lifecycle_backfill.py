@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid as _uuid_module
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -418,7 +419,7 @@ class TestReconcileBrokenLifecycleMetadataDispatch:
 class TestRunLifecycleBackfillAsync:
     """Verify _run_lifecycle_backfill_async registers job and invokes runner."""
 
-    def test_async_worker_registers_job_and_invokes_runner(self):
+    def test_async_worker_registers_job_and_invokes_runner(self, tmp_path):
         """
         Direct call to _run_lifecycle_backfill_async(['x', 'y']).
         Assert:
@@ -426,9 +427,18 @@ class TestRunLifecycleBackfillAsync:
             username='system', and a UUID-shaped job_id string.
           - LifecycleBatchRunner constructed with 6 expected kwargs.
           - runner.run called with positional ['x', 'y'] and kwarg parent_job_id=<job_id>.
+
+        Bug #1471 regression: _golden_repos_dir must resolve to a real tmp_path-based
+        directory. An unconfigured MagicMock's auto-provisioned __fspath__ returns a
+        literal 'MagicMock/<repr>' string, which Path()/mkdir() then happily creates
+        as a real directory tree at the process cwd (the project root under pytest).
         """
         sched = _make_scheduler_bare()
         _wire_all(sched)
+        # Bug #1471: override the unconfigured MagicMock from _wire_all with a real
+        # tmp_path-based directory so _init_backfill_journal() cannot coerce a mock
+        # repr into a literal on-disk path.
+        sched._golden_repos_dir = tmp_path / "golden-repos"
 
         mock_job_tracker = MagicMock()
         sched._job_tracker = mock_job_tracker
@@ -440,6 +450,14 @@ class TestRunLifecycleBackfillAsync:
             captured_job_id.append(kwargs.get("job_id"))
 
         mock_job_tracker.register_job_if_no_conflict.side_effect = capture_register
+
+        # Bug #1471: snapshot any pre-existing MagicMock/ leak-evidence directory
+        # (deliberately left in place from historical runs) so the post-call check
+        # below only flags NEW entries created by this test, not old evidence.
+        magicmock_root = Path.cwd() / "MagicMock"
+        before_leak_entries = (
+            set(magicmock_root.rglob("*")) if magicmock_root.exists() else set()
+        )
 
         with patch(f"{SCHEDULER_MODULE}.LifecycleBatchRunner") as mock_runner_cls:
             mock_runner = MagicMock()
@@ -480,11 +498,35 @@ class TestRunLifecycleBackfillAsync:
         assert list(run_positional[0]) == ["x", "y"]
         assert run_kwargs.get("parent_job_id") == job_id
 
+        # 4. Bug #1471 regression: journal must land under the real tmp_path-based
+        # golden_repos_dir, never leaked into the process cwd via an unconfigured mock.
+        journal_dir = (
+            tmp_path / "golden-repos" / ".scratch" / "lifecycle-backfill-journal"
+        )
+        assert journal_dir.exists(), (
+            "Bug #1471 regression: lifecycle backfill journal must be written under "
+            "the real tmp_path-based golden_repos_dir"
+        )
+        after_leak_entries = (
+            set(magicmock_root.rglob("*")) if magicmock_root.exists() else set()
+        )
+        new_leak_entries = after_leak_entries - before_leak_entries
+        assert not new_leak_entries, (
+            "Bug #1471 regression: an unconfigured MagicMock _golden_repos_dir must "
+            "never leak a NEW 'MagicMock/<repr>' directory into the process cwd. "
+            f"New entries created by this test: {new_leak_entries}"
+        )
+
     def test_async_worker_swallows_register_job_exception_and_skips_runner(
-        self, caplog
+        self, caplog, tmp_path
     ):
         sched = _make_scheduler_bare()
         _wire_all(sched)
+        # Bug #1471: override the unconfigured MagicMock from _wire_all with a real
+        # tmp_path-based directory so _init_backfill_journal() (called before the
+        # register_job_if_no_conflict exception below) cannot coerce a mock repr
+        # into a literal on-disk path.
+        sched._golden_repos_dir = tmp_path / "golden-repos"
 
         mock_job_tracker = MagicMock()
         mock_job_tracker.register_job_if_no_conflict.side_effect = RuntimeError(
@@ -492,6 +534,14 @@ class TestRunLifecycleBackfillAsync:
         )
         sched._job_tracker = mock_job_tracker
         sched._tracking_backend = MagicMock()
+
+        # Bug #1471: snapshot any pre-existing MagicMock/ leak-evidence directory
+        # (deliberately left in place from historical runs) so the post-call check
+        # below only flags NEW entries created by this test, not old evidence.
+        magicmock_root = Path.cwd() / "MagicMock"
+        before_leak_entries = (
+            set(magicmock_root.rglob("*")) if magicmock_root.exists() else set()
+        )
 
         with patch(f"{SCHEDULER_MODULE}.LifecycleBatchRunner") as mock_runner_cls:
             mock_runner = MagicMock()
@@ -508,4 +558,16 @@ class TestRunLifecycleBackfillAsync:
         ]
         assert any("repair thread failed" in m for m in error_messages), (
             f"Expected ERROR 'repair thread failed', got: {error_messages}"
+        )
+
+        # Bug #1471 regression: no NEW MagicMock repr must ever be coerced into a
+        # real on-disk directory at the process cwd.
+        after_leak_entries = (
+            set(magicmock_root.rglob("*")) if magicmock_root.exists() else set()
+        )
+        new_leak_entries = after_leak_entries - before_leak_entries
+        assert not new_leak_entries, (
+            "Bug #1471 regression: an unconfigured MagicMock _golden_repos_dir must "
+            "never leak a NEW 'MagicMock/<repr>' directory into the process cwd. "
+            f"New entries created by this test: {new_leak_entries}"
         )

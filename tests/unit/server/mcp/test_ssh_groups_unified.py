@@ -357,7 +357,7 @@ class TestManageSshKeyDispatcher:
         mock_meta.email = None
         mock_meta.description = None
         mock_meta.public_key = "ssh-ed25519 AAAA..."
-        mock_manager.create_key.return_value = mock_meta
+        mock_manager.create_key_audited.return_value = mock_meta
 
         with patch(
             "code_indexer.server.mcp.handlers.ssh_keys.get_ssh_key_manager",
@@ -368,7 +368,10 @@ class TestManageSshKeyDispatcher:
                 admin_user,
             )
         assert content["success"] is True
-        mock_manager.create_key.assert_called_once()
+        mock_manager.create_key_audited.assert_called_once()
+        assert mock_manager.create_key_audited.call_args.kwargs["actor"] == (
+            admin_user.username
+        )
 
 
 # =============================================================================

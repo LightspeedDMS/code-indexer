@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from code_indexer.server.services.audit_events import SystemComponent
+
 
 @pytest.fixture
 def mock_config_manager():
@@ -79,7 +81,7 @@ class TestEnsureRegistered:
         ]
 
         # Setup: Credential generation
-        mock_mcp_credential_manager.generate_credential.return_value = {
+        mock_mcp_credential_manager.generate_credential_audited.return_value = {
             "credential_id": "cred-123",
             "client_id": "mcp_abc123",
             "client_secret": "mcp_sec_xyz789",
@@ -99,8 +101,10 @@ class TestEnsureRegistered:
         assert service._registration_checked is True
 
         # Verify credential was generated
-        mock_mcp_credential_manager.generate_credential.assert_called_once_with(
-            user_id="admin", name="cidx-local-auto"
+        mock_mcp_credential_manager.generate_credential_audited.assert_called_once_with(
+            "admin",
+            "cidx-local-auto",
+            actor=SystemComponent.MCP_SELF_REGISTRATION,
         )
 
         # Verify config was saved
@@ -190,7 +194,7 @@ class TestGetOrCreateCredentials:
         }
 
         # Should NOT generate new credential
-        mock_mcp_credential_manager.generate_credential.assert_not_called()
+        mock_mcp_credential_manager.generate_credential_audited.assert_not_called()
 
     def test_creates_new_when_no_stored_credentials(
         self, service, mock_mcp_credential_manager, mock_config_manager
@@ -205,7 +209,7 @@ class TestGetOrCreateCredentials:
         mock_config_manager.load_config.return_value = mock_config
 
         # Setup: Generate new credential
-        mock_mcp_credential_manager.generate_credential.return_value = {
+        mock_mcp_credential_manager.generate_credential_audited.return_value = {
             "credential_id": "cred-new",
             "client_id": "mcp_new123",
             "client_secret": "mcp_sec_new456",
@@ -219,8 +223,10 @@ class TestGetOrCreateCredentials:
         assert result["client_secret"] == "mcp_sec_new456"
 
         # Verify credential was generated
-        mock_mcp_credential_manager.generate_credential.assert_called_once_with(
-            user_id="admin", name="cidx-local-auto"
+        mock_mcp_credential_manager.generate_credential_audited.assert_called_once_with(
+            "admin",
+            "cidx-local-auto",
+            actor=SystemComponent.MCP_SELF_REGISTRATION,
         )
 
     def test_recreates_when_stored_credential_invalidated(
@@ -242,7 +248,7 @@ class TestGetOrCreateCredentials:
         mock_mcp_credential_manager.get_credential_by_client_id.return_value = None
 
         # Setup: Generate new credential
-        mock_mcp_credential_manager.generate_credential.return_value = {
+        mock_mcp_credential_manager.generate_credential_audited.return_value = {
             "credential_id": "cred-replacement",
             "client_id": "mcp_replacement123",
             "client_secret": "mcp_sec_replacement456",
@@ -256,7 +262,7 @@ class TestGetOrCreateCredentials:
         assert result["client_secret"] == "mcp_sec_replacement456"
 
         # Verify new credential was generated
-        mock_mcp_credential_manager.generate_credential.assert_called_once()
+        mock_mcp_credential_manager.generate_credential_audited.assert_called_once()
 
 
 class TestRegisterInClaudeCode:
@@ -354,7 +360,7 @@ class TestGracefulDegradation:
         ]
 
         # Setup credential generation
-        mock_mcp_credential_manager.generate_credential.return_value = {
+        mock_mcp_credential_manager.generate_credential_audited.return_value = {
             "credential_id": "cred-123",
             "client_id": "mcp_abc",
             "client_secret": "mcp_sec_xyz",

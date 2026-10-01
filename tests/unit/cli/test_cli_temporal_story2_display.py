@@ -7,7 +7,7 @@ not calling deleted SQLite methods.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.code_indexer.cli import (
+from code_indexer.cli import (
     _display_file_chunk_match,
     _display_commit_message_match,
 )
@@ -16,7 +16,7 @@ from src.code_indexer.cli import (
 class TestTemporalDisplayStory2(unittest.TestCase):
     """Test temporal display functions use payload data, not deleted SQLite methods."""
 
-    @patch("src.code_indexer.cli.console")
+    @patch("code_indexer.cli.console")
     def test_display_file_chunk_uses_temporal_context(self, console_mock):
         """Test that file chunk display uses temporal_context, not _fetch_commit_details."""
         # Arrange
@@ -55,7 +55,7 @@ class TestTemporalDisplayStory2(unittest.TestCase):
         self.assertIn("Add authentication", output)
         self.assertIn("test@example.com", output)
 
-    @patch("src.code_indexer.cli.console")
+    @patch("code_indexer.cli.console")
     def test_display_commit_message_no_fetch_methods(self, console_mock):
         """Test that commit message display doesn't call deleted SQLite methods."""
         # Arrange

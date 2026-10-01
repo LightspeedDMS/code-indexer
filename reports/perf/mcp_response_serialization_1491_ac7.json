@@ -1,0 +1,8 @@
+{
+  "after_production_mcp_response_median_s": 0.007824735977919772,
+  "asserted_min_speedup_x": 1.5,
+  "before_indent2_median_s": 0.029783347010379657,
+  "measured_speedup_x": 3.8063069596755446,
+  "result_count": 4000,
+  "trials": 5
+}

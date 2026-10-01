@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.tools.migrate_to_postgres import (
+from code_indexer.server.tools.migrate_to_postgres import (
     SqliteToPostgresMigrator,
     _build_arg_parser,
 )
@@ -162,7 +162,7 @@ def psycopg_mock_for(pg_db):
     def _patch():
         mock_conn = _make_sqlite_psycopg_mock(pg_db)
         with patch(
-            "src.code_indexer.server.tools.migrate_to_postgres.psycopg"
+            "code_indexer.server.tools.migrate_to_postgres.psycopg"
         ) as mock_psycopg:
             mock_psycopg.connect.return_value.__enter__ = lambda s: mock_conn
             mock_psycopg.connect.return_value.__exit__ = MagicMock(return_value=False)

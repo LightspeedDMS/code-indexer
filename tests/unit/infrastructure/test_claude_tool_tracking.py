@@ -9,7 +9,7 @@ from datetime import datetime
 from unittest.mock import Mock
 from rich.console import Console
 
-from src.code_indexer.services.claude_tool_tracking import (
+from code_indexer.services.claude_tool_tracking import (
     ToolUsageEvent,
     CommandClassifier,
     ToolUsageTracker,

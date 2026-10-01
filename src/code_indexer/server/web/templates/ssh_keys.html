@@ -125,25 +125,30 @@
                         <button
                             class="outline secondary"
                             style="margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem;"
-                            onclick="showPublicKey('{{ key.name }}')">
+                            data-key-name="{{ key.name }}"
+                            onclick="showPublicKey(this.dataset.keyName)">
                             View Public Key
                         </button>
                         <button
                             class="outline secondary"
                             style="margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem;"
-                            onclick="copyPublicKey('{{ key.name }}', '{{ key.public_key|replace("'", "\\'") if key.public_key else "" }}')">
+                            data-key-name="{{ key.name }}"
+                            data-public-key="{{ key.public_key or '' }}"
+                            onclick="copyPublicKey(this.dataset.keyName, this.dataset.publicKey)">
                             Copy Public Key
                         </button>
                         <button
                             class="outline"
                             style="margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem;"
-                            onclick="showAssignHostDialog('{{ key.name }}')">
+                            data-key-name="{{ key.name }}"
+                            onclick="showAssignHostDialog(this.dataset.keyName)">
                             Assign Host
                         </button>
                         <button
                             class="outline contrast"
                             style="margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem;"
-                            onclick="deleteKey('{{ key.name }}')">
+                            data-key-name="{{ key.name }}"
+                            onclick="deleteKey(this.dataset.keyName)">
                             Delete
                         </button>
                     </div>

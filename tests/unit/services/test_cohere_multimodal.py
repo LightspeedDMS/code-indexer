@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from src.code_indexer.config import CohereConfig
+from code_indexer.config import CohereConfig
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ class TestCohereMultimodalClientInit:
 
     def test_init_with_api_key_from_config(self, cohere_config: CohereConfig) -> None:
         """Test client initializes when API key is in config."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client.api_key == "test-co-key"
@@ -68,7 +68,7 @@ class TestCohereMultimodalClientInit:
 
     def test_init_with_api_key_from_env(self, tmp_path: Path) -> None:
         """Test client falls back to CO_API_KEY env var when config key is empty."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         config = CohereConfig(model="embed-v4.0-multimodal", api_key="")
         with patch.dict(os.environ, {"CO_API_KEY": "env-key-123"}):
@@ -77,7 +77,7 @@ class TestCohereMultimodalClientInit:
 
     def test_init_missing_api_key_raises_value_error(self) -> None:
         """Test initialization raises ValueError when no API key is available."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         config = CohereConfig(model="embed-v4.0-multimodal", api_key="")
         env_without_key = {k: v for k, v in os.environ.items() if k != "CO_API_KEY"}
@@ -87,7 +87,7 @@ class TestCohereMultimodalClientInit:
 
     def test_init_stores_config(self, cohere_config: CohereConfig) -> None:
         """Test that config is stored on the client instance."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client.config is cohere_config
@@ -106,7 +106,7 @@ class TestCohereMultimodalPayload:
         self, mock_client_cls: MagicMock, cohere_config: CohereConfig, png_image: Path
     ) -> None:
         """Test payload uses 'inputs' with typed content blocks and embedding_types."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         mock_response = Mock()
         mock_response.json.return_value = _fake_response([[0.1] * EMBED_DIM])
@@ -146,7 +146,7 @@ class TestCohereMultimodalPayload:
         self, mock_client_cls: MagicMock, cohere_config: CohereConfig
     ) -> None:
         """Test text-only request does not include image content block."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         mock_response = Mock()
         mock_response.json.return_value = _fake_response([[0.2] * EMBED_DIM])
@@ -180,7 +180,7 @@ class TestCohereMultimodalResponseParsing:
         self, mock_client_cls: MagicMock, cohere_config: CohereConfig
     ) -> None:
         """Test response parsing extracts embedding from embeddings.float path."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         expected = [0.5] * EMBED_DIM
         mock_response = Mock()
@@ -203,7 +203,7 @@ class TestCohereMultimodalResponseParsing:
         self, mock_client_cls: MagicMock, cohere_config: CohereConfig
     ) -> None:
         """Test ValueError raised when response lacks embeddings key."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         mock_response = Mock()
         mock_response.json.return_value = {"unexpected": "format"}
@@ -230,7 +230,7 @@ class TestCohereMultimodalBatch:
 
     def test_empty_batch_returns_empty_list(self, cohere_config: CohereConfig) -> None:
         """Test get_multimodal_embeddings_batch returns [] for empty input."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         result = client.get_multimodal_embeddings_batch(items=[])
@@ -244,7 +244,7 @@ class TestCohereMultimodalBatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test batch is split when token limit (90% of 128000) would be exceeded."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         # 3 items at 50000 tokens each: first two fit (100000 < 115200), third triggers split
         call_count = [0]
@@ -298,7 +298,7 @@ class TestCohereMultimodalBatch:
         With 2 items: item1 (50 images) fills batch1 partially, but adding item2 would
         bring total to 100 > 96, so item2 goes into batch2.
         """
-        from src.code_indexer.services.cohere_multimodal import (
+        from code_indexer.services.cohere_multimodal import (
             CohereMultimodalClient,
             MAX_IMAGES_PER_REQUEST,
         )
@@ -364,7 +364,7 @@ class TestCohereMultimodalImageSizeEnforcement:
     ) -> None:
         """Test images over 5MB are skipped with a warning, text still embedded."""
         import logging
-        from src.code_indexer.services.cohere_multimodal import (
+        from code_indexer.services.cohere_multimodal import (
             CohereMultimodalClient,
             COHERE_MAX_IMAGE_SIZE,
         )
@@ -416,7 +416,7 @@ class TestCohereMultimodalGetEmbedding:
         self, mock_client_cls: MagicMock, cohere_config: CohereConfig
     ) -> None:
         """Test get_embedding uses input_type=search_query for query vectorization."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         mock_response = Mock()
         mock_response.json.return_value = _fake_response([[0.7] * EMBED_DIM])
@@ -440,7 +440,7 @@ class TestCohereMultimodalGetEmbedding:
         self, mock_client_cls: MagicMock
     ) -> None:
         """Test get_embedding returns vector with configured dimension."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         config = _make_config(dimension=512)
         mock_response = Mock()
@@ -476,8 +476,8 @@ class TestCohereMultimodalCollectionName:
         'embed-v4.0-multimodal' even though the Cohere API model is 'embed-v4.0'.
         This decouples the collection directory name from the API model name.
         """
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
-        from src.code_indexer.config import COHERE_MULTIMODAL_MODEL
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.config import COHERE_MULTIMODAL_MODEL
 
         client = CohereMultimodalClient(cohere_config)
         assert client.collection_name == COHERE_MULTIMODAL_MODEL
@@ -498,7 +498,7 @@ class TestCohereMultimodalGetEmbeddingKwargs:
         CohereMultimodalClient.get_embedding() must accept **kwargs for interface
         compatibility without crashing.
         """
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         mock_response = Mock()
         mock_response.json.return_value = _fake_response([[0.7] * EMBED_DIM])
@@ -521,7 +521,7 @@ class TestCohereMultimodalMapInputType:
 
     def test_query_maps_to_search_query(self, cohere_config: CohereConfig) -> None:
         """Test 'query' maps to 'search_query'."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client._map_input_type("query") == "search_query"
@@ -530,14 +530,14 @@ class TestCohereMultimodalMapInputType:
         self, cohere_config: CohereConfig
     ) -> None:
         """Test 'document' maps to 'search_document'."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client._map_input_type("document") == "search_document"
 
     def test_none_maps_to_search_document(self, cohere_config: CohereConfig) -> None:
         """Test None maps to 'search_document' (indexing default)."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client._map_input_type(None) == "search_document"
@@ -546,7 +546,7 @@ class TestCohereMultimodalMapInputType:
         self, cohere_config: CohereConfig
     ) -> None:
         """Test any non-query value maps to 'search_document'."""
-        from src.code_indexer.services.cohere_multimodal import CohereMultimodalClient
+        from code_indexer.services.cohere_multimodal import CohereMultimodalClient
 
         client = CohereMultimodalClient(cohere_config)
         assert client._map_input_type("other") == "search_document"

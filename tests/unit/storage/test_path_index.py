@@ -7,7 +7,7 @@ when files are re-indexed. This addresses Story #540.
 from pathlib import Path
 import tempfile
 import msgpack
-from src.code_indexer.storage.filesystem_vector_store import PathIndex
+from code_indexer.storage.filesystem_vector_store import PathIndex
 
 
 class TestPathIndexBasicOperations:

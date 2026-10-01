@@ -12,7 +12,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Set, cast
+from typing import List, Optional, Tuple, Dict, Any, Set, cast, TYPE_CHECKING
 from datetime import datetime, timezone
 import logging
 import math
@@ -27,6 +27,17 @@ from ..models.api_models import (
     FileListQueryParams,
 )
 from ..services.config_service import get_config_service
+from code_indexer.utils.path_confinement import resolve_confined_path
+
+if TYPE_CHECKING:
+    # Bug #1650: type-only import for the lazily-constructed
+    # activated_repo_manager property below. Kept under TYPE_CHECKING
+    # (never imported at runtime here) so the real import stays local to
+    # the property that needs it, for the same circular-import-avoidance
+    # reason as the original eager code.
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -103,16 +114,74 @@ class FileListingService:
     DEFAULT_MAX_LINES: int = 500  # Default limit when no explicit limit provided
     MAX_ALLOWED_LIMIT: int = 5000  # Maximum limit client can request
 
+    # Bug #1650 remediation: CLASS-LEVEL RLock (not per-instance), so
+    # instances created via FileListingService.__new__(FileListingService)
+    # in several existing test files (bypassing __init__ entirely) still
+    # have a lock to synchronize on instead of raising AttributeError.
+    # Mirrors the identical pattern applied to GitOperationsService for the
+    # same bug: importing this module (transitively, via server/app.py's
+    # own module-level `from .services.file_service import file_service`)
+    # used to construct a real ActivatedRepoManager -> GoldenRepoManager ->
+    # SQLite golden-repo load, spawning bgm-worker/bgm-temporal-worker
+    # threads, as a side effect of merely importing any MCP handler module.
+    _activated_repo_manager_lock = threading.RLock()
+
     def __init__(self):
         """Initialize the file listing service."""
-        # Import here to avoid circular imports
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
 
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+    @property
+    def activated_repo_manager(self) -> "ActivatedRepoManager":
+        """Lazily construct ActivatedRepoManager (Bug #1650): deferred to
+        first real access instead of FileListingService() construction
+        time.
+
+        Uses getattr(..., None) rather than bare self._activated_repo_manager_lazy:
+        several existing test files construct this service via
+        FileListingService.__new__(FileListingService) (bypassing __init__
+        entirely) and may read this property before ever assigning to it.
+
+        Guarded by a per-instance `_arm_initializing` sentinel (Bug #1650
+        round-2 remediation, M2): the RLock alone stops CROSS-THREAD
+        deadlock but not SAME-THREAD re-entrant recursion -- on re-entry
+        the double-checked `is None` test is still True (the assignment
+        happens only after the constructor returns), so an unguarded
+        re-entrant call arriving from within construction would construct
+        AGAIN. Mirrors GitOperationsService.activated_repo_manager's
+        identical fix exactly.
+        """
+        if getattr(self, "_activated_repo_manager_lazy", None) is None:
+            with self._activated_repo_manager_lock:
+                if getattr(self, "_arm_initializing", False):
+                    raise AttributeError(
+                        "activated_repo_manager is still under construction "
+                        "(re-entrant access)"
+                    )
+                if getattr(self, "_activated_repo_manager_lazy", None) is None:
+                    self._arm_initializing = True
+                    try:
+                        # Import here to avoid circular imports (same
+                        # reasoning as the original eager code this
+                        # replaces).
+                        import os
+                        from ..repositories.activated_repo_manager import (
+                            ActivatedRepoManager,
+                        )
+
+                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                        self._activated_repo_manager_lazy = ActivatedRepoManager(
+                            data_dir=os.path.join(_server_dir, "data")
+                            if _server_dir
+                            else None
+                        )
+                    finally:
+                        self._arm_initializing = False
+        return self._activated_repo_manager_lazy
+
+    @activated_repo_manager.setter
+    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
+        with self._activated_repo_manager_lock:
+            self._activated_repo_manager_lazy = value
 
     def _get_file_content_limits_config(self):
         """Get file content limits config from ConfigService (Bug #939: unified ContentLimitsConfig).
@@ -709,7 +778,38 @@ class FileListingService:
                 if f.language and f.language.lower() == target_language
             ]
 
+        # Bug #1886: single-level depth restriction (browse_directory's
+        # recursive=False). Gitignore-style glob matching (used above for
+        # path_pattern) generally DOES anchor correctly -- "examples/*.java"
+        # matches only direct children ending in .java, never
+        # "examples/sub/Nested.java". The one leaky shape is a trailing BARE
+        # "*" segment: "examples/*" still matches "examples/sub/Nested.java"
+        # because pathspec's directory-containment semantics don't anchor an
+        # unsuffixed "*" to stop at "/". This explicit restriction closes
+        # that gap (and is a second, independent guarantee for every other
+        # pattern shape besides). Applied here (BEFORE
+        # _apply_sorting/_apply_pagination) so a limit truncation can never
+        # starve real direct children behind alphabetically-earlier nested
+        # files.
+        if query_params.direct_children_of is not None:
+            base = query_params.direct_children_of
+            filtered_files = [
+                f for f in filtered_files if self._dirname_of(f.path) == base
+            ]
+
         return filtered_files
+
+    @staticmethod
+    def _dirname_of(path: str) -> str:
+        """Return the parent directory of a repo-relative path (posix "/").
+
+        Mirrors Path(path).parent behavior for the forward-slash-joined
+        relative paths FileInfo.path always holds (built via
+        ``Path.relative_to()`` in ``_collect_files_uncached``): a top-level
+        file's dirname is "" (the repository root).
+        """
+        idx = path.rfind("/")
+        return path[:idx] if idx != -1 else ""
 
     def _apply_sorting(
         self, files: List[FileInfo], sort_by: Optional[str]
@@ -897,11 +997,13 @@ class FileListingService:
             - pagination_hint: Helpful message for navigating large files
         """
         repo_path = self._get_repository_path(repository_alias, username)
-        full_file_path = Path(repo_path) / file_path
-        full_file_path = full_file_path.resolve()
-        repo_root = Path(repo_path).resolve()
-        if not str(full_file_path).startswith(str(repo_root)):
-            raise PermissionError("Access denied")
+        # Bug #1891 round 2 (S1): the previous
+        # str(full_file_path).startswith(str(repo_root)) check incorrectly
+        # admitted a SIBLING directory whose name starts with repo_root's
+        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
+        # resolve_confined_path() confines via Path.relative_to() instead,
+        # which is immune to that class of bug.
+        full_file_path = resolve_confined_path(Path(repo_path), file_path)
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():
@@ -1079,11 +1181,13 @@ class FileListingService:
             PermissionError: If path traversal attempted
             FileNotFoundError: If file doesn't exist
         """
-        full_file_path = Path(repo_path) / file_path
-        full_file_path = full_file_path.resolve()
-        repo_root = Path(repo_path).resolve()
-        if not str(full_file_path).startswith(str(repo_root)):
-            raise PermissionError("Access denied")
+        # Bug #1891 round 2 (S1): the previous
+        # str(full_file_path).startswith(str(repo_root)) check incorrectly
+        # admitted a SIBLING directory whose name starts with repo_root's
+        # name (e.g. repo_root=".../foo" admits ".../foo-private/...").
+        # resolve_confined_path() confines via Path.relative_to() instead,
+        # which is immune to that class of bug.
+        full_file_path = resolve_confined_path(Path(repo_path), file_path)
         if not full_file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not full_file_path.is_file():

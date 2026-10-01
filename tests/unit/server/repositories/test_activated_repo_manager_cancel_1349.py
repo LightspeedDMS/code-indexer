@@ -40,11 +40,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
 # NOTE: imported WITHOUT the "src." prefix -- see the identical comment in
 # test_activated_repo_manager_cancel_1345_1346.py for why this matters for
@@ -52,7 +52,7 @@ from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def activated_repo_manager(
 
 def _patch_committer():
     return patch(
-        "src.code_indexer.server.repositories.activated_repo_manager"
+        "code_indexer.server.repositories.activated_repo_manager"
         ".CommitterResolutionService"
     )
 
@@ -132,7 +132,7 @@ _TEST_FAST_LOOP_MAX_ELAPSED_SECONDS = 5.0
 
 def _patch_fast_retry_constants():
     return patch.multiple(
-        "src.code_indexer.server.repositories.activated_repo_manager",
+        "code_indexer.server.repositories.activated_repo_manager",
         _ORPHAN_CLEANUP_RETRY_ATTEMPTS=_TEST_FAST_RETRY_ATTEMPTS,
         _ORPHAN_CLEANUP_RETRY_SLEEP_SECONDS=_TEST_FAST_RETRY_SLEEP_SECONDS,
     )
@@ -231,7 +231,7 @@ class TestClonePhaseOrphanCleanupBoundedRetry1349:
         (Path(activated_repo_path) / "partial-file.txt").write_text("partial")
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager.time.sleep"
+            "code_indexer.server.repositories.activated_repo_manager.time.sleep"
         ) as mock_sleep:
             activated_repo_manager._cleanup_orphaned_clone_after_failure(
                 activated_repo_path, "my-activated-repo"
@@ -405,7 +405,7 @@ class TestClonePhaseOrphanCleanupWidenedWindow1350:
         """Lock in the widened bound: (attempts - 1) * sleep_seconds must
         fall in the 10-15s range the issue asked for, replacing the old
         ~1.2s worst case that staging proved too short."""
-        from src.code_indexer.server.repositories import activated_repo_manager as m
+        from code_indexer.server.repositories import activated_repo_manager as m
 
         total_bound_seconds = (
             m._ORPHAN_CLEANUP_RETRY_ATTEMPTS - 1

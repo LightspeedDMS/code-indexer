@@ -75,6 +75,7 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
             self.manager.add_golden_repo(
                 repo_url="git@gitlab.com:example/r53-global.git",
                 alias="r53-global",
+                submitter_username="example-admin",
             )
 
     def test_add_golden_repo_rejects_alias_with_just_global_suffix_token(self):
@@ -86,6 +87,7 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
             self.manager.add_golden_repo(
                 repo_url="git@gitlab.com:example/repo.git",
                 alias="-global",
+                submitter_username="example-admin",
             )
 
     def test_add_golden_repo_rejects_any_alias_ending_in_global(self):
@@ -97,6 +99,7 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
             self.manager.add_golden_repo(
                 repo_url="git@gitlab.com:example/my-repo-global.git",
                 alias="my-repo-global",
+                submitter_username="example-admin",
             )
 
     # ------------------------------------------------------------------
@@ -115,6 +118,7 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
         job_id = self.manager.add_golden_repo(
             repo_url="local://my-global-repo",
             alias="my-global-repo",
+            submitter_username="example-admin",
         )
         assert isinstance(job_id, str)
         assert len(job_id) > 0
@@ -131,6 +135,7 @@ class TestGoldenRepoManagerAliasGlobalSuffixValidation:
         job_id = self.manager.add_golden_repo(
             repo_url="local://my-repo",
             alias="my-repo",
+            submitter_username="example-admin",
         )
         assert isinstance(job_id, str)
         assert len(job_id) > 0

@@ -9,12 +9,17 @@ Provides REST endpoints for:
 Uses GlobalRepoOperations for shared business logic with CLI and MCP.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Any, Optional, cast
 
-from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth import dependencies
+from code_indexer.server.auth.dependencies import (
+    get_current_admin_user_hybrid,
+    get_current_user,
+)
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.routers import repo_access_http
 from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
 
@@ -117,27 +122,43 @@ class ConfigUpdateResponse(BaseModel):
 # Endpoints
 @router.get("/repos", response_model=GlobalReposResponse)
 def list_global_repos(
+    request: Request,
     user: User = Depends(get_current_user),
 ) -> GlobalReposResponse:
     """
-    List all global repositories.
+    List the global repositories the caller has group access to.
 
-    Returns list of all globally-accessible repositories with metadata.
+    Admins see every repository (same listing as the MCP list_global_repos
+    tool, filtered by repo_name). Fails closed with 500 when the access
+    service is unavailable.
 
     Requires authentication.
 
     Returns:
         GlobalReposResponse with list of repository metadata
     """
+    access_filtering_service = getattr(
+        request.app.state, "access_filtering_service", None
+    )
+    repo_access_http.enforce_repo_access(access_filtering_service, user.username, None)
     ops = get_global_repo_operations()
     repos = ops.list_repos()
+    accessible = set(
+        repo_access_http.accessible_repo_names(
+            access_filtering_service,
+            user.username,
+            [r.get("repo_name", "") for r in repos],
+        )
+    )
 
-    return GlobalReposResponse(repos=repos)
+    return GlobalReposResponse(
+        repos=[r for r in repos if r.get("repo_name", "") in accessible]
+    )
 
 
 @router.get("/repos/{alias}/status")
 def get_repo_status(
-    alias: str, user: User = Depends(get_current_user)
+    alias: str, request: Request, user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Get status of a specific global repository.
@@ -151,8 +172,17 @@ def get_repo_status(
         Repository status dict with metadata
 
     Raises:
+        HTTPException 403: caller lacks group access to the repository.
         HTTPException 404: If repository not found
+        HTTPException 500: access service unavailable (fails closed).
     """
+    # Reading a global repository's status requires group access to it,
+    # checked before its existence is looked up.
+    repo_access_http.enforce_repo_access(
+        getattr(request.app.state, "access_filtering_service", None),
+        user.username,
+        alias,
+    )
     ops = get_global_repo_operations()
 
     try:
@@ -181,19 +211,29 @@ def get_global_config(user: User = Depends(get_current_user)) -> ConfigResponse:
     return ConfigResponse(refresh_interval=config["refresh_interval"])
 
 
-@router.put("/config", response_model=ConfigUpdateResponse)
+@router.put(
+    "/config",
+    response_model=ConfigUpdateResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_global_config(
-    config: GlobalConfigUpdate, user: User = Depends(get_current_user)
+    config: GlobalConfigUpdate,
+    user: User = Depends(get_current_admin_user_hybrid),
 ) -> ConfigUpdateResponse:
     """
     Update global configuration.
 
     Updates the global refresh interval.
 
+    This mutates server-wide config (the golden-repo refresh
+    interval used across the whole fleet), so it requires admin role AND an
+    active TOTP elevation window -- matching the MCP twin `set_global_config`
+    (`@require_mcp_elevation()` in `mcp/handlers/admin/__init__.py`).
+
     Args:
         config: GlobalConfigUpdate with new refresh_interval
 
-    Requires authentication.
+    Requires admin role + elevation.
 
     Returns:
         ConfigUpdateResponse with status="updated"
@@ -204,7 +244,7 @@ def update_global_config(
     ops = get_global_repo_operations()
 
     try:
-        ops.set_config(config.refresh_interval)
+        ops.set_config(config.refresh_interval, actor=user.username)
         return ConfigUpdateResponse(status="updated")
     except ValueError as e:
         # Map ValueError (validation failed) to HTTP 400

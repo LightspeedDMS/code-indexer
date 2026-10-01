@@ -520,7 +520,13 @@ class TestCIDXRemoteAPIClientTokenPersistence:
     ):
         """Test that tokens persist across API client restarts."""
         # Create first client instance and authenticate
-        with patch("httpx.AsyncClient.post") as mock_post:
+        # NOTE: CIDXRemoteAPIClient's login POST goes through a synchronous
+        # httpx.Client (self.session) -- there is no httpx.AsyncClient anywhere
+        # in api_clients/ (see base_client.py __aenter__ docstring). Patching
+        # httpx.Client.post is the correct interception point; patching
+        # httpx.AsyncClient.post is a dead mock that lets the real request through
+        # to genuine outbound DNS resolution (issue #1735).
+        with patch("httpx.Client.post") as mock_post:
             # Mock successful authentication response
             mock_response = Mock()  # Use Mock, not AsyncMock for httpx Response
             mock_response.status_code = 200
@@ -533,7 +539,7 @@ class TestCIDXRemoteAPIClientTokenPersistence:
                 project_root=temp_project_dir,
             ) as client1:
                 # Force authentication
-                token1 = await client1._get_valid_token()
+                token1 = client1._get_valid_token()
                 assert token1 == valid_jwt_token
 
         # Create second client instance (simulating restart)
@@ -543,10 +549,10 @@ class TestCIDXRemoteAPIClientTokenPersistence:
             project_root=temp_project_dir,
         ) as client2:
             # Should load token from persistent storage without re-authentication
-            with patch("httpx.AsyncClient.post") as mock_post_restart:
+            with patch("httpx.Client.post") as mock_post_restart:
                 mock_post_restart.return_value = Mock()  # Should not be called
 
-                token2 = await client2._get_valid_token()
+                token2 = client2._get_valid_token()
 
                 # Should use persisted token
                 assert token2 == valid_jwt_token
@@ -558,7 +564,8 @@ class TestCIDXRemoteAPIClientTokenPersistence:
         self, temp_project_dir, mock_server_url, mock_credentials, valid_jwt_token
     ):
         """Test automatic token refresh with immediate persistence."""
-        with patch("httpx.AsyncClient.post") as mock_post:
+        # See note above: CIDXRemoteAPIClient uses a synchronous httpx.Client.
+        with patch("httpx.Client.post") as mock_post:
             # Mock token refresh response
             mock_response = Mock()  # Use Mock, not AsyncMock
             mock_response.status_code = 200
@@ -588,7 +595,7 @@ class TestCIDXRemoteAPIClientTokenPersistence:
                 client.jwt_manager.is_token_near_expiry = MagicMock(return_value=True)
 
                 # Get valid token should trigger refresh
-                token = await client._get_valid_token()
+                token = client._get_valid_token()
 
                 # Should get refreshed token (using valid JWT from fixture)
                 assert token == valid_jwt_token
@@ -601,7 +608,8 @@ class TestCIDXRemoteAPIClientTokenPersistence:
         self, temp_project_dir, mock_server_url, mock_credentials, valid_jwt_token
     ):
         """Test re-authentication fallback when refresh fails."""
-        with patch("httpx.AsyncClient.post") as mock_post:
+        # See note above: CIDXRemoteAPIClient uses a synchronous httpx.Client.
+        with patch("httpx.Client.post") as mock_post:
             # Mock re-authentication response (after refresh failure)
             mock_response = Mock()  # Use Mock instead of AsyncMock
             mock_response.status_code = 200
@@ -617,7 +625,7 @@ class TestCIDXRemoteAPIClientTokenPersistence:
                 client._current_token = None
 
                 # Get valid token should authenticate successfully
-                token = await client._get_valid_token()
+                token = client._get_valid_token()
 
                 # Should get new authentication token
                 assert token == valid_jwt_token
@@ -651,7 +659,8 @@ class TestCircuitBreakerPattern:
         self, temp_project_dir, mock_server_url, mock_credentials
     ):
         """Test circuit breaker opens after 5 consecutive authentication failures."""
-        with patch("httpx.AsyncClient.post") as mock_post:
+        # See note above: CIDXRemoteAPIClient uses a synchronous httpx.Client.
+        with patch("httpx.Client.post") as mock_post:
             # Mock authentication failures
             mock_response = Mock()  # Use Mock instead of AsyncMock
             mock_response.status_code = 401

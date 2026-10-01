@@ -17,8 +17,9 @@ inputSchema:
           name (str): Pattern name used as filename stem and lookup key. Use kebab-case (e.g. "catch-rethrow").
           description (str): Human-readable description of what the pattern finds.
           language (str): Target language (e.g. "java", "python", "typescript").
-          evaluator_code (str): Rust fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> body. Same Rust security whitelist as xray_search applies.
+          evaluator_code (str): Rust evaluator body. Shape depends on execution_mode: for "legacy" (default), a fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> body; for "graph", a fn collect_facts(...) + fn analyze_graph(...) callback pair. Same Rust security whitelist as xray_search/analyze_graph applies.
         Optional fields:
+          execution_mode (str): "legacy" or "graph". Missing means "legacy" — see Execution Modes section.
           tags (list[str]): Categorization labels.
           author (str): Pattern author.
           created_at (str): ISO date string.
@@ -98,6 +99,30 @@ parameters:                      # optional, typed parameter declarations
     description: "Minimum nesting depth to report"
 ```
 
+## Execution Modes
+
+A pattern's `execution_mode` declares which tool can run it:
+
+- `legacy` (default when the field is absent): `evaluator_code` is a single `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` body. Runs per-file, via `xray_search` / `xray_explore` `pattern_name`. All patterns stored before this field existed are `legacy`.
+- `graph`: `evaluator_code` is a `fn collect_facts(...)` + `fn analyze_graph(...)` callback pair. Runs whole-repo, via `analyze_graph`'s `pattern_name` / `pattern_params`.
+
+A pattern's declared mode must match the tool that resolves it. Using a `legacy` pattern with `analyze_graph`, or a `graph` pattern with `xray_search`/`xray_explore`, fails with `pattern_mode_mismatch` — the pattern is never silently run in the wrong mode.
+
+**Store a graph-mode pattern**:
+```yaml
+name: unreferenced-public-methods
+description: "Finds public methods with no call sites anywhere in the repo"
+language: java
+execution_mode: graph
+evaluator_code: |
+  fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+      Vec::new()
+  }
+  fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+      GraphResult::default()
+  }
+```
+
 ## Parameters (Typed Constants)
 
 Patterns can declare typed parameters that become Rust `const` declarations prepended to the evaluator code. Callers override defaults via `pattern_params` in `xray_search`/`xray_explore`.
@@ -133,6 +158,7 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
 | pattern_yaml_required | pattern_yaml parameter missing or empty |
 | invalid_yaml | pattern_yaml cannot be parsed as YAML |
 | missing_required_field | A required field (name, description, language, evaluator_code) is absent |
+| invalid_execution_mode | execution_mode is present but is neither "legacy" nor "graph" |
 | xray_evaluator_validation_failed | evaluator_code fails the Rust security whitelist (see error_code, offending_construct, offending_line) |
 | pattern_already_exists | Pattern with this name already exists in scope and overwrite=false |
 | invalid_parameter | A parameter declaration uses an unknown field |

@@ -5,13 +5,16 @@ Formats standardized error responses following CLAUDE.md Foundation #1: No mocks
 Provides consistent error response formatting across all endpoints.
 """
 
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, Tuple, Union, cast
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError as PydanticValidationError
+from __future__ import annotations
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Union, cast
+
+if TYPE_CHECKING:
+    # Bug #1468: type-only (generate_correlation_id() needs no fastapi).
+    from fastapi.responses import JSONResponse
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError as PydanticValidationError
 
 from ..models.error_models import (
     ErrorType,
@@ -19,76 +22,37 @@ from ..models.error_models import (
     ValidationErrorDetails,
 )
 
-# CLAUDE.md Foundation #8 Pattern #7: Named constants for security fix
-MINIMUM_RETRY_SECONDS = 5
-MAXIMUM_RETRY_SECONDS = 60
-RETRY_MULTIPLIER = 10
+# Bug #1568: primitives (constants, correlation-id/timestamp helpers, JSON
+# serialization, Pydantic-message humanization) moved to their own module to
+# keep this file under the CLAUDE.md Foundation #6 line limit. Re-exported
+# here (via __all__) so existing callers that import them from
+# error_formatters keep working unchanged.
+from .error_response_primitives import (
+    MINIMUM_RETRY_SECONDS,
+    MAXIMUM_RETRY_SECONDS,
+    RETRY_MULTIPLIER,
+    generate_correlation_id,
+    get_current_timestamp,
+    format_timestamp,
+    humanize_validation_message,
+    _serialize_value_for_json,
+)
 
-
-def generate_correlation_id() -> str:
-    """Generate unique correlation ID for error tracking."""
-    return str(uuid.uuid4())
-
-
-def get_current_timestamp() -> datetime:
-    """Get current timestamp in UTC."""
-    return datetime.now(timezone.utc)
-
-
-def format_timestamp(timestamp: datetime) -> str:
-    """Format timestamp in ISO 8601 format."""
-    return timestamp.isoformat().replace("+00:00", "Z")
-
-
-def _serialize_value_for_json(value: Any) -> Any:
-    """
-    Serialize value to ensure JSON compatibility.
-
-    Handles datetime, Path, bytes, callable objects, nested dicts, and lists recursively.
-
-    Args:
-        value: Value to serialize
-
-    Returns:
-        JSON-serializable value
-    """
-    if isinstance(value, datetime):
-        return value.isoformat()
-    elif isinstance(value, Path):
-        return str(value)
-    elif isinstance(value, bytes):
-        return f"<bytes:{len(value)} bytes>"
-    elif callable(value):
-        return f"<function:{getattr(value, '__name__', 'unknown')}>"
-    elif isinstance(value, dict):
-        return {k: _serialize_value_for_json(v) for k, v in value.items()}
-    elif isinstance(value, (list, tuple)):
-        return [_serialize_value_for_json(item) for item in value]
-    else:
-        return value
-
-
-def humanize_validation_message(pydantic_error: Dict[str, Any]) -> str:
-    """Convert Pydantic error messages to human-readable format."""
-    error_type = pydantic_error["type"]
-    message = pydantic_error.get("msg", "")
-
-    # Map common error types to friendly messages
-    friendly_messages = {
-        "missing": "This field is required",
-        "string_too_short": "This field is too short",
-        "string_too_long": "This field is too long",
-        "string_pattern_mismatch": "This field has an invalid format",
-        "value_error.missing": "This field is required",
-        "type_error.integer": "This field must be a number",
-        "type_error.str": "This field must be text",
-        "type_error.bool": "This field must be true or false",
-        "value_error.number.not_gt": "This field must be greater than the minimum value",
-        "value_error.number.not_lt": "This field must be less than the maximum value",
-        "value_error.email": "This field must be a valid email address",
-    }
-
-    return friendly_messages.get(error_type, message or "Invalid value")
+__all__ = [
+    "MINIMUM_RETRY_SECONDS",
+    "MAXIMUM_RETRY_SECONDS",
+    "RETRY_MULTIPLIER",
+    "generate_correlation_id",
+    "get_current_timestamp",
+    "format_timestamp",
+    "humanize_validation_message",
+    "_serialize_value_for_json",
+    "create_validation_error_response",
+    "create_database_error_response",
+    "create_http_exception_response",
+    "create_generic_error_response",
+    "create_json_response",
+]
 
 
 def create_validation_error_response(
@@ -293,6 +257,8 @@ def create_json_response(
     Returns:
         JSONResponse with proper status code and headers
     """
+    from fastapi.responses import JSONResponse  # Bug #1468: lazy, only real use site
+
     error_type = error_data.get("error", ErrorType.INTERNAL_SERVER_ERROR)
     status_code = status_code_map.get(error_type, 500)
 

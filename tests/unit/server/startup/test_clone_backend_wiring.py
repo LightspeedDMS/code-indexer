@@ -560,11 +560,11 @@ class TestDeriveDaemonStoragePathFromMount:
 
         with patch(
             "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
-            return_value="192.0.2.10:/home/jsbattig/cow-storage",
+            return_value="192.0.2.10:/home/opuser/cow-storage",
         ):
             result = _derive_daemon_storage_path_from_mount("/mnt/cow-storage")
 
-        assert result == "/home/jsbattig/cow-storage"
+        assert result == "/home/opuser/cow-storage"
 
     def test_falls_back_to_proc_mounts_when_findmnt_unavailable(self, tmp_path):
         from code_indexer.server.startup.clone_backend_wiring import (
@@ -573,7 +573,7 @@ class TestDeriveDaemonStoragePathFromMount:
 
         mounts_file = tmp_path / "proc_mounts_fixture"
         mounts_file.write_text(
-            "192.0.2.10:/home/jsbattig/cow-storage /mnt/cow-storage nfs4 rw 0 0\n"
+            "192.0.2.10:/home/opuser/cow-storage /mnt/cow-storage nfs4 rw 0 0\n"
         )
 
         with patch(
@@ -584,7 +584,7 @@ class TestDeriveDaemonStoragePathFromMount:
                 "/mnt/cow-storage", mounts_file=str(mounts_file)
             )
 
-        assert result == "/home/jsbattig/cow-storage"
+        assert result == "/home/opuser/cow-storage"
 
     def test_returns_none_when_mount_point_is_local_not_nfs(self):
         """Daemon host: mount_point resolves to local XFS -- findmnt SOURCE
@@ -616,11 +616,11 @@ class TestDeriveDaemonStoragePathFromMount:
 
         with patch(
             "code_indexer.server.startup.clone_backend_wiring._findmnt_source",
-            return_value="[fe80::1]:/home/jsbattig/cow-storage",
+            return_value="[fe80::1]:/home/opuser/cow-storage",
         ):
             result = _derive_daemon_storage_path_from_mount("/mnt/cow-storage")
 
-        assert result == "/home/jsbattig/cow-storage"
+        assert result == "/home/opuser/cow-storage"
 
     def test_returns_none_when_no_source_found_anywhere(self, tmp_path):
         from code_indexer.server.startup.clone_backend_wiring import (
@@ -688,11 +688,11 @@ class TestResolveEffectiveCowDaemonConfig:
         with patch(
             "code_indexer.server.startup.clone_backend_wiring."
             "_derive_daemon_storage_path_from_mount",
-            return_value="/home/jsbattig/cow-storage",
+            return_value="/home/opuser/cow-storage",
         ):
             result = _resolve_effective_cow_daemon_config(cow_cfg)
 
-        assert result.daemon_storage_path == "/home/jsbattig/cow-storage"
+        assert result.daemon_storage_path == "/home/opuser/cow-storage"
         # Original config object must be untouched (no in-place mutation).
         assert cow_cfg.daemon_storage_path is None
 
@@ -741,14 +741,12 @@ class TestBuildSnapshotManagerDerivesDaemonStoragePath:
             patch(
                 "code_indexer.server.startup.clone_backend_wiring."
                 "_derive_daemon_storage_path_from_mount",
-                return_value="/home/jsbattig/cow-storage",
+                return_value="/home/opuser/cow-storage",
             ),
         ):
             manager = build_snapshot_manager(cfg, versioned_base=str(tmp_path))
 
-        assert (
-            manager._clone_backend._daemon_storage_path == "/home/jsbattig/cow-storage"
-        )
+        assert manager._clone_backend._daemon_storage_path == "/home/opuser/cow-storage"
 
     def test_cow_daemon_backend_keeps_configured_daemon_storage_path(self, tmp_path):
         """When cow_daemon.daemon_storage_path is already configured, the

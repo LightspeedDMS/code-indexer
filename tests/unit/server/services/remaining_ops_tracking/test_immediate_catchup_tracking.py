@@ -13,7 +13,9 @@ Tests:
 Fixture `job_tracker` is provided by conftest.py in this directory.
 """
 
-import time
+import threading
+from contextlib import contextmanager
+from typing import List
 from unittest.mock import MagicMock, patch
 
 
@@ -21,13 +23,69 @@ from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.server.routers.api_keys import trigger_catchup_on_api_key_save
 
 
-# Wait time for background daemon thread to complete work before assertions.
-BACKGROUND_THREAD_WAIT_SECONDS = 0.3
+# Name the production trigger gives its background worker
+# (`api_keys.trigger_catchup_on_api_key_save`).
+CATCHUP_THREAD_NAME = "ImmediateCatchupProcessor"
+
+# Ceiling on the join below. This is a deadlock guard, NOT a synchronisation
+# delay: the join returns the instant the worker exits, so the test costs
+# whatever the worker actually costs and never this number.
+CATCHUP_JOIN_TIMEOUT_SECONDS = 30.0
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def joined_catchup_thread():
+    """Join the background worker `trigger_catchup_on_api_key_save()` spawns.
+
+    Bug #1867. The trigger hands its work to a daemon thread and returns
+    immediately, so the test must wait for that thread before asserting on what
+    it recorded. Waiting a fixed `time.sleep(0.3)` is a race in two separate
+    ways, both observed live in chunk1 of the 20260915_035600 server-fast run:
+
+    1. Under concurrent CPU load the worker was not scheduled until 546 ms
+       after `start()` returned -- 246 ms AFTER the assertion had already run
+       and failed with `assert 0 >= 1`.
+    2. Worse, by then the `patch()` scopes the worker depends on had been torn
+       down, so its `get_job_tracker()` resolved the REAL process-wide tracker
+       instead of the test's. The worker went on to touch the developer's real
+       server data directory.
+
+    Entering this context inside the still-active `patch()` scopes and exiting
+    it before they unwind closes both windows.
+
+    The worker is captured in `Thread.start()` rather than by diffing
+    `threading.enumerate()`: a worker that finishes before the diff is taken is
+    already gone from `enumerate()`, which would make the capture itself racy.
+    """
+    started: List[threading.Thread] = []
+    original_start = threading.Thread.start
+
+    def recording_start(self) -> None:
+        if self.name == CATCHUP_THREAD_NAME:
+            started.append(self)
+        original_start(self)
+
+    threading.Thread.start = recording_start  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        threading.Thread.start = original_start  # type: ignore[method-assign]
+        for thread in started:
+            thread.join(timeout=CATCHUP_JOIN_TIMEOUT_SECONDS)
+
+    assert started, (
+        f"trigger_catchup_on_api_key_save() spawned no {CATCHUP_THREAD_NAME} thread"
+    )
+    for thread in started:
+        assert not thread.is_alive(), (
+            f"{thread.name} still running after "
+            f"{CATCHUP_JOIN_TIMEOUT_SECONDS}s -- catch-up worker is stuck"
+        )
 
 
 def _make_mock_result(processed=None, error=None):
@@ -67,10 +125,9 @@ class TestImmediateCatchupJobRegistration:
                 "code_indexer.server.routers.api_keys.get_job_tracker",
                 return_value=job_tracker,
             ),
+            joined_catchup_thread(),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
-
-        time.sleep(BACKGROUND_THREAD_WAIT_SECONDS)
 
         jobs = job_tracker.query_jobs(operation_type="immediate_catchup")
         assert len(jobs) >= 1
@@ -96,10 +153,9 @@ class TestImmediateCatchupJobRegistration:
                 "code_indexer.server.routers.api_keys.get_job_tracker",
                 return_value=job_tracker,
             ),
+            joined_catchup_thread(),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
-
-        time.sleep(BACKGROUND_THREAD_WAIT_SECONDS)
 
         jobs = job_tracker.query_jobs(
             operation_type="immediate_catchup", status="completed"
@@ -128,10 +184,9 @@ class TestImmediateCatchupJobRegistration:
                 "code_indexer.server.routers.api_keys.get_job_tracker",
                 return_value=job_tracker,
             ),
+            joined_catchup_thread(),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
-
-        time.sleep(BACKGROUND_THREAD_WAIT_SECONDS)
 
         jobs = job_tracker.query_jobs(operation_type="immediate_catchup")
         assert len(jobs) >= 1
@@ -159,6 +214,7 @@ class TestImmediateCatchupJobRegistration:
                 "code_indexer.server.routers.api_keys.get_job_tracker",
                 return_value=None,
             ),
+            joined_catchup_thread(),
         ):
             result = trigger_catchup_on_api_key_save("sk-ant-valid-key")
 
@@ -188,6 +244,7 @@ class TestImmediateCatchupJobRegistration:
                 "code_indexer.server.routers.api_keys.get_job_tracker",
                 return_value=broken_tracker,
             ),
+            joined_catchup_thread(),
         ):
             result = trigger_catchup_on_api_key_save("sk-ant-valid-key")
 

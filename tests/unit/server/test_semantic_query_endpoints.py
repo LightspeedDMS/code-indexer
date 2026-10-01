@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from datetime import datetime, timezone
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.app import create_app
+from code_indexer.server.auth.user_manager import User, UserRole
 
 
 @pytest.mark.e2e
@@ -48,12 +48,10 @@ class TestSemanticQueryEndpoint:
             created_at=datetime.now(timezone.utc),
         )
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_valid_request(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -67,8 +65,7 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager response
-        mock_semantic_manager.query_user_repositories.return_value = {
+        mock_return_value = {
             "results": [
                 {
                     "file_path": "/path/to/file.py",
@@ -87,14 +84,21 @@ class TestSemanticQueryEndpoint:
             },
         }
 
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test function", "limit": 10},
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance captured as a
+        # closure parameter by register_query_routes (Story #409-style
+        # extraction); code_indexer.server.app.semantic_query_manager never
+        # reaches it.
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test function", "limit": 10},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Verify response
         assert response.status_code == 200
         data = response.json()
         assert "results" in data
@@ -104,22 +108,19 @@ class TestSemanticQueryEndpoint:
         assert len(data["results"]) == 1
         assert data["results"][0]["similarity_score"] == 0.85
 
-        # Verify semantic query manager was called correctly
-        mock_semantic_manager.query_user_repositories.assert_called_once_with(
-            username="testuser",
-            query_text="test function",
-            repository_alias=None,
-            limit=10,
-            min_score=None,
-            file_extensions=None,
-        )
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["query_text"] == "test function"
+        assert call_kwargs["repository_alias"] is None
+        assert call_kwargs["limit"] == 10
+        assert call_kwargs["min_score"] is None
+        assert call_kwargs["file_extensions"] is None
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_repository_filter(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -133,8 +134,7 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager response
-        mock_semantic_manager.query_user_repositories.return_value = {
+        mock_return_value = {
             "results": [],
             "total_results": 0,
             "query_metadata": {
@@ -145,37 +145,39 @@ class TestSemanticQueryEndpoint:
             },
         }
 
-        # Make request with repository filter
-        response = client.post(
-            "/api/query",
-            json={
-                "query_text": "test",
-                "repository_alias": "specific-repo",
-                "limit": 5,
-                "min_score": 0.7,
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see test_semantic_query_with_valid_request above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "test",
+                    "repository_alias": "specific-repo",
+                    "limit": 5,
+                    "min_score": 0.7,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Verify response
         assert response.status_code == 200
 
-        # Verify semantic query manager was called with filters
-        mock_semantic_manager.query_user_repositories.assert_called_once_with(
-            username="testuser",
-            query_text="test",
-            repository_alias="specific-repo",
-            limit=5,
-            min_score=0.7,
-            file_extensions=None,
-        )
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["query_text"] == "test"
+        assert call_kwargs["repository_alias"] == "specific-repo"
+        assert call_kwargs["limit"] == 5
+        assert call_kwargs["min_score"] == 0.7
+        assert call_kwargs["file_extensions"] is None
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_as_background_job(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -189,25 +191,26 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager job submission
-        mock_semantic_manager.submit_query_job.return_value = "job-123"
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see test_semantic_query_with_valid_request above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "submit_query_job",
+            return_value="job-123",
+        ) as mock_submit:
+            response = client.post(
+                "/api/query",
+                json={"query_text": "complex query", "async_query": True},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Make request with async flag
-        response = client.post(
-            "/api/query",
-            json={"query_text": "complex query", "async_query": True},
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        # Verify response
         assert response.status_code == 202
         data = response.json()
         assert "job_id" in data
         assert "message" in data
         assert data["job_id"] == "job-123"
 
-        # Verify background job was submitted
-        mock_semantic_manager.submit_query_job.assert_called_once_with(
+        mock_submit.assert_called_once_with(
             username="testuser",
             query_text="complex query",
             repository_alias=None,
@@ -217,23 +220,27 @@ class TestSemanticQueryEndpoint:
         )
 
     def test_semantic_query_without_authentication(self, client):
-        """Test semantic query without authentication returns 403."""
+        """Test semantic query without authentication returns 401."""
         response = client.post("/api/query", json={"query_text": "test"})
 
-        assert response.status_code == 403  # FastAPI returns 403 for missing auth
+        # Per MCP spec RFC 9728, missing credentials return 401, not 403.
+        assert response.status_code == 401
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_invalid_parameters(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query with invalid parameters returns 400."""
+        """Test semantic query with invalid parameters returns 422.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the empty query_text before the route handler
+        (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -250,18 +257,23 @@ class TestSemanticQueryEndpoint:
 
         assert response.status_code == 422  # FastAPI validation error
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_no_repositories(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query when user has no activated repositories returns 400."""
+        """Test semantic query when user has no activated repositories returns 400.
+
+        #1707 Finding 3 cleanup: patch the REAL semantic_query_manager
+        instance (closure-capture class -- see
+        test_semantic_query_with_valid_request above) and assert the mock
+        is actually called, instead of relying on "testuser" coincidentally
+        having no real activated repositories.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -269,21 +281,22 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager to raise error for no repositories
-        from src.code_indexer.server.query.semantic_query_manager import (
+        from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
 
-        mock_semantic_manager.query_user_repositories.side_effect = SemanticQueryError(
-            "No activated repositories found"
-        )
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            side_effect=SemanticQueryError("No activated repositories found"),
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test"},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test"},
-            headers={"Authorization": "Bearer test-token"},
-        )
+        mock_query.assert_called_once()
 
         # Verify error response
         assert response.status_code == 400
@@ -291,12 +304,10 @@ class TestSemanticQueryEndpoint:
         assert "detail" in data
         assert "No activated repositories" in data["detail"]
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_invalid_repository(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -310,34 +321,32 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager to raise error for invalid repository
-        from src.code_indexer.server.query.semantic_query_manager import (
+        from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
 
-        mock_semantic_manager.query_user_repositories.side_effect = SemanticQueryError(
-            "Repository 'invalid-repo' not found"
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see test_semantic_query_with_valid_request above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            side_effect=SemanticQueryError("Repository 'invalid-repo' not found"),
+        ):
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test", "repository_alias": "invalid-repo"},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test", "repository_alias": "invalid-repo"},
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        # Verify error response
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data
         assert "not found" in data["detail"]
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_timeout_error(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -351,34 +360,32 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager to raise timeout error
-        from src.code_indexer.server.query.semantic_query_manager import (
+        from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
 
-        mock_semantic_manager.query_user_repositories.side_effect = SemanticQueryError(
-            "Query timed out"
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see test_semantic_query_with_valid_request above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            side_effect=SemanticQueryError("Query timed out"),
+        ):
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test"},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test"},
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        # Verify timeout response
         assert response.status_code == 408
         data = response.json()
         assert "detail" in data
         assert "timed out" in data["detail"]
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_internal_error(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
@@ -392,17 +399,18 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager to raise internal error
-        mock_semantic_manager.query_user_repositories.side_effect = Exception(
-            "Internal search error"
-        )
-
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test"},
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see test_semantic_query_with_valid_request above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            side_effect=Exception("Internal search error"),
+        ):
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test"},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
         # Verify error response
         assert response.status_code == 500
@@ -410,18 +418,21 @@ class TestSemanticQueryEndpoint:
         assert "detail" in data
         assert "search error" in data["detail"]
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_validates_limit_range(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query validates limit parameter range."""
+        """Test semantic query validates limit parameter range.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the out-of-range limit before the route handler
+        (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -438,18 +449,21 @@ class TestSemanticQueryEndpoint:
 
         assert response.status_code == 422  # Pydantic validation error
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_validates_min_score_range(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query validates min_score parameter range."""
+        """Test semantic query validates min_score parameter range.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the out-of-range min_score before the route
+        handler (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",

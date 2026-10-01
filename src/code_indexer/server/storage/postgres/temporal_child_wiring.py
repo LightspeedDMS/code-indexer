@@ -18,10 +18,20 @@ cluster hot path.
 This module closes that gap with a minimal, path-only IPC contract:
 
   1. build_temporal_child_env(server_config, base_env=None): PARENT side.
-     Returns an env dict with CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to the
+     Story #1457 AC6 Finding-1 (round-23 correction): this builder is now
+     restructured to ALWAYS return a dict (never None), mirroring
+     build_embedding_stats_child_env's unconditional-on-storage_mode
+     design. It UNCONDITIONALLY sets CIDX_SERVER_REFRESH_CONTEXT=1 in ALL
+     storage modes -- the signal a temporal child uses to distinguish
+     "I was spawned by the server" (any storage mode, including a
+     solo/SQLite local server) from "I am a genuine standalone CLI
+     invocation with no server process at all". The PREVIOUS
+     postgres-only-return-else-None design silently dropped this signal
+     in solo/SQLite server mode, which is genuinely server-context, not
+     standalone-CLI -- that was the bug this correction fixes. It
+     continues to additionally set CIDX_TEMPORAL_PG_BOOTSTRAP_DIR to the
      server's resolved server_dir (the directory containing config.json)
-     ONLY when storage_mode == "postgres"; otherwise returns None (caller
-     passes env=None -- unchanged env, unchanged SQLite behavior). The DSN
+     ONLY when storage_mode == "postgres" (unchanged from before). The DSN
      itself NEVER crosses via argv or env: both are world-readable via
      /proc/<pid>/cmdline and /proc/<pid>/environ, so passing only a path
      avoids duplicating the secret and avoids a second source of truth on
@@ -42,6 +52,7 @@ This module closes that gap with a minimal, path-only IPC contract:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -55,6 +66,8 @@ from code_indexer.storage.temporal_metadata_backend_registry import (
     set_temporal_metadata_backend_factory,
 )
 
+logger = logging.getLogger(__name__)
+
 # Bounded connect/acquire timeout for the child's dedicated pool -- this is
 # infra (connection establishment), NOT an indexing-work timeout (Bug #1218:
 # no wall-clock timeout is ever applied to the indexing work itself).
@@ -62,33 +75,65 @@ _TEMPORAL_CHILD_POOL_MIN_SIZE = 1
 _TEMPORAL_CHILD_POOL_MAX_SIZE = 8
 _TEMPORAL_CHILD_POOL_TIMEOUT_SECONDS = 30.0
 
+#: Story #1457 AC6 Finding-1 (round-23): unconditional server-context
+#: marker set on EVERY temporal child, in ALL storage modes -- signals
+#: "this child was spawned by the server" (as opposed to a genuine
+#: standalone `cidx index` with no server process at all). Distinct from
+#: TEMPORAL_PG_BOOTSTRAP_DIR_ENV, which remains postgres-only.
+# Bug #1529 finding #11: re-exported from the canonical, dependency-free
+# definition rather than re-declared here. Two independent literals for one
+# wire protocol drift silently the moment either is edited, and the failure
+# mode is temporal data going to a location the reader disagrees with. The
+# import direction is deliberate and must not be inverted: server -> services
+# only, since the reverse would drag the server/psycopg import chain into the
+# standalone CLI's temporal path (the Bug #1468 import-budget regression).
+from code_indexer.services.temporal.temporal_server_paths import (  # noqa: E402
+    CIDX_SERVER_REFRESH_CONTEXT_ENV,
+)
+
+__all__ = ["CIDX_SERVER_REFRESH_CONTEXT_ENV"]
+
 
 def build_temporal_child_env(
     server_config: Optional[ServerConfig], base_env: Optional[Dict[str, str]] = None
-) -> Optional[Dict[str, str]]:
+) -> Dict[str, str]:
     """Build the env dict for a temporal-indexing child Popen call.
+
+    Story #1457 AC6 Finding-1 (round-23 correction): ALWAYS returns a dict
+    (never None) -- the previous postgres-only-return-else-None shape
+    silently dropped the server-context signal in solo/SQLite server mode,
+    which IS genuinely server-context (not standalone-CLI).
 
     Args:
         server_config: The server's own ServerConfig, or None if unavailable
-            (bootstrap read failed -- treated the same as sqlite mode: no
-            special wiring, child gets the SQLite default).
+            (bootstrap read failed). The server-context flag is still set
+            unconditionally in this case (the function is only ever called
+            from server-side spawn sites); only the postgres-specific
+            bootstrap-dir var is skipped, since storage_mode is unknown.
         base_env: Environment to merge into (copied, never mutated). When
             None, defaults to a copy of the current process's os.environ so
             the child inherits PATH and everything else it needs.
 
     Returns:
-        None when server_config is None or storage_mode != "postgres" (the
-        caller then passes env=None to Popen -- fully unchanged behavior).
-        Otherwise a NEW dict (base_env or os.environ, copied) with
-        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to server_config.server_dir.
-    """
-    if server_config is None or server_config.storage_mode != "postgres":
-        return None
+        A NEW dict (base_env or os.environ, copied) with
+        CIDX_SERVER_REFRESH_CONTEXT set to "1" unconditionally,
+        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to server_config.server_dir
+        additionally when server_config.storage_mode == "postgres".
 
+        Bug #1529: CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED and its
+        fleet-reader-capability gate are GONE, along with the
+        sister-location publish path they governed. Server-context temporal
+        data now goes straight to its fixed root (see
+        services/temporal/temporal_server_paths.py), gated by nothing beyond
+        CIDX_SERVER_REFRESH_CONTEXT itself.
+    """
     merged: Dict[str, str] = (
         dict(base_env) if base_env is not None else dict(os.environ)
     )
-    merged[TEMPORAL_PG_BOOTSTRAP_DIR_ENV] = server_config.server_dir
+    merged[CIDX_SERVER_REFRESH_CONTEXT_ENV] = "1"
+    if server_config is not None and server_config.storage_mode == "postgres":
+        merged[TEMPORAL_PG_BOOTSTRAP_DIR_ENV] = server_config.server_dir
+
     return merged
 
 

@@ -155,7 +155,6 @@ class RipgrepInstaller:
                 format_error_log(
                     "REPO-GENERAL-045",
                     f"Ripgrep binary only available for x86_64, found {platform.machine()}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -218,7 +217,6 @@ class RipgrepInstaller:
                     format_error_log(
                         "REPO-GENERAL-046",
                         "Ripgrep installation verification failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -228,11 +226,6 @@ class RipgrepInstaller:
                 format_error_log(
                     "REPO-GENERAL-047",
                     f"Ripgrep installation failed: {e}",
-                    extra={
-                        "correlation_id": get_correlation_id(),
-                        "error": str(e),
-                        "manual_install_url": f"https://github.com/BurntSushi/ripgrep/releases/tag/{self.RIPGREP_VERSION}",
-                    },
                 )
             )
             return False

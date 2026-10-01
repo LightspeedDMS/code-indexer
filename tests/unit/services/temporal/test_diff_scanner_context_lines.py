@@ -5,7 +5,7 @@ Tests that TemporalDiffScanner accepts and uses the diff_context_lines parameter
 
 from unittest.mock import Mock, patch
 
-from src.code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
+from code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
 
 
 class TestDiffScannerContextLines:

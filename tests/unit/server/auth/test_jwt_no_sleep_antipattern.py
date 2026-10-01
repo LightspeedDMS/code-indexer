@@ -7,7 +7,7 @@ using time.sleep() and handles timestamp precision correctly.
 
 from unittest.mock import patch
 
-from src.code_indexer.server.auth.jwt_manager import JWTManager
+from code_indexer.server.auth.jwt_manager import JWTManager
 
 
 class TestJWTNoSleepAntiPattern:

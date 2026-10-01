@@ -8,7 +8,7 @@ to indicate functionality is not yet implemented.
 from fastapi.testclient import TestClient
 from fastapi import status
 
-from src.code_indexer.server.app import create_app
+from code_indexer.server.app import create_app
 
 
 import pytest

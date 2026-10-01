@@ -12,7 +12,9 @@ from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
 
 from . import _utils
@@ -131,6 +133,9 @@ def _get_wiki_cache_for_handler():
     is called). Returns None when golden_repo_manager is unavailable.
     """
     from code_indexer.server.wiki.wiki_cache import WikiCache
+    from code_indexer.server.utils.registry_factory import (
+        resolve_backend_registry_attr,
+    )
 
     grm = getattr(_utils.app_module, "golden_repo_manager", None)
     if grm is None:
@@ -138,7 +143,13 @@ def _get_wiki_cache_for_handler():
     db_path = getattr(grm, "db_path", None)
     if not db_path:
         return None
-    return WikiCache(db_path)
+    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+    # cluster mode so this handler sees the same store regardless of which
+    # node handles the request.
+    wiki_backend, _ = resolve_backend_registry_attr(
+        "wiki_cache", caller_name="guides._get_wiki_cache_for_handler"
+    )
+    return WikiCache(db_path, storage_backend=wiki_backend)
 
 
 def _wiki_analytics_filter_by_search(
@@ -197,7 +208,13 @@ def _wiki_analytics_build_articles(all_views: list, wiki_alias: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def quick_reference(
+    params: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Any = None,
+) -> Dict[str, Any]:
     """
     Generate quick reference documentation for available MCP tools.
 
@@ -209,14 +226,31 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         Dictionary with tool summaries filtered by category and user permissions
     """
     try:
-        from ..tools import TOOL_REGISTRY
+        from ..tools import TOOL_REGISTRY, tool_passes_config_gate
         from ..tool_doc_loader import _get_tool_doc_loader
+        from ..tool_access import ToolAccessMemo, resolve_effective_user
+
+        if tool_access_memo is None:
+            tool_access_memo = ToolAccessMemo()
+        effective_user = resolve_effective_user(user, session_state)
 
         category_filter = params.get("category")
 
         # Story #987 AC6: 'tool' parameter takes precedence over 'category'
         requested_tool = params.get("tool")
         if requested_tool:
+            decision = tool_access_memo.is_allowed(requested_tool, effective_user)
+            tool_def = TOOL_REGISTRY.get(requested_tool)
+            if decision is False or (
+                decision is None
+                and tool_def is not None
+                and not effective_user.has_permission(
+                    tool_def.get("required_permission", "query_repos")
+                )
+            ):
+                return _mcp_response(
+                    {"success": False, "error": f"Tool '{requested_tool}' not found"}
+                )
             loader = _get_tool_doc_loader()
             body = loader.get_extended_description(requested_tool)
             if body is None:
@@ -235,10 +269,28 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         tools_by_category: Dict[str, list] = {}
         total_tools = 0
 
+        # Story #22 / Bug #1955 item 6: fetched BEFORE the counting loop (moved
+        # up from after it) so total_tools can apply the SAME requires_config
+        # gate filter_tools_by_role (the real tools/list) applies -- otherwise
+        # this count silently disagreed with what tools/list actually serves
+        # whenever a requires_config tool (e.g. Langfuse-gated start_trace/
+        # end_trace) was disabled.
+        config = get_config_service().get_config()
+
         for tool_name, tool_def in TOOL_REGISTRY.items():
             # Check permission
+            decision = tool_access_memo.is_allowed(tool_name, effective_user)
             required_permission = tool_def.get("required_permission", "query_repos")
-            if not user.has_permission(required_permission):
+            if decision is False or (
+                decision is None
+                and not effective_user.has_permission(required_permission)
+            ):
+                continue
+
+            # Bug #1955 item 6: skip a tool whose requires_config condition
+            # (e.g. langfuse_enabled) is not satisfied -- mirrors
+            # filter_tools_by_role exactly (Rule 4, anti-duplication).
+            if not tool_passes_config_gate(tool_def, config):
                 continue
 
             # Get category and tl_dr from frontmatter; fallback for undocumented tools
@@ -264,8 +316,8 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             tools_by_category[tool_category].append({"name": tool_name, "tl_dr": tl_dr})
             total_tools += 1
 
-        # Story #22: Add server identity with a.k.a. line
-        config = get_config_service().get_config()
+        # Story #22: Add server identity with a.k.a. line (config fetched
+        # above, before the counting loop)
         display_name = config.service_display_name or "Neo"
         server_identity = f"This server is CIDX (a.k.a. {display_name})."
 
@@ -390,6 +442,13 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "example_call": "git_stage(repository_alias='my-backend', file_paths=['src/new_file.py'])",
                 "expected_result": "Files staged for commit, ready for git_commit",
             },
+            {
+                "step_number": 10,
+                "title": "Cross-file analysis with X-Ray (analyze_graph)",
+                "description": "search_code() inspects one match at a time; xray_search inspects one file's AST at a time. For a question that spans the WHOLE repository -- dead code, unwired components, layering violations, endpoint-to-sink reachability, blast radius -- use analyze_graph(), the X-Ray graph-mode tool: it builds a real cross-file reference graph (Java/Kotlin) and runs your evaluator over it. See cidx_quick_reference(tool='analyze_graph') for the full contract, templates, and worked examples.",
+                "example_call": "cidx_quick_reference(tool='analyze_graph')",
+                "expected_result": "The full analyze_graph reference, including ready-to-copy evaluator templates for dead-code sweeps, endpoint-to-sink reachability, and cycle detection",
+            },
         ],
         "quick_start_summary": [
             "1. whoami() - Check your permissions",
@@ -401,6 +460,7 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             "7. scip_definition('symbol', 'repo-global') - Find definitions",
             "8. activate_repository('repo-global', 'my-repo') - Enable editing",
             "9. edit_file -> git_stage -> git_commit -> git_push - Make changes",
+            "10. analyze_graph() - X-Ray whole-repository graph analysis (dead code, blast radius, reachability)",
         ],
         "common_errors": [
             {
@@ -433,13 +493,25 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     return _mcp_response({"success": True, "guide": guide})
 
 
-def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_tool_categories(
+    args: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Any = None,
+) -> Dict[str, Any]:
     """Handler for get_tool_categories tool - returns tools organized by category.
 
     Uses ToolDocLoader singleton to build categories from markdown documentation
     files without per-call disk I/O (Story #222 code review Finding 1).
     """
     from ..tool_doc_loader import _get_tool_doc_loader
+    from ..tools import TOOL_REGISTRY
+    from ..tool_access import ToolAccessMemo, resolve_effective_user
+
+    if tool_access_memo is None:
+        tool_access_memo = ToolAccessMemo()
+    effective_user = resolve_effective_user(user, session_state)
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -454,8 +526,18 @@ def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         display_name = category_name.upper()
         category_tools = []
         for tool_info in tools:
+            tool_name = tool_info["name"]
+            decision = tool_access_memo.is_allowed(tool_name, effective_user)
+            tool_def = TOOL_REGISTRY.get(tool_name, {})
+            if decision is False or (
+                decision is None
+                and not effective_user.has_permission(
+                    tool_def.get("required_permission", "query_repos")
+                )
+            ):
+                continue
             # Format as "tool_name - tl_dr description"
-            category_tools.append(f"{tool_info['name']} - {tool_info['tl_dr']}")
+            category_tools.append(f"{tool_name} - {tool_info['tl_dr']}")
             total_tools += 1
         if category_tools:
             categories[display_name] = category_tools
@@ -544,7 +626,6 @@ def handle_start_trace(
             format_error_log(
                 "TRACE-001",
                 f"Error in handle_start_trace: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"status": "error", "message": str(e)})
@@ -624,7 +705,6 @@ def handle_end_trace(
             format_error_log(
                 "TRACE-002",
                 f"Error in handle_end_trace: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"status": "error", "message": str(e)})
@@ -718,7 +798,6 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
             format_error_log(
                 "WIKI-ANALYTICS-001",
                 f"Error in handle_wiki_article_analytics: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})

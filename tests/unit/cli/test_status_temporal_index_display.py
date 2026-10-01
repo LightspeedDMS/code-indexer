@@ -245,13 +245,16 @@ def test_temporal_metadata_extracted_correctly(
 
 @patch("code_indexer.cli.Table")
 @patch("code_indexer.cli.EmbeddingProviderFactory")
-def test_temporal_index_not_shown_when_missing(
+def test_temporal_index_shows_not_configured_when_missing(
     mock_embedding_factory,
     mock_table_class,
     filesystem_config_no_temporal,
     tmp_path,
 ):
-    """Test that temporal index section is NOT shown when temporal collection doesn't exist."""
+    """Test that a 'Not configured' Temporal Index row IS shown when no
+    temporal collection exists (deliberate behavior, cli.py ~8080-8086:
+    "No temporal collections found -- show 'not configured' row"), not
+    that the row is absent."""
     config_manager, config = filesystem_config_no_temporal
 
     # Setup mocks
@@ -296,7 +299,24 @@ def test_temporal_index_not_shown_when_missing(
     # Extract component names (first argument)
     component_names = [call_args[0][0] for call_args in add_row_calls]
 
-    # Verify Temporal Index row NOT added
-    assert "Temporal Index" not in component_names, (
-        f"Temporal Index should NOT be shown when temporal collection doesn't exist, got: {component_names}"
+    # Verify Temporal Index row IS added, with the "not configured" status
+    assert "Temporal Index" in component_names, (
+        f"Temporal Index 'Not configured' row should be shown when no "
+        f"temporal collection exists, got: {component_names}"
+    )
+
+    temporal_row = None
+    for call_args in add_row_calls:
+        if call_args[0][0] == "Temporal Index":
+            temporal_row = call_args[0]
+            break
+
+    assert temporal_row is not None, "Temporal Index row should exist"
+    _, status, details = temporal_row[0], temporal_row[1], temporal_row[2]
+    assert status == "⚪ Not configured", (
+        f"Expected 'Not configured' status when no temporal collection "
+        f"exists, got: {status}"
+    )
+    assert "cidx index --index-commits" in details, (
+        f"Expected guidance to build the temporal index, got: {details}"
     )

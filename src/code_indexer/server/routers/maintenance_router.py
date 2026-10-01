@@ -16,11 +16,18 @@ from code_indexer.server.auth.dependencies import (
     require_localhost,
 )
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.audit_events import SystemComponent
 from code_indexer.server.services.maintenance_service import get_maintenance_state
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin/maintenance", tags=["maintenance"])
+
+# The switch is loopback-only (require_localhost) and driven by the local
+# auto-updater, whose token names no person: rows name the fixed system
+# actor, and record that the request came over loopback.
+_MAINTENANCE_ACTOR = SystemComponent.LOCALHOST_MAINTENANCE
+_LOOPBACK = "loopback"
 
 
 @router.post("/enter")
@@ -37,7 +44,9 @@ def enter_maintenance_mode(
         Dict with maintenance_mode, running_jobs, queued_jobs, message
     """
     state = get_maintenance_state()
-    result = state.enter_maintenance_mode()
+    result = state.enter_maintenance_mode_audited(
+        actor=_MAINTENANCE_ACTOR, origin=_LOOPBACK
+    )
     logger.info(f"Maintenance mode entered: {result}")
     return dict(result)
 
@@ -55,7 +64,9 @@ def exit_maintenance_mode(
         Dict with maintenance_mode, message
     """
     state = get_maintenance_state()
-    result = state.exit_maintenance_mode()
+    result = state.exit_maintenance_mode_audited(
+        actor=_MAINTENANCE_ACTOR, origin=_LOOPBACK
+    )
     logger.info(f"Maintenance mode exited: {result}")
     return dict(result)
 

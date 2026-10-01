@@ -10,17 +10,19 @@ See HighThroughputProcessor for file progress patterns (total>0).
 from __future__ import annotations
 
 import logging
+import os
 import time
 import datetime
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, TYPE_CHECKING
+from typing import List, Dict, Any, FrozenSet, Optional, Callable, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 
 from ..config import Config, VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
 from ..services.embedding_provider import EmbeddingProvider
 from ..indexing.processor import ProcessingStats
 from .progressive_metadata import ProgressiveMetadata
+from .resume_state_seal import load_or_create_resume_seal_key
 from .git_topology_service import GitTopologyService
 
 # Removed: SmartBranchIndexer (abandoned code)
@@ -29,6 +31,8 @@ from .indexing_lock import IndexingLockError, create_indexing_lock
 from .high_throughput_processor import HighThroughputProcessor
 from .git_hook_manager import GitHookManager
 from ..utils.enhanced_messaging import OperationType, create_enhanced_callback
+from ..utils.path_confinement import resolve_if_within_root
+from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
 
 # CRITICAL: Lazy import for FTS - only load when --fts flag used
 # This prevents Tantivy from loading on every cidx command (including --help)
@@ -176,6 +180,29 @@ class SmartIndexer(HighThroughputProcessor):
                     continue
 
                 status = parts[0]
+
+                # Codex round-6 MEDIUM finding (Bug #1467 follow-up):
+                # classify a RENAME record's old and new paths
+                # INDEPENDENTLY, before the common exclude-filter check
+                # below -- never after. parts[1] for a rename is the OLD
+                # path; applying the common filter to it FIRST would
+                # `continue` past the whole line (dropping new_path too)
+                # whenever the old path happens to be excluded, even if
+                # the new path is genuinely included and should be
+                # indexed as new.
+                if status.startswith("R"):
+                    # Renamed file: R100\told_path\tnew_path
+                    if len(parts) >= 3:
+                        old_path = parts[1]
+                        new_path = parts[2]
+                        renamed.append((old_path, new_path))
+                        # Treat rename as delete old + add new for indexing
+                        if self._should_index_file(old_path):
+                            deleted.append(old_path)
+                        if self._should_index_file(new_path):
+                            added.append(new_path)
+                    continue
+
                 file_path = parts[1]
 
                 # Filter files based on our indexing criteria
@@ -188,17 +215,6 @@ class SmartIndexer(HighThroughputProcessor):
                     modified.append(file_path)
                 elif status == "D":
                     deleted.append(file_path)
-                elif status.startswith("R"):
-                    # Renamed file: R100\told_path\tnew_path
-                    if len(parts) >= 3:
-                        old_path = parts[1]
-                        new_path = parts[2]
-                        renamed.append((old_path, new_path))
-                        # Treat rename as delete old + add new for indexing
-                        if self._should_index_file(old_path):
-                            deleted.append(old_path)
-                        if self._should_index_file(new_path):
-                            added.append(new_path)
 
             logger.info(
                 f"Git delta: +{len(added)} ~{len(modified)} -{len(deleted)} R{len(renamed)}"
@@ -216,19 +232,60 @@ class SmartIndexer(HighThroughputProcessor):
         try:
             path = Path(file_path)
 
+            base_result = True
+
             # Check file extension (lstrip dot: .java -> java to match config format)
             if path.suffix.lower().lstrip(".") not in self.config.file_extensions:
-                return False
+                base_result = False
 
             # Check exclude patterns using path component boundaries
             # (not substring: "build" must match "build/" dir, not "builder/")
-            parts = Path(file_path).parts
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in parts:
-                    return False
+            if base_result:
+                parts = Path(file_path).parts
+                for exclude_dir in self.config.exclude_dirs:
+                    if exclude_dir in parts:
+                        base_result = False
+                        break
 
-            return True
-        except Exception:
+            # Bug #1467: also apply the canonical FileFinder exclude_spec
+            # (e.g. .code-indexer-override.yaml and other generated
+            # config artifacts). This git-diff-based incremental
+            # discovery path previously reimplemented only the
+            # extension/exclude_dirs subset of file_finder.py's
+            # filtering, silently diverging from the first (full-walk)
+            # index run's scope -- letting a generated artifact slip
+            # through as a real "changed file" once committed to git.
+            # Pure string matching, safe for deleted files too (no
+            # filesystem access, unlike file_finder's other checks).
+            if base_result and self.file_finder.matches_exclude_pattern(file_path):
+                base_result = False
+
+            # Codex Finding #10 (MEDIUM): apply the SAME force-include/
+            # force-exclude override parity full discovery
+            # (file_finder.py's _should_include_file) already has, reusing
+            # the SAME OverrideFilterService instance rather than
+            # reimplementing its pattern logic -- without this, a file
+            # matching .code-indexer-override.yaml's force_include_patterns
+            # is correctly indexed on the first (full-walk) run but
+            # silently rejected once committed and picked up incrementally.
+            override_filter_service = getattr(
+                self.file_finder, "override_filter_service", None
+            )
+            if override_filter_service is not None:
+                return bool(
+                    override_filter_service.should_include_file(path, base_result)
+                )
+
+            return base_result
+        except Exception as exc:
+            # Fail-soft is intentional here: a single malformed git-diff
+            # path must not abort the whole delta computation loop. The
+            # exception is logged (not silently swallowed) so a genuine
+            # filtering bug remains diagnosable.
+            logger.debug(
+                f"_should_index_file: treating '{file_path}' as not-indexed "
+                f"after unexpected error: {exc}"
+            )
             return False
 
     def _delete_files_from_backend(
@@ -286,6 +343,7 @@ class SmartIndexer(HighThroughputProcessor):
         vector_thread_count: Optional[int] = None,
         detect_deletions: bool = False,
         enable_fts: bool = False,
+        trust_resume_state: bool = True,
     ) -> ProcessingStats:
         """
         Smart indexing that automatically chooses between full and incremental indexing.
@@ -301,6 +359,16 @@ class SmartIndexer(HighThroughputProcessor):
             vector_thread_count: Number of threads for vector calculation
             detect_deletions: Detect and handle files deleted from filesystem but still in database
             enable_fts: Build full-text search index alongside semantic index
+            trust_resume_state: When False (server-spawned indexing), the
+                repository-stored resume metadata is trusted ONLY when it
+                carries a valid server-held seal, i.e. it was written by a
+                previous server-context run (see resume_state_seal.py);
+                every save of this run is sealed so an interruption can be
+                resumed. State without a valid server seal never drives
+                the resume branch, and its stored file lists are discarded;
+                an interrupted operation then completes via a reconcile.
+                Deliberately not force_full/--clear (avoids a full
+                re-embed). Default True preserves the local CLI behavior.
 
         Returns:
             ProcessingStats with operation results
@@ -330,6 +398,13 @@ class SmartIndexer(HighThroughputProcessor):
         create_new_fts: bool = False
 
         try:
+            # Server context: trust stored resume state only when the server
+            # itself sealed it, and seal every save of this run. Done before
+            # anything else touches the metadata.
+            resume_state_trusted = trust_resume_state or (
+                self._enable_server_resume_seal()
+            )
+
             # Get current git status
             git_status = self.get_git_status()
             provider_name = self.embedding_provider.get_provider_name()
@@ -350,10 +425,84 @@ class SmartIndexer(HighThroughputProcessor):
                     # FTS uses meta.json as the marker file for existing indexes
                     fts_index_exists = (fts_index_dir / "meta.json").exists()
 
-                    # Only force full rebuild if forcing full reindex or index doesn't exist
-                    create_new_fts = force_full or not fts_index_exists
+                    # Bug #1763: an existing index built before Bug #1761
+                    # introduced _PATH_EXACT_FIELD lacks that field forever
+                    # unless forced through a one-time rebuild -- #1761's
+                    # dedup fix is a safe no-op on such a stale-schema
+                    # index, so duplicates would silently keep
+                    # accumulating on every already-indexed repo. Detect +
+                    # self-heal automatically (no new setting).
+                    fts_schema_stale = fts_index_exists and (
+                        fts_manager.schema_needs_rebuild()
+                    )
+                    if fts_schema_stale:
+                        # Tantivy refuses to build the new schema in place
+                        # over an on-disk index whose physical schema
+                        # differs ("Schema error: An index exists but the
+                        # schema does not match.") -- the directory must
+                        # be cleared first, same pattern already used by
+                        # cli.py's rebuild-fts command and the daemon's
+                        # exposed_rebuild_fts_index() before any
+                        # create_new=True call.
+                        import shutil
+
+                        logger.info(
+                            f"FTS index at {fts_index_dir} has a stale "
+                            f"pre-#1761 schema -- clearing for a one-time "
+                            f"rebuild so the dedup fix takes effect"
+                        )
+
+                        try:
+                            shutil.rmtree(fts_index_dir)
+                        except OSError as e:
+                            # MEDIUM-4 (#1763 code review): a partial
+                            # rmtree (disk full, EACCES mid-delete) can
+                            # leave the index directory in a half-deleted
+                            # state. Log this distinctly and loudly
+                            # (ERROR, with the specific "rebuild step
+                            # itself failed" framing) before re-raising,
+                            # so this is distinguishable in logs from an
+                            # unrelated FTS setup failure caught by the
+                            # generic handler below -- that handler still
+                            # degrades gracefully (fts_manager=None), this
+                            # just makes the half-deleted-state risk loud.
+                            logger.error(
+                                f"FTS stale-schema rebuild failed while "
+                                f"clearing {fts_index_dir} -- the index "
+                                f"directory may be left in a "
+                                f"partially-deleted state: {e}"
+                            )
+                            raise
+
+                    # Only force full rebuild if forcing full reindex,
+                    # index doesn't exist, or the existing index's
+                    # physical schema is stale (Bug #1763).
+                    create_new_fts = (
+                        force_full or not fts_index_exists or fts_schema_stale
+                    )
 
                     fts_manager.initialize_index(create_new=create_new_fts)
+
+                    # CRITICAL-1 (#1763 code review): a stale-schema or
+                    # brand-new FTS index was just wiped/created empty
+                    # above. _do_incremental_index()/_do_resume_interrupted()
+                    # (the paths a normal `cidx index` run with a
+                    # non-empty changed-files set takes) only re-add the
+                    # CHANGED subset of files to fts_manager -- so without
+                    # this, every untouched file's FTS entries would be
+                    # gone forever, not just re-added later. Repopulate
+                    # eagerly, right here, from every file on disk,
+                    # BEFORE any changed-files-only processing runs;
+                    # per-file supersession (delete_document_deferred()
+                    # then add_document(), file_chunking_manager.py) makes
+                    # re-adding the same changed files afterward safe --
+                    # no duplicate rows. Skipped for force_full: that path
+                    # already walks every file itself via _do_full_index()
+                    # and would otherwise pay this cost twice.
+                    if create_new_fts and not force_full:
+                        self._populate_fts_from_all_files(
+                            fts_manager, progress_callback
+                        )
 
                     if progress_callback:
                         if create_new_fts:
@@ -464,7 +613,7 @@ class SmartIndexer(HighThroughputProcessor):
                         # Update progressive metadata with new git status
                         updated_git_status = git_status.copy()
                         updated_git_status["current_branch"] = current_branch
-                        self.progressive_metadata.start_indexing(
+                        self.progressive_metadata.start_fresh_indexing(
                             provider_name, model_name, updated_git_status
                         )
 
@@ -493,9 +642,39 @@ class SmartIndexer(HighThroughputProcessor):
                             f"Original error: {e}"
                         ) from e
 
+            # Bug #1969 Round 6 (P1-4): a corrupt/unreadable self-heal-
+            # reprocess sidecar means its replay record is lost -- rather
+            # than silently trusting normal incremental/resume file
+            # selection (which has no way to know what a lost sidecar
+            # might have listed), force THIS run into reconcile-with-
+            # database mode: a complete superset of whatever the corrupt
+            # sidecar could have listed, since a self-heal-wiped file has
+            # zero points regardless of whether the sidecar remembers it.
+            if not force_full and not reconcile_with_database:
+                _p14_collection_name = self.vector_store_client.resolve_collection_name(
+                    self.config, self.embedding_provider
+                )
+                if self.vector_store_client.collection_exists(
+                    _p14_collection_name
+                ) and self.vector_store_client.is_self_heal_reprocess_sidecar_corrupt(
+                    _p14_collection_name
+                ):
+                    logger.error(
+                        "Bug #1969 Round 6 (P1-4): the self-heal-reprocess "
+                        "sidecar for collection %r is corrupt/unreadable -- "
+                        "its replay record is lost, so this run is forced "
+                        "into reconcile-with-database mode (a complete "
+                        "superset: any file with zero points is detected as "
+                        "missing and reindexed) instead of trusting normal "
+                        "incremental/resume file selection.",
+                        _p14_collection_name,
+                    )
+                    reconcile_with_database = True
+
             # Check for interrupted operations first - highest priority (unless forcing full)
             if (
                 not force_full
+                and resume_state_trusted
                 and self.progressive_metadata.can_resume_interrupted_operation()
             ):
                 # NOTE: The "Resuming interrupted operation" progress message is
@@ -514,8 +693,36 @@ class SmartIndexer(HighThroughputProcessor):
                     fts_manager,
                 )
 
-            # Check for reconcile operation
-            if reconcile_with_database:
+            # Untrusted (unsealed) resume state after a genuinely
+            # interrupted operation must not stall forever (mtime scan
+            # compares against an already-advanced last_index_timestamp).
+            # Fall back to a fresh disk-vs-database reconcile instead.
+            #
+            # `not force_full` is REQUIRED here. force_full=True (--clear)
+            # must always fall straight through to the force_full branch
+            # below (progressive_metadata.clear() + _do_full_index(), which
+            # actually calls vector_store_client.clear_collection()) --
+            # never be silently downgraded to this reconcile fallback,
+            # which only diffs disk-vs-database and can decide there is
+            # nothing to do at all, defeating --clear's contract of
+            # clearing old content.
+            #
+            # Checking status alone is sufficient: can_resume_interrupted_
+            # operation() requires status in ("in_progress", "failed") as
+            # part of its own definition, so it can never be true while the
+            # status check below is false -- an explicit
+            # `can_resume_interrupted_operation() or` here would be
+            # redundant.
+            if (
+                not resume_state_trusted
+                and not force_full
+                and self.progressive_metadata.metadata.get("status")
+                in ("in_progress", "failed")
+            ):
+                logger.info(
+                    "Stored resume state is not server-sealed; completing the "
+                    "interrupted operation with a reconcile instead of resuming."
+                )
                 return self._do_reconcile_with_database(
                     batch_size,
                     progress_callback,
@@ -525,7 +732,49 @@ class SmartIndexer(HighThroughputProcessor):
                     files_count_to_process,
                     quiet,
                     vector_thread_count,
+                    fts_manager,
                 )
+
+            # Check for reconcile operation
+            if reconcile_with_database:
+                reconcile_stats = self._do_reconcile_with_database(
+                    batch_size,
+                    progress_callback,
+                    git_status,
+                    provider_name,
+                    model_name,
+                    files_count_to_process,
+                    quiet,
+                    vector_thread_count,
+                    fts_manager,
+                )
+                # Bug #1969 Round 6 (P1-4): only after the reconcile
+                # completes SUCCESSFULLY (not cancelled) is it safe to
+                # quarantine a corrupt sidecar -- covers both this run
+                # being FORCED into reconcile mode above, and an
+                # explicit user-run `--reconcile` that happens to also
+                # see a corrupt sidecar sitting there for an unrelated
+                # reason.
+                if not reconcile_stats.cancelled:
+                    _p14_collection_name = (
+                        self.vector_store_client.resolve_collection_name(
+                            self.config, self.embedding_provider
+                        )
+                    )
+                    if self.vector_store_client.is_self_heal_reprocess_sidecar_corrupt(
+                        _p14_collection_name
+                    ):
+                        quarantine_path = self.vector_store_client.quarantine_corrupt_self_heal_reprocess_sidecar(
+                            _p14_collection_name
+                        )
+                        logger.warning(
+                            "Bug #1969 Round 6 (P1-4): quarantined corrupt "
+                            "self-heal-reprocess sidecar for collection %r "
+                            "after a successful reconcile -> %s",
+                            _p14_collection_name,
+                            quarantine_path,
+                        )
+                return reconcile_stats
 
             # Handle deletion detection for standard indexing (when not doing reconcile)
             # PERFORMANCE FIX (Bug 3): Skip deletion detection for git-aware projects
@@ -594,7 +843,7 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
-                create_new_fts,
+                trust_resume_state=resume_state_trusted,
             )
 
         except KeyboardInterrupt:
@@ -637,6 +886,344 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Always release the lock, even on exception
             indexing_lock.release()
+
+    def _clear_current_provider_multimodal_collection(self, provider_name: str) -> None:
+        """Bug #1979 P1: a `--clear` full run must clear THIS run's
+        provider's multimodal collection too, or a removed image's stale
+        point (and the collection's pre-clear layout) survives what the
+        maintainer defines as "indexing from scratch". Only the CURRENT
+        provider's fixed-name collection is cleared -- never both
+        unconditionally -- because a multi-provider `cidx index` run
+        constructs and runs one SmartIndexer per provider sequentially
+        (cli.py's `--extra-provider` loop); clearing every multimodal
+        collection here would wipe out a provider that already finished
+        its own full-index pass earlier in the same run."""
+        multimodal_collection = {
+            "voyage-ai": VOYAGE_MULTIMODAL_MODEL,
+            "cohere": COHERE_MULTIMODAL_MODEL,
+        }.get(provider_name)
+        if multimodal_collection and self.vector_store_client.collection_exists(
+            multimodal_collection
+        ):
+            if not self.vector_store_client.clear_collection(multimodal_collection):
+                raise RuntimeError(
+                    f"Failed to clear existing multimodal collection '{multimodal_collection}'"
+                )
+
+    def _abort_multimodal_collections(self) -> None:
+        """Bug #1746 Change 3: abort_indexing() for every existing
+        multimodal collection (discard, mirrors the finalize-side loop)."""
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                self.vector_store_client.abort_indexing(multimodal_collection)
+
+    def _finalize_multimodal_collections(
+        self, progress_callback: Optional[Callable]
+    ) -> None:
+        """Pre-existing multimodal end_indexing loop, extracted unchanged."""
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete "
+                    f"({multimodal_collection}): "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
+
+    def _finalize_or_abort_indexing_session(
+        self,
+        collection_name: str,
+        fatal_chunk_store_error: Optional[BaseException],
+        progress_callback: Optional[Callable],
+        log_prefix: str = "Index",
+    ) -> None:
+        """Bug #1746 Change 3: abort_indexing() on a fatal chunk-store
+        failure instead of end_indexing() -- no watermark advance for a
+        run that never actually indexed the repository."""
+        if fatal_chunk_store_error is not None:
+            logger.error(
+                f"{log_prefix}: fatal chunk-store failure -- aborting "
+                f"instead of finalizing: {fatal_chunk_store_error}"
+            )
+            self.vector_store_client.abort_indexing(collection_name)
+            self._abort_multimodal_collections()
+            return
+
+        if progress_callback:
+            progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
+        end_result = self.vector_store_client.end_indexing(
+            collection_name, progress_callback
+        )
+        logger.info(
+            f"{log_prefix} finalization complete: "
+            f"{end_result.get('vectors_indexed', 0)} vectors indexed"
+        )
+        self._finalize_multimodal_collections(progress_callback)
+
+    def _fold_in_pending_self_heal_paths(
+        self, collection_name: str, files: List[Path]
+    ) -> Tuple[FrozenSet[str], List[Path]]:
+        """Bug #1969 Round 5 (R4-F1): consult the DURABLE self-heal
+        reprocess sidecar (recorded by ``recover_from_corrupt_id_index_
+        by_wiping_files()`` itself, the single choke point EVERY self-heal
+        call site -- ``upsert_points``, ``end_indexing``, ``scroll_points``
+        -- funnels through, in THIS run or a PRIOR one) and merge any
+        pending relative path not already in `files` and still present on
+        disk into the file list BEFORE this strategy's own "anything to
+        do?" check.
+
+        This is what makes even a "plain rerun" with zero git/mtime
+        changes still reprocess a file a PAST run's self-heal wiped: the
+        durable record survives the process boundary Round 4's in-memory
+        queue could not.
+
+        Returns:
+            ``(pending_paths_consulted, merged_files)`` -- the full
+            pending set (for the caller to clear once this run completes
+            successfully) and the possibly-larger file list to process.
+        """
+        pending = self.vector_store_client.get_pending_self_heal_reprocess_paths(
+            collection_name
+        )
+        if not pending:
+            return frozenset(), files
+        codebase = Path(self.config.codebase_dir)
+        covered = {str(f) for f in files}
+        merged = list(files)
+        for rel_path in pending:
+            abs_path = codebase / rel_path
+            if str(abs_path) in covered:
+                continue
+            if not abs_path.exists():
+                continue
+            merged.append(abs_path)
+            covered.add(str(abs_path))
+        return pending, merged
+
+    def _reprocess_newly_pending_self_heal_paths(
+        self,
+        collection_name: str,
+        already_covered_files: List[Path],
+        stats: ProcessingStats,
+        vector_thread_count: int,
+        progress_callback: Optional[Callable],
+        fts_manager: Optional[TantivyIndexManager],
+    ) -> Tuple[ProcessingStats, FrozenSet[str]]:
+        """Bug #1969 Round 5 (R4-F1): consult the durable sidecar AGAIN,
+        AFTER this run's own primary processing pass -- catches a wipe
+        that fired DURING that pass itself (the exact Round-4-confirmed
+        same-run scenario: a corrupt ``id_index.bin`` + a dormant
+        duplicate on an UNRELATED file gets discovered only while
+        processing THIS run's own selected files), which
+        ``_fold_in_pending_self_heal_paths`` could not have known about
+        before the pass ran.
+
+        For every pending relative path not already covered and still on
+        disk, runs a second ``process_files_high_throughput`` pass in
+        THIS SAME run, merging its stats into the caller's.
+
+        Bug #1969 Round 5 (R4-F3): propagates a `cancelled` reprocess
+        pass into `stats.cancelled` -- a cancelled reprocess must not let
+        the caller treat the run as cleanly completed (which would
+        otherwise clear the sidecar for a wipe that was never actually
+        resolved).
+
+        Returns:
+            ``(stats, pending_paths_consulted)``.
+        """
+        pending = self.vector_store_client.get_pending_self_heal_reprocess_paths(
+            collection_name
+        )
+        if not pending:
+            return stats, frozenset()
+
+        codebase = Path(self.config.codebase_dir)
+        covered = {str(f) for f in already_covered_files}
+        reprocess_files: List[Path] = []
+        for rel_path in pending:
+            abs_path = codebase / rel_path
+            if str(abs_path) in covered or not abs_path.exists():
+                continue
+            reprocess_files.append(abs_path)
+
+        if reprocess_files:
+            logger.warning(
+                "Bug #1969 Round 5: self-heal wiped %d file(s) this run's "
+                "primary pass did not select -- reprocessing them now so "
+                "their content does not become silently unsearchable: %s",
+                len(reprocess_files),
+                [str(f) for f in reprocess_files],
+            )
+            if progress_callback:
+                progress_callback(
+                    0,
+                    0,
+                    Path(""),
+                    info=(
+                        f"🔧 Reprocessing {len(reprocess_files)} file(s) "
+                        f"whose index was self-healed this run..."
+                    ),
+                )
+            reprocess_stats = self.process_files_high_throughput(
+                files=reprocess_files,
+                vector_thread_count=vector_thread_count,
+                batch_size=50,
+                progress_callback=progress_callback,
+                fts_manager=fts_manager,
+            )
+            stats.files_processed += reprocess_stats.files_processed
+            stats.chunks_created += reprocess_stats.chunks_created
+            stats.failed_files += reprocess_stats.failed_files
+            # Bug #1969 Round 6 (P1-3): merge the second pass's per-path
+            # failure attribution too (a set UNION of both passes' failed
+            # paths), not just its aggregate count -- otherwise the
+            # combined stats always look "unattributed" to
+            # _clear_self_heal_reprocess_paths_if_safe's consistency
+            # check, forcing it to (safely, but wrongly) retain every
+            # pending path instead of clearing the one that genuinely
+            # succeeded.
+            stats.failed_paths = stats.failed_paths | reprocess_stats.failed_paths
+            stats.total_size += reprocess_stats.total_size
+            stats.cancelled = stats.cancelled or reprocess_stats.cancelled
+
+        return stats, pending
+
+    def _self_heal_path_has_points(self, collection_name: str, rel_path: str) -> bool:
+        """Bug #1969 Round 6 (P1-3): true if `rel_path` currently has at
+        least one point in the collection -- used to verify a
+        self-heal-pending path was ACTUALLY successfully reprocessed
+        before clearing its durable replay record, rather than trusting
+        the run's aggregate `stats.failed_files` count (which cannot say
+        WHICH path failed). Tries both the relative form (the sidecar's
+        own representation) and the absolute form (Bug #1575 AC6: a
+        stored `payload.path` may be absolute) since either can be the
+        on-disk representation. Fails SAFE: any error while checking is
+        treated as "not yet resolved" -- never silently clears on doubt.
+        """
+        candidates = [rel_path, str(Path(self.config.codebase_dir) / rel_path)]
+        try:
+            for candidate in candidates:
+                points, _ = self.vector_store_client.scroll_points(
+                    collection_name=collection_name,
+                    filter_conditions={
+                        "must": [{"key": "path", "match": {"value": candidate}}]
+                    },
+                    limit=1,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                if points:
+                    return True
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): failed to verify reprocessed "
+                "state for %r (%s) -- treating as still pending.",
+                rel_path,
+                exc,
+            )
+            return False
+
+    def _clear_self_heal_reprocess_paths_if_safe(
+        self,
+        collection_name: str,
+        pending_paths: FrozenSet[str],
+        stats: ProcessingStats,
+    ) -> None:
+        """Bug #1969 Round 5 (R4-F3) / Round 6 (P1-3): clear the durable
+        sidecar entries this run consulted -- but ONLY when the run
+        completed without being cancelled, AND only PER-PATH: a path is
+        cleared only when it now actually has points again (verified via
+        ``_self_heal_path_has_points``), never just because the run's
+        aggregate ``stats.failed_files`` happened to be zero or because
+        SOME OTHER unrelated path in the same run failed.
+
+        A cancelled run must NOT mark ANY wipe as resolved: the durable
+        record stays intact for every consulted path, exactly the
+        crash-safety property the sidecar exists for.
+
+        A path that still has zero points (its own reprocess attempt
+        genuinely failed, or was never attempted) stays durably recorded
+        -- it gets re-attempted once per future run (a WARNING is logged
+        here, and the sidecar itself is only ever appended/removed, never
+        looped over from this method) rather than being lost or causing
+        an unbounded retry loop.
+
+        (P1-3 review, Codex counter-example) A self-heal wipe records the
+        sidecar entry BEFORE deleting the old (pre-wipe) points -- a
+        crash, or this run's own failure, can leave those stale points in
+        place, never genuinely replaced. "Has points" alone cannot
+        distinguish a fresh success from that leftover, and an AGGREGATE
+        failure count cannot either: two pending paths, one with a stale
+        leftover point and one that genuinely succeeded with zero chunks,
+        produce the exact same (still-pending count, failed_files) pair
+        as one pending path that failed and one that succeeded --
+        opposite correct outcomes from identical aggregate evidence. Only
+        `stats.failed_paths` (Bug #1969 Round 6 P1-3, per-file failure
+        attribution from the real processing loop) can break that tie: a
+        pending path is trusted as resolved via "has points" ONLY when
+        it is NOT in `stats.failed_paths` AND `stats.failed_paths`
+        itself accounts for every reported failure
+        (`len(stats.failed_paths) >= stats.failed_files`). If some
+        failure has no attributed path at all (a rare internal executor
+        error, or a hand-built `ProcessingStats` in a test), nothing is
+        trusted as resolved this call -- fail safe.
+        """
+        if not pending_paths:
+            return
+        if stats.cancelled:
+            logger.warning(
+                "Bug #1969 Round 5 (R4-F3): this run was cancelled -- "
+                "leaving %d self-heal-pending path(s) durably recorded "
+                "for a future run: %s",
+                len(pending_paths),
+                sorted(pending_paths),
+            )
+            return
+
+        if len(stats.failed_paths) < stats.failed_files:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): this run reported %d failed "
+                "file(s) but only %d are attributed to a specific path -- "
+                "cannot confirm which self-heal-pending path(s) genuinely "
+                "failed, so none are cleared this run: %s",
+                stats.failed_files,
+                len(stats.failed_paths),
+                sorted(pending_paths),
+            )
+            return
+
+        resolved = {
+            rel_path
+            for rel_path in pending_paths
+            if rel_path not in stats.failed_paths
+            and self._self_heal_path_has_points(collection_name, rel_path)
+        }
+        still_pending = pending_paths - resolved
+
+        if still_pending:
+            logger.warning(
+                "Bug #1969 Round 6 (P1-3): %d self-heal-pending path(s) "
+                "were not confirmed reprocessed this run (failed_files=%d) "
+                "-- leaving them durably recorded for a future attempt: "
+                "%s",
+                len(still_pending),
+                stats.failed_files,
+                sorted(still_pending),
+            )
+
+        if resolved:
+            self.vector_store_client.clear_self_heal_reprocess_paths(
+                collection_name, resolved
+            )
 
     def _do_full_index(
         self,
@@ -688,7 +1275,20 @@ class SmartIndexer(HighThroughputProcessor):
             enhanced_callback = None
 
         # Clear collection - enhanced callback will provide clear, non-duplicate messaging
-        self.vector_store_client.clear_collection(collection_name)
+        # Bug #1979 P1 (round 5): clear=true is "index from scratch" -- a
+        # failed clear of the TEXT collection must abort the run exactly
+        # like a failed multimodal-collection clear already does below,
+        # instead of silently leaving stale rows in place while indexing
+        # proceeds and later reports success.
+        if not self.vector_store_client.clear_collection(collection_name):
+            raise RuntimeError(
+                f"Failed to clear existing collection '{collection_name}'"
+            )
+        # Bug #1979 P1: clear=true is "index from scratch" -- this
+        # provider's multimodal collection must not survive with stale
+        # points/layout just because only the TEXT collection was cleared
+        # above.
+        self._clear_current_provider_multimodal_collection(provider_name)
         if enhanced_callback and points_before_clear > 0:
             enhanced_callback(
                 0,
@@ -713,7 +1313,9 @@ class SmartIndexer(HighThroughputProcessor):
         # NOTE: progressive_metadata.clear() is now called earlier in smart_index() when force_full=True
 
         # Start indexing
-        self.progressive_metadata.start_indexing(provider_name, model_name, git_status)
+        self.progressive_metadata.start_fresh_indexing(
+            provider_name, model_name, git_status
+        )
 
         # Find all files
         if progress_callback:
@@ -768,6 +1370,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.vector_store_client.begin_indexing(collection_name)
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Convert absolute paths to relative paths for BranchAwareIndexer
             relative_files = []
@@ -854,38 +1457,28 @@ class SmartIndexer(HighThroughputProcessor):
 
         except Exception as e:
             logger.error(f"High-throughput processor failed during full index: {e}")
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate the fatal error UNWRAPPED
+                # (not folded into the generic RuntimeError below) so the
+                # finally block aborts instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware indexing failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception -- this ensures FilesystemVectorStore rebuilds
+            # HNSW/ID indexes on success, or discards the in-memory
+            # session on a fatal chunk-store failure (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -936,12 +1529,17 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
-        create_new_fts: bool = False,
+        trust_resume_state: bool = True,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
         # 🔧 FIX: Check for interrupted operation first (before timestamp check)
-        if self.progressive_metadata.can_resume_interrupted_operation():
+        # trust_resume_state=False must skip this
+        # branch too (defense in depth alongside smart_index()'s gate).
+        if (
+            trust_resume_state
+            and self.progressive_metadata.can_resume_interrupted_operation()
+        ):
             if progress_callback:
                 # Get preview stats for feedback
                 metadata_stats = self.progressive_metadata.get_stats()
@@ -990,11 +1588,6 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
             )
 
-        # Ensure provider-aware collection exists for incremental indexing
-        self.vector_store_client.ensure_provider_aware_collection(
-            self.config, self.embedding_provider, quiet
-        )
-
         # NOTE: start_indexing() moved to after work determination to fix idempotency bug
 
         # DUAL-TRACK APPROACH: Git log + filesystem timestamps
@@ -1027,6 +1620,9 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # Handle deletions FIRST (critical for git pull scenarios)
                 if git_delta.deleted:
+                    self.vector_store_client.ensure_provider_aware_collection(
+                        self.config, self.embedding_provider, quiet
+                    )
                     collection_name = self.vector_store_client.resolve_collection_name(
                         self.config, self.embedding_provider
                     )
@@ -1056,17 +1652,50 @@ class SmartIndexer(HighThroughputProcessor):
         # TRACK 2: Filesystem timestamp for uncommitted changes
         working_dir_files = list(self.file_finder.find_modified_files(resume_timestamp))
 
-        # Combine both tracks, removing duplicates
-        all_files_to_index = list(
-            set([str(f) for f in committed_files] + [str(f) for f in working_dir_files])
-        )
-
-        # Convert to Path objects, ensuring absolute paths
+        # Combine both tracks, de-duplicating on the absolutized path.
+        # committed_files (Track 1, git delta) are REPO-RELATIVE strings;
+        # working_dir_files (Track 2, mtime scan) are already ABSOLUTE.
+        # Absolutize every entry FIRST, then de-duplicate -- otherwise the
+        # same physical file reported by both tracks in two different
+        # string formats (e.g. "src/a.py" vs "/repo/src/a.py") survives as
+        # two distinct set members and gets indexed twice (Bug #1574).
+        # NOTE: deliberately NOT calling .resolve() here -- both tracks
+        # already share the same codebase_dir prefix, so plain
+        # absolutization (prefixing with codebase_dir) is sufficient to
+        # unify them. Calling .resolve() would follow symlinks and could
+        # break the downstream relative_to(codebase_dir) computation if
+        # codebase_dir itself is a symlinked path.
         codebase = Path(self.config.codebase_dir)
-        files_to_index = [
+        unique_files_to_index = {
             codebase / f if not Path(f).is_absolute() else Path(f)
-            for f in all_files_to_index
-        ]
+            for f in [str(f) for f in committed_files]
+            + [str(f) for f in working_dir_files]
+        }
+        # committed_files (Track 1, git delta) entries are repo-relative
+        # strings taken from git diff output; _should_index_file only
+        # applies string-only eligibility filtering (extension/exclude),
+        # never containment. Reject any entry whose resolved location is
+        # not inside the codebase root before it is treated as work to do.
+        files_to_index = self._filter_paths_within_codebase_root(unique_files_to_index)
+
+        # Bug #1969 Round 5 (R4-F1): fold in any DURABLY pending self-heal
+        # reprocess paths (from THIS collection's sidecar, recorded by
+        # recover_from_corrupt_id_index_by_wiping_files() itself -- covers
+        # every trigger site, in this run or a past one) BEFORE the
+        # "nothing to do" check below, so even a plain rerun with zero
+        # git/mtime changes still reprocesses a file a past wipe left
+        # behind instead of early-returning as "up to date".
+        _self_heal_collection_name = self.vector_store_client.resolve_collection_name(
+            self.config, self.embedding_provider
+        )
+        pending_self_heal_before, files_to_index = (
+            self._fold_in_pending_self_heal_paths(
+                _self_heal_collection_name, files_to_index
+            )
+        )
+        # Files the previous run could not index are retried even when
+        # nothing changed since, so they never stay missing from the index.
+        retried_failures, files_to_index = self._merge_recorded_failures(files_to_index)
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK: Detect corrupted state before marking as completed
@@ -1110,17 +1739,30 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.update_commit_watermark(
                     current_branch, current_commit
                 )
-            # FTS bootstrap: if brand-new FTS index requested but nothing to embed,
-            # still build FTS from all files on disk.
-            if fts_manager is not None and create_new_fts:
-                self._populate_fts_from_all_files(fts_manager, progress_callback)
+            # FTS bootstrap: NOTE, #1763 code review (CRITICAL-1) -- the
+            # full-from-disk repopulation for a brand-new/rebuilt FTS
+            # index now happens EAGERLY and UNCONDITIONALLY in
+            # smart_index() itself, immediately after
+            # fts_manager.initialize_index(create_new=create_new_fts),
+            # rather than only here in the zero-changed-files branch.
+            # Calling _populate_fts_from_all_files() a second time here
+            # would double-add every file's FTS document (this call site
+            # has no delete-before-add supersession, unlike the per-file
+            # processing path) -- so this is deliberately NOT called
+            # again.
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()
 
+        # A zero-change run must not create a collection that will never reach
+        # end_indexing(), which commits a fresh CHUNKS_DB layout on disk.
+        self.vector_store_client.ensure_provider_aware_collection(
+            self.config, self.embedding_provider, quiet
+        )
+
         # CRITICAL: Now that we know work is needed, start the indexing session
         if self.progressive_metadata.metadata["status"] != "in_progress":
-            self.progressive_metadata.start_indexing(
+            self.progressive_metadata.start_fresh_indexing(
                 provider_name, model_name, git_status
             )
 
@@ -1152,6 +1794,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.progressive_metadata.set_files_to_index(files_to_index)
 
         # Use HighThroughputProcessor directly for git-aware processing (STORY 3 MIGRATION)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Get current branch for indexing
             current_branch = self.git_topology_service.get_current_branch() or "master"
@@ -1179,6 +1822,23 @@ class SmartIndexer(HighThroughputProcessor):
                 batch_size=50,
                 progress_callback=progress_callback,
                 fts_manager=fts_manager,
+            )
+
+            # Bug #1969 Round 5 (R4-F1): a same-run self-heal escalation
+            # triggered while processing the files above may have wiped a
+            # DIFFERENT file's indexed chunks -- one this run's own
+            # git-diff/mtime detection never selected. Guarantee it gets
+            # reprocessed in THIS SAME run before the session finalizes.
+            (
+                high_throughput_stats,
+                pending_self_heal_after,
+            ) = self._reprocess_newly_pending_self_heal_paths(
+                collection_name,
+                files_to_index,
+                high_throughput_stats,
+                resolved_thread_count,
+                progress_callback,
+                fts_manager,
             )
 
             # For incremental indexing, also hide files that don't exist in current branch
@@ -1215,38 +1875,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"HighThroughputProcessor failed during incremental indexing in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate unwrapped so finally aborts
+                # instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware incremental indexing failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Incremental index",
             )
-            logger.info(
-                f"Incremental index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -1273,6 +1920,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
+            self._record_failures_of_run(stats, retried_failures, [])
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:
@@ -1280,6 +1928,17 @@ class SmartIndexer(HighThroughputProcessor):
                 "Indexing was cancelled, not marking as completed for resume capability"
             )
             self.progress_log.mark_session_cancelled()
+
+        # Bug #1969 Round 5 (R4-F1/R4-F3): clear the durable sidecar
+        # entries this run consulted (both the upfront fold-in and the
+        # post-pass re-check). _clear_self_heal_reprocess_paths_if_safe()
+        # itself checks stats.cancelled and no-ops when cancelled -- see
+        # that method's own docstring/implementation.
+        self._clear_self_heal_reprocess_paths_if_safe(
+            _self_heal_collection_name,
+            pending_self_heal_before | pending_self_heal_after,
+            stats,
+        )
 
         return stats
 
@@ -1330,11 +1989,18 @@ class SmartIndexer(HighThroughputProcessor):
         files_count_to_process: Optional[int] = None,
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
+        fts_manager: Optional[TantivyIndexManager] = None,
     ) -> ProcessingStats:
-        """Reconcile disk files with database contents and index missing/modified files."""
+        """Reconcile disk files with database contents and index missing/modified files.
 
-        # Initialize FTS manager to None (FTS not supported in reconcile)
-        fts_manager: Optional[TantivyIndexManager] = None
+        ``fts_manager``
+        is accepted (not hardcoded to None) so a caller with
+        ``enable_fts=True`` -- in particular the ``trust_resume_state=False``
+        interrupted-operation fallback in ``smart_index()`` -- keeps
+        feeding the SAME already-initialized FTS index reconcile's
+        semantic-side files go into, instead of every reconciled file's
+        FTS update being silently dropped.
+        """
 
         # Ensure provider-aware collection exists
         collection_name = self.vector_store_client.ensure_provider_aware_collection(
@@ -1353,6 +2019,13 @@ class SmartIndexer(HighThroughputProcessor):
             if progress_callback:
                 # ⚠️  CRITICAL: total=0 makes this show as ℹ️ message in CLI
                 progress_callback(0, 0, Path(""), info="No files found to index")
+            # A reconcile that finds nothing to do
+            # must still mark the operation completed -- otherwise a
+            # lingering "in_progress"/"failed" status (e.g. the
+            # trust_resume_state=False fallback after an interrupted run)
+            # never clears, and every subsequent run re-enters this same
+            # reconcile fallback forever.
+            self.progressive_metadata.complete_indexing()
             return ProcessingStats()
 
         # Query database to see what files are already indexed with timestamps
@@ -1363,6 +2036,13 @@ class SmartIndexer(HighThroughputProcessor):
                 Path(""),
                 info=f"Checking database collection '{collection_name}' for indexed files...",
             )
+
+        # Issue #1505: defensive default so a mocked/failed snapshot never
+        # leaves this attribute missing before the main reconcile loop reads it.
+        self._reconcile_db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: same defensive default for the
+        # hidden_branches map the branch-visibility loop reads.
+        self._reconcile_hidden_branches: Dict[str, List[str]] = {}
 
         # Get indexed files using efficient snapshot approach (no infinite loops, minimal memory)
         indexed_files_with_timestamps = self._get_indexed_files_snapshot(
@@ -1381,10 +2061,32 @@ class SmartIndexer(HighThroughputProcessor):
         # Bug #471: Batch-check all modified files in one subprocess call
         self._reconcile_modified_files = self._get_modified_files_set()
 
+        # Issue #1505: Batch-fetch every tracked file's committed blob hash in
+        # ONE `git ls-tree -r HEAD` subprocess call, instead of spawning a
+        # `git log -1 -- path` subprocess PER unchanged file inside the loop
+        # below. Only meaningful for git-available repos; non-git repos keep
+        # their existing mtime/size-only comparison scheme untouched.
+        if self.git_topology_service.is_git_available():
+            self._reconcile_head_blob_hashes = self._get_head_blob_hash_map()
+        else:
+            self._reconcile_head_blob_hashes = {}
+
+        # Codex #1505 review, Finding 2: track how many files fall back to
+        # the slow per-file `git log` content-id computation during this
+        # reconcile run, so a high fallback rate (map failed/mostly-empty)
+        # can be surfaced LOUDLY after the main per-file loop below instead
+        # of silently degrading to the O(N) stall Issue #1505 fixed.
+        self._reconcile_fallback_count = 0
+
         # Find files that need to be indexed using working directory aware comparison
         files_to_index = []
         modified_files = 0
         missing_files = 0
+        # Files whose analysis THROWS were never verified. The run is still
+        # marked completed (leaving it open would make every following
+        # server-context run reconcile again), but these files are recorded
+        # as failed so the partial result is never silent.
+        analysis_failed_paths: List[str] = []
 
         for file_path in all_files_to_index:
             try:
@@ -1412,11 +2114,13 @@ class SmartIndexer(HighThroughputProcessor):
                     files_to_index.append(file_path)
                     missing_files += 1
                 else:
-                    # File exists in database - check if content changed
-                    # Get ANY version of this file from database (not branch-filtered)
-                    db_content_id = self._get_any_content_id_for_file(
-                        relative_path, collection_name
-                    )
+                    # File exists in database - check if content changed.
+                    # Issue #1505: look up the pre-computed batched content-id
+                    # map (built once in `_get_indexed_files_snapshot` from
+                    # the same bulk scroll already used for the timestamp
+                    # snapshot) instead of issuing a per-file scroll_points
+                    # query via `_get_any_content_id_for_file`.
+                    db_content_id = self._reconcile_db_content_ids.get(relative_path)
 
                     if db_content_id and current_effective_id != db_content_id:
                         # Content changed - needs re-indexing
@@ -1431,7 +2135,35 @@ class SmartIndexer(HighThroughputProcessor):
             except Exception as e:
                 # File might have issues, log and skip
                 logger.warning(f"Failed to analyze file {file_path} for reconcile: {e}")
+                analysis_failed_paths.append(str(file_path))
                 continue
+
+        # Codex #1505 review, Finding 2: a degraded reconcile run (batched
+        # HEAD blob-hash map failed/mostly-empty, forcing most or all
+        # committed files onto the slow per-file `git log` fallback) must
+        # be LOUD and observable -- never a silent multi-hour O(N) stall,
+        # per this project's anti-silent-failure rule. Correctness is
+        # unaffected either way; only visibility is added here, and
+        # reconcile is never hard-aborted (a degraded-but-working reconcile
+        # beats a failed one).
+        if self.git_topology_service.is_git_available() and all_files_to_index:
+            fallback_count = getattr(self, "_reconcile_fallback_count", 0)
+            total_files = len(all_files_to_index)
+            fallback_ratio = fallback_count / total_files
+            map_entirely_empty = not self._reconcile_head_blob_hashes
+            if (map_entirely_empty and fallback_count > 0) or fallback_ratio > 0.10:
+                logger.error(
+                    "RECONCILE DEGRADED: %d/%d files (%.1f%%) fell back to "
+                    "the slow per-file `git log` content-id lookup this "
+                    "run because the batched HEAD blob-hash map "
+                    "(_get_head_blob_hash_map) was empty or missing "
+                    "entries for most files. This can reintroduce the "
+                    "O(N) per-file git-subprocess stall Issue #1505 fixed "
+                    "-- investigate git ls-tree failures.",
+                    fallback_count,
+                    total_files,
+                    fallback_ratio * 100,
+                )
 
         # NEW: For git projects, unhide files that should be visible in current branch
         files_unhidden = 0  # Initialize for all code paths
@@ -1457,30 +2189,22 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # Check if this file exists on disk in current branch (should be visible)
                 if relative_file_path in disk_files_set:
-                    # File exists on disk, check if it's hidden for current branch
-                    content_points, _ = self.vector_store_client.scroll_points(
-                        filter_conditions={
-                            "must": [
-                                {"key": "type", "match": {"value": "content"}},
-                                {"key": "path", "match": {"value": relative_file_path}},
-                            ]
-                        },
-                        limit=1,  # Just need to check one point
-                        collection_name=collection_name,
+                    # Codex #1505 review, Finding 1: derive hidden_branches
+                    # from the bulk snapshot already fetched in
+                    # `_get_indexed_files_snapshot` instead of issuing a
+                    # fresh `scroll_points` query PER indexed file -- this
+                    # loop previously defeated the O(1)-ish DB-call goal of
+                    # Issue #1505's fix by reintroducing a per-file query in
+                    # the same reconcile pass.
+                    hidden_branches = self._reconcile_hidden_branches.get(
+                        relative_file_path, []
                     )
-
-                    if content_points:
-                        hidden_branches = (
-                            content_points[0]
-                            .get("payload", {})
-                            .get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        # File exists on disk but is hidden for current branch - unhide it
+                        self._ensure_file_visible_in_branch_thread_safe(
+                            relative_file_path, current_branch, collection_name
                         )
-                        if current_branch in hidden_branches:
-                            # File exists on disk but is hidden for current branch - unhide it
-                            self._ensure_file_visible_in_branch_thread_safe(
-                                relative_file_path, current_branch, collection_name
-                            )
-                            files_unhidden += 1
+                        files_unhidden += 1
 
             if files_unhidden > 0 and progress_callback:
                 progress_callback(
@@ -1543,6 +2267,18 @@ class SmartIndexer(HighThroughputProcessor):
                     info=f"🗑️  Cleaned up {len(deleted_files)} deleted files from database",
                 )
 
+        # Bug #1969 Round 5 (R4-F1): fold in any durably pending self-heal
+        # reprocess paths -- defense-in-depth. Reconcile's OWN missing-
+        # file detection above already catches a wholly-wiped file
+        # naturally (zero DB points -> file_in_db=False -> already in
+        # files_to_index), but this makes the consultation explicit and
+        # ensures the sidecar entry gets cleared below once this run
+        # actually reprocesses (or confirms up-to-date) every pending
+        # path.
+        pending_self_heal_reconcile, files_to_index = (
+            self._fold_in_pending_self_heal_paths(collection_name, files_to_index)
+        )
+
         if not files_to_index:
             if progress_callback:
                 progress_callback(
@@ -1551,6 +2287,37 @@ class SmartIndexer(HighThroughputProcessor):
                     Path(""),
                     info=f"✅ All {len(all_files_to_index)} files up-to-date - no reconciliation needed",
                 )
+            if analysis_failed_paths:
+                # Nothing was queued, but not because every file was
+                # verified up-to-date -- some candidates' analysis THREW.
+                # Complete with those files recorded as failed and reported
+                # in the returned stats (never a silent completion); the
+                # next run retries them. Pending self-heal entries are kept,
+                # since those files were never actually checked.
+                logger.warning(
+                    "Reconcile found nothing to index, but %d file(s) "
+                    "failed analysis and were skipped; marking the operation "
+                    "completed with them recorded as failed files.",
+                    len(analysis_failed_paths),
+                )
+                self.progressive_metadata.set_failed_file_paths(
+                    analysis_failed_paths, failed_count=len(analysis_failed_paths)
+                )
+                self.progressive_metadata.complete_indexing()
+                return self._analysis_failure_stats(analysis_failed_paths)
+            # Same as the "no files on disk" early
+            # return above -- finding nothing to reconcile must still mark
+            # the operation completed. Every file was verified, so no
+            # recorded failure remains.
+            self.progressive_metadata.set_failed_file_paths([], failed_count=0)
+            self.progressive_metadata.complete_indexing()
+            # Nothing to reprocess -- but any pending self-heal entries
+            # were, by construction (reconcile's own full disk/DB
+            # comparison just ran), either already covered above or
+            # genuinely up-to-date/deleted. Safe to clear.
+            self._clear_self_heal_reprocess_paths_if_safe(
+                collection_name, pending_self_heal_reconcile, ProcessingStats()
+            )
             return ProcessingStats()
 
         # Apply files count limit if specified (for testing)
@@ -1595,64 +2362,95 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Start/update indexing metadata
         if self.progressive_metadata.metadata["status"] != "in_progress":
-            self.progressive_metadata.start_indexing(
+            self.progressive_metadata.start_fresh_indexing(
                 provider_name, model_name, git_status
             )
 
         # Store file list for resumability
         self.progressive_metadata.set_files_to_index(files_to_index)
 
-        # CRITICAL FIX: In non-git mode, delete old chunks for modified files before re-indexing
-        # This ensures old content doesn't persist alongside new content
-        if not self.is_git_aware() and files_to_index:
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
-
-            # Get relative paths that are being modified (not newly added)
-            modified_relative_files = []
-            for file_path in files_to_index:
-                try:
-                    # Check if this file was previously indexed (exists in database)
-                    # indexed_files_with_timestamps has Path objects as keys
-                    if file_path in indexed_files_with_timestamps:
-                        if file_path.is_absolute():
-                            relative_path = str(
-                                file_path.relative_to(self.config.codebase_dir)
-                            )
-                        else:
-                            relative_path = str(file_path)
-                        modified_relative_files.append(relative_path)
-                except ValueError:
-                    continue
-
-            # Delete old chunks for modified files
-            if modified_relative_files:
-                deleted_count = 0
-                for relative_file_path in modified_relative_files:
-                    success = self.vector_store_client.delete_by_filter(
-                        {
-                            "must": [
-                                {"key": "path", "match": {"value": relative_file_path}}
-                            ]
-                        },
-                        collection_name,
-                    )
-                    if success:
-                        deleted_count += 1
-
-                if progress_callback and deleted_count > 0:
-                    progress_callback(
-                        0,
-                        0,
-                        Path(""),
-                        info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
-                    )
-
-        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding)
+        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding).
+        # Bug #1575 Fix 4: hoisted BEFORE the non-git modified-file delete
+        # loop below (previously called only after it) so every delete
+        # this loop triggers lands INSIDE the session -- tracked via
+        # _indexing_session_changes and persisted ONCE at end_indexing(),
+        # instead of each delete independently persisting path_index.bin
+        # (and co-persisting the entire id_index.bin) on its own. Measured
+        # 5.6x slower incremental refresh on a 4000-file collection.
         self.vector_store_client.begin_indexing(collection_name)
 
+        # CRITICAL FIX: In non-git mode, delete old chunks for modified files before re-indexing
+        # This ensures old content doesn't persist alongside new content
+        #
+        # Bug #1575 round 6, item 2: this whole section runs AFTER
+        # begin_indexing() opened a session but BEFORE the BranchAwareIndexer
+        # try/finally below (whose finally calls end_indexing()) starts. An
+        # exception here (delete_by_filter() or progress_callback() raising)
+        # used to propagate WITHOUT ever finalizing the session --
+        # permanently leaking it (self._indexing_session_changes and this
+        # collection's cached PathIndex/id_index stay open until process
+        # restart, disabling out-of-session Gap D/B persistence). Wrapped in
+        # its own try/except so end_indexing() always runs before any
+        # exception from this section propagates.
+        try:
+            if not self.is_git_aware() and files_to_index:
+                # Get relative paths that are being modified (not newly added)
+                modified_relative_files = []
+                for file_path in files_to_index:
+                    try:
+                        # Check if this file was previously indexed (exists in database)
+                        # indexed_files_with_timestamps has Path objects as keys
+                        if file_path in indexed_files_with_timestamps:
+                            if file_path.is_absolute():
+                                relative_path = str(
+                                    file_path.relative_to(self.config.codebase_dir)
+                                )
+                            else:
+                                relative_path = str(file_path)
+                            modified_relative_files.append(relative_path)
+                    except ValueError:
+                        continue
+
+                # Delete old chunks for modified files
+                if modified_relative_files:
+                    deleted_count = 0
+                    for relative_file_path in modified_relative_files:
+                        # Bug #1575 Fix 4 investigation: was previously called
+                        # as (filter_dict, collection_name) -- the WRONG order
+                        # against the real FilesystemVectorStore.delete_by_filter
+                        # (self, collection_name, filter_conditions) signature.
+                        # Confirmed live: the swapped call raised TypeError
+                        # inside scroll_points, caught by delete_by_filter's own
+                        # broad except-Exception and silently turned into
+                        # `return False` -- this cleanup had never actually
+                        # deleted anything. Fixed to the correct order.
+                        success = self.vector_store_client.delete_by_filter(
+                            collection_name,
+                            {
+                                "must": [
+                                    {
+                                        "key": "path",
+                                        "match": {"value": relative_file_path},
+                                    }
+                                ]
+                            },
+                        )
+                        if success:
+                            deleted_count += 1
+
+                    if progress_callback and deleted_count > 0:
+                        progress_callback(
+                            0,
+                            0,
+                            Path(""),
+                            info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
+                        )
+        except Exception:
+            self.vector_store_client.end_indexing(collection_name, progress_callback)
+            raise
+
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Convert absolute paths to relative paths for BranchAwareIndexer
             relative_files = []
@@ -1704,10 +2502,9 @@ class SmartIndexer(HighThroughputProcessor):
             )
 
             # Convert BranchIndexingResult to ProcessingStats
-            stats = ProcessingStats()
+            stats = self._analysis_failure_stats(analysis_failed_paths)
             stats.files_processed = branch_result.files_processed
             stats.chunks_created = branch_result.content_points_created
-            stats.failed_files = 0
             stats.start_time = time.time() - branch_result.processing_time
             stats.end_time = time.time()
             stats.cancelled = branch_result.cancelled
@@ -1716,38 +2513,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"BranchAwareIndexer failed during reconcile in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3 (extended): propagate unwrapped so
+                # finally aborts instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware reconcile failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -1772,6 +2556,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Mark as completed only if not cancelled
         if not stats.cancelled:
+            self._record_failures_of_run(stats, [], analysis_failed_paths)
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:
@@ -1779,6 +2564,12 @@ class SmartIndexer(HighThroughputProcessor):
                 "Indexing was cancelled, not marking as completed for resume capability"
             )
             self.progress_log.mark_session_cancelled()
+
+        # Bug #1969 Round 5 (R4-F1/R4-F3): clear the durable sidecar
+        # entries this reconcile run consulted.
+        self._clear_self_heal_reprocess_paths_if_safe(
+            collection_name, pending_self_heal_reconcile, stats
+        )
 
         return stats
 
@@ -1793,7 +2584,7 @@ class SmartIndexer(HighThroughputProcessor):
         same logical directory is reachable under TWO different absolute
         prefixes -- the NFS *mount* path (e.g.
         ``/mnt/cow-storage/golden-repos/<repo>``) and the daemon-LOCAL path
-        (e.g. ``/home/jsbattig/cow-storage/golden-repos/<repo>``). If the
+        (e.g. ``/home/opuser/cow-storage/golden-repos/<repo>``). If the
         prior run stored the mount prefix but the current run's
         ``codebase_dir`` is the daemon-local prefix (or vice versa), using the
         stored path verbatim makes ``file_path.relative_to(codebase_dir)``
@@ -1854,6 +2645,172 @@ class SmartIndexer(HighThroughputProcessor):
         # return unchanged so downstream .exists()/.relative_to can surface it.
         return first_match if first_match is not None else candidate
 
+    def _enable_server_resume_seal(self) -> bool:
+        """Server-context runs: seal this run's resume-state saves with the
+        server-held key, and report whether the stored state was sealed by
+        a previous server-context run. False whenever the key is unavailable,
+        so unsealed state is never trusted. Untrusted state also loses its
+        stored file lists (work list, completed and failed files), so none of
+        them is acted on or carried into this run's sealed saves."""
+        key = load_or_create_resume_seal_key()
+        if key is not None:
+            self.progressive_metadata.enable_resume_seal(key)
+        trusted = key is not None and self.progressive_metadata.loaded_state_is_sealed()
+        if not trusted:
+            self.progressive_metadata.discard_file_tracking()
+        return trusted
+
+    def _merge_recorded_failures(
+        self, files: List[Path]
+    ) -> Tuple[List[Path], List[Path]]:
+        """Merge the files the previous run recorded as failed into ``files``.
+
+        Each recorded path must still exist and pass the same containment
+        and eligibility checks as a resumed path; any other recorded path
+        drops out of the stored list. Returns ``(retried, merged_files)``.
+        """
+        recorded = [
+            str(p)
+            for p in self.progressive_metadata.metadata.get("failed_file_paths", [])
+        ]
+        if not recorded:
+            return [], files
+        codebase = Path(self.config.codebase_dir)
+        resolved_codebase = codebase.resolve()
+        retried: List[Path] = []
+        for stored in recorded:
+            candidate = self._reanchor_resume_path(stored, codebase)
+            if candidate.exists() and self._resume_candidate_is_safe(
+                candidate, resolved_codebase
+            ):
+                retried.append(candidate)
+        if len(retried) != len(recorded):
+            self.progressive_metadata.set_failed_file_paths([str(p) for p in retried])
+        covered = {str(f) for f in files}
+        merged = list(files) + [p for p in retried if str(p) not in covered]
+        if retried:
+            logger.info(
+                "Retrying %d file(s) that the previous indexing run could not index.",
+                len(retried),
+            )
+        return retried, merged
+
+    def _relative_to_codebase(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.config.codebase_dir))
+        except ValueError:
+            return str(path)
+
+    def _analysis_failure_stats(self, failed_paths: List[str]) -> ProcessingStats:
+        """Stats reporting the files whose reconcile analysis failed, so the
+        caller (and the CLI exit code) sees them."""
+        return ProcessingStats(
+            failed_files=len(failed_paths),
+            failed_paths=frozenset(
+                self._relative_to_codebase(Path(p)) for p in failed_paths
+            ),
+        )
+
+    def _record_failures_of_run(
+        self,
+        stats: ProcessingStats,
+        retried: List[Path],
+        extra_failed: List[str],
+    ) -> None:
+        """Replace the recorded failure list with every attributable failure
+        of this run: ``extra_failed`` plus every path in
+        ``stats.failed_paths`` (first-time candidates and retries alike).
+        When some failure has no attributed path, every retried file also
+        stays recorded."""
+        codebase = Path(self.config.codebase_dir)
+        failed = list(extra_failed) + [
+            str(codebase / rel) for rel in sorted(stats.failed_paths)
+        ]
+        if stats.failed_files > len(stats.failed_paths):
+            failed += [str(p) for p in retried]
+        self.progressive_metadata.set_failed_file_paths(failed)
+        if failed:
+            logger.warning(
+                "%d file(s) could not be indexed in this run; they are recorded "
+                "and retried on the next run.",
+                len(failed),
+            )
+
+    def _resume_candidate_is_safe(
+        self, candidate: Path, resolved_codebase: Path
+    ) -> bool:
+        """Reject a resume-path candidate unless it resolves
+        (collapsing '..', following symlinks) strictly inside
+        codebase_dir, and passes the SAME eligibility decision a fresh
+        FileFinder walk would apply. Fails closed (returns False) on any
+        resolve error.
+
+        Containment is checked on the RESOLVED candidate against the
+        RESOLVED codebase root -- this is what actually proves the
+        candidate cannot escape codebase_dir via '..' or a symlink.
+        Eligibility (size/extension/exclude/text-file checks), however, is
+        checked on the candidate reconstructed in codebase_dir's OWN,
+        possibly-unresolved form: ``FileFinder.is_eligible()`` computes
+        ``file_path.relative_to(self.config.codebase_dir)`` internally
+        against the CONFIGURED (unresolved) codebase_dir, which
+        ``ConfigManager.load()`` deliberately leaves unresolved when it is
+        itself a symlink (Bug #1087's mount-path case). Feeding it the
+        fully-resolved candidate instead would raise ValueError there for
+        every legitimate in-tree file whenever codebase_dir is a symlink,
+        rejecting them all rather than just the ones that actually escape.
+
+        Uses FileFinder's own eligibility method (the exact one
+        ``find_files()`` itself calls) rather than the git-diff based
+        ``_should_index_file()`` filter, which never applies FileFinder's
+        max-file-size gate or its extension-gated text-file check.
+
+        Also requires the candidate's own, unresolved link NAME to be
+        eligible -- a symlink whose resolved TARGET is a perfectly
+        eligible, in-tree file can still have a NAME that a fresh
+        ``find_files()`` walk would never reach at all (inside an excluded
+        directory such as ``node_modules/``, or matching a ``.gitignore``
+        pattern), since directory pruning and pattern exclusion happen by
+        NAME, before ``find_files()`` ever resolves a symlink's target.
+        """
+        # resolve_if_within_root is the ONE shared implementation of the
+        # resolve+containment decision -- it both performs the check and
+        # hands back the resolved path, so there is no second,
+        # independent resolve() call here.
+        resolved_candidate = resolve_if_within_root(candidate, resolved_codebase)
+        if resolved_candidate is None:
+            # Local CLI context only: a fresh walk includes an in-tree
+            # symlink whose target lies outside the root (judged by its link
+            # name below), but never descends into a symlinked directory.
+            # Server context never follows a symlink out of the root.
+            if self.config.confined_to_codebase_root or not (
+                candidate.is_symlink()
+                and resolve_if_within_root(candidate.parent, resolved_codebase)
+                is not None
+            ):
+                return False
+        else:
+            relative_path = resolved_candidate.relative_to(resolved_codebase)
+
+            eligibility_candidate = Path(self.config.codebase_dir) / relative_path
+            if not self.file_finder.is_eligible(eligibility_candidate):
+                return False
+
+        try:
+            link_relative_path = candidate.relative_to(Path(self.config.codebase_dir))
+        except ValueError:
+            return False
+
+        normalized_link_relative = os.path.normpath(str(link_relative_path))
+        if normalized_link_relative == os.curdir or normalized_link_relative.startswith(
+            ".."
+        ):
+            return False
+
+        link_eligibility_candidate = (
+            Path(self.config.codebase_dir) / normalized_link_relative
+        )
+        return bool(self.file_finder.is_eligible(link_eligibility_candidate))
+
     def _do_resume_interrupted(
         self,
         batch_size: int,
@@ -1867,18 +2824,33 @@ class SmartIndexer(HighThroughputProcessor):
     ) -> ProcessingStats:
         """Resume a previously interrupted indexing operation."""
 
+        # Bug #1862 follow-up: resuming a "failed" run (Bug #467's
+        # can_resume_interrupted_operation() explicitly accepts it) is one
+        # of the run transitions covered by the error_message invariant
+        # stated on ProgressiveMetadata.start_indexing() -- neither
+        # start_indexing() nor complete_indexing() run on this path below,
+        # so drop the PRIOR run's error here now, or it sits next to this
+        # run's fresh progress counters indefinitely.
+        self.progressive_metadata.resume_indexing()
+
         # Ensure provider-aware collection exists for resuming
         self.vector_store_client.ensure_provider_aware_collection(
             self.config, self.embedding_provider, quiet
         )
 
+        # Bug #1969 Round 5 (R4-F1): resolve collection_name EARLY (before
+        # either early-return below) so a durably-pending self-heal
+        # reprocess path can be folded in regardless of whether there is
+        # any OTHER remaining/resumable work -- the reviewer flagged
+        # resuming an interrupted run as the MOST likely real-world
+        # trigger for this corruption in the first place (an interrupted
+        # run is itself a primary way id_index.bin gets corrupted).
+        _self_heal_collection_name = self.vector_store_client.resolve_collection_name(
+            self.config, self.embedding_provider
+        )
+
         # Get remaining files from metadata
         remaining_file_strings = self.progressive_metadata.get_remaining_files()
-        if not remaining_file_strings:
-            # No files left to process
-            self.progressive_metadata.complete_indexing()
-            self.progress_log.complete_session()
-            return ProcessingStats()
 
         # Convert strings back to Path objects, re-anchoring each onto the
         # CURRENT walk root. Stored paths come from a PRIOR run and may carry a
@@ -1891,11 +2863,61 @@ class SmartIndexer(HighThroughputProcessor):
             self._reanchor_resume_path(f, codebase) for f in remaining_file_strings
         ]
 
+        # Reject any re-anchored candidate that does
+        # not resolve inside codebase_dir or fails FileFinder's own
+        # eligibility filters, before the existence check below. Rejected
+        # entries are dropped (resume continues with the rest); only the
+        # count is logged, never the path/content.
+        resolved_codebase = codebase.resolve()
+        safe_files = []
+        rejected_count = 0
+        for candidate in remaining_files:
+            if self._resume_candidate_is_safe(candidate, resolved_codebase):
+                safe_files.append(candidate)
+            else:
+                rejected_count += 1
+        if rejected_count:
+            logger.warning(
+                "Resume metadata contained %d file path candidate(s) that "
+                "are outside the codebase root or ineligible for indexing; "
+                "dropping them and continuing the resume with the "
+                "remaining files.",
+                rejected_count,
+            )
+
         # Filter out files that no longer exist
-        existing_files = [f for f in remaining_files if f.exists()]
+        existing_files = [f for f in safe_files if f.exists()]
+
+        # Bug #1969 Round 5 (R4-F1): fold in any durably pending self-heal
+        # reprocess paths BEFORE the "nothing to do" check below -- a
+        # resume with zero genuinely-remaining files must still pick up a
+        # file a self-heal wiped (during THIS or a prior interrupted run).
+        pending_self_heal_before, existing_files = (
+            self._fold_in_pending_self_heal_paths(
+                _self_heal_collection_name, existing_files
+            )
+        )
+        retried_failures, existing_files = self._merge_recorded_failures(existing_files)
+
+        if (
+            not remaining_file_strings
+            and not pending_self_heal_before
+            and not retried_failures
+        ):
+            # No files left to process, and nothing durably pending either.
+            self.progressive_metadata.complete_indexing()
+            self.progress_log.complete_session()
+            return ProcessingStats()
 
         if not existing_files:
-            # All remaining files have been deleted
+            # All remaining files have been deleted (and nothing self-heal
+            # -pending exists on disk to reprocess either) -- still safe
+            # to clear any pending entries for those since-deleted paths
+            # (nothing left to reprocess for a file that no longer
+            # exists), so they don't stay durably stuck forever.
+            self._clear_self_heal_reprocess_paths_if_safe(
+                _self_heal_collection_name, pending_self_heal_before, ProcessingStats()
+            )
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
             return ProcessingStats()
@@ -1923,6 +2945,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.vector_store_client.begin_indexing(collection_name)
 
         # Use HighThroughputProcessor directly for git-aware processing (STORY 3 MIGRATION)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Use direct high-throughput parallel processing for resume (4-8x faster)
             # STORY 3: Use process_files_high_throughput() directly instead of branch wrapper
@@ -1941,6 +2964,23 @@ class SmartIndexer(HighThroughputProcessor):
                 fts_manager=fts_manager,  # type: ignore[name-defined]
             )
 
+            # Bug #1969 Round 5 (R4-F1): the reviewer's flagged MOST likely
+            # real-world trigger -- a self-heal escalation firing inside
+            # upsert_points() during THIS resume, wiping a DIFFERENT
+            # file's chunks. Consult the durable sidecar again after the
+            # primary pass to catch it.
+            (
+                high_throughput_stats,
+                pending_self_heal_after,
+            ) = self._reprocess_newly_pending_self_heal_paths(
+                _self_heal_collection_name,
+                existing_files,
+                high_throughput_stats,
+                resolved_thread_count,
+                progress_callback,
+                fts_manager,
+            )
+
             # Use ProcessingStats directly from high-throughput processor
             stats = high_throughput_stats
 
@@ -1948,38 +2988,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"HighThroughputProcessor failed during resume in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate unwrapped so finally aborts
+                # instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware resume failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -1996,6 +3023,7 @@ class SmartIndexer(HighThroughputProcessor):
         if not stats.cancelled:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="Finalizing resume session...")
+            self._record_failures_of_run(stats, retried_failures, [])
             self.progressive_metadata.complete_indexing()
             self.progress_log.complete_session()
         else:
@@ -2003,6 +3031,14 @@ class SmartIndexer(HighThroughputProcessor):
                 "Indexing was cancelled, not marking as completed for resume capability"
             )
             self.progress_log.mark_session_cancelled()
+
+        # Bug #1969 Round 5 (R4-F1/R4-F3): clear the durable sidecar
+        # entries this resume consulted -- only if not cancelled.
+        self._clear_self_heal_reprocess_paths_if_safe(
+            _self_heal_collection_name,
+            pending_self_heal_before | pending_self_heal_after,
+            stats,
+        )
 
         return stats
 
@@ -2014,7 +3050,27 @@ class SmartIndexer(HighThroughputProcessor):
         resumable: bool = False,
         vector_thread_count: Optional[int] = None,
     ) -> ProcessingStats:
-        """Process files with progressive metadata updates and throughput monitoring."""
+        """Process files with progressive metadata updates and throughput monitoring.
+
+        Bug #1746 Change 3 (extended, code review finding B2): this method
+        is confirmed DEAD/ORPHAN code -- zero production call sites
+        (verified by exhaustive grep across src/), exercised only by a
+        unit test that invokes it directly. It calls
+        process_files_high_throughput() below with NO surrounding
+        try/except and never calls begin_indexing()/end_indexing()/
+        abort_indexing() itself -- unlike every real session-managing
+        entry point (_do_full_index, _do_incremental_index,
+        _do_resume_interrupted, _do_reconcile_with_database,
+        process_files_incrementally), which all own an indexing session
+        lifecycle and were fixed to abort instead of finalize on a fatal
+        ChunkStoreUnavailableError. Because this method never begins a
+        session, there is no incorrect finalize to prevent here: a fatal
+        error already propagates uncaught to whatever future caller
+        invokes it. If this method is ever wired into a real call site,
+        that caller becomes responsible for the same abort-vs-finalize
+        decision the other five entry points make (see
+        _finalize_or_abort_indexing_session()).
+        """
 
         stats = ProcessingStats()
         stats.start_time = time.time()
@@ -2064,9 +3120,17 @@ class SmartIndexer(HighThroughputProcessor):
                 relative_path = str(file_path)
 
             # Delete all existing chunks for this file
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = self.vector_store_client.delete_by_filter(
-                {"must": [{"key": "path", "match": {"value": relative_path}}]},
                 collection_name,
+                {"must": [{"key": "path", "match": {"value": relative_path}}]},
             )
             if success:
                 files_cleaned += 1
@@ -2162,6 +3226,7 @@ class SmartIndexer(HighThroughputProcessor):
                     "must": [{"key": "visible_branches", "match": {"value": branch}}]
                 },
                 limit=10000,  # Process in batches if needed
+                self_heal=True,
             )
 
             content_points_hidden = 0
@@ -2262,6 +3327,12 @@ class SmartIndexer(HighThroughputProcessor):
                         )
                         # Continue processing other files even if one deletion fails
 
+            # NOTE: absolute_paths is re-joined onto codebase_dir and
+            # re-filtered for containment inside
+            # process_branch_changes_high_throughput() below (the single
+            # choke point shared by every relative-path-list caller) --
+            # no separate check is needed here.
+
             if not absolute_paths:
                 stats.end_time = time.time()
                 return stats
@@ -2278,6 +3349,14 @@ class SmartIndexer(HighThroughputProcessor):
 
             if absolute_paths:
                 # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
+                collection_name = None
+                # Bug #1746 Change 3 (extended): set when the fatal
+                # ChunkStoreUnavailableError propagates from
+                # process_branch_changes_high_throughput() below, so the
+                # inner finally aborts instead of finalizing, and the
+                # outer except (further below) re-raises instead of
+                # silently swallowing it into stats.failed_files.
+                fatal_chunk_store_error: Optional[BaseException] = None
                 try:
                     # Get current branch for indexing
                     current_branch = (
@@ -2290,6 +3369,21 @@ class SmartIndexer(HighThroughputProcessor):
                     )
 
                     # Use high-throughput parallel processing for incremental files (4-8x faster)
+                    # Bug #1575 Part C Defect 1 (dual-review corroborated):
+                    # defer_finalization=True -- this method (not
+                    # process_branch_changes_high_throughput itself) applies
+                    # branch isolation below via
+                    # hide_files_not_in_branch_thread_safe(), which is what
+                    # registers the branch-visibility context
+                    # end_indexing()'s decision engine needs. Finalizing
+                    # INSIDE process_branch_changes_high_throughput's own
+                    # finally block (the pre-fix behavior) closed the
+                    # indexing session BEFORE that context existed,
+                    # orphaning it -- exactly the ghost-vector regression
+                    # this fix closes. The SAME finalization pass that
+                    # closes this session now happens in THIS method's own
+                    # finally block below, AFTER
+                    # hide_files_not_in_branch_thread_safe runs.
                     branch_result = self.process_branch_changes_high_throughput(
                         old_branch="",  # No old branch for process files incrementally
                         new_branch=current_branch,
@@ -2301,6 +3395,7 @@ class SmartIndexer(HighThroughputProcessor):
                         watch_mode=watch_mode,  # Pass through watch_mode
                         fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
                         skip_branch_isolation=True,  # Branch isolation handled separately below
+                        defer_finalization=True,  # Bug #1575 Part C Defect 1
                     )
 
                     # For incremental file processing, also ensure branch isolation
@@ -2336,17 +3431,50 @@ class SmartIndexer(HighThroughputProcessor):
                     logger.error(
                         f"BranchAwareIndexer failed during process_files_incrementally in git project: {e}"
                     )
+                    if isinstance(e, ChunkStoreUnavailableError):
+                        # Bug #1746 Change 3 (extended): propagate
+                        # unwrapped so the inner finally aborts instead of
+                        # finalizing, and the outer except (below) does
+                        # NOT swallow this into stats.failed_files.
+                        fatal_chunk_store_error = e
+                        raise
                     # NO FALLBACK - fail fast in git projects
                     raise RuntimeError(
                         f"Git-aware incremental processing failed and fallbacks are disabled. "
                         f"Original error: {e}"
                     ) from e
+                finally:
+                    # Bug #1575 Part C Defect 1: finalize (end_indexing) the
+                    # SAME indexing session process_branch_changes_high_throughput
+                    # began (defer_finalization=True above), now that
+                    # branch-isolation context has been established by
+                    # hide_files_not_in_branch_thread_safe(). Guarded on
+                    # collection_name being resolved -- if
+                    # resolve_collection_name() itself raised,
+                    # begin_indexing() was never called and there is
+                    # nothing to finalize. Runs on the exception path too,
+                    # matching the pre-fix "always finalize indexes, even
+                    # on exception" contract. Bug #1746 Change 3 (extended):
+                    # aborts instead when fatal_chunk_store_error is set.
+                    if collection_name is not None:
+                        self._finalize_indexing_session(
+                            collection_name,
+                            progress_callback=None,
+                            watch_mode=watch_mode,
+                            fatal_chunk_store_error=fatal_chunk_store_error,
+                        )
 
                 if not quiet:
                     logger.info(
                         f"Processed {stats.files_processed} files incrementally"
                     )
 
+        except ChunkStoreUnavailableError:
+            # Bug #1746 Change 3 (extended): never swallow a fatal
+            # chunk-store failure into an ordinary failed_files count and
+            # return normally -- that reproduces the exact silent-failure
+            # shape #1746 exists to kill. Propagate to the caller.
+            raise
         except Exception as e:
             logger.error(f"Incremental processing failed: {e}")
             stats.failed_files = len(file_paths)
@@ -2373,6 +3501,17 @@ class SmartIndexer(HighThroughputProcessor):
             Dict mapping file paths to their timestamps
         """
         indexed_files_with_timestamps: Dict[Path, float] = {}
+        # Issue #1505: derived in the SAME bulk-scroll pass as the timestamp
+        # snapshot above, so the main reconcile loop can look up each file's
+        # DB-side content id via a plain in-memory dict lookup instead of a
+        # per-file `scroll_points` query (`_get_any_content_id_for_file`).
+        db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: derived in this SAME bulk-scroll
+        # pass too, so the branch-visibility ("unhide") check in
+        # `_do_reconcile_with_database` can look up each file's
+        # `hidden_branches` via an in-memory dict lookup instead of issuing
+        # a fresh `scroll_points` query PER indexed file.
+        db_hidden_branches: Dict[str, List[str]] = {}
 
         try:
             if progress_callback:
@@ -2415,6 +3554,28 @@ class SmartIndexer(HighThroughputProcessor):
                 ):
                     indexed_files_with_timestamps[file_path] = timestamp
 
+                # Issue #1505: derive this file's DB-side content id once,
+                # first point encountered per relative path wins (mirrors
+                # the pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces).
+                try:
+                    relative_key = str(file_path.relative_to(self.config.codebase_dir))
+                except ValueError:
+                    relative_key = str(path_from_db)
+                if relative_key not in db_content_ids:
+                    db_content_ids[relative_key] = (
+                        self._derive_db_content_id_from_point(relative_key, point)
+                    )
+
+                # Codex #1505 review, Finding 1: capture hidden_branches for
+                # this path once too, first point wins -- mirrors the
+                # pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces.
+                if relative_key not in db_hidden_branches:
+                    db_hidden_branches[relative_key] = payload.get(
+                        "hidden_branches", []
+                    )
+
             if progress_callback:
                 progress_callback(
                     0,
@@ -2434,8 +3595,51 @@ class SmartIndexer(HighThroughputProcessor):
                 )
             # Return empty dict - reconcile will treat all files as new
             indexed_files_with_timestamps = {}
+            db_content_ids = {}
+            db_hidden_branches = {}
 
+        self._reconcile_db_content_ids = db_content_ids
+        self._reconcile_hidden_branches = db_hidden_branches
         return indexed_files_with_timestamps
+
+    def _derive_db_content_id_from_point(
+        self, relative_path: str, point: Dict[str, Any]
+    ) -> str:
+        """Derive the DB-side content id for a file from an already-fetched
+        content point's payload, without any additional store query.
+
+        Mirrors `_get_any_content_id_for_file`'s identity scheme: working_dir
+        (mtime/size-identified) points use the mtime/size id; committed
+        points prefer the git blob hash (Issue #1505 -- precise,
+        single-batch-derivable) and fall back to the legacy git commit hash
+        for older data that predates the blob-hash field.
+
+        Codex #1505 review, Finding 3: real point ids are deterministic
+        UUID5 strings (see `git_aware_processor.py` /
+        `high_throughput_processor.py`'s `_create_point_id`) and NEVER
+        contain a "working_dir" substring -- a previous string-match check
+        on the point id was dead code against real persisted data. The
+        authoritative signal is the payload shape itself:
+        `high_throughput_processor.py`'s `_create_vector_point` writes
+        `filesystem_mtime`/`filesystem_size` payload fields ONLY for a
+        non-git-available (mtime/size-identified) file, and never alongside
+        `git_blob_hash`/`git_commit_hash`.
+        """
+        payload = point.get("payload", {})
+
+        if "filesystem_mtime" in payload:
+            return (
+                f"{relative_path}:working_dir:"
+                f"{payload.get('filesystem_mtime', 'unknown')}:"
+                f"{payload.get('filesystem_size', 0)}"
+            )
+
+        blob_hash = payload.get("git_blob_hash")
+        if blob_hash:
+            return f"{relative_path}:blob:{blob_hash}"
+
+        git_commit = payload.get("git_commit_hash", "unknown")
+        return f"{relative_path}:{git_commit}"
 
     def _scroll_all_content_points(self, collection_name: str) -> List[Dict[str, Any]]:
         """Scroll through all content points and return them as a list.
@@ -2447,6 +3651,12 @@ class SmartIndexer(HighThroughputProcessor):
         offset = None
 
         while True:
+            # Bug #1969 Round 6 (P1-1 caller audit): the sole caller of
+            # this method is _get_indexed_files_snapshot ->
+            # _do_reconcile_with_database -- self_heal=True so
+            # `cidx index --reconcile` self-heals a corrupt-duplicate
+            # collection instead of hard-failing on the exact corruption
+            # this whole fix exists to resolve.
             points, next_offset = self.vector_store_client.scroll_points(
                 collection_name=collection_name,
                 filter_conditions={
@@ -2456,6 +3666,7 @@ class SmartIndexer(HighThroughputProcessor):
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,  # CRITICAL: No vectors = massive memory savings
+                self_heal=True,
             )
 
             if not points:
@@ -2463,15 +3674,20 @@ class SmartIndexer(HighThroughputProcessor):
 
             all_points.extend(points)
 
-            # Update offset first
+            # Bug #1971: the stuck-pagination safety check MUST compare
+            # `next_offset` against the PREVIOUS `offset` BEFORE it is
+            # reassigned -- comparing after assignment is always True
+            # (self-comparison), which silently truncated every
+            # multi-page scroll to page 1. Mirrors the already-correct
+            # sibling loop in
+            # HighThroughputProcessor._fetch_all_content_points.
+            if next_offset is not None and next_offset == offset:
+                logger.error(f"Pagination stuck at offset {offset} - breaking")
+                break
+
             offset = next_offset
             if offset is None:
                 # Normal completion - no more data
-                break
-
-            # Safety check to prevent infinite loops (only check if offset is not None)
-            if next_offset == offset:
-                logger.error(f"Pagination stuck at offset {offset} - breaking")
                 break
 
         return all_points
@@ -2629,15 +3845,11 @@ class SmartIndexer(HighThroughputProcessor):
             if not points:
                 return None
 
-            # Return the content ID from database
-            payload = points[0].get("payload", {})
-            git_commit = payload.get("git_commit_hash", "unknown")
-
-            # Check if this is working_dir content
-            if "working_dir" in str(points[0].get("id", "")):
-                return f"{file_path}:working_dir:{payload.get('filesystem_mtime', 'unknown')}:{payload.get('file_size', 0)}"
-            else:
-                return f"{file_path}:{git_commit}"
+            # Issue #1505: reuse the shared derivation helper so this method
+            # stays consistent with the batched-path identity scheme
+            # (blob-hash-first, commit-hash fallback) instead of duplicating
+            # the formatting logic.
+            return self._derive_db_content_id_from_point(file_path, points[0])
 
         except Exception as e:
             logger.warning(f"Failed to get content ID for {file_path}: {e}")
@@ -2668,6 +3880,7 @@ class SmartIndexer(HighThroughputProcessor):
                 },
                 limit=10000,  # Get all visible content points
                 collection_name=collection_name,
+                self_heal=True,
             )
 
             if not all_points:
@@ -2796,10 +4009,18 @@ class SmartIndexer(HighThroughputProcessor):
         else:
             # DEADLOCK FIX: Use hard delete without verification
             # Trust synchronous operations - verification was causing 5+ minute hangs
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = bool(
                 self.vector_store_client.delete_by_filter(
-                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                     collection_name,
+                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                 )
             )
             if success:
@@ -2837,6 +4058,14 @@ class SmartIndexer(HighThroughputProcessor):
 
             while True:
                 try:
+                    # Bug #1969 Round 6 (P1-1 caller audit): this scan
+                    # drives delete_file_branch_aware for genuinely-
+                    # deleted files -- self_heal=True so a corrupt-
+                    # duplicate collection is repaired here instead of
+                    # this loop's own except-Exception handler silently
+                    # masking the failure ("Database query failed during
+                    # deletion detection") and leaving the corruption in
+                    # place forever.
                     points, next_offset = self.vector_store_client.scroll_points(
                         filter_conditions={
                             "should": [
@@ -2849,6 +4078,7 @@ class SmartIndexer(HighThroughputProcessor):
                         with_payload=True,
                         with_vectors=False,
                         collection_name=collection_name,
+                        self_heal=True,
                     )
 
                     for point in points:
@@ -2979,9 +4209,100 @@ class SmartIndexer(HighThroughputProcessor):
                 # Fallback if stat fails
                 return f"{file_path}:working_dir_error"
         else:
-            # File matches committed version - use commit-based ID
+            # File matches committed version - use blob-hash based ID.
+            # Issue #1505: prefer the O(1) batched HEAD blob-hash lookup
+            # (built once per reconcile run via `_get_head_blob_hash_map`)
+            # over the per-file `git log -1 -- path` subprocess call. Only
+            # fall back to the original per-file computation for the rare
+            # file with no entry in the committed tree (e.g. untracked via
+            # `git rm --cached` while left on disk) -- graceful degradation
+            # for just that one file, never a silent skip.
+            head_blob_hashes = getattr(self, "_reconcile_head_blob_hashes", {})
+            blob_hash = head_blob_hashes.get(file_path)
+            if blob_hash is not None:
+                return f"{file_path}:blob:{blob_hash}"
+
+            # Codex #1505 review, Finding 2: count every fallback so the
+            # main reconcile loop can detect and loudly report a
+            # degraded (map-failed/mostly-empty) run. `_reconcile_fallback_count`
+            # is initialized to 0 in `_do_reconcile_with_database` alongside
+            # `_reconcile_head_blob_hashes`; `getattr` is a defensive
+            # fallback for any direct caller of this method in isolation
+            # (e.g. unit tests) that never ran that init.
+            self._reconcile_fallback_count = (
+                getattr(self, "_reconcile_fallback_count", 0) + 1
+            )
             commit = self._get_file_commit(file_path)
             return f"{file_path}:{commit}"
+
+    def _get_head_blob_hash_map(self) -> Dict[str, str]:
+        """Batch-fetch every tracked file's committed blob hash at HEAD.
+
+        Issue #1505: a single `git ls-tree -r HEAD` invocation returns the
+        blob hash for every path in the committed tree, replacing what used
+        to be a `git log -1 -- path` subprocess spawned PER unchanged file.
+        Uses `-z` (NUL-terminated records) so paths containing unusual
+        characters (spaces, newlines) are parsed correctly.
+
+        Returns:
+            Dict mapping relative file path -> 40-character blob hash SHA.
+            Empty dict on any failure (callers gracefully fall back to the
+            original per-file `_get_file_commit` computation for any path
+            missing from the map -- never silently skip a file).
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-tree", "-r", "-z", "HEAD"],
+                cwd=self.config.codebase_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                # Codex #1505 review, Finding 2: a silent `{}` here made
+                # every committed file fall back to the per-file `git log`
+                # path with NO indication why -- log LOUDLY (return code +
+                # stderr) so this failure mode is diagnosable instead of
+                # silently reintroducing Issue #1505's O(N) stall.
+                logger.warning(
+                    "_get_head_blob_hash_map: `git ls-tree -r HEAD` failed "
+                    "(return code %s): %s; reconcile will fall back to the "
+                    "slow per-file `git log` content-id lookup for every "
+                    "committed file in this run",
+                    result.returncode,
+                    result.stderr.strip() if result.stderr else "(no stderr)",
+                )
+                return {}
+
+            mapping: Dict[str, str] = {}
+            # Codex #1505 review, Finding 5: count malformed/unparsable
+            # entries instead of silently skipping them.
+            malformed_count = 0
+            for entry in result.stdout.split("\0"):
+                if not entry:
+                    continue
+                try:
+                    meta, path = entry.split("\t", 1)
+                except ValueError:
+                    malformed_count += 1
+                    continue
+                meta_parts = meta.split(" ")
+                if len(meta_parts) < 3:
+                    malformed_count += 1
+                    continue
+                blob_sha = meta_parts[2]
+                mapping[path] = blob_sha
+            if malformed_count:
+                logger.warning(
+                    "_get_head_blob_hash_map: skipped %d malformed `git "
+                    "ls-tree` entr%s while building the HEAD blob-hash map",
+                    malformed_count,
+                    "y" if malformed_count == 1 else "ies",
+                )
+            return mapping
+        except Exception as e:
+            logger.warning(f"Failed to batch-fetch HEAD blob hashes: {e}")
+            return {}
 
     def _get_modified_files_set(self) -> set:
         """Get set of files that differ from HEAD (unstaged + staged) in one batch call.

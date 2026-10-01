@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from datetime import datetime, timezone
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.app import create_app
+from code_indexer.server.auth.user_manager import User, UserRole
 
 
 @pytest.mark.e2e
@@ -38,27 +38,24 @@ class TestFileExtensionFiltering:
             created_at=datetime.now(timezone.utc),
         )
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_file_extensions_parameter(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_user,
     ):
         """Test semantic query accepts file_extensions parameter."""
-        # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        # Mock response with mixed file types (should be filtered to only .py files)
-        mock_semantic_manager.query_user_repositories.return_value = {
+        # Mixed file types (should be filtered to only .py files)
+        mock_return_value = {
             "results": [
                 {
                     "file_path": "/repo/src/main.py",
@@ -77,54 +74,53 @@ class TestFileExtensionFiltering:
             },
         }
 
-        # Make request with file_extensions parameter
-        response = client.post(
-            "/api/query",
-            json={
-                "query_text": "main function",
-                "file_extensions": [".py", ".js"],
-                "limit": 10,
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see module note above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "main function",
+                    "file_extensions": [".py", ".js"],
+                    "limit": 10,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Should succeed with 200
         assert response.status_code == 200
         data = response.json()
         assert "results" in data
         assert data["total_results"] == 1
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["query_text"] == "main function"
+        assert call_kwargs["repository_alias"] is None
+        assert call_kwargs["limit"] == 10
+        assert call_kwargs["min_score"] is None
+        assert call_kwargs["file_extensions"] == [".py", ".js"]
 
-        # Verify semantic query manager was called with file_extensions parameter
-        mock_semantic_manager.query_user_repositories.assert_called_once_with(
-            username="testuser",
-            query_text="main function",
-            repository_alias=None,
-            limit=10,
-            min_score=None,
-            file_extensions=[".py", ".js"],  # This parameter should be passed through
-        )
-
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_filters_results_by_file_extensions(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_user,
     ):
-        """Test semantic query manager properly filters results by file extensions."""
-        # Setup authentication
+        """Filters results by file extensions (mock arg order: bottom-up)."""
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        # Mock response should only contain .py files (filtered from larger set)
-        mock_semantic_manager.query_user_repositories.return_value = {
+        mock_return_value = {
             "results": [
                 {
                     "file_path": "/repo/src/utils.py",
@@ -150,28 +146,29 @@ class TestFileExtensionFiltering:
             },
         }
 
-        # Request only .py files
-        response = client.post(
-            "/api/query",
-            json={
-                "query_text": "class helper",
-                "file_extensions": [".py"],
-                "limit": 10,
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ):
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "class helper",
+                    "file_extensions": [".py"],
+                    "limit": 10,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Verify response contains only .py files
         assert response.status_code == 200
         data = response.json()
         assert data["total_results"] == 2
-
-        # All results should be .py files
         for result in data["results"]:
             assert result["file_path"].endswith(".py")
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_validates_file_extension_format(
         self, mock_dep_user_manager, mock_jwt_manager, client, mock_user
     ):
@@ -199,8 +196,8 @@ class TestFileExtensionFiltering:
         data = response.json()
         assert "detail" in data
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_validates_file_extension_characters(
         self, mock_dep_user_manager, mock_jwt_manager, client, mock_user
     ):
@@ -228,26 +225,23 @@ class TestFileExtensionFiltering:
         data = response.json()
         assert "detail" in data
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_with_empty_file_extensions_list(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_user,
     ):
         """Test semantic query with empty file_extensions list behaves like no filter."""
-        # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        mock_semantic_manager.query_user_repositories.return_value = {
+        mock_return_value = {
             "results": [],
             "total_results": 0,
             "query_metadata": {
@@ -258,48 +252,50 @@ class TestFileExtensionFiltering:
             },
         }
 
-        # Request with empty file_extensions list
-        response = client.post(
-            "/api/query",
-            json={
-                "query_text": "test",
-                "file_extensions": [],  # Empty list
-                "limit": 10,
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see module note above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "test",
+                    "file_extensions": [],  # Empty list
+                    "limit": 10,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Should succeed and pass None (no filtering)
         assert response.status_code == 200
-        mock_semantic_manager.query_user_repositories.assert_called_once_with(
-            username="testuser",
-            query_text="test",
-            repository_alias=None,
-            limit=10,
-            min_score=None,
-            file_extensions=None,  # Empty list should be converted to None
-        )
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["query_text"] == "test"
+        assert call_kwargs["repository_alias"] is None
+        assert call_kwargs["limit"] == 10
+        assert call_kwargs["min_score"] is None
+        assert call_kwargs["file_extensions"] is None  # Empty list -> None
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_without_file_extensions_parameter(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_user,
     ):
         """Test semantic query without file_extensions parameter (backward compatibility)."""
-        # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        mock_semantic_manager.query_user_repositories.return_value = {
+        mock_return_value = {
             "results": [],
             "total_results": 0,
             "query_metadata": {
@@ -310,65 +306,67 @@ class TestFileExtensionFiltering:
             },
         }
 
-        # Request without file_extensions parameter (existing behavior)
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test", "limit": 10},
-            headers={"Authorization": "Bearer test-token"},
-        )
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see module note above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            return_value=mock_return_value,
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test", "limit": 10},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Should succeed and pass None for file_extensions
         assert response.status_code == 200
-        mock_semantic_manager.query_user_repositories.assert_called_once_with(
-            username="testuser",
-            query_text="test",
-            repository_alias=None,
-            limit=10,
-            min_score=None,
-            file_extensions=None,  # Should default to None for backward compatibility
-        )
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
+        assert call_kwargs["username"] == "testuser"
+        assert call_kwargs["query_text"] == "test"
+        assert call_kwargs["repository_alias"] is None
+        assert call_kwargs["limit"] == 10
+        assert call_kwargs["min_score"] is None
+        assert call_kwargs["file_extensions"] is None  # backward compatibility
 
-    @patch("src.code_indexer.server.auth.dependencies.jwt_manager")
-    @patch("src.code_indexer.server.auth.dependencies.user_manager")
-    @patch("src.code_indexer.server.app.semantic_query_manager")
+    @patch("code_indexer.server.auth.dependencies.jwt_manager")
+    @patch("code_indexer.server.auth.dependencies.user_manager")
     def test_semantic_query_async_with_file_extensions(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_user,
     ):
         """Test async semantic query with file_extensions parameter."""
-        # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
             "role": "normal_user",
         }
         mock_dep_user_manager.get_user.return_value = mock_user
 
-        # Mock job submission
-        mock_semantic_manager.submit_query_job.return_value = "job-456"
+        # Patch the REAL semantic_query_manager instance (closure-capture
+        # class -- see module note above).
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "submit_query_job",
+            return_value="job-456",
+        ) as mock_submit:
+            response = client.post(
+                "/api/query",
+                json={
+                    "query_text": "async test",
+                    "file_extensions": [".py", ".ts"],
+                    "async_query": True,
+                    "limit": 15,
+                },
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Request async query with file_extensions
-        response = client.post(
-            "/api/query",
-            json={
-                "query_text": "async test",
-                "file_extensions": [".py", ".ts"],
-                "async_query": True,
-                "limit": 15,
-            },
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        # Should return job ID
         assert response.status_code == 202
         data = response.json()
         assert data["job_id"] == "job-456"
-
-        # Verify job submission includes file_extensions
-        mock_semantic_manager.submit_query_job.assert_called_once_with(
+        mock_submit.assert_called_once_with(
             username="testuser",
             query_text="async test",
             repository_alias=None,

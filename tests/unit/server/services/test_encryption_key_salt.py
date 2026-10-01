@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from src.code_indexer.server.services.encryption_key_salt import (
+from code_indexer.server.services.encryption_key_salt import (
     ensure_encryption_key_salt,
     read_encryption_key_salt,
 )

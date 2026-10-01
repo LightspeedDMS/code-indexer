@@ -7,7 +7,7 @@ On an immutable host /root/.local is read-only -> OSError -> deploy dead-loops.
 
 Re-fix (v11.11.0): the original v11.10.0 fix below (item 1) classified a user install
 ONLY via the "/.local/" substring. Staging proved this misses an EDITABLE install at a
-jsbattig-owned path with NO /.local/ segment (e.g. /home/jsbattig/code-indexer/src/
+operator-owned path with NO /.local/ segment (e.g. /home/opuser/code-indexer/src/
 code_indexer/__init__.py) -> probe returned False -> use_sudo=True -> sudo's root pip hit
 read-only /root/.local + /root/.cache/pip/wheels -> fatal pip install failure -> dead loop.
 _is_user_install now keys on WRITABILITY (os.access(install_dir, os.W_OK)) in addition to
@@ -178,7 +178,7 @@ class TestIsUserInstall:
     ) -> None:
         """Bug #1245 re-fix regression (staging-proven).
 
-        An editable-home install (e.g. /home/jsbattig/code-indexer/src/
+        An editable-home install (e.g. /home/opuser/code-indexer/src/
         code_indexer/__init__.py) has NO "/.local/" segment at all, but its
         containing directory IS writable by the current (auto-updater)
         process user. The v11.10.0 /.local/-substring-only probe returned

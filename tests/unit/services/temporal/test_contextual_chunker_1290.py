@@ -5,11 +5,11 @@ Chunks an AggregatedCommitDocument (from commit_aggregator.py) into fixed-size,
 section-range provenance map) and is_head (chunk_index == 0).
 """
 
-from src.code_indexer.services.temporal.commit_aggregator import (
+from code_indexer.services.temporal.commit_aggregator import (
     AggregatedCommitDocument,
     ProvenanceSection,
 )
-from src.code_indexer.services.temporal.contextual_chunker import (
+from code_indexer.services.temporal.contextual_chunker import (
     chunk_aggregated_document,
 )
 

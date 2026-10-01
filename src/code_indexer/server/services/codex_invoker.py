@@ -22,6 +22,10 @@ import signal
 import subprocess
 from typing import Callable, List, Optional, Tuple, Union
 
+from code_indexer.server.services.agent_cli_isolation import (
+    is_isolation_exempt_flow,
+    prepare_stable_neutral_cwd,
+)
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,
@@ -130,7 +134,26 @@ class CodexInvoker:
         if validation_error is not None:
             return validation_error
 
-        start_result = self._start_process(prompt, cwd)
+        scratch_dir: Optional[str] = None
+        if is_isolation_exempt_flow(flow):
+            process_cwd = cwd
+        else:
+            # The analyzed directory is never the subprocess's own working
+            # directory — codex auto-loads AGENTS.md from its cwd exactly
+            # like Claude auto-loads CLAUDE.md; a repository-authored one
+            # must not be picked up as trusted CLI configuration. The
+            # scratch directory is STABLE per target (cwd) rather than
+            # fresh per call, so codex's own per-cwd session storage is
+            # created once per target instead of once per call.
+            scratch_dir = prepare_stable_neutral_cwd(cwd)
+            process_cwd = scratch_dir
+
+        # scratch_dir (when set) is a stable per-target directory (see
+        # prepare_stable_neutral_cwd) and is intentionally never removed
+        # here -- it is emptied at the START of the next call for the same
+        # target instead, so codex's own per-cwd session storage is created
+        # once per target, not once per call.
+        start_result = self._start_process(prompt, process_cwd)
         if isinstance(start_result, InvocationResult):
             return start_result
         proc = start_result
@@ -175,6 +198,14 @@ class CodexInvoker:
         self, prompt: str, cwd: str
     ) -> "Union[subprocess.Popen[str], InvocationResult]":
         """Start the Codex subprocess. Returns Popen on success, InvocationResult on error.
+
+        Keeps its full command capability (Bash, file writes, git) via
+        --dangerously-bypass-approvals-and-sandbox, unchanged from before
+        this module existed. The isolation control for Codex is the
+        subprocess's working directory (see ``invoke()``): a neutral
+        directory for golden-repo flows, so a repository's own AGENTS.md is
+        not auto-loaded, while the repository itself stays fully reachable
+        because Codex does not confine file access to its cwd.
 
         When auth_header_provider is set, calls it once to obtain the Authorization
         header value and injects it as CIDX_MCP_AUTH_HEADER so codex reads it via

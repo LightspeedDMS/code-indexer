@@ -6,7 +6,7 @@ Tests verify critical violations are fixed per code review.
 from pathlib import Path
 from unittest.mock import Mock
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 

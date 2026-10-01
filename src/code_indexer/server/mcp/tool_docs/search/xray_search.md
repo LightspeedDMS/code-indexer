@@ -13,13 +13,13 @@ inputSchema:
       - type: array
         items:
           type: string
-      description: 'Repository identifier(s): String for single-repo search, array of strings for omni multi-repo search across multiple repos. JSON-encoded string arrays (e.g. ''["repo-a","repo-b"]'') are also accepted and parsed as arrays. Single-repo returns {job_id}; multi-repo returns {job_ids, errors}. Use list_global_repos to see available repositories.'
+      description: 'Repository identifier(s). String for single-repo search; array of strings (or a JSON-encoded array string, e.g. ''["repo-a","repo-b"]'') for multi-repo search.'
     pattern:
       type: string
-      description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
+      description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files.'
     evaluator_code:
       type: string
-      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. The function receives the file root AST node (OwnedNode) and returns zero or more findings. Each EvalFinding has: pattern (String identifying the finding), line (usize, 1-based line number), snippet (String, code context). The OwnedNode and EvalFinding types are provided automatically by the compiler preamble -- do not define them yourself. Use node.descendants_of_kind("type_name") to walk the AST. Rust security whitelist enforced: no unsafe, no std::fs/net/process/env/io, no raw pointers, no extern blocks, no forbidden macros.'
+      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. Mutually exclusive with pattern_name. See "Evaluator API" below.'
     search_target:
       type: string
       enum:
@@ -30,13 +30,20 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include (e.g. ["*.java", "*.kt"]). "*" matches a single path segment; use "**" for recursive segment matching. Empty list means include all.'
+      description: >-
+        Glob patterns for files to include (e.g. ["*.java", "*.kt"]). Empty
+        list means include all. See "Glob Pattern Semantics" below for the
+        full matching rules (brace groups, any-depth vs. root-anchored
+        segments).
       default: []
     exclude_patterns:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none.'
+      description: >-
+        Glob patterns for files to exclude (e.g. ["*/test/*"]). Same
+        brace-group and bare-directory semantics as include_patterns.
+        Empty list means exclude none.
       default: []
     path:
       type: string
@@ -67,17 +74,17 @@ inputSchema:
       default: 120
     max_results:
       type: integer
-      description: 'Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use a small value (e.g. 5) to test the evaluator before running the full search. Renamed from max_files in v10.3.x. Must be >= 1 when provided.'
+      description: 'Maximum number of candidate files to evaluate. Must be >= 1 when provided.'
       minimum: 1
     await_seconds:
       type: number
-      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..120.0 (raised from 10.0 in v10.5.0). Values > 30.0 emit a server-side warning. Error code await_seconds_invalid if out of range or wrong type.'
+      description: 'Optional server-side polling window in seconds (floats accepted, e.g. 2.5). Range 0.0..45.0. See intro paragraph above for behavior at 0 vs. > 0.'
       minimum: 0
-      maximum: 120.0
+      maximum: 45.0
       default: 0
     pattern_name:
       type: string
-      description: "Before writing evaluator_code inline, check the pattern library — a pattern for your use case may already exist. Use browse_directory('cidx-meta-global', path='xray-patterns') to list available patterns. Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code — provide one or the other, not both. When provided, the server loads the pattern YAML, resolves typed parameter defaults, applies any pattern_params overrides, and uses the resulting evaluator code. Seed patterns catch-rethrow and deep-nesting are created automatically in __any__/ scope on first use. Use store_xray_pattern to add custom patterns. Before ending a session where you developed a new evaluator, if it took iteration, call store_xray_pattern so the work survives session restart and reaches all users."
+      description: "Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code. See \"Pattern Library\" below."
     pattern_params:
       type: object
       description: 'JSON object of parameter overrides for the resolved pattern. Only valid when pattern_name is provided. Keys must match parameter names declared in the pattern YAML (UPPER_SNAKE_CASE). Values must be compatible with the declared parameter type (usize, i64, f64, bool, or str). Unknown keys return invalid_parameter error; type-incompatible values return invalid_parameter_type error.'
@@ -133,7 +140,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path` and `language`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
 
 ## Quick Start
 
@@ -165,8 +172,8 @@ Key points:
 | pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
 | evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See "Evaluator API" below. When omitted, the server substitutes a default that produces one finding per Phase 1 hit. |
 | search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
-| include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
-| exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. |
+| include_patterns | list[str] | no | [] | Glob patterns for files to include. Empty means include all. See "Glob Pattern Semantics" below. |
+| exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. Same semantics as include_patterns. |
 | path | str | no | null | Subdirectory restriction within the repo (relative). |
 | case_sensitive | bool | no | true | Phase 1 content driver case sensitivity. |
 | context_lines | int | no | 0 | Lines of context before/after each Phase 1 hit. Range 0..10. |
@@ -174,11 +181,60 @@ Key points:
 | pcre2 | bool | no | false | PCRE2 engine for the content driver (lookahead/lookbehind). |
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
-| await_seconds | float | no | 0 | Server-side inline-wait window. 0 = return job id immediately. Range 0.0..120.0 (v10.5.0). Values > 30.0 emit a server warning. |
+| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). 0 = return job id immediately. Range 0.0..45.0 (lowered from 120.0 by Bug #1070 -- async handlers risk a 504 at the ALB 60s timeout; the server enforces the 45.0 ceiling via `_AWAIT_SECONDS_MAX` in `handlers/xray.py`). Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
 | pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
 > **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the renamed fields shown above. When calling the REST API directly, use the original field names.
+
+## Glob Pattern Semantics
+
+`include_patterns`/`exclude_patterns` are gitignore-style globs, normalized identically for both
+`search_target` modes and for indexed and unindexed repositories alike:
+
+- A leading `./` is stripped (`./src/*.ts` behaves like `src/*.ts`).
+- A "bare token" with no `/`, no glob metacharacter, and no `.` (e.g. `docs`, `Makefile`) is
+  ambiguous -- it could be a directory name or an extension-less filename -- so it matches BOTH the
+  name itself at any depth AND everything recursively under it (`**/docs`, `**/docs/**`).
+- A pattern with no `/` at all is never anchored to a directory level, even when it carries a glob
+  metacharacter or a `.` (unlike the bare-token case above, which requires the ABSENCE of both) --
+  `*.java` matches the basename at any depth: `Foo.java`, `src/Foo.java`, and `src/sub/Foo.java` all
+  match.
+- A pattern ending in `/` with exactly one path segment (e.g. `docs/`) behaves IDENTICALLY to the
+  bare token above -- the trailing slash adds no meaning for a single segment.
+- The same any-depth rule applies when that single segment ALSO carries a wildcard (e.g.
+  `tests*/`, `build-*/`, `*.d/`) -- it is never root-anchored: `tests*/` matches `tests/foo.py`
+  (root), `a/tests/foo.py` (nested), and `lib/src/tests_unit/foo.py` (deeply nested, different
+  `tests*` variant) alike, not only files directly under a root-level `tests`-prefixed directory.
+- A pattern ending in `/` with MORE than one path segment (e.g. `src/main/`) is different: it is an
+  explicit, ROOT-ANCHORED directory marker -- unlike every case above, it does NOT match at any
+  depth. `src/main/` matches `src/main` and everything under it starting from the repository root
+  only; `modA/src/main/App.java` (nested under a submodule) is NOT matched. The same rule makes
+  `src/*/` match only files inside a NAMED subdirectory of `src/` (`src/sub/x.java`,
+  `src/sub/sub2/x.java`), never a file directly in `src/` itself (`src/x.java` does NOT match).
+- `*` matches a single path segment; a leading `*/` is rewritten to `**/` (matches at any depth)
+  regardless of how many further `/` the rest of the pattern contains, and regardless of whether the
+  pattern ends in a wildcard or a bare trailing `/` -- `*/tests/*` and `*/tests/` both match
+  `tests/foo.py` (zero segments before `tests`), `src/tests/foo.py` (one segment), and
+  `a/b/tests/foo.py` (two-or-more segments) alike. `**` matches multiple path segments recursively.
+- Brace groups are supported, including nested and multiple groups in one pattern (e.g.
+  `*.{ts,tsx}`), capped at 64 expanded variants per pattern -- exceeding the cap is an invalid
+  pattern (see below), not a silent truncation.
+
+## Invalid Pattern Errors
+
+A malformed `include_patterns`/`exclude_patterns` entry is rejected up front, before evaluator
+validation or any background job is submitted -- it is never silently skipped or allowed to widen
+the search. The response is returned immediately (synchronously, no `job_id`):
+
+```json
+{"error": "include_patterns_invalid", "message": "<reason>"}
+```
+
+(or `exclude_patterns_invalid` for that field). Triggers: the field is present but not a list
+(including falsy-but-not-a-list values like `""` or `0`); a non-string list item (e.g. `[null]`);
+an unbalanced brace group (e.g. `*.{ts,md`); gitignore negation/comment syntax used as a standalone
+pattern (`!*.md`, `#x`); or a brace group expanding to more than 64 variants.
 
 ## Evaluator API
 
@@ -719,7 +775,24 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 - `partial: true` (only on partial completion)
 - `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
 - `max_files_reached: true` (only when the `max_results` cap fired before timeout)
-- `warnings[]` (only when present): zero-match include_pattern hints
+- `warnings[]` (only when present): advisory diagnostics from the Phase 1 zero-match-pattern probe.
+  Never causes job failure and never changes `matches[]`. Possible `type` values:
+  - `zero_match_include_pattern`: this `include_pattern` matched zero files. Carries `pattern` and a
+    `hint` suggesting `**/name` for recursive matching. A likely sign the pattern is narrower than
+    intended.
+  - `zero_match_probe_incomplete` (`search_target="filename"` only): the probe's bounded comparison
+    budget (10,000 pattern-to-file comparisons, shared across ALL `include_patterns` in this
+    request) was exhausted before every file could be checked against every pattern. Carries the
+    `patterns` that could not be fully checked. Meaning for the caller: some genuine zero-match
+    patterns among those listed may have gone unreported -- absence of a
+    `zero_match_include_pattern` warning for one of them is NOT proof it matched something. The
+    main search's `matches[]` are unaffected; this only limits the diagnostic's completeness.
+  - `zero_match_probe_timeout` (`search_target="content"` only): the ripgrep-backed probe ran out of
+    its shared time budget before checking every `include_pattern`. Same caller implication as
+    `zero_match_probe_incomplete` -- some zero-match warnings may be missing; results are unaffected.
+  - `content_search_read_capped` (`search_target="content"` only): a probe's own broadest-possible
+    scan hit the internal byte-size read ceiling, so that pattern's zero-match determination may be
+    unreliable.
 
 ### evaluation_errors[] payload examples
 
@@ -778,18 +851,21 @@ Other validation rejection messages name the offending construct and include a d
 
 ### Large Result Paging
 
-For results larger than ~2000 chars (configurable via Web UI `payload_preview_size_chars`), the polled job result is truncated and stored in PayloadCache. Additional fields:
+For results larger than the server's single payload character budget (Web UI `payload_max_fetch_size_chars`, default 5000 chars), the polled job result is truncated and the FULL set is stored in PayloadCache as a series of whole-entry pages. The inline budget IS the page budget -- there is no separate, smaller preview threshold. `matches[]`/`evaluation_errors[]` come back inline as many WHOLE leading entries as fit within `payload_max_fetch_size_chars` -- a result with many small entries can inline dozens of them. **No entry is ever partially cut to fit a page**: an entry that alone exceeds the budget gets its own, necessarily oversized, page in the cache, intact and unmodified. Additional fields:
 
-- `truncated: true` -- set when the matches+errors JSON exceeded the preview cap
+- `truncated: true` -- set when the matches+errors JSON exceeded the character budget
 - `has_more: true` -- synonym; set with `truncated`
 - `cache_handle: "<uuid>"` -- opaque handle for paged retrieval
-- `total_size: <int>` -- full payload byte size
-- `matches_and_errors_preview: "<first 2000 chars of JSON>"` -- quick preview
-- `matches[]` and `evaluation_errors[]` -- only the first 3 entries inline
+- `total_pages: <int>` -- number of independently-fetchable cache pages the full content was split across
+- `inline_entry_truncated: true` -- present only in the rare case where the single first entry alone exceeds the budget; it is then adaptively shrunk (string/list fields capped) for THIS inline response ONLY -- the cached copy stays whole and unmodified
+- `matches[]` and `evaluation_errors[]` -- as many whole leading entries as fit the character budget (never a fixed count, never a partially-truncated entry unless `inline_entry_truncated` is set)
+- `fetch_tool_hint` -- names `cidx_fetch_cached_payload` and describes the page format below
 
-To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`), or use the discoverable `cidx_fetch_cached_payload` MCP tool.
+To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP tool with `cache_handle`, incrementing `page` from 1 through `total_pages` (or until `has_more` is `false`). Each page is stored as its own independent cache row and is returned WHOLE and unsliced regardless of the server's CURRENT `payload_max_fetch_size_chars` setting -- a config change between when a result was produced and when you fetch it cannot corrupt or misalign a page. Each page is an independently parseable JSON object `{"matches": [...], "evaluation_errors": [...]}` holding a whole-entry slice -- `json.loads` (or equivalent) works on every page by itself; concatenate every page's `matches`/`evaluation_errors` lists, in page order, to reconstruct the full arrays exactly, in original order.
 
-When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors[]` arrays are returned inline.
+When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors[]` arrays are returned inline, unmodified.
+
+**Cache degradation and failure** (Bug #1928 final round): `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the search already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
 
 ## Iterating on Your Evaluator
 
@@ -804,13 +880,16 @@ When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors
 
 ## Pattern Library
 
+Before writing `evaluator_code` inline, check the pattern library: a pattern for your use case may already exist (see "Discovering Available Patterns" below).
+
 When an evaluator pattern is complex, tuned through iteration, or costly to produce, save it via `store_xray_pattern` for reuse. Stored patterns:
 
 - Are referenced by name via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
 - Support typed parameters with defaults, overridable per-call via `pattern_params`.
 - Persist in cidx-meta (git-versioned) across sessions and server restarts.
+- Seed patterns `catch-rethrow` and `deep-nesting` are created automatically in `__any__/` scope on first use.
 
-**Recommendation**: If you have spent significant effort developing and testing an evaluator, store it rather than discarding it. Future searches can reference the pattern by name without reconstructing the evaluator logic.
+**Recommendation**: If you have spent significant effort developing and testing an evaluator, store it rather than discarding it -- especially before ending a session, so the work survives session restart and reaches all users. Future searches can reference the pattern by name without reconstructing the evaluator logic.
 
 ### Discovering Available Patterns
 
@@ -898,6 +977,7 @@ Running xray_search jobs can be cancelled via `cancel_job(job_id)`. XRay jobs re
 
 ## Related
 
+- See `list_global_repos` to see available repositories before calling this tool.
 - See `cancel_job` to cancel a running xray_search job with process termination.
 - See `xray_explore` for verbose AST debug output to help craft evaluator code.
 - `xray_explore` runs the same two-phase pipeline but adds an `ast_debug` field to every match, showing the complete tree-sitter AST node structure. Use it before writing your `evaluator_code`.

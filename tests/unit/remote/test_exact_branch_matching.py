@@ -8,7 +8,7 @@ import json
 import pytest
 from unittest.mock import Mock
 
-from src.code_indexer.remote.repository_linking import (
+from code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
     RepositoryLink,
     RepositoryMatch,
@@ -17,8 +17,8 @@ from src.code_indexer.remote.repository_linking import (
     BranchMatchingError,
     NoMatchFoundError,
 )
-from src.code_indexer.services.git_topology_service import GitTopologyService
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.services.git_topology_service import GitTopologyService
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     RepositoryMatch as ClientRepositoryMatch,
     RepositoryDiscoveryResponse as ClientDiscoveryResponse,
@@ -114,7 +114,7 @@ class TestExactBranchMatcher:
 
     def test_exact_branch_matcher_initialization(self, mock_repository_linking_client):
         """Test ExactBranchMatcher initializes correctly."""
-        from src.code_indexer.remote.repository_linking import ExactBranchMatcher
+        from code_indexer.remote.repository_linking import ExactBranchMatcher
 
         matcher = ExactBranchMatcher(mock_repository_linking_client)
 
@@ -338,7 +338,7 @@ class TestExactBranchMatcher:
         exact_branch_matcher.git_service = mock_git_topology_service
 
         # Mock network error during repository discovery
-        from src.code_indexer.api_clients.base_client import NetworkError
+        from code_indexer.api_clients.base_client import NetworkError
 
         exact_branch_matcher.repository_client.discover_repositories.side_effect = (
             NetworkError("Connection failed")
@@ -430,7 +430,7 @@ class TestExactBranchMatcher:
 
     def test_select_best_match_single_activated(self, exact_branch_matcher):
         """Test selecting best match with single activated repository."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             RepositoryType,
             MatchQuality,
         )
@@ -461,7 +461,7 @@ class TestExactBranchMatcher:
 
     def test_select_best_match_multiple_activated(self, exact_branch_matcher):
         """Test selecting best match with multiple activated repositories."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             RepositoryType,
             MatchQuality,
         )
@@ -504,7 +504,7 @@ class TestExactBranchMatcher:
 
     def test_select_best_match_golden_fallback(self, exact_branch_matcher):
         """Test selecting best match falls back to golden repositories."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             RepositoryType,
             MatchQuality,
         )
@@ -548,7 +548,7 @@ class TestRepositoryLinkStorage:
     @pytest.fixture
     def sample_repository_link(self):
         """Sample repository link for testing."""
-        from src.code_indexer.remote.repository_linking import RepositoryType
+        from code_indexer.remote.repository_linking import RepositoryType
 
         return RepositoryLink(
             alias="repo-auth-user1",
@@ -564,7 +564,7 @@ class TestRepositoryLinkStorage:
 
     def test_store_repository_link(self, tmp_path, sample_repository_link):
         """Test storing repository link in remote configuration."""
-        from src.code_indexer.remote.repository_linking import store_repository_link
+        from code_indexer.remote.repository_linking import store_repository_link
 
         store_repository_link(tmp_path, sample_repository_link)
 
@@ -583,7 +583,7 @@ class TestRepositoryLinkStorage:
 
     def test_load_repository_link(self, tmp_path, sample_repository_link):
         """Test loading repository link from remote configuration."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             store_repository_link,
             load_repository_link,
         )
@@ -602,7 +602,7 @@ class TestRepositoryLinkStorage:
 
     def test_load_repository_link_not_found(self, tmp_path):
         """Test loading repository link when configuration doesn't exist."""
-        from src.code_indexer.remote.repository_linking import load_repository_link
+        from code_indexer.remote.repository_linking import load_repository_link
 
         # Should return None when config doesn't exist
         result = load_repository_link(tmp_path)
@@ -612,7 +612,7 @@ class TestRepositoryLinkStorage:
         self, tmp_path, sample_repository_link
     ):
         """Test repository link is stored in correct configuration format."""
-        from src.code_indexer.remote.repository_linking import store_repository_link
+        from code_indexer.remote.repository_linking import store_repository_link
 
         store_repository_link(tmp_path, sample_repository_link)
 
@@ -679,8 +679,8 @@ class TestBranchMatchingIntegration:
     @pytest.mark.asyncio
     async def test_exact_branch_matching_with_real_git(self, real_git_repo):
         """Test exact branch matching with real GitTopologyService."""
-        from src.code_indexer.services.git_topology_service import GitTopologyService
-        from src.code_indexer.remote.repository_linking import ExactBranchMatcher
+        from code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.remote.repository_linking import ExactBranchMatcher
 
         git_service = GitTopologyService(real_git_repo)
         current_branch = git_service.get_current_branch()
@@ -703,7 +703,7 @@ class TestBranchMatchingIntegration:
     def test_git_topology_service_detached_head(self, real_git_repo):
         """Test GitTopologyService handles detached HEAD state."""
         import subprocess
-        from src.code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.services.git_topology_service import GitTopologyService
 
         # Create detached HEAD state
         result = subprocess.run(
@@ -726,7 +726,7 @@ class TestBranchMatchingIntegration:
 
     def test_git_topology_service_no_git_repo(self, tmp_path):
         """Test GitTopologyService handles non-git directories gracefully."""
-        from src.code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.services.git_topology_service import GitTopologyService
 
         git_service = GitTopologyService(tmp_path)
         current_branch = git_service.get_current_branch()
@@ -740,7 +740,7 @@ class TestExactBranchMatchingExceptions:
 
     def test_repository_linking_error_inheritance(self):
         """Test RepositoryLinkingError exception inheritance."""
-        from src.code_indexer.remote.repository_linking import RepositoryLinkingError
+        from code_indexer.remote.repository_linking import RepositoryLinkingError
 
         error = RepositoryLinkingError("Test error")
         assert isinstance(error, Exception)
@@ -748,7 +748,7 @@ class TestExactBranchMatchingExceptions:
 
     def test_branch_matching_error_inheritance(self):
         """Test BranchMatchingError exception inheritance."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             BranchMatchingError,
             RepositoryLinkingError,
         )
@@ -760,7 +760,7 @@ class TestExactBranchMatchingExceptions:
 
     def test_no_match_found_error_inheritance(self):
         """Test NoMatchFoundError exception inheritance."""
-        from src.code_indexer.remote.repository_linking import BranchMatchingError
+        from code_indexer.remote.repository_linking import BranchMatchingError
 
         error = NoMatchFoundError("No matching repositories found")
         assert isinstance(error, BranchMatchingError)
@@ -773,7 +773,7 @@ class TestRepositoryDataModels:
 
     def test_repository_match_model_validation(self):
         """Test RepositoryMatch model validation."""
-        from src.code_indexer.remote.repository_linking import (
+        from code_indexer.remote.repository_linking import (
             RepositoryType,
             MatchQuality,
         )
@@ -799,7 +799,7 @@ class TestRepositoryDataModels:
 
     def test_repository_link_model_validation(self):
         """Test RepositoryLink model validation."""
-        from src.code_indexer.remote.repository_linking import RepositoryType
+        from code_indexer.remote.repository_linking import RepositoryType
 
         link = RepositoryLink(
             alias="test-repo-user1",

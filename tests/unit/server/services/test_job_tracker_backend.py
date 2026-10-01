@@ -322,13 +322,15 @@ class TestGetJobDelegation:
 class TestCleanupOrphanedJobs:
     """cleanup_orphaned_jobs_on_startup must delegate to backend."""
 
-    def test_cleanup_orphaned_jobs_marks_running_as_failed(self, db_path, backend):
+    def test_cleanup_orphaned_jobs_marks_running_as_interrupted(self, db_path, backend):
         """
-        cleanup_orphaned_jobs_on_startup marks orphaned running jobs as failed.
+        cleanup_orphaned_jobs_on_startup marks orphaned running jobs as interrupted.
 
         Given jobs persisted with status running/pending
         When a new JobTracker is created (simulating restart) and cleanup is called
-        Then those jobs are marked failed in the backend
+        Then those jobs are marked 'interrupted' in the backend (Bug #1950:
+        a restart artifact, DISTINCT from 'failed', so /health's
+        get_failed_job_count() never counts it).
         """
         # Pre-populate the backend with "orphaned" running job
         before = datetime.now(timezone.utc).isoformat()
@@ -348,10 +350,11 @@ class TestCleanupOrphanedJobs:
         assert count >= 1
         row = backend.get_job("job-orphan-001")
         assert row is not None
-        assert row["status"] == "failed"
+        assert row["status"] == "interrupted"
 
-    def test_cleanup_orphaned_jobs_marks_pending_as_failed(self, db_path, backend):
-        """Pending jobs are also marked as failed on startup cleanup."""
+    def test_cleanup_orphaned_jobs_marks_pending_as_interrupted(self, db_path, backend):
+        """Pending jobs are also marked 'interrupted' (Bug #1950) on
+        startup cleanup, not 'failed'."""
         before = datetime.now(timezone.utc).isoformat()
         backend.save_job(
             job_id="job-orphan-002",
@@ -367,7 +370,8 @@ class TestCleanupOrphanedJobs:
 
         assert count >= 1
         row = backend.get_job("job-orphan-002")
-        assert row["status"] == "failed"
+        assert row is not None
+        assert row["status"] == "interrupted"
 
     def test_cleanup_does_not_touch_completed_jobs(self, db_path, backend):
         """cleanup_orphaned_jobs_on_startup leaves completed jobs intact."""

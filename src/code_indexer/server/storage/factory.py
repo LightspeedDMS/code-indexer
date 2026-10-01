@@ -125,6 +125,15 @@ class BackendRegistry:
     # SAME db_path (SQLite) / general connection_pool (PostgreSQL) as the
     # sibling backends in this registry, never a second isolated connection.
     embedding_call_stats: Any = field(default=None)
+    # Story #1787 S2 amendment AC16 (dual-review defect H4/H6): X-Ray
+    # graph-build K-calibration store — SQLite (dedicated db file) in solo
+    # mode, PostgreSQL (shared general pool) in cluster mode, so all nodes
+    # learn the same per-language memory multiplier from real graph builds.
+    # Typed Any like every other dual-backend field in this dataclass: the
+    # concrete type is chosen at runtime by storage_mode, and both concrete
+    # backends already share the identical record_sample()/get_k() protocol
+    # (KStoreProtocol in k_calibration_store.py).
+    xray_k_calibration: Any = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +231,9 @@ class StorageFactory:
         from code_indexer.server.services.embedding_call_stats import (
             EmbeddingCallStatsSqliteBackend,
         )
+        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+            SqliteKCalibrationBackend,
+        )
 
         # Main database: all backends except groups/audit share the same DB.
         db_path = str(Path(data_dir) / "cidx_server.db")
@@ -272,6 +284,9 @@ class StorageFactory:
             query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
             search_embed_event=SearchEmbedEventSqliteBackend(db_path=db_path),
             embedding_call_stats=EmbeddingCallStatsSqliteBackend(db_path=db_path),
+            xray_k_calibration=SqliteKCalibrationBackend(
+                db_path=str(Path(data_dir) / "xray_k_calibration.db")
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -391,6 +406,9 @@ class StorageFactory:
         from code_indexer.server.services.embedding_call_stats import (
             EmbeddingCallStatsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.xray_graph_k_calibration_backend import (
+            XrayGraphKCalibrationPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -447,6 +465,7 @@ class StorageFactory:
             query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
             search_embed_event=SearchEmbedEventPostgresBackend(pool),
             embedding_call_stats=EmbeddingCallStatsPostgresBackend(pool),
+            xray_k_calibration=XrayGraphKCalibrationPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

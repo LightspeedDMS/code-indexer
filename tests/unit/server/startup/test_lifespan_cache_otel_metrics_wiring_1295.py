@@ -80,3 +80,24 @@ class TestLifespanConstructsEmbeddingCacheOtelMetrics:
             "get_query_embedding_cache must be resolved before "
             "EmbeddingCacheOtelMetrics construction (total_entries_fn source)"
         )
+
+    def test_write_failures_fn_wired_to_query_embedding_cache(self):
+        """Bug #1536: write_failures_fn must be passed to the
+        EmbeddingCacheOtelMetrics(...) constructor call, sourced from the
+        same wired cache instance's write_failures_since_start() accessor --
+        otherwise the write-failure gauge always reads 0 in production
+        (silently reverting the observability fix)."""
+        source = _LIFESPAN_PATH.read_text()
+        otel_construction_pos = source.rfind("EmbeddingCacheOtelMetrics(")
+        assert otel_construction_pos != -1, "EmbeddingCacheOtelMetrics(...) not found"
+        # The constructor call itself must pass write_failures_fn=...
+        construction_call_end = source.find(")", otel_construction_pos)
+        construction_call_text = source[otel_construction_pos:construction_call_end]
+        assert "write_failures_fn=" in construction_call_text, (
+            "EmbeddingCacheOtelMetrics(...) constructor call must pass "
+            "write_failures_fn=... (Bug #1536)"
+        )
+        assert "write_failures_since_start" in source, (
+            "write_failures_fn must be sourced from "
+            "QueryEmbeddingCache.write_failures_since_start()"
+        )

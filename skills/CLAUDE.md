@@ -49,6 +49,6 @@ mkdir -p skills/<skill-name>
 
 ## Available skills
 
-| Display Name | Source |
-|---|---|
-| Lightspeed Neo Exploration | `lightspeed-neo-exploration/SKILL.md` |
+None currently checked in.
+
+Skills describing internal systems, customer deployments, or proprietary architecture MUST NOT be committed here -- this repository is public. See the "Disclosure Discipline" section in the root `CLAUDE.md`. Keep such skills outside the repo and upload them to Claude.ai directly.

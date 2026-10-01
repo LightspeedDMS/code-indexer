@@ -35,8 +35,8 @@ class TestLifespanAuditServiceWiring1241:
 
     def test_audit_service_stop_present_in_shutdown(self) -> None:
         source = _LIFESPAN_PATH.read_text()
-        assert "_audit_svc.stop()" in source or "audit_service.stop()" in source, (
-            "lifespan.py must call audit_service.stop() (or _audit_svc.stop()) "
+        assert "run_sync(_audit_svc.stop)" in source, (
+            "lifespan.py must call audit_service.stop() (off the event loop) "
             "during shutdown (Issue #1241 P1.3) to drain the async queue and "
             "prevent audit-record loss on graceful restart."
         )
@@ -45,16 +45,12 @@ class TestLifespanAuditServiceWiring1241:
         source = _LIFESPAN_PATH.read_text()
         yield_pos = source.find("yield  # Server is now running")
         start_pos = source.find("audit_service.start()")
-        # stop may be reached via _audit_svc.stop() or audit_service.stop()
-        stop_pos_1 = source.find("_audit_svc.stop()")
-        stop_pos_2 = source.find("audit_service.stop()")
-        stop_pos = stop_pos_1 if stop_pos_1 != -1 else stop_pos_2
+        # stop runs off the event loop: run_sync(_audit_svc.stop)
+        stop_pos = source.find("run_sync(_audit_svc.stop)")
 
         assert yield_pos != -1, "could not locate the lifespan yield boundary"
         assert start_pos != -1, "audit_service.start() not found in lifespan.py"
-        assert stop_pos != -1, (
-            "_audit_svc.stop() / audit_service.stop() not found in lifespan.py"
-        )
+        assert stop_pos != -1, "run_sync(_audit_svc.stop) not found in lifespan.py"
         assert start_pos < yield_pos, (
             "audit_service.start() must run during STARTUP (before the yield), "
             f"but it appears at position {start_pos} vs yield at {yield_pos}"

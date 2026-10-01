@@ -113,7 +113,6 @@ class TestProtocolCompliance:
             "get_all_users_with_groups",
             "user_exists",
             "log_audit",
-            "get_audit_logs",
         ]
         for method_name in required_methods:
             assert callable(getattr(backend, method_name, None)), (
@@ -466,7 +465,8 @@ class TestLogAudit:
             details="some detail",
         )
 
-        all_sqls = [call[0][0] for call in cur.execute.call_args_list]
+        # Routed through the audit backend's single write (one transaction).
+        all_sqls = [call[0][0] for call in cur.executemany.call_args_list]
         assert any("INSERT INTO audit_logs" in sql for sql in all_sqls)
 
     def test_log_audit_uses_parameterized_query(self):
@@ -489,41 +489,32 @@ class TestLogAudit:
             target_id="oldgroup",
         )
 
-        all_calls = cur.execute.call_args_list
+        all_calls = cur.executemany.call_args_list
         insert_calls = [c for c in all_calls if "INSERT INTO audit_logs" in c[0][0]]
         assert len(insert_calls) == 1
-        sql, params = insert_calls[0][0]
+        sql, rows = insert_calls[0][0]
         assert "%s" in sql
-        assert "admin" in params
-        assert "group_deleted" in params
+        assert len(rows) == 1
+        assert "admin" in rows[0]
+        assert "group_deleted" in rows[0]
 
 
 # ---------------------------------------------------------------------------
-# get_audit_logs
+# Audit rows are read only through services/audit_log_query.query_audit_log
 # ---------------------------------------------------------------------------
 
 
-class TestGetAuditLogs:
-    def test_get_audit_logs_returns_tuple(self):
-        """
-        Given a mocked pool returning empty results
-        When get_audit_logs() is called
-        Then it returns a tuple of (list, int).
-        """
+class TestNoAuditLogRead:
+    def test_groups_backend_does_not_read_audit_logs(self):
+        """The groups backend writes audit rows (log_audit) but never reads
+        them: the one read path is the shared audit query."""
         from code_indexer.server.storage.postgres.groups_backend import (
             GroupsPostgresBackend,
         )
+        from code_indexer.server.storage.protocols.groups_backend import (
+            GroupsBackend,
+        )
 
-        count_row = {"cnt": 0}
-        pool, _, cur = _make_pool()
-        cur.fetchone.return_value = count_row
-        cur.fetchall.return_value = []
-        backend = GroupsPostgresBackend(pool)
-
-        result = backend.get_audit_logs()
-
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        logs, total = result
-        assert isinstance(logs, list)
-        assert isinstance(total, int)
+        assert not hasattr(GroupsPostgresBackend, "get_audit_logs")
+        assert not hasattr(GroupsBackend, "get_audit_logs")
+        assert callable(getattr(GroupsPostgresBackend, "log_audit", None))

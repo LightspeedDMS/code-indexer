@@ -20,7 +20,14 @@ Pattern YAML schema:
     tags: list[str]       (optional)
     author: str           (optional)
     created_at: str       (optional, ISO date)
-    evaluator_code: str   (required, Rust fn evaluate_node code)
+    evaluator_code: str   (required, Rust fn evaluate_node code; when
+                           execution_mode is "graph", holds a
+                           collect_facts + analyze_graph callback pair
+                           instead)
+    execution_mode: str   (optional: "legacy" | "graph". Missing means
+                           "legacy" -- ADR-001, Story #1859. All 39
+                           patterns stored before this field existed are
+                           legacy source and resolve as "legacy".)
     parameters: list      (optional, list of ParameterDecl dicts)
 
 ParameterDecl:
@@ -45,7 +52,10 @@ from code_indexer.server.services.cidx_meta_backup.branch_detect import (
 )
 from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.xray.sandbox import validate_rust_evaluator
+from code_indexer.xray.sandbox import (
+    detect_evaluator_entry_points,
+    validate_rust_evaluator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +64,14 @@ _ALLOWED_PARAM_TYPES = frozenset({"usize", "i64", "f64", "bool", "str"})
 
 # Required top-level fields in a pattern YAML
 _REQUIRED_FIELDS = ("name", "description", "language", "evaluator_code")
+
+# Valid values for the optional execution_mode field (ADR-001, Story #1859).
+# Absence is interpreted as "legacy" everywhere this is checked -- the field
+# was added after all 39 pre-existing stored patterns were already legacy
+# evaluate_node source, and no caller written before this field existed
+# ever supplies it.
+_ALLOWED_EXECUTION_MODES = frozenset({"legacy", "graph"})
+DEFAULT_EXECUTION_MODE = "legacy"
 
 # Coarse write-lock alias for the shared cidx-meta git repo (Bug #1037).
 # Must match the alias used by MemoryStoreService and RefreshScheduler.
@@ -320,6 +338,55 @@ class XrayPatternService:
         if param_validation is not None:
             return param_validation
 
+        # 4a. Validate execution_mode if present (ADR-001, Story #1859).
+        # Absence is not an error -- it means "legacy" (see DEFAULT_EXECUTION_MODE).
+        execution_mode = spec.get("execution_mode")
+        if (
+            execution_mode is not None
+            and execution_mode not in _ALLOWED_EXECUTION_MODES
+        ):
+            return {
+                "error": "invalid_execution_mode",
+                "message": (
+                    f"execution_mode {execution_mode!r} is not allowed. "
+                    f"Allowed values: {sorted(_ALLOWED_EXECUTION_MODES)}"
+                ),
+            }
+
+        # 4b. Cross-check the declared (or defaulted) execution_mode against
+        # the callback family ACTUALLY present in evaluator_code (C4,
+        # #1858-#1861 remediation). `validate_rust_evaluator` above only
+        # confirms evaluator_code satisfies AT LEAST ONE mode's entry
+        # points -- it never checks that mode against the DECLARED
+        # execution_mode, so `execution_mode: graph` paired with
+        # legacy-only code (or vice versa) previously stored successfully
+        # and only failed much later at Rust compile/load with an
+        # unrelated, opaque error. ADR-001 names an artifact whose exports
+        # do not match its declaration as a hard error -- reject it here,
+        # at store time, reusing the SAME detection `validate_rust_
+        # evaluator` already ran (Rule 4 anti-duplication) rather than
+        # re-deriving it.
+        resolved_mode = execution_mode or DEFAULT_EXECUTION_MODE
+        has_legacy_entry_point, has_graph_entry_point = detect_evaluator_entry_points(
+            evaluator_code
+        )
+        if resolved_mode == "graph" and not has_graph_entry_point:
+            return {
+                "error": "execution_mode_mismatch",
+                "message": (
+                    "execution_mode is 'graph' but evaluator_code does not "
+                    "define both 'fn collect_facts' and 'fn analyze_graph'"
+                ),
+            }
+        if resolved_mode == "legacy" and not has_legacy_entry_point:
+            return {
+                "error": "execution_mode_mismatch",
+                "message": (
+                    "execution_mode is 'legacy' (declared or defaulted) but "
+                    "evaluator_code does not define 'fn evaluate_node'"
+                ),
+            }
+
         # 5. Resolve target path
         target_dir = self._patterns_root / scope
         target_path = target_dir / f"{name}.yaml"
@@ -382,6 +449,25 @@ class XrayPatternService:
         if pattern_params is None:
             pattern_params = {}
 
+        # Consolidated review finding H3 (Issue #1811/Bug #1812): a
+        # non-dict pattern_params (e.g. a list or bare string, both
+        # iterable) must be rejected HERE, before _resolve_params ever
+        # iterates it -- `for key in overrides` silently iterates a list's
+        # elements (or a string's characters) as if they were dict keys,
+        # and the subsequent `overrides.get(name, default)` then raises an
+        # unhandled AttributeError (list) or produces a nonsensical
+        # unknown_parameter/parameter_type_mismatch report keyed off single
+        # characters (string). Validating the TYPE here, at the one shared
+        # choke point both the REST route (xray_routes.py) and the MCP
+        # handler (handlers/xray.py::_resolve_evaluator_code) funnel
+        # through, means the fix covers both callers without duplicating
+        # the check in each.
+        if not isinstance(pattern_params, dict):
+            raise ValueError(
+                f"invalid_pattern_params: pattern_params must be a dict, "
+                f"got {type(pattern_params).__name__}"
+            )
+
         # Bug #1423 (defense in depth): repo_alias must be a str before it
         # reaches the path-traversal check below or _load_pattern's Path
         # division. A list (even single-element -- the omni multi-repo
@@ -428,6 +514,51 @@ class XrayPatternService:
             prepared_code = evaluator_code
 
         return prepared_code, resolved
+
+    def get_pattern_execution_mode(self, repo_alias: str, pattern_name: str) -> str:
+        """Return the declared execution_mode ("legacy" or "graph") for a
+        stored pattern, without preparing/parametrizing its evaluator code.
+
+        Resolution order matches resolve_and_prepare_pattern (repo-specific
+        scope first, then __any__) -- both go through the same _load_pattern
+        lookup, so a repo-specific override and its declared mode are never
+        resolved from two different files.
+
+        Missing execution_mode metadata resolves to DEFAULT_EXECUTION_MODE
+        ("legacy") per ADR-001: the field was added after all 39 existing
+        patterns were already stored as legacy evaluate_node source, and
+        none of them declares it.
+
+        Args:
+            repo_alias: Repository alias for resolution priority.
+            pattern_name: Name of the pattern (filename stem without .yaml).
+
+        Returns:
+            "legacy" or "graph".
+
+        Raises:
+            ValueError: "pattern_not_found" if pattern doesn't exist in
+                either scope.
+            ValueError: "path_traversal_rejected" for a repo_alias or
+                pattern_name containing path traversal sequences.
+        """
+        for field_name, field_value in [
+            ("repo_alias", repo_alias),
+            ("pattern_name", pattern_name),
+        ]:
+            if "/" in field_value or "\\" in field_value or ".." in field_value:
+                raise ValueError(
+                    f"path_traversal_rejected: {field_name} '{field_value}' "
+                    "contains path traversal sequences"
+                )
+
+        spec = self._load_pattern(repo_alias, pattern_name)
+        if spec is None:
+            raise ValueError(
+                f"pattern_not_found: pattern '{pattern_name}' not found in "
+                f"scope '{repo_alias}' or '__any__'"
+            )
+        return str(spec.get("execution_mode") or DEFAULT_EXECUTION_MODE)
 
     def ensure_seed_patterns(self) -> None:
         """Create seed patterns in __any__/ if they don't already exist.
@@ -603,7 +734,6 @@ class XrayPatternService:
             sync = CidxMetaBackupSync(
                 cidx_meta_path=str(self._cidx_meta),
                 branch=branch,
-                claude_resolver=None,
             )
             result = sync.sync()
             if result.sync_failure:
@@ -619,7 +749,30 @@ class XrayPatternService:
     def _load_pattern(
         self, repo_alias: str, pattern_name: str
     ) -> Optional[Dict[str, Any]]:
-        """Try repo-specific path then __any__ path. Returns parsed spec or None."""
+        """Try repo-specific path then __any__ path. Returns parsed spec or None.
+
+        Raises:
+            ValueError: "pattern_parse_error" if a candidate file EXISTS but
+                is unreadable, fails YAML parsing, or fails schema
+                validation (consolidated review, Issue #1811/Bug #1812,
+                new finding #5 + R2-5 re-review). A malformed
+                repo-specific pattern must surface loudly here rather than
+                silently falling through to the __any__ global pattern of
+                the same name -- an operator-authored typo in a
+                repo-specific override would otherwise be masked by a
+                same-named global pattern quietly taking over, with only a
+                WARNING log to notice. R2-5 widened this from "YAML syntax
+                errors only" to a full schema check: an EMPTY file
+                (yaml.safe_load returns None) was previously
+                indistinguishable from "file doesn't exist" and silently
+                fell through to __any__ as pattern_not_found; a
+                list/scalar-shaped YAML document crashed downstream with a
+                raw AttributeError; a missing 'evaluator_code' key crashed
+                with a raw KeyError; and a wrong-typed 'evaluator_code'
+                (e.g. an int) silently proceeded as a bogus evaluator
+                value. All four collapse into ONE explicit
+                pattern_parse_error here instead.
+        """
         candidates = [
             self._patterns_root / repo_alias / f"{pattern_name}.yaml",
             self._patterns_root / self.ANY_SCOPE / f"{pattern_name}.yaml",
@@ -627,10 +780,82 @@ class XrayPatternService:
         for path in candidates:
             if path.is_file():
                 try:
-                    return yaml.safe_load(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
-                except yaml.YAMLError:
-                    logger.warning("xray_pattern_service: failed to parse %s", path)
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but could not be read: {exc}"
+                    ) from exc
+                try:
+                    spec = yaml.safe_load(text)
+                except yaml.YAMLError as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but failed to parse as YAML: {exc}"
+                    ) from exc
+                self._validate_pattern_schema(spec, path)
+                return spec  # type: ignore[no-any-return]
         return None
+
+    def _validate_pattern_schema(self, spec: Any, path: Path) -> None:
+        """Validate a freshly-parsed pattern spec's structural shape.
+
+        Raises:
+            ValueError: "pattern_parse_error" for ANY of: not a YAML
+                mapping (list/scalar/None -- including an EMPTY file,
+                which yaml.safe_load parses as None), a missing or
+                wrong-typed required key (name, evaluator_code -- both
+                already required at WRITE time by store_xray_pattern's
+                own validation; requiring them again here keeps
+                read/write validation symmetric), or a malformed
+                'parameters' declaration list (non-list entry, or an
+                entry failing _validate_parameter_declarations).
+                Collapses every schema-invalid shape into ONE explicit,
+                non-fall-through error instead of a raw
+                AttributeError/KeyError or a silently-accepted bad value.
+        """
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' does not "
+                f"contain a YAML mapping (got {type(spec).__name__})"
+            )
+        name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' is missing a "
+                "non-empty 'name' string"
+            )
+        evaluator_code = spec.get("evaluator_code")
+        if not isinstance(evaluator_code, str) or not evaluator_code:
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' is missing a "
+                "non-empty 'evaluator_code' string"
+            )
+        params = spec.get("parameters")
+        if params is not None:
+            if not isinstance(params, list) or any(
+                not isinstance(decl, dict) for decl in params
+            ):
+                raise ValueError(
+                    f"pattern_parse_error: pattern file '{path}' has a "
+                    "'parameters' field that is not a list of mappings"
+                )
+            error = self._validate_parameter_declarations(params)
+            if error is not None:
+                raise ValueError(
+                    f"pattern_parse_error: pattern file '{path}' has an "
+                    f"invalid parameter declaration: {error.get('message', error)}"
+                )
+        execution_mode = spec.get("execution_mode")
+        if (
+            execution_mode is not None
+            and execution_mode not in _ALLOWED_EXECUTION_MODES
+        ):
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' has an invalid "
+                f"'execution_mode' value {execution_mode!r} "
+                "(must be 'legacy' or 'graph')"
+            )
 
     def _validate_parameter_declarations(
         self, params: List[Dict[str, Any]]

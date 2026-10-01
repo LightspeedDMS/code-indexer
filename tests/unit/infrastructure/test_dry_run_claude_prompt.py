@@ -10,10 +10,10 @@ from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
-@patch("src.code_indexer.cli.check_claude_sdk_availability")
+@patch("code_indexer.cli.check_claude_sdk_availability")
 def test_dry_run_show_claude_prompt_flag_exists(mock_claude_check):
     """Test that the dry-run flag is properly defined in CLI."""
     # Mock Claude SDK availability check to avoid dependency issues
@@ -30,12 +30,12 @@ def test_dry_run_show_claude_prompt_flag_exists(mock_claude_check):
     assert "without executing analysis" in result.output
 
 
-@patch("src.code_indexer.cli.check_claude_sdk_availability")
-@patch("src.code_indexer.cli.GenericQueryService")
-@patch("src.code_indexer.cli.ClaudeIntegrationService")
-@patch("src.code_indexer.cli.FilesystemClient")
-@patch("src.code_indexer.cli.EmbeddingProviderFactory")
-@patch("src.code_indexer.cli.ConfigManager")
+@patch("code_indexer.cli.check_claude_sdk_availability")
+@patch("code_indexer.cli.GenericQueryService")
+@patch("code_indexer.cli.ClaudeIntegrationService")
+@patch("code_indexer.cli.FilesystemClient")
+@patch("code_indexer.cli.EmbeddingProviderFactory")
+@patch("code_indexer.cli.ConfigManager")
 @patch("httpx.Client")
 def test_dry_run_shows_prompt_without_execution(
     mock_httpx_client,
@@ -127,12 +127,12 @@ def test_dry_run_shows_prompt_without_execution(
         mock_claude_instance.create_claude_first_prompt.assert_called_once()
 
 
-@patch("src.code_indexer.cli.check_claude_sdk_availability")
-@patch("src.code_indexer.cli.GenericQueryService")
-@patch("src.code_indexer.cli.ClaudeIntegrationService")
-@patch("src.code_indexer.cli.FilesystemClient")
-@patch("src.code_indexer.cli.EmbeddingProviderFactory")
-@patch("src.code_indexer.cli.Config")
+@patch("code_indexer.cli.check_claude_sdk_availability")
+@patch("code_indexer.cli.GenericQueryService")
+@patch("code_indexer.cli.ClaudeIntegrationService")
+@patch("code_indexer.cli.FilesystemClient")
+@patch("code_indexer.cli.EmbeddingProviderFactory")
+@patch("code_indexer.cli.Config")
 @patch("httpx.Client")
 def test_dry_run_prevents_claude_execution(
     mock_httpx_client,

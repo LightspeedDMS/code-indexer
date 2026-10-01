@@ -12,7 +12,7 @@ Covers:
 
 import pytest
 
-from src.code_indexer.services.temporal.token_preflight import (
+from code_indexer.services.temporal.token_preflight import (
     enforce_request_seal,
     pack_chunks_into_documents,
     preflight_split_chunk,

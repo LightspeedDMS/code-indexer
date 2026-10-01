@@ -20,7 +20,7 @@ class TestGitRetryLogic:
 
     def test_successful_command_no_retry(self, tmp_path):
         """Test that successful git command executes once without retry."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -64,7 +64,7 @@ class TestGitRetryLogic:
 
     def test_failure_then_success_on_retry(self, tmp_path):
         """Test that transient failure triggers retry and succeeds."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -113,7 +113,7 @@ class TestGitRetryLogic:
 
     def test_double_failure_propagates_exception(self, tmp_path):
         """Test that persistent failure exhausts retries and propagates error."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -155,7 +155,7 @@ class TestGitRetryLogic:
 
     def test_timeout_not_retried(self, tmp_path):
         """Test that timeout exceptions are not retried (not transient)."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -189,8 +189,8 @@ class TestGitRetryLogic:
 
     def test_retry_logs_failures_with_full_context(self, tmp_path):
         """Test that git failures are logged with command, cwd, and stack trace."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -248,7 +248,7 @@ class TestGitRetryLogic:
 
     def test_retry_delay_is_one_second(self, tmp_path):
         """Test that retry delay is exactly 1 second."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -284,7 +284,7 @@ class TestGitRetryLogic:
 
     def test_max_retries_is_one(self, tmp_path):
         """Test that maximum retry attempts is 1 (total 2 attempts)."""
-        from src.code_indexer.utils.git_runner import run_git_command_with_retry
+        from code_indexer.utils.git_runner import run_git_command_with_retry
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -318,7 +318,7 @@ class TestGetGitEnvironmentSshSafety:
 
     def test_get_git_environment_has_ssh_batchmode(self, tmp_path):
         """get_git_environment must set GIT_SSH_COMMAND with BatchMode=yes."""
-        from src.code_indexer.utils.git_runner import get_git_environment
+        from code_indexer.utils.git_runner import get_git_environment
 
         env = get_git_environment(tmp_path)
         assert_env_present(env, "GIT_SSH_COMMAND")
@@ -326,14 +326,14 @@ class TestGetGitEnvironmentSshSafety:
 
     def test_get_git_environment_has_terminal_prompt_disabled(self, tmp_path):
         """get_git_environment must set GIT_TERMINAL_PROMPT=0."""
-        from src.code_indexer.utils.git_runner import get_git_environment
+        from code_indexer.utils.git_runner import get_git_environment
 
         env = get_git_environment(tmp_path)
         assert env.get("GIT_TERMINAL_PROMPT") == "0"
 
     def test_get_git_environment_still_sets_safe_directory(self, tmp_path):
         """get_git_environment must still configure safe.directory for dubious ownership."""
-        from src.code_indexer.utils.git_runner import get_git_environment
+        from code_indexer.utils.git_runner import get_git_environment
 
         env = get_git_environment(tmp_path)
         assert env.get("GIT_CONFIG_KEY_0") == "safe.directory"
@@ -345,7 +345,7 @@ class TestGitRetryIntegrationWithExistingRunner:
 
     def test_backward_compatibility_with_run_git_command(self, tmp_path):
         """Test that existing run_git_command still works without retry."""
-        from src.code_indexer.utils.git_runner import run_git_command
+        from code_indexer.utils.git_runner import run_git_command
 
         repo_dir = tmp_path / "test_repo"
         repo_dir.mkdir()
@@ -360,7 +360,7 @@ class TestGitRetryIntegrationWithExistingRunner:
 
     def test_run_git_command_with_retry_is_new_function(self):
         """Test that run_git_command_with_retry is a separate new function."""
-        from src.code_indexer.utils import git_runner
+        from code_indexer.utils import git_runner
 
         # Both functions should exist
         assert hasattr(git_runner, "run_git_command")

@@ -197,11 +197,15 @@ class OAuthManager:
     def get_client(self, client_id: str) -> Optional[Dict[str, Any]]:
         if self._backend:
             return self._backend.get_client(client_id)  # type: ignore[no-any-return]
-        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        cursor.execute("SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,))
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:  # type: ignore[union-attr]
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
+            )
+            row = cursor.fetchone()
         if row:
             return {
                 "client_id": row["client_id"],
@@ -338,13 +342,15 @@ class OAuthManager:
     def validate_token(self, access_token: str) -> Optional[Dict[str, Any]]:
         if self._backend:
             return self._backend.validate_token(access_token)  # type: ignore[no-any-return]
-        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        cursor.execute(
-            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:  # type: ignore[union-attr]
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+            )
+            row = cursor.fetchone()
         if not row:
             return None
         expires_at_raw = row["expires_at"]
@@ -366,13 +372,15 @@ class OAuthManager:
     def extend_token_on_activity(self, access_token: str) -> bool:
         if self._backend:
             return self._backend.extend_token_on_activity(access_token)  # type: ignore[no-any-return]
-        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        cursor.execute(
-            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:  # type: ignore[union-attr]
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+            )
+            row = cursor.fetchone()
         if not row:
             return False
         now = datetime.now(timezone.utc)

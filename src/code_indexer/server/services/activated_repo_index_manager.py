@@ -11,16 +11,22 @@ from code_indexer.server.logging_utils import format_error_log, get_log_extra
 import json
 import logging
 import os
-import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple, cast
+
+from code_indexer.config import Config
 
 from ..repositories.background_jobs import BackgroundJobManager
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
+from .repository_health_aggregator import discover_health_collections
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 from ..utils.cancellable_subprocess import (
     SHORT_POLL_SECONDS,
     SubprocessCancelledError,
@@ -198,6 +204,19 @@ class ActivatedRepoIndexManager:
                 f"Valid types: {', '.join(self.VALID_INDEX_TYPES)}"
             )
 
+        # Story #1457 AC12: temporal data is owned EXCLUSIVELY by the golden
+        # repo's shared sister location (AC1-AC11) -- an activated (non-golden)
+        # repo has no business re-deriving or duplicating it locally.
+        # ActivatedRepoIndexManager is used ONLY for activated repos (golden
+        # repos go through GoldenRepoManager instead), so this rejection is
+        # unconditional here. Reject loudly -- never a silent no-op.
+        if "temporal" in index_types:
+            raise ValueError(
+                "temporal indexing is not supported for activated repositories: "
+                "temporal data is owned exclusively by the golden repo's shared "
+                "sister location and is never built locally for an activated repo"
+            )
+
         # Validate repository exists
         try:
             repo_path = self.activated_repo_manager.get_activated_repo_path(
@@ -317,7 +336,7 @@ class ActivatedRepoIndexManager:
         status = {
             "semantic": self._get_semantic_status(repo_path),
             "fts": self._get_fts_status(repo_path),
-            "temporal": self._get_temporal_status(repo_path),
+            "temporal": self._get_temporal_status(repo_path, repo_alias, username),
             "scip": self._get_scip_status(repo_path),
         }
 
@@ -412,12 +431,23 @@ class ActivatedRepoIndexManager:
 
             update_progress(100, message, phase="complete")
 
-            return {
+            job_result: Dict[str, Any] = {
                 "success": all_success,
                 "message": message,
                 "results": results,
                 "failed_types": failed_types if failed_types else None,
             }
+            if not all_success:
+                # Bug #1978: BackgroundJobManager derives the JobTracker-visible
+                # error via job.result.get("error", "job failed")
+                # (repositories/background_jobs.py) -- without a top-level
+                # "error" key here, every failed reindex surfaced the generic
+                # "job failed" string, and the real cause (e.g. an EACCES
+                # permission error) was visible only in server logs.
+                job_result["error"] = self._summarize_failed_index_types(
+                    failed_types, results
+                )
+            return job_result
 
         except Exception as e:
             error_msg = f"Failed to execute reindex job for '{repo_alias}': {str(e)}"
@@ -435,6 +465,35 @@ class ActivatedRepoIndexManager:
                 "results": {},
                 "error": str(e),
             }
+
+    #: Bug #1978: per-type and overall caps on the summarized job "error"
+    #: field -- a verbose subprocess diagnostic (the common case for a
+    #: permission or provider failure) must reach the job record, but never
+    #: unbounded: one failing type must not be able to blow up job storage.
+    _MAX_PER_TYPE_ERROR_CHARS = 1000
+    _MAX_JOB_ERROR_CHARS = 4000
+
+    @classmethod
+    def _summarize_failed_index_types(
+        cls, failed_types: List[str], results: Dict[str, Dict[str, Any]]
+    ) -> str:
+        """Bug #1978: build the job's top-level "error" text from the REAL
+        per-type failures (each already carries its own real cause, e.g. the
+        EACCES text from a cluster CoW-clone permission failure) instead of
+        the generic "job failed" string BackgroundJobManager otherwise falls
+        back to via ``job.result.get("error", "job failed")``.
+        """
+        parts = []
+        for index_type in failed_types:
+            detail = str(results.get(index_type, {}).get("error") or "unknown error")
+            if len(detail) > cls._MAX_PER_TYPE_ERROR_CHARS:
+                detail = detail[: cls._MAX_PER_TYPE_ERROR_CHARS] + "... [truncated]"
+            parts.append(f"{index_type}: {detail}")
+
+        summary = "; ".join(parts)
+        if len(summary) > cls._MAX_JOB_ERROR_CHARS:
+            summary = summary[: cls._MAX_JOB_ERROR_CHARS] + "... [truncated]"
+        return summary
 
     def _execute_all_index_types(
         self,
@@ -644,6 +703,9 @@ class ActivatedRepoIndexManager:
         from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
             build_embedding_stats_child_env,
         )
+        from code_indexer.storage.shared.hnsw_sync_state import (
+            resolve_hnsw_sync_epoch_env_var,
+        )
 
         env_with_stats = build_embedding_stats_child_env(
             get_config_service().get_config(),
@@ -651,6 +713,11 @@ class ActivatedRepoIndexManager:
             golden_repo_alias=golden_repo_alias,
         )
         resolved_env = build_cidx_subprocess_env(env_with_stats)
+        # Bug #1575 Part C independent re-review: this is the SHARED
+        # convergence point for every `cidx index` spawn in this file
+        # (semantic, fts, temporal), so the postgres-mode signal is
+        # merged in here ONCE.
+        resolved_env.update(resolve_hnsw_sync_epoch_env_var())
         self._seed_telemetry(repo_path)
         try:
             return run_cancellable_subprocess(
@@ -708,18 +775,19 @@ class ActivatedRepoIndexManager:
             if not (repo_path_obj / ".code-indexer" / "config.json").exists():
                 return self._uninitialized_repo_error(repo_path, "Semantic")
 
-            index_dir = repo_path_obj / ".code-indexer" / "index"
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
 
-            # Clear index if requested
-            if clear and index_dir.exists():
-                self.logger.info(
-                    f"Clearing semantic index: {index_dir}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                shutil.rmtree(index_dir)
-
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = ["cidx", "index"]
+            if clear:
+                args.append("--clear")
+            args = append_server_layout_args(args)
+            clear_start_time = time.time()
             result = self._run_subprocess_with_telemetry(
-                ["cidx", "index"],
+                args,
                 repo_path,
                 cancel_check=cancel_check,
                 golden_repo_alias=repo_alias,
@@ -728,8 +796,68 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Semantic indexing failed: {result.stderr}",
+                    "error": (
+                        "Semantic indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
+
+            # clear=true must refresh every configured provider's metadata
+            # and leave each provider's TEXT collection non-empty. Existing
+            # multimodal directories may be empty when images were removed.
+            if clear:
+                # Bug #1979 (codex review findings, turns 13 and 15): a
+                # configured provider that the child skipped for ANY reason
+                # (missing API key, a failed health check, or anything else)
+                # must not let this job report success. Matching individual
+                # skip-reason stdout strings proved fragile -- turn 13's
+                # "no API key found" regex missed turn 15's differently-
+                # worded "health check failed ... skipping" path entirely.
+                # The robust, reason-agnostic signal is each provider's OWN
+                # progress metadata (cli.py's per-provider
+                # metadata-<provider>.json): if it was not updated to a
+                # timestamp at or after this clear started, that provider
+                # was not genuinely rebuilt this run -- regardless of
+                # whether its collection happens to hold OLD points from a
+                # prior run (a positive point count alone is not proof of a
+                # fresh rebuild). Config is read via the same
+                # json.load + Config(**data) pattern already used elsewhere
+                # in this file, then get_embedding_providers() is the real,
+                # authoritative method -- no credential-resolution logic is
+                # re-derived here.
+                config_json_path = repo_path_obj / ".code-indexer" / "config.json"
+                with open(config_json_path) as f:
+                    repo_config = Config(**json.load(f))
+
+                from code_indexer.services.provider_rebuild_check import (
+                    find_providers_not_rebuilt_since,
+                )
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
+
+                index_dir = repo_path_obj / ".code-indexer" / "index"
+                store = FilesystemVectorStore(index_dir, project_root=repo_path_obj)
+
+                stale_or_missing_providers = find_providers_not_rebuilt_since(
+                    repo_path_obj / ".code-indexer",
+                    repo_config.get_embedding_providers(),
+                    clear_start_time,
+                    config=repo_config,
+                    vector_store=store,
+                )
+
+                if stale_or_missing_providers:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Semantic indexing reported success but "
+                            f"provider(s) {stale_or_missing_providers} were "
+                            "not genuinely rebuilt during clear=true "
+                            "(skipped, stale metadata, or empty TEXT collection); "
+                            "treating as failure."
+                        ),
+                    }
 
             return {"success": True, "message": "Semantic indexing completed"}
 
@@ -795,7 +923,13 @@ class ActivatedRepoIndexManager:
             if not (repo_path_obj / ".code-indexer" / "config.json").exists():
                 return self._uninitialized_repo_error(repo_path, "FTS")
 
-            args = ["cidx", "index", "--fts"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = append_server_layout_args(["cidx", "index", "--fts"])
             if clear:
                 args.append("--clear")
 
@@ -808,7 +942,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"FTS indexing failed: {result.stderr}",
+                    "error": (
+                        "FTS indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "FTS indexing completed"}
@@ -835,7 +972,13 @@ class ActivatedRepoIndexManager:
                 build_temporal_child_env,
             )
 
-            args = ["cidx", "index", "--index-commits"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            args = append_server_layout_args(["cidx", "index", "--index-commits"])
             if clear:
                 args.append("--clear")
 
@@ -863,7 +1006,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Temporal indexing failed: {result.stderr}",
+                    "error": (
+                        "Temporal indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "Temporal indexing completed"}
@@ -923,7 +1069,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"SCIP generation failed: {result.stderr}",
+                    "error": (
+                        "SCIP generation failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "SCIP generation completed"}
@@ -931,41 +1080,292 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"SCIP generation error: {str(e)}"}
 
+    def _select_active_semantic_collection(
+        self,
+        repo_path: Path,
+        semantic_collections: List[Tuple[str, Path]],
+    ) -> Optional[Tuple[str, Path]]:
+        """Resolve which discovered semantic collection is the repo's
+        actual active embedder (Issue #1476 dual-review Finding 3).
+
+        A repo normally has exactly one semantic collection. During an
+        embedder-switch/migration window it can briefly have more than
+        one (old + new embedder collections coexisting) -- picking one
+        arbitrarily (e.g. alphabetically) can silently report stale data
+        under the "current" status. The authoritative source of "which
+        embedder is active" is the repo's own ``.code-indexer/config.json``
+        (``embedding_provider`` + the matching provider's ``model``
+        field) -- the SAME field `cidx health`'s auto-detect path
+        (``cli.py``'s ``collection_name = config.voyage_ai.model``) and
+        the on-disk collection directory naming both already key off of.
+
+        Returns the matching (name, hnsw_path) tuple, or None if
+        genuinely ambiguous (more than one candidate and no config match)
+        -- callers must treat None as an explicit failure to determine
+        the active collection, never silently pick one (Messi Rule #2,
+        anti-fallback).
+        """
+        config_path = repo_path / ".code-indexer" / "config.json"
+        if not config_path.exists():
+            # Round-5 dual-review Issue 2: the "only one exists, must be
+            # it" shortcut is trustworthy ONLY in this genuinely
+            # no-config-at-all case (backward compatible with repos that
+            # predate this resolution mechanism entirely). Once
+            # config.json exists it is always consulted below, even for
+            # a single discovered collection -- that collection could
+            # belong to an OLD embedder while config already names a NEW
+            # one whose collection has not been built yet (e.g.
+            # mid-reindex), and blindly trusting "only one" would report
+            # stale data as if the configured embedder were fully
+            # indexed.
+            if len(semantic_collections) == 1:
+                return semantic_collections[0]
+            return None
+
+        try:
+            with open(config_path) as f:
+                config_data = json.load(f)
+            config = Config(**config_data)
+        except Exception as exc:
+            # Round-3 dual-review Issue 3: log the REAL parse/validation
+            # exception here so a corrupt config.json is distinguishable
+            # in logs from genuine embedder ambiguity (valid config,
+            # matches neither collection) -- the caller's generic "cannot
+            # determine active embedder" warning does not carry this
+            # distinction on its own.
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to read/parse {config_path} while resolving "
+                    f"the active semantic embedder: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return None
+
+        active_model = (
+            config.cohere.model
+            if config.embedding_provider == "cohere"
+            else config.voyage_ai.model
+        )
+
+        for name, hnsw_path in semantic_collections:
+            if name == active_model:
+                return (name, hnsw_path)
+        return None
+
     def _get_semantic_status(self, repo_path: Path) -> Dict[str, Any]:
-        """Get semantic index status."""
+        """Get semantic index status.
+
+        GitHub Issue #1476: the current per-embedder collection layout
+        (e.g. ``.code-indexer/index/voyage-code-3/collection_meta.json``)
+        never produces a legacy top-level ``metadata.json`` -- checking for
+        that file always reported a genuinely indexed repo as
+        "not_indexed". Detection now reuses `discover_health_collections`
+        (the SAME shared, already-tested primitive
+        `/api/activated-repos/{alias}/health` and `repository_health.py`
+        route through), which scans the index directory for real
+        per-embedder collections keyed on the presence of `hnsw_index.bin`
+        -- never a bare `*.json` glob (a `collection_meta.json` always
+        exists once a collection directory is created, empty or not).
+
+        Dual-review remediation (Issue #1476): a metadata-read failure or
+        missing schema field on a collection with a REAL, present
+        hnsw_index.bin is a distinct "error" status, never silently
+        collapsed into "not_indexed" (which would discard the real
+        HNSW-presence signal). Similarly, unique_file_count and
+        hnsw_index.last_rebuild are never backfilled from the
+        dimensionally-different hnsw_index.vector_count (chunk count, not
+        file count) or created_at (creation time, not rebuild time).
+        """
         index_dir = repo_path / ".code-indexer" / "index"
 
         if not index_dir.exists():
             return {"status": "not_indexed"}
 
-        metadata_file = index_dir / "metadata.json"
-        if not metadata_file.exists():
+        # Round-7 dual-review Issue 2: a real filesystem failure (e.g. an
+        # unreadable index directory -- PermissionError) raised while
+        # scanning for collections must never escape uncaught to an
+        # unhandled HTTP 500. discover_health_collections() calls
+        # index_dir.iterdir() internally, which requires read+execute
+        # permission on index_dir itself (unlike the bare .exists() check
+        # above, which only needs permission on index_dir's PARENT).
+        try:
+            semantic_collections = [
+                (name, hnsw_path)
+                for name, index_type, hnsw_path in discover_health_collections(
+                    index_dir
+                )
+                if index_type == "semantic"
+            ]
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to scan semantic index directory {index_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to scan semantic index directory: {exc}",
+            }
+        if not semantic_collections:
             return {"status": "not_indexed"}
+
+        selected = self._select_active_semantic_collection(
+            repo_path, semantic_collections
+        )
+        if selected is None:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    "Unable to determine active semantic embedder among "
+                    f"{len(semantic_collections)} candidates: "
+                    f"{[name for name, _ in semantic_collections]}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            # Round-7 dual-review Issue 3: the message must accurately
+            # describe which scenario actually occurred -- a single
+            # discovered collection that doesn't match the repo's
+            # configured active embedder (e.g. mid embedder-switch, the
+            # new embedder's collection not built yet) is a DIFFERENT
+            # situation from genuinely ambiguous multiple collections
+            # with no config to disambiguate. Always saying "Multiple
+            # semantic collections found" for the single-collection case
+            # would be misleading.
+            if len(semantic_collections) == 1:
+                error_message = (
+                    f"Found 1 semantic collection "
+                    f"('{semantic_collections[0][0]}') that does not "
+                    "match the repo's configured active embedder"
+                )
+            else:
+                error_message = (
+                    f"Found {len(semantic_collections)} semantic "
+                    "collections; cannot determine the active embedder"
+                )
+            return {
+                "status": "error",
+                "error": error_message,
+            }
+
+        _collection_name, hnsw_path = selected
+        collection_dir = hnsw_path.parent
+        metadata_file = collection_dir / "collection_meta.json"
 
         try:
             with open(metadata_file) as f:
                 metadata = json.load(f)
-
-            # Calculate index size
-            index_size_bytes = sum(
-                f.stat().st_size for f in index_dir.rglob("*") if f.is_file()
-            )
-            index_size_mb = round(index_size_bytes / self.BYTES_PER_MB, 2)
-
-            return {
-                "last_indexed": metadata.get("last_indexed"),
-                "file_count": metadata.get("file_count", 0),
-                "index_size_mb": index_size_mb,
-                "status": "up_to_date",
-            }
-        except Exception:
+            # Round-5 dual-review Issue 1: collection_meta.json can be
+            # syntactically valid JSON that is NOT a JSON object (e.g. a
+            # bare list) -- json.load() succeeds, but the .get() calls
+            # below would then raise an uncaught AttributeError instead
+            # of the intended graceful "error" status. Both isinstance
+            # checks MUST stay inside this try block so their failure is
+            # caught by the same except clause below.
+            if not isinstance(metadata, dict):
+                raise ValueError(
+                    "collection_meta.json must contain a JSON object, got "
+                    f"{type(metadata).__name__}"
+                )
+            hnsw_metadata = metadata.get("hnsw_index") or {}
+            if not isinstance(hnsw_metadata, dict):
+                raise ValueError(
+                    "collection_meta.json's hnsw_index field must be a "
+                    f"JSON object, got {type(hnsw_metadata).__name__}"
+                )
+        except Exception as exc:
             logger.warning(
                 format_error_log(
-                    "SVC-MIGRATE-005", "Failed to read semantic index metadata: {e}"
+                    "SVC-MIGRATE-005",
+                    f"Failed to read semantic index metadata at {metadata_file}: {exc}",
                 ),
                 extra=get_log_extra("SVC-MIGRATE-005"),
             )
-            return {"status": "not_indexed"}
+            return {
+                "status": "error",
+                "error": f"Failed to read semantic index metadata: {exc}",
+            }
+
+        # Real schema (Story #1456/#1458 CHUNKS_DB and legacy SHARDED_JSON
+        # both write these fields identically): file_count from the
+        # top-level unique_file_count; last_indexed from the HNSW
+        # last_rebuild timestamp. Per this project's writer/reader
+        # contract, a genuinely completed collection always has both --
+        # their absence is an anomaly, never silently backfilled from the
+        # dimensionally-different vector_count (chunk count) or created_at
+        # (creation time, not rebuild time).
+        file_count = metadata.get("unique_file_count")
+        last_indexed = hnsw_metadata.get("last_rebuild")
+
+        # Round-7 dual-review Issue 1: a present-but-wrong-typed value
+        # (e.g. a list) passes a bare `is None` check but then crashes the
+        # Pydantic response layer downstream (routers/indexing.py) with
+        # an unhandled ValidationError -> HTTP 500. Validate the ACTUAL
+        # type here, not just presence. `bool` is deliberately excluded
+        # from the int check -- isinstance(True, int) is True in Python
+        # (the same CHUNKS_DB discriminator gotcha this project has hit
+        # before).
+        file_count_is_valid = (
+            isinstance(file_count, int)
+            and not isinstance(file_count, bool)
+            and file_count >= 0
+        )
+        last_indexed_is_valid = isinstance(last_indexed, str) and last_indexed != ""
+
+        if not file_count_is_valid or not last_indexed_is_valid:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    "Semantic collection metadata at "
+                    f"{metadata_file} is missing or has invalid types for "
+                    "unique_file_count and/or hnsw_index.last_rebuild "
+                    f"(file_count={file_count!r}, last_indexed={last_indexed!r})",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": "Incomplete semantic index metadata",
+            }
+
+        # Round-3 dual-review Issue 2: scope the size computation to the
+        # SELECTED active collection directory only -- summing the whole
+        # index_dir would double-count inactive collections (e.g. an old
+        # embedder's collection during a migration window, or temporal/
+        # multimodal collections), producing a wildly inflated figure
+        # inconsistent with file_count/last_indexed, which already
+        # describe only the active collection.
+        #
+        # Round-7 dual-review Issue 2: a real filesystem failure (e.g.
+        # PermissionError) raised while scanning collection_dir must
+        # never escape uncaught to an unhandled HTTP 500.
+        try:
+            index_size_bytes = sum(
+                f.stat().st_size for f in collection_dir.rglob("*") if f.is_file()
+            )
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to compute semantic index size for {collection_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to compute semantic index size: {exc}",
+            }
+        index_size_mb = round(index_size_bytes / self.BYTES_PER_MB, 2)
+
+        return {
+            "last_indexed": last_indexed,
+            "file_count": file_count,
+            "index_size_mb": index_size_mb,
+            "status": "up_to_date",
+        }
 
     def _get_fts_status(self, repo_path: Path) -> Dict[str, Any]:
         """Get FTS index status."""
@@ -1007,27 +1407,133 @@ class ActivatedRepoIndexManager:
             )
             return {"status": "not_indexed"}
 
-    def _get_temporal_status(self, repo_path: Path) -> Dict[str, Any]:
+    def _resolve_relocated_temporal_dir(
+        self, legacy_index_path: Path, repo_alias: str, username: str
+    ) -> Optional[Path]:
+        """Resolver-aware fallback (GitHub Issue #1459 AC4): the local
+        clone scan found nothing -- check whether temporal data has
+        relocated to Story #1457's golden-owned sister location before
+        concluding "not_indexed". Routes through the SAME
+        TemporalShardResolver/catalog mechanism the query path uses, never
+        a parallel sister-root scan.
+
+        Returns the resolved shard's physical directory (sister v_*
+        version OR in-repo legacy dir) when queryable data is found, else
+        None.
+        """
+        try:
+            metadata = self.activated_repo_manager.get_repository(
+                username, repo_alias, touch=False
+            )
+        except Exception as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-008",
+                    f"Failed to resolve golden_repo_alias for activated repo "
+                    f"'{repo_alias}' (user '{username}'): {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-008"),
+            )
+            return None
+        if not metadata:
+            return None
+        golden_repo_alias = metadata.get("golden_repo_alias")
+        if not isinstance(golden_repo_alias, str) or not golden_repo_alias:
+            return None
+
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
+        )
+
+        golden_repos_dir = (
+            Path(self.activated_repo_manager.activated_repos_dir).parent
+            / "golden-repos"
+        )
+        temporal_status = get_temporal_repo_status(
+            golden_repos_dir=golden_repos_dir,
+            repo_alias=golden_repo_alias,
+            legacy_index_path=legacy_index_path,
+        )
+        if temporal_status.is_queryable and temporal_status.resolved_path:
+            # mypy workaround: this file resolves under a src.-prefixed
+            # module identity when checked from the repo root, which
+            # otherwise infers this cross-module attribute access as Any
+            # (same pre-existing project quirk collection_migration.py's
+            # bool(...) wrap documents for its own analogous case).
+            return cast(Path, temporal_status.resolved_path)
+        return None
+
+    def _get_temporal_status(
+        self, repo_path: Path, repo_alias: str, username: str
+    ) -> Dict[str, Any]:
         """Get temporal index status."""
         from code_indexer.services.temporal.temporal_collection_naming import (
             is_temporal_collection as _is_temporal,
         )
 
         index_dir = repo_path / ".code-indexer" / "index"
-        temporal_dir = next(
-            (
-                d
-                for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
-                if d.is_dir() and _is_temporal(d.name)
-            ),
-            None,
-        )
+        # Round-7 dual-review Issue 2 (GitHub Issue #1476): this method
+        # shares index_dir with _get_semantic_status and is invoked by
+        # the SAME get_index_status() entry point -- a real filesystem
+        # failure (e.g. PermissionError from an unreadable index
+        # directory) here must not escape uncaught to an unhandled HTTP
+        # 500 either.
+        try:
+            temporal_dir = next(
+                (
+                    d
+                    for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+                    if d.is_dir() and _is_temporal(d.name)
+                ),
+                None,
+            )
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "SVC-MIGRATE-005",
+                    f"Failed to scan temporal index directory {index_dir}: {exc}",
+                ),
+                extra=get_log_extra("SVC-MIGRATE-005"),
+            )
+            return {
+                "status": "error",
+                "error": f"Failed to scan temporal index directory: {exc}",
+            }
 
+        if temporal_dir is not None and not (temporal_dir / "hnsw_index.bin").exists():
+            # Issue #1459 Finding 1b Site B: a name-matched local directory
+            # with a metadata.json completion marker is not sufficient to
+            # report a positive status -- it must also have a working
+            # HNSW. Without this check, a genuine crash-window state (rows
+            # + metadata.json written, hnsw_index.bin not yet built) would
+            # be reported as a false-positive "up_to_date"/"stale" status.
+            # Reset to None so execution falls through into the SAME
+            # resolver-based fallback below that already handles "nothing
+            # found locally" -- never a third code path.
+            temporal_dir = None
+
+        resolved_via_sister = False
         if temporal_dir is None or not temporal_dir.exists():
-            return {"status": "not_indexed"}
+            resolved_temporal_dir = self._resolve_relocated_temporal_dir(
+                index_dir, repo_alias, username
+            )
+            if resolved_temporal_dir is None:
+                return {"status": "not_indexed"}
+            temporal_dir = resolved_temporal_dir
+            resolved_via_sister = True
 
         metadata_file = temporal_dir / "metadata.json"
         if not metadata_file.exists():
+            if resolved_via_sister:
+                # Sister-relocated shards do not (yet) carry the legacy
+                # metadata.json in-repo TemporalIndexer writes (Story #1457
+                # AC6's build machinery writes collection_meta.json +
+                # chunks.db + hnsw_index.bin, not this file) -- report a
+                # queryable-but-no-detail status rather than falsely
+                # claiming "not_indexed".
+                return {"status": "up_to_date"}
+            # Local in-repo shard missing metadata.json -- pre-existing
+            # behavior preserved exactly (regression safety).
             return {"status": "not_indexed"}
 
         try:

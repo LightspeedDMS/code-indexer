@@ -19,8 +19,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from src.code_indexer.server.services.search_service import SemanticSearchService
-from src.code_indexer.server.models.api_models import SemanticSearchRequest
+from code_indexer.server.services.search_service import SemanticSearchService
+from code_indexer.server.models.api_models import SemanticSearchRequest
 
 
 @pytest.mark.slow
@@ -98,21 +98,21 @@ class TestSearchServiceNoDoubleMetrics:
         # Note: api_metrics_service is imported locally in search_repository_path(),
         # so we patch the actual module where it's defined
         with patch(
-            "src.code_indexer.server.services.api_metrics_service.api_metrics_service",
+            "code_indexer.server.services.api_metrics_service.api_metrics_service",
             mock_api_metrics,
         ):
             with patch(
-                "src.code_indexer.server.services.search_service.ConfigManager.create_with_backtrack"
+                "code_indexer.server.services.search_service.ConfigManager.create_with_backtrack"
             ) as mock_config_manager:
                 mock_config = MagicMock()
                 mock_config_manager.return_value.get_config.return_value = mock_config
 
                 with patch(
-                    "src.code_indexer.server.services.search_service.BackendFactory.create",
+                    "code_indexer.server.services.search_service.BackendFactory.create",
                     return_value=mock_backend,
                 ):
                     with patch(
-                        "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                        "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
                         return_value=mock_embedding_service,
                     ):
                         search_request = SemanticSearchRequest(
@@ -156,7 +156,7 @@ class TestSearchServiceNoDoubleMetrics:
                 mock_search_path.return_value = MagicMock()
 
                 with patch(
-                    "src.code_indexer.server.services.api_metrics_service.api_metrics_service",
+                    "code_indexer.server.services.api_metrics_service.api_metrics_service",
                     mock_api_metrics,
                 ):
                     search_request = SemanticSearchRequest(

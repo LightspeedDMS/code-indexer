@@ -7,15 +7,19 @@ Manages per-user git forge credentials with AES-256-CBC encryption.
 Validates tokens against the forge API before storing.
 """
 
+import functools
 import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import anyio
+
 from code_indexer.server.clients.forge_client import get_forge_client
 from code_indexer.server.storage.protocols import GitCredentialsBackend
 from code_indexer.server.storage.sqlite_backends import GitCredentialsSqliteBackend
+from .audit_outcome import conforming_details, record_outcome, record_outcome_async
 from .token_encryption import (
     derive_key_from_salt as _derive_key_from_salt_fn,
     derive_encryption_key as _derive_encryption_key_fn,
@@ -25,6 +29,53 @@ from .token_encryption import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _record_git(
+    actor: str,
+    action_type: str,
+    credential_id: Optional[str],
+    outcome: str,
+    details: Dict[str, Any],
+) -> None:
+    record_outcome(
+        actor=actor,
+        action_type=action_type,
+        target_type="git_credential",
+        target_id=credential_id,
+        outcome=outcome,
+        details=details,
+    )
+
+
+def _verified_git_row(
+    verified: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Target id and details for a looked-up credential (None -> placeholder)."""
+    if verified is None:
+        return None, {}
+    return verified.get("credential_id"), conforming_details(
+        "git_credential_deleted",
+        platform=verified.get("forge_type"),
+        forge_host=verified.get("forge_host"),
+    )
+
+
+async def _record_git_async(
+    actor: str,
+    action_type: str,
+    credential_id: Optional[str],
+    outcome: str,
+    details: Dict[str, Any],
+) -> None:
+    await record_outcome_async(
+        actor=actor,
+        action_type=action_type,
+        target_type="git_credential",
+        target_id=credential_id,
+        outcome=outcome,
+        details=details,
+    )
 
 
 class GitCredentialManager:
@@ -127,16 +178,20 @@ class GitCredentialManager:
         encrypted_token = self._encrypt_token(token)
         now = datetime.now(timezone.utc).isoformat()
 
-        self._backend.upsert_credential(
-            credential_id=credential_id,
-            username=username,
-            forge_type=forge_type,
-            forge_host=forge_host,
-            encrypted_token=encrypted_token,
-            git_user_name=identity.get("git_user_name"),
-            git_user_email=identity.get("git_user_email"),
-            forge_username=identity.get("forge_username"),
-            name=name,
+        # Synchronous storage write: run it off the event loop.
+        await anyio.to_thread.run_sync(
+            functools.partial(
+                self._backend.upsert_credential,
+                credential_id=credential_id,
+                username=username,
+                forge_type=forge_type,
+                forge_host=forge_host,
+                encrypted_token=encrypted_token,
+                git_user_name=identity.get("git_user_name"),
+                git_user_email=identity.get("git_user_email"),
+                forge_username=identity.get("forge_username"),
+                name=name,
+            )
         )
 
         return {
@@ -150,6 +205,73 @@ class GitCredentialManager:
             "name": name,
             "created_at": now,
         }
+
+    async def configure_credential_audited(
+        self,
+        username: str,
+        forge_type: str,
+        forge_host: str,
+        token: str,
+        name: Optional[str] = None,
+        *,
+        actor: str,
+    ) -> Dict[str, Any]:
+        """:meth:`configure_credential`, recording ``git_credential_configured``.
+
+        Every front door calls this.  The row is written off the event loop;
+        the token and the free-text name are never recorded.  A failed
+        configuration persisted nothing, so its row names no credential and
+        carries no details.
+        """
+        try:
+            result = await self.configure_credential(
+                username, forge_type, forge_host, token, name=name
+            )
+        except Exception:
+            await _record_git_async(
+                actor, "git_credential_configured", None, "failure", {}
+            )
+            raise
+        details = conforming_details(
+            "git_credential_configured", platform=forge_type, forge_host=forge_host
+        )
+        await _record_git_async(
+            actor,
+            "git_credential_configured",
+            result.get("credential_id"),
+            "success",
+            details,
+        )
+        return result
+
+    def delete_credential_audited(
+        self, username: str, credential_id: str, *, actor: str
+    ) -> bool:
+        """:meth:`delete_credential`, recording ``git_credential_deleted``.
+
+        The credential is named only when the lookup inside the guarded
+        block found it among *username*'s persisted credentials.
+        """
+        verified: Optional[Dict[str, Any]] = None
+        try:
+            verified = next(
+                (
+                    cred
+                    for cred in self._backend.list_credentials(username)
+                    if cred.get("credential_id") == credential_id
+                ),
+                None,
+            )
+            deleted = self.delete_credential(username, credential_id)
+        except Exception:
+            verified_id, details = _verified_git_row(verified)
+            _record_git(
+                actor, "git_credential_deleted", verified_id, "failure", details
+            )
+            raise
+        verified_id, details = _verified_git_row(verified)
+        _record_git(actor, "git_credential_deleted", verified_id, "success", details)
+        return deleted
 
     def list_credentials(self, username: str) -> List[Dict[str, Any]]:
         """List credentials for user with token redacted to last 4 chars of plaintext."""

@@ -50,11 +50,9 @@ def backend(db_path: Path):
 
 
 @pytest.fixture
-def job_manager(db_path: Path):
+def job_manager(db_path: Path, background_job_manager_factory):
     """BackgroundJobManager with SQLite backend (no JobTracker)."""
-    from code_indexer.server.repositories.background_jobs import BackgroundJobManager
-
-    return BackgroundJobManager(use_sqlite=True, db_path=str(db_path))
+    return background_job_manager_factory(use_sqlite=True, db_path=str(db_path))
 
 
 # ---------------------------------------------------------------------------
@@ -453,16 +451,15 @@ class TestSqliteBackendActorUsername:
 class TestDeactivateRepositoryActorUsername:
     """ActivatedRepoManager.deactivate_repository must pass actor_username to submit_job."""
 
-    def test_deactivate_repository_passes_actor_username(self, tmp_path: Path) -> None:
+    def test_deactivate_repository_passes_actor_username(
+        self, tmp_path: Path, background_job_manager_factory
+    ) -> None:
         """deactivate_repository(actor_username='admin') results in job with actor_username='admin'."""
         import os
         import json
 
         from code_indexer.server.repositories.activated_repo_manager import (
             ActivatedRepoManager,
-        )
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
         )
 
         # ActivatedRepoManager uses data_dir; activated-repos is created as a subdir
@@ -485,7 +482,7 @@ class TestDeactivateRepositoryActorUsername:
             )
 
         # Use a real BackgroundJobManager (no SQLite) with a spy on submit_job
-        bjm = BackgroundJobManager()
+        bjm = background_job_manager_factory()
         submitted_kwargs: Dict[str, Any] = {}
 
         def capturing_submit(*args, **kwargs):
@@ -516,7 +513,7 @@ class TestDeactivateRepositoryActorUsername:
         )
 
     def test_deactivate_repository_no_actor_defaults_to_submitter(
-        self, tmp_path: Path
+        self, tmp_path: Path, background_job_manager_factory
     ) -> None:
         """deactivate_repository(actor_username=None) passes actor_username=None to submit_job."""
         import os
@@ -524,9 +521,6 @@ class TestDeactivateRepositoryActorUsername:
 
         from code_indexer.server.repositories.activated_repo_manager import (
             ActivatedRepoManager,
-        )
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
         )
 
         data_dir2 = str(tmp_path / "data2")
@@ -542,7 +536,7 @@ class TestDeactivateRepositoryActorUsername:
         with open(metadata_path, "w") as f:
             json.dump({"golden_repo_alias": "g", "created_at": "2026-01-01"}, f)
 
-        bjm = BackgroundJobManager()
+        bjm = background_job_manager_factory()
         submitted_kwargs: Dict[str, Any] = {}
 
         def capturing_submit(*args, **kwargs):

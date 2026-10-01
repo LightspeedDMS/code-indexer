@@ -18,8 +18,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from src.code_indexer.cli import query as query_command
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.cli import query as query_command
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
 
@@ -85,8 +85,8 @@ def _invoke_temporal_query(runner, temp_project, temporal_results):
 
     Returns the CliRunner result (with .output and .exit_code).
     External dependencies patched:
-    - src.code_indexer.cli.BackendFactory (module-level import in cli.py)
-    - src.code_indexer.services.temporal.temporal_fusion_dispatch
+    - code_indexer.cli.BackendFactory (module-level import in cli.py)
+    - code_indexer.services.temporal.temporal_fusion_dispatch
       .execute_temporal_query_with_fusion (lazy import inside query function)
     """
     config_manager_mock = _make_config_manager_mock(temp_project)
@@ -99,13 +99,13 @@ def _invoke_temporal_query(runner, temp_project, temporal_results):
         patch(
             # Lazy import in query(): "from .services.temporal.temporal_fusion_dispatch
             # import execute_temporal_query_with_fusion as _execute_temporal_fusion"
-            # resolves in the src.code_indexer namespace.
-            "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+            # resolves in the code_indexer namespace.
+            "code_indexer.services.temporal.temporal_fusion_dispatch"
             ".execute_temporal_query_with_fusion",
             return_value=temporal_results,
         ),
         # BackendFactory is imported at module level in cli.py; patch it there.
-        patch("src.code_indexer.cli.BackendFactory") as mock_backend_cls,
+        patch("code_indexer.cli.BackendFactory") as mock_backend_cls,
     ):
         mock_backend_cls.create.return_value = backend_mock
         return runner.invoke(
@@ -145,7 +145,7 @@ class TestCLITemporalWarningDisplay:
         config_manager_mock = _make_config_manager_mock(temp_project_no_temporal)
 
         with patch(
-            "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+            "code_indexer.services.temporal.temporal_fusion_dispatch"
             ".execute_temporal_query_with_fusion"
         ) as mock_fusion:
             result = runner.invoke(
@@ -200,7 +200,7 @@ class TestCLITemporalWarningDisplay:
         self, runner, temp_project
     ):
         """When results are returned, no temporal warning should be printed."""
-        from src.code_indexer.services.temporal.temporal_search_service import (
+        from code_indexer.services.temporal.temporal_search_service import (
             TemporalSearchResult,
         )
 

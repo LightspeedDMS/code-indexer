@@ -10,7 +10,7 @@ import numpy as np
 import threading
 import time
 from pathlib import Path
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 class TestConcurrentUpserts:
@@ -25,7 +25,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -125,7 +127,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -175,7 +179,9 @@ class TestConcurrentUpserts:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")

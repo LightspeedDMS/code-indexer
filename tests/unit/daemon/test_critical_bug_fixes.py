@@ -155,6 +155,14 @@ class TestBug5SemanticIndexesFailToLoad:
         with open(collection_path / "collection_meta.json", "w") as f:
             json.dump(metadata, f)
 
+        # Bug #1730: _load_semantic_indexes now resolves the CONFIGURED
+        # collection via a real config.json before selecting one.
+        from code_indexer.config import ConfigManager
+
+        ConfigManager(tmp_path / ".code-indexer" / "config.json").create_default_config(
+            codebase_dir=tmp_path
+        )
+
         # Create cache entry
         from code_indexer.daemon.cache import CacheEntry
 
@@ -174,6 +182,7 @@ class TestBug5SemanticIndexesFailToLoad:
         ):
             mock_vector_store = MagicMock()
             mock_vector_store.list_collections.return_value = ["test_collection"]
+            mock_vector_store.resolve_collection_name.return_value = "test_collection"
             mock_vector_store_cls.return_value = mock_vector_store
 
             mock_hnsw = MagicMock()
@@ -208,6 +217,14 @@ class TestBug5SemanticIndexesFailToLoad:
         with open(collection_path / "collection_meta.json", "w") as f:
             json.dump(metadata, f)
 
+        # Bug #1730: _load_semantic_indexes now resolves the CONFIGURED
+        # collection via a real config.json before selecting one.
+        from code_indexer.config import ConfigManager
+
+        ConfigManager(tmp_path / ".code-indexer" / "config.json").create_default_config(
+            codebase_dir=tmp_path
+        )
+
         # Create cache entry
         from code_indexer.daemon.cache import CacheEntry
 
@@ -227,6 +244,7 @@ class TestBug5SemanticIndexesFailToLoad:
         ):
             mock_vector_store = MagicMock()
             mock_vector_store.list_collections.return_value = ["test_collection"]
+            mock_vector_store.resolve_collection_name.return_value = "test_collection"
             mock_vector_store_cls.return_value = mock_vector_store
 
             mock_hnsw = MagicMock()

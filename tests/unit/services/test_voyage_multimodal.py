@@ -5,9 +5,9 @@ import os
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
-from src.code_indexer.services.voyage_multimodal import VoyageMultimodalClient
-from src.code_indexer.services.multimodal_utils import encode_image_to_base64
-from src.code_indexer.config import VoyageAIConfig
+from code_indexer.services.voyage_multimodal import VoyageMultimodalClient
+from code_indexer.services.multimodal_utils import encode_image_to_base64
+from code_indexer.config import VoyageAIConfig
 
 
 @pytest.fixture

@@ -277,7 +277,6 @@ Status values:
                     "MCP-GENERAL-147",
                     f"Job {job_id}: Claude Code timed out after "
                     f"{self.CLAUDE_TIMEOUT_SECONDS}s for {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise
@@ -312,7 +311,6 @@ Status values:
                     "MCP-GENERAL-148",
                     f"Job {job_id}: Invalid status '{status}' in Claude response "
                     f"for {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return ClaudeResponse(
@@ -411,7 +409,6 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-149",
                     f"Job {job_id}: Failed to parse Claude response for {project_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return ClaudeResponse(
@@ -424,7 +421,6 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-150",
                     f"Job {job_id}: I/O error invoking Claude Code for {project_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return ClaudeResponse(
@@ -475,7 +471,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-151",
                         f"Job {job_id}: Cannot handle response for unknown project {project_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -518,7 +513,6 @@ Status values:
                         "MCP-GENERAL-152",
                         f"Job {job_id}: SCIP retry failed for {project_path}, "
                         f"attempt {job.language_resolution_status[project_path]['attempts']}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             self.job_manager._persist_jobs()
@@ -547,7 +541,6 @@ Status values:
                         "MCP-GENERAL-153",
                         f"Job {job_id}: Project {project_path} marked unresolvable "
                         f"after {project_status['attempts']} attempts",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             else:
@@ -578,7 +571,6 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-154",
                     f"Job {job_id}: Project {project_path} marked unresolvable: {reasoning}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             self.job_manager._persist_jobs()
@@ -606,7 +598,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-155",
                         f"Job {job_id}: Cannot retry SCIP for unknown project {project_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -638,7 +629,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-156",
                         f"Job {job_id}: Project directory not found: {project_dir}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -654,7 +644,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-157",
                         f"Job {job_id}: No SCIP indexer available for {language}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -681,7 +670,6 @@ Status values:
                         "MCP-GENERAL-158",
                         f"Job {job_id}: SCIP retry failed for {project_path}: "
                         f"{indexer_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -691,9 +679,8 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-159",
                     f"Job {job_id}: Exception during SCIP retry for {project_path}: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return False
 
@@ -710,7 +697,6 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-160",
                     f"Job {job_id}: Resolution queue not available, cannot re-queue {project_path}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -727,7 +713,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-161",
                         f"Job {job_id}: Cannot re-queue unknown project {project_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -754,9 +739,8 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-162",
                     f"Job {job_id}: Failed to re-queue {project_path}: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     def _record_partial_success_details(
@@ -811,7 +795,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-163",
                         f"Job {job_id} not found for completion determination",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return JobStatus.FAILED
@@ -821,7 +804,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-164",
                         f"Job {job_id} has no language_resolution_status",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return JobStatus.FAILED
@@ -847,7 +829,6 @@ Status values:
                         "MCP-GENERAL-165",
                         f"Job {job_id}: {pending} projects still in non-terminal state "
                         "(should not happen at completion)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -880,7 +861,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-166",
                         f"Job {job_id}: {job.failure_reason}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 final_status = JobStatus.FAILED
@@ -963,7 +943,6 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-167",
                         f"Job {job_id}: Cannot create PR - no repo_alias in job params",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -1003,7 +982,6 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-168",
                     f"Job {job_id}: Failed to create PR (non-blocking): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )

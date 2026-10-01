@@ -13,13 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
     JobStatus,
 )
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 
 class TestCrossNodeCancellation:

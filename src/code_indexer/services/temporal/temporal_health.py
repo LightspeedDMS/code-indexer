@@ -6,7 +6,8 @@ Semantic keys use provider names: "voyage-ai" (unchanged, backward compat)
 """
 
 import logging
-from typing import List, Tuple
+import threading
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,68 @@ TEMPORAL_HEALTH_PREFIX = "temporal:"
 
 # Collection name prefix used by temporal indexer
 _TEMPORAL_COLLECTION_PREFIX = "code-indexer-temporal-"
+
+# Story #1457 AC8 Step 6: pin-acquisition exhaustion counters, DELIBERATELY
+# separate from ProviderHealthMonitor -- a lost resolve/validate race
+# against a concurrent alias swap is a transient lock-contention event, not
+# a provider-health signal, and must never feed record_temporal_failure's
+# circuit-breaker scoring.
+#
+# 2026-07-23 code review MEDIUM #12 (CLAUDE.md cluster-aware-state scope
+# disclosure): this dict is PROCESS-LOCAL ONLY -- in a multi-node cluster,
+# each node has its own independent tally, and get_temporal_pin_exhaustion_
+# count() below returns ONLY the calling node's count, never a cluster-wide
+# aggregate. It is intentionally NOT promoted to a PostgreSQL/SQLite dual-
+# backend table (this codebase's established pattern for genuinely shared
+# cross-node counters, e.g. golden_repo_reconcile_breaker_state): pin
+# exhaustion is a rare, already-durably-observable event via the WARNING
+# log emitted below, which flows into this server's DB-backed log store
+# (already cluster-aware, queryable cluster-wide via admin_logs_query /
+# the Post-E2E Log Audit gate) -- the actual established shared
+# observability mechanism for this class of rare-event operator signal.
+# get_temporal_pin_exhaustion_count() has zero production callers today
+# (test-only); should a future health/admin surface need a genuine
+# cluster-wide aggregate, route it through the log store's query API or a
+# dedicated dual-backend table at that time, rather than trusting this
+# process-local value across nodes.
+_pin_exhaustion_counts: Dict[str, int] = {}
+_pin_exhaustion_lock = threading.Lock()
+
+
+def record_temporal_pin_exhaustion(model_or_collection: str) -> None:
+    """Record a pin-acquisition exhaustion event for observability.
+
+    Story #1457 AC8 Step 6: called when TemporalShardResolver.pin() lost
+    _PIN_MAX_ATTEMPTS consecutive resolve/validate races. Deliberately does
+    NOT call ProviderHealthMonitor -- a lost pointer race is a transient
+    lock-contention event, not a provider-health signal, so it must not
+    degrade the provider circuit breaker record_temporal_failure() drives.
+
+    The WARNING log emitted here (not the in-process counter) is the
+    durable, cluster-wide-queryable observability record -- see the
+    process-local scope disclosure above _pin_exhaustion_counts.
+    """
+    key = make_temporal_health_key(model_or_collection)
+    with _pin_exhaustion_lock:
+        _pin_exhaustion_counts[key] = _pin_exhaustion_counts.get(key, 0) + 1
+        count = _pin_exhaustion_counts[key]
+    logger.warning(
+        "[temporal-pin-exhausted] recorded for %s (process-local cumulative count=%d)",
+        key,
+        count,
+    )
+
+
+def get_temporal_pin_exhaustion_count(model_or_collection: str) -> int:
+    """Return THIS NODE's process-local cumulative pin-exhaustion count.
+
+    NOT a cluster-wide aggregate -- see the scope disclosure above
+    _pin_exhaustion_counts. In a multi-node deployment, other nodes'
+    exhaustion events are invisible to this call.
+    """
+    key = make_temporal_health_key(model_or_collection)
+    with _pin_exhaustion_lock:
+        return _pin_exhaustion_counts.get(key, 0)
 
 
 def make_temporal_health_key(model_or_collection: str) -> str:
