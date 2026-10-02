@@ -126,6 +126,8 @@ Only on a second explicit "yes" do you push. "ok"/"sure"/"do it"/"go ahead" is N
 
 **Default on work completion (THE NORMAL PATH)**: (1) bump version on development, commit, push origin/development (CI auto-tags); (2) merge development -> staging, push (auto-deploys); (3) **STOP.** Report what's on dev and staging; wait for the user. Promoting staging -> master is never the default.
 
+**Remotes (2026-10-02)**: `origin` is the PRIVATE repo: `development` and `staging` live there, and the staging servers deploy from it. `public` is the public repo: it carries ONLY `master` (production deploys from it) and `development`. It has NO `staging` branch; never create one there. On an authorized promotion: merge `origin/staging` onto `public/master` (git plumbing), push `public master` and the new tags, fast-forward `public development` to the new `public master`, then back-merge `public/master` into `origin/development`.
+
 Past failure (2026-06-03): pushed v10.91.14 to master without authorization, reasoning from an earlier version's "promote to prod" + a `/goal` mention of staging + green gates. Wrong on every axis; production restart killed a user's in-flight dep-map job. This section was hardened in response.
 
 ### Security-Sensitive Commit Discipline (Story #929)
