@@ -5,6 +5,11 @@ CIDX can deliver pilot security events to Google Security Operations
 delivered, the guarantee, configuration, arming, operation and the admin
 actions.
 
+For Google SecOps staff (where to find each setting's value in Google, the
+service account, searching and alerting), see
+[siem-secops-guide.md](siem-secops-guide.md). For every delivered event and
+its UDM fields, see [siem-secops-event-catalog.md](siem-secops-event-catalog.md).
+
 ## What is delivered
 
 Pilot scope only (a code constant, not a setting):
