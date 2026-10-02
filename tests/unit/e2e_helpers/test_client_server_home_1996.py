@@ -12,10 +12,12 @@ sentinel file, so even a broken refusal can never touch the real one.
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,6 +42,39 @@ _BASE_ENV = {
     "E2E_ADMIN_PASS": "example-password",
     "E2E_VOYAGE_API_KEY": "",
 }
+# Ports: the harness default for run_phase servers, plus one per live server.
+DEFAULT_PHASE_SERVER_PORT = 8899
+STUB_ROUND_TRIP_PORT = 8123
+PHASE4_PORT, FAULT_PORT, PG_PORT, SIEM_PORT = 18899, 18900, 18901, 18904
+
+
+def _stub_flags(port: int) -> dict:
+    """What a stub unit for a server on *port* must yield."""
+    return {"host": "127.0.0.1", "port": port, "workers": 1}
+
+
+def _parsed_stub(unit_dir: Path) -> dict:
+    """What the REAL live-ExecStart reader parses from *unit_dir*."""
+    code = (
+        "import json\n"
+        "from code_indexer.server.auto_update.deployment_executor import "
+        "read_execstart_flags\n"
+        "print(json.dumps(read_execstart_flags()))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=BASH_TIMEOUT_SECONDS,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "SYSTEMD_UNIT_DIR": str(unit_dir),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    parsed: dict = json.loads(result.stdout.strip().splitlines()[-1])
+    return parsed
 
 
 def _harness_root(home: Path) -> Path:
@@ -427,10 +462,15 @@ def test_run_phase_gives_each_phase_a_fresh_client_home(home: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert list(client_home.iterdir()) == [], "previous phase's files survived"
+    assert [p.name for p in client_home.iterdir()] == ["systemd-units"], (
+        "previous phase's files survived"
+    )
     assert f"SERVER_DIR={client_home}\n" in result.stdout
     assert f"DATA_DIR={client_home}\n" in result.stdout
-    assert f"UNIT_DIR={client_home}/no-systemd-units\n" in result.stdout
+    assert f"UNIT_DIR={client_home}/systemd-units\n" in result.stdout
+    assert _parsed_stub(client_home / "systemd-units") == _stub_flags(
+        DEFAULT_PHASE_SERVER_PORT
+    )
 
 
 def test_run_phase_refuses_an_unsafe_client_home(home: Path) -> None:
@@ -458,7 +498,62 @@ def test_otel_subcheck_gets_a_fresh_client_home(home: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert list(client_home.iterdir()) == []
+    assert [p.name for p in client_home.iterdir()] == ["systemd-units"]
     assert f"SERVER_DIR={client_home}\n" in result.stdout
     assert f"DATA_DIR={client_home}\n" in result.stdout
-    assert f"UNIT_DIR={client_home}/no-systemd-units\n" in result.stdout
+    assert f"UNIT_DIR={client_home}/systemd-units\n" in result.stdout
+    assert _parsed_stub(client_home / "systemd-units") == _stub_flags(
+        DEFAULT_PHASE_SERVER_PORT
+    )
+
+
+def test_stub_unit_is_parsed_by_the_execstart_reader(
+    home: Path, tmp_path: Path
+) -> None:
+    unit_dir = tmp_path / "units"
+
+    result = _bash(home, f'write_stub_systemd_unit "{unit_dir}" {STUB_ROUND_TRIP_PORT}')
+
+    assert result.returncode == 0, result.stderr
+    assert (unit_dir / "cidx-server.service").is_file()
+    assert _parsed_stub(unit_dir) == _stub_flags(STUB_ROUND_TRIP_PORT)
+
+
+@pytest.mark.parametrize(
+    "launcher, data_var, port_var, port",
+    [
+        ("start_phase4_server", "E2E_SERVER_DATA_DIR", "E2E_SERVER_PORT", PHASE4_PORT),
+        (
+            "start_fault_server",
+            "E2E_FAULT_SERVER_DATA_DIR",
+            "E2E_FAULT_SERVER_PORT",
+            FAULT_PORT,
+        ),
+        ("start_pg_server", "E2E_PG_SERVER_DATA_DIR", "E2E_PG_SERVER_PORT", PG_PORT),
+        (
+            "start_siem_server",
+            "E2E_SIEM_SERVER_DATA_DIR",
+            "E2E_SIEM_SERVER_PORT",
+            SIEM_PORT,
+        ),
+    ],
+)
+def test_live_servers_read_their_own_stub_unit(
+    home: Path,
+    tmp_path: Path,
+    launcher: str,
+    data_var: str,
+    port_var: str,
+    port: int,
+) -> None:
+    data_dir = tmp_path / "server-data"
+    data_dir.mkdir()
+
+    result = _bash(
+        home, f"{launcher}\nwait", **{data_var: str(data_dir), port_var: str(port)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = (data_dir / "server.log").read_text()
+    assert f"UNIT_DIR={data_dir}/systemd-units\n" in log, log
+    assert _parsed_stub(data_dir / "systemd-units") == _stub_flags(port)

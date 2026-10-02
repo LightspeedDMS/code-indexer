@@ -252,6 +252,23 @@ wipe_client_server_home() {
     mkdir -p -- "$target" || { _red "Failed to create $target" >&2; return 1; }
 }
 
+# Bug #1996: a deployed node always has a cidx-server.service unit; every e2e
+# server reads a STUB one (loopback host -- Bug #1324 -- its own port, one
+# worker) through SYSTEMD_UNIT_DIR instead of this host's real unit or none.
+# The ExecStart shape matches what read_execstart_flags (Bug #1232) parses.
+write_stub_systemd_unit() {
+    local unit_dir="$1" port="$2"
+    mkdir -p -- "$unit_dir" || { _red "Failed to create $unit_dir" >&2; return 1; }
+    printf '%s\n' \
+        "[Unit]" \
+        "Description=CIDX e2e stub unit (never installed; read by the launch-key gap-fill)" \
+        "" \
+        "[Service]" \
+        "ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host 127.0.0.1 --port $port --workers 1" \
+        > "$unit_dir/cidx-server.service" \
+        || { _red "Failed to write $unit_dir/cidx-server.service" >&2; return 1; }
+}
+
 # Refuse a caller environment whose server data dir points at the real home.
 check_caller_server_env() {
     local var value reason
@@ -566,6 +583,8 @@ run_phase() {
     # Bug #1996: a fresh client server home per phase, so one phase's server
     # files cannot leak into the next; an unsafe path aborts the whole run.
     wipe_client_server_home || exit 2
+    write_stub_systemd_unit "$E2E_CLIENT_SERVER_HOME/systemd-units" "$E2E_SERVER_PORT" \
+        || exit 2
 
     # Capture pytest output to a temp file so we can extract skip lines
     # while still streaming to stdout (-v --tb=short for normal visibility).
@@ -582,7 +601,7 @@ run_phase() {
     CIDX_TEST_FAST_SQLITE=1 \
     CIDX_SERVER_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
     CIDX_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
-    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/no-systemd-units" \
+    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/systemd-units" \
     E2E_SERVER_PORT="$E2E_SERVER_PORT" \
     E2E_SERVER_HOST="$E2E_SERVER_HOST" \
     E2E_ADMIN_USER="$E2E_ADMIN_USER" \
@@ -651,8 +670,10 @@ run_otel_live_collector_subcheck() {
         return 0
     fi
 
-    # Bug #1996: its own fresh client server home (see run_phase)
+    # Bug #1996: its own fresh client server home + stub unit (see run_phase)
     wipe_client_server_home || exit 2
+    write_stub_systemd_unit "$E2E_CLIENT_SERVER_HOME/systemd-units" "$E2E_SERVER_PORT" \
+        || exit 2
 
     local subcheck_output_file
     subcheck_output_file=$(mktemp)
@@ -662,7 +683,7 @@ run_otel_live_collector_subcheck() {
     CIDX_TEST_FAST_SQLITE=1 \
     CIDX_SERVER_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
     CIDX_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
-    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/no-systemd-units" \
+    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/systemd-units" \
     E2E_ADMIN_USER="$E2E_ADMIN_USER" \
     E2E_ADMIN_PASS="$E2E_ADMIN_PASS" \
     E2E_VOYAGE_API_KEY="$E2E_VOYAGE_API_KEY" \
@@ -712,10 +733,13 @@ handle_phase_result() {
 # ---------------------------------------------------------------------------
 start_phase4_server() {
     _yellow "  Starting uvicorn on ${E2E_SERVER_HOST}:${E2E_SERVER_PORT}..."
+    write_stub_systemd_unit "$E2E_SERVER_DATA_DIR/systemd-units" "$E2E_SERVER_PORT" \
+        || exit 2
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_TEST_FAST_SQLITE=1 \
     CIDX_SERVER_DATA_DIR="$E2E_SERVER_DATA_DIR" \
     CIDX_DATA_DIR="$E2E_SERVER_DATA_DIR" \
+    SYSTEMD_UNIT_DIR="$E2E_SERVER_DATA_DIR/systemd-units" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
             --host "$E2E_SERVER_HOST" \
@@ -750,9 +774,12 @@ CONFIG_EOF
 # ---------------------------------------------------------------------------
 start_fault_server() {
     _yellow "  Starting fault server on ${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}..."
+    write_stub_systemd_unit "$E2E_FAULT_SERVER_DATA_DIR/systemd-units" \
+        "$E2E_FAULT_SERVER_PORT" || exit 2
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_SERVER_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
     CIDX_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
+    SYSTEMD_UNIT_DIR="$E2E_FAULT_SERVER_DATA_DIR/systemd-units" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
     CO_API_KEY="${E2E_COHERE_API_KEY:-${CO_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
@@ -923,14 +950,16 @@ start_pg_server() {
     # looks unauthenticated on the very next request (this exact failure mode
     # was empirically reproduced end-to-end). SYSTEMD_UNIT_DIR is the
     # product's own pre-existing "configurable for testing" override
-    # (deployment_executor.py) -- pointing it at a directory that never
-    # contains a cidx-server.service unit makes this ephemeral Phase 6 server
-    # immune to whatever systemd units exist on the host, so the gap-fill
-    # correctly falls back to the ServerConfig default of 127.0.0.1 instead.
+    # (deployment_executor.py) -- Bug #1996: it points at this server's own
+    # STUB unit (127.0.0.1, this port, one worker), so the gap-fill is immune
+    # to whatever systemd units exist on the host AND finds every launch key
+    # (no Bug #1232 "absent from config.json and live ExecStart" WARNING).
+    write_stub_systemd_unit "$E2E_PG_SERVER_DATA_DIR/systemd-units" \
+        "$E2E_PG_SERVER_PORT" || exit 2
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_SERVER_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
     CIDX_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
-    SYSTEMD_UNIT_DIR="$E2E_PG_SERVER_DATA_DIR/no-systemd-units" \
+    SYSTEMD_UNIT_DIR="$E2E_PG_SERVER_DATA_DIR/systemd-units" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
             --host "$E2E_PG_SERVER_HOST" \
