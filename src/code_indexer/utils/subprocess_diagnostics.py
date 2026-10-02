@@ -67,15 +67,54 @@ _URL_USERINFO_RE = re.compile(
 )
 
 
-def redact_url_credentials(text: str) -> str:
+def redact_url_credentials(text: object) -> str:
     """Replace the userinfo of any scheme://user:secret@host URL with ``***``.
 
     A failing git command is reported with its full argv, and that argv can carry
     a credentialed remote URL -- `git remote add origin https://oauth2:<PAT>@...`.
     The resulting message travels into job errors, API responses and logs, so the
     secret is stripped here, once, rather than at each call site.
+
+    This is applied to EVERY channel the formatter emits, not just argv. git is
+    the reason: handed a credentialed URL it echoes that URL back on failure
+    (`fatal: unable to access 'https://oauth2:<PAT>@gitlab.com/o/r.git/': 403`),
+    so the exact secret stripped from `command=` reappeared verbatim in
+    `stderr=`. Redacting argv alone covered the cheapest channel and left the
+    loudest one open.
+
+    Both credentialed forms this codebase actually builds are covered, because
+    both are scheme URLs: GitLab's `https://oauth2:<token>@host/...` and
+    GitHub's `https://<token>@host/...` (remote_branch_service.
+    _build_effective_url, which converts scp-form remotes to HTTPS before
+    inserting the credential -- so no credentialed scp-form remote is ever
+    constructed). Schemeless scp-form (`git@github.com:org/repo.git`) carries no
+    secret and is deliberately left byte-identical.
     """
+    # Accepts anything an f-string accepts, because this now stands where an
+    # f-string interpolation used to. Captured streams are not reliably `str`:
+    # subprocess returns `bytes` without `text=True`, a stream is None when it
+    # was not captured, and test doubles pass Mocks. `re.sub` raises TypeError
+    # on all three, which would turn message formatting into a crash on exactly
+    # the error path where the diagnostic is being built -- worse than the leak
+    # this function exists to stop. Rendering matches f-string output so
+    # existing log lines are unchanged.
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    elif not isinstance(text, str):
+        text = f"{text}"
     return _URL_USERINFO_RE.sub(lambda m: f"{m.group('scheme')}***@", text)
+
+
+def _redact_and_cap(text: Optional[str], max_chars: int) -> str:
+    """Redact credentials, THEN bound the length. The order is load-bearing.
+
+    Capping first can sever a credentialed URL before the ``@`` the pattern
+    anchors on; the regex then no longer matches, and a PREFIX of a live token
+    survives into the output. Redacting first cannot do that, and never costs
+    room -- ``***`` is shorter than any userinfo it replaces, so the redacted
+    text is always <= the original and the cap still bounds the result.
+    """
+    return _cap(redact_url_credentials(text or ""), max_chars)
 
 
 def _format_cmd(cmd: Union[str, Sequence[str], None]) -> str:
@@ -105,10 +144,16 @@ def format_subprocess_failure_diagnostic(
     """Build a diagnostic naming the command, exit code, and BOTH captured
     streams (each capped at max_chars) -- never rely on stderr alone,
     which can be empty when the failing command's real diagnostic lands
-    on stdout instead (Bug #1832)."""
+    on stdout instead (Bug #1832).
+
+    This is the single formatting boundary every public entry point in this
+    module funnels through, so credential redaction is applied HERE -- to argv
+    and to both captured streams alike -- rather than to argv only. See
+    `redact_url_credentials`."""
     return (
         f"command='{_format_cmd(cmd)}' exit_code={returncode} "
-        f"stdout={_cap(stdout, max_chars)!r} stderr={_cap(stderr, max_chars)!r}"
+        f"stdout={_redact_and_cap(stdout, max_chars)!r} "
+        f"stderr={_redact_and_cap(stderr, max_chars)!r}"
     )
 
 

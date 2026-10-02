@@ -193,3 +193,212 @@ class TestCredentialRedactionInCommandText:
             "https://gitlab.com/group/repo.git"
             in format_called_process_error_diagnostic(exc)
         )
+
+
+class TestCredentialRedactionInCapturedStreams:
+    """Redaction must happen at the FORMATTING BOUNDARY, not only on argv.
+
+    `redact_url_credentials` was applied inside `_format_cmd` only, so
+    `command=` was clean while `stdout=`/`stderr=` -- which go through
+    `_cap()` -- carried the secret VERBATIM. git is the worst case: it
+    echoes back the credentialed URL it was handed, so the exact argv this
+    module redacts reappears unredacted in the stream it does not:
+
+        stderr="fatal: unable to access
+                'https://oauth2:<PAT>@gitlab.com/o/r.git/': 403"
+
+    Every public entry point of this module builds strings that travel into
+    job errors, API responses and logs, so every channel must be covered.
+    """
+
+    _PAT = "glpat-NOTAREALTOKEN123"
+
+    @property
+    def _url(self) -> str:
+        return f"https://oauth2:{self._PAT}@gitlab.com/group/repo.git"
+
+    def test_pat_in_stderr_is_redacted(self) -> None:
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "fetch", "origin"],
+            returncode=128,
+            stdout="",
+            stderr=f"fatal: unable to access '{self._url}/': The requested URL returned error: 403",
+        )
+
+        assert self._PAT not in message
+        assert "oauth2" not in message
+        assert "https://***@gitlab.com/group/repo.git" in message
+        # the actionable half of the diagnostic must survive redaction
+        assert "returned error: 403" in message
+
+    def test_pat_in_stdout_is_redacted(self) -> None:
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "ls-remote"],
+            returncode=1,
+            stdout=f"probing {self._url} ...",
+            stderr="",
+        )
+
+        assert self._PAT not in message
+        assert "https://***@gitlab.com/group/repo.git" in message
+
+    def test_pat_in_both_streams_is_redacted(self) -> None:
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "fetch"],
+            returncode=128,
+            stdout=f"stdout mentions {self._url}",
+            stderr=f"stderr mentions {self._url}",
+        )
+
+        assert self._PAT not in message
+        assert message.count("https://***@gitlab.com/group/repo.git") == 2
+
+    def test_pat_in_argv_and_stderr_simultaneously_is_redacted_in_both(self) -> None:
+        """The real shape of the leak: the SAME credentialed URL is both the
+        argument git was given and the text git echoes back on failure. The
+        argv half was already clean; the stream half was not."""
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "fetch", self._url],
+            returncode=128,
+            stdout="",
+            stderr=f"fatal: unable to access '{self._url}/': 403",
+        )
+
+        assert self._PAT not in message
+        assert "oauth2" not in message
+        # both channels present, both redacted
+        assert "command='git fetch https://***@gitlab.com/group/repo.git'" in message
+        assert message.count("https://***@gitlab.com/group/repo.git") == 2
+
+    def test_github_style_bare_token_userinfo_in_stream_is_redacted(self) -> None:
+        """GitHub remotes are built as `https://<token>@host/...` (userinfo
+        with no colon) -- see remote_branch_service._build_effective_url."""
+        token = "ghp_NOTAREALTOKEN0000000000000000000000"
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "push"],
+            returncode=128,
+            stdout="",
+            stderr=f"remote: Invalid username or password for https://{token}@github.com/org/repo.git",
+        )
+
+        assert token not in message
+        assert "https://***@github.com/org/repo.git" in message
+
+    def test_called_process_error_streams_are_redacted(self) -> None:
+        exc = subprocess.CalledProcessError(
+            128,
+            ["git", "clone"],
+            output=f"stdout {self._url}",
+            stderr=f"stderr {self._url}",
+        )
+
+        message = format_called_process_error_diagnostic(exc)
+
+        assert self._PAT not in message
+        assert message.count("https://***@gitlab.com/group/repo.git") == 2
+
+    def test_completed_process_streams_are_redacted(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["git", "fetch"],
+            returncode=1,
+            stdout=f"stdout {self._url}",
+            stderr=f"stderr {self._url}",
+        )
+
+        message = format_completed_process_diagnostic(result)
+
+        assert self._PAT not in message
+        assert message.count("https://***@gitlab.com/group/repo.git") == 2
+
+    def test_redaction_runs_before_truncation_so_no_partial_token_survives(
+        self,
+    ) -> None:
+        """Order matters. Cap-then-redact lets the cap sever the URL before
+        the `@` the pattern anchors on, so the regex no longer matches and a
+        PREFIX of the live token survives in the output. Redact-then-cap
+        cannot leak a partial token, and is never longer (`***` is shorter
+        than any userinfo it replaces)."""
+        # tuned so a cap at 1000 would land 10 characters into the token
+        noise = "X" * (1000 - len("https://oauth2:") - 10)
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "fetch"],
+            returncode=128,
+            stdout="",
+            stderr=noise + self._url,
+            max_chars=1000,
+        )
+
+        assert self._PAT not in message
+        assert self._PAT[:10] not in message
+        assert "glpat" not in message
+
+    def test_scp_style_remote_in_stream_survives_intact(self) -> None:
+        """`git@github.com:org/repo.git` is a schemeless scp-form remote: it
+        carries no secret, and mangling it would destroy the most useful line
+        in the diagnostic. It must come through byte-identical."""
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "fetch"],
+            returncode=128,
+            stdout="",
+            stderr=(
+                "fatal: Could not read from remote repository "
+                "git@github.com:org/repo.git\n"
+                "Please make sure you have the correct access rights."
+            ),
+        )
+
+        assert "git@github.com:org/repo.git" in message
+        assert "***" not in message
+
+    def test_benign_stream_output_is_not_mangled(self) -> None:
+        benign = (
+            "remote: Enumerating objects: 1234, done.\n"
+            "error: failed to push some refs to 'https://gitlab.com/group/repo.git'\n"
+            "hint: Updates were rejected because the tip of your current branch is behind\n"
+            "Contact: ops@example.com"
+        )
+        message = format_subprocess_failure_diagnostic(
+            cmd=["git", "push"], returncode=1, stdout="", stderr=benign
+        )
+
+        assert "https://gitlab.com/group/repo.git" in message
+        assert "ops@example.com" in message
+        assert "Enumerating objects: 1234, done." in message
+        assert "***" not in message
+
+
+class TestRedactionAcceptsWhateverAnFStringWouldAccept:
+    """`redact_url_credentials` sits where an f-string interpolation used to be,
+    so it must accept everything an f-string accepts.
+
+    Captured streams are not reliably `str`: `subprocess` hands back `bytes`
+    when `text=False`, a stream is `None` when it was not captured, and test
+    doubles pass Mocks. The regex raises `TypeError: expected string or
+    bytes-like object` on all three, which turns a message-formatting path into
+    a crash -- strictly worse than the leak it was added to stop, because it
+    fires on the error path where the real diagnostic is being built.
+    """
+
+    def test_non_string_inputs_do_not_raise(self) -> None:
+        from unittest.mock import Mock
+
+        from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+
+        for value in (None, 42, b"bytes output", Mock(), ["a"], object()):
+            redact_url_credentials(value)  # type: ignore[arg-type]
+
+    def test_non_string_renders_as_an_f_string_would(self) -> None:
+        """Rendering must not change what operators already read in logs."""
+        from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+
+        for value in (None, 42, "plain"):
+            assert redact_url_credentials(value) == f"{value}"  # type: ignore[arg-type]
+
+    def test_a_credential_in_bytes_is_still_redacted(self) -> None:
+        from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+
+        pat = "glpat-AAAAAAAAAAAAAAAAAAAA"
+        out = redact_url_credentials(
+            f"https://oauth2:{pat}@gitlab.com/o/r.git".encode()
+        )
+        assert pat not in out

@@ -24,6 +24,7 @@ from typing import Optional, Any, List, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class GitStateManager:
                 extra={"correlation_id": get_correlation_id()},
             )
         except subprocess.CalledProcessError as e:
-            error_msg = f"git reset --hard failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+            error_msg = f"git reset --hard failed: {redact_url_credentials(e.stderr if hasattr(e, 'stderr') else str(e))}"
             logger.error(
                 format_error_log(
                     "CACHE-GENERAL-020",
@@ -157,7 +158,7 @@ class GitStateManager:
             )
         except subprocess.CalledProcessError as e:
             error_msg = (
-                f"git clean -fd failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+                f"git clean -fd failed: {redact_url_credentials(e.stderr if hasattr(e, 'stderr') else str(e))}"
             )
             logger.error(
                 format_error_log(
@@ -177,7 +178,7 @@ class GitStateManager:
 
         if final_status.stdout.strip():
             # Still dirty after reset/clean - should never happen
-            error_msg = f"Repository not clean after reset/clean: {final_status.stdout}"
+            error_msg = f"Repository not clean after reset/clean: {redact_url_credentials(final_status.stdout)}"
             logger.error(
                 format_error_log(
                     "CACHE-GENERAL-022",

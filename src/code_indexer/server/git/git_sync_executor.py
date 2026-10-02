@@ -36,6 +36,7 @@ from ..services.git_state_manager import GitStateManager
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.storage.shared.git_backend import GitBackend, LocalGitBackend
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 
 # Configure logging
@@ -320,7 +321,7 @@ class GitSyncExecutor:
             error_code, recovery_suggestions = self._analyze_git_error(e)
 
             raise GitSyncError(
-                f"Git pull failed: {e.stderr or e.stdout}",
+                f"Git pull failed: {redact_url_credentials(e.stderr or e.stdout)}",
                 error_code,
                 recovery_suggestions=recovery_suggestions,
                 git_output=e.stderr or e.stdout,
@@ -573,7 +574,7 @@ class GitSyncExecutor:
         try:
             result = run_git_command(cmd, cwd=self.repository_path, env=env)
             logger.info(
-                f"Git pull completed successfully: {result.stdout[:200]}...",
+                f"Git pull completed successfully: {redact_url_credentials(result.stdout[:200])}...",
                 extra={"correlation_id": get_correlation_id()},
             )
             return str(result.stdout)

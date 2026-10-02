@@ -51,6 +51,7 @@ from code_indexer.server.services.pace_maker_guard import (  # Story #997
     enforce_pace_maker_config,
 )
 from code_indexer.server.self_monitoring import log_query
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +408,7 @@ class ClaudeInvoker:
         if result.returncode != 0:
             error_msg = (
                 f"ClaudeInvoker: non-zero exit {result.returncode}"
-                f" (stderr={result.stderr[:_STDERR_SNIPPET_LEN]})"
+                f" (stderr={redact_url_credentials(result.stderr[:_STDERR_SNIPPET_LEN])})"
             )
             logger.warning(error_msg)
             return _make_failure(error_msg, FailureClass.RETRYABLE_ON_OTHER)

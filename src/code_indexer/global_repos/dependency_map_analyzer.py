@@ -33,6 +33,7 @@ from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 # Story #848: lazy server imports for Pass 2 CliDispatcher wiring.
 # These are None in pure CLI contexts (no server package) and populated when
@@ -2907,15 +2908,15 @@ Rules:
             if raw_stdout_len == 0:
                 logger.warning(
                     f"Claude CLI returned EMPTY stdout. "
-                    f"stderr (first 1000 chars): {(result.stderr or '')[:1000]}"
+                    f"stderr (first 1000 chars): {redact_url_credentials((result.stderr or '')[:1000])}"
                 )
             elif raw_stdout_len < 100:
                 logger.warning(
-                    f"Claude CLI returned very short stdout: {result.stdout!r}"
+                    f"Claude CLI returned very short stdout: {redact_url_credentials(result.stdout)!r}"
                 )
             else:
                 logger.debug(
-                    f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}"
+                    f"Claude CLI stdout (first 500 chars): {redact_url_credentials(result.stdout[:500])}"
                 )
 
             if result.returncode != 0:

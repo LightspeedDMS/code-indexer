@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from ..middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -323,11 +324,15 @@ class RemoteBranchService:
             )
 
             if result.returncode != 0:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                error_msg = (
+                    redact_url_credentials(result.stderr.strip())
+                    if result.stderr
+                    else "Unknown error"
+                )
                 logger.warning(
                     format_error_log(
                         "GIT-GENERAL-052",
-                        f"git ls-remote failed for {clone_url}: {error_msg}",
+                        f"git ls-remote failed for {redact_url_credentials(clone_url)}: {error_msg}",
                     )
                 )
                 return BranchFetchResult(
@@ -360,7 +365,7 @@ class RemoteBranchService:
             logger.warning(
                 format_error_log(
                     "GIT-GENERAL-053",
-                    f"git ls-remote timeout for {clone_url}",
+                    f"git ls-remote timeout for {redact_url_credentials(clone_url)}",
                 )
             )
             return BranchFetchResult(
@@ -376,7 +381,7 @@ class RemoteBranchService:
             logger.error(
                 format_error_log(
                     "GIT-GENERAL-054",
-                    f"Error fetching branches for {clone_url}: {error_msg}",
+                    f"Error fetching branches for {redact_url_credentials(clone_url)}: {error_msg}",
                 )
             )
             return BranchFetchResult(

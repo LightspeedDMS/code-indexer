@@ -24,6 +24,7 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 
 import bleach  # type: ignore[import-untyped]
 import markdown  # type: ignore[import-untyped]
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -1666,7 +1667,7 @@ class ResearchAssistantService:
                     or "not found" in result.stderr.lower()
                 ):
                     logger.info(
-                        f"Resume failed (session cleared or expired), retrying with --session-id: {result.stderr}"
+                        f"Resume failed (session cleared or expired), retrying with --session-id: {redact_url_credentials(result.stderr)}"
                     )
                     cmd = base_cmd + [
                         "--session-id",

@@ -80,6 +80,7 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 # contract would let that early caller permanently disable telemetry.
 from code_indexer.server.telemetry.manager import peek_telemetry_manager
 from code_indexer.server.telemetry.job_metrics import get_job_metrics
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -1072,7 +1073,7 @@ class RefreshScheduler:
 
         logger.warning(
             f"Transient fetch failure #{count} for {alias_name} "
-            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {error.stderr}"
+            f"(threshold={self.MAX_TRANSIENT_FAILURES}): {redact_url_credentials(error.stderr)}"
         )
         return False
 
@@ -1160,7 +1161,7 @@ class RefreshScheduler:
         self._apply_fetch_backoff(alias_name, error.category, count)
 
         raise RuntimeError(
-            f"Fetch failed for {alias_name} (category={error.category}): {error.stderr}"
+            f"Fetch failed for {alias_name} (category={error.category}): {redact_url_credentials(error.stderr)}"
         )
 
     def _attempt_reclone(
@@ -2748,7 +2749,7 @@ class RefreshScheduler:
                                     ) as checkout_exc:
                                         logger.error(
                                             f"Failed to reset {alias_name} to {default_branch}: "
-                                            f"{checkout_exc.stderr}"
+                                            f"{redact_url_credentials(checkout_exc.stderr)}"
                                         )
                             except Exception as e:
                                 logger.warning(
@@ -3991,7 +3992,7 @@ class RefreshScheduler:
                         str(versioned_path), ".", timeout=git_restore_timeout
                     )
                 except subprocess.CalledProcessError as restore_exc:
-                    logger.debug(f"git restore output: {restore_exc.stderr}")
+                    logger.debug(f"git restore output: {redact_url_credentials(restore_exc.stderr)}")
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git restore timed out after {git_restore_timeout} seconds"

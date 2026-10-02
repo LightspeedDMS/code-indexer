@@ -20,6 +20,7 @@ from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic as _format_subprocess_failure_diagnostic,
 )
 from .update_strategy import UpdateStrategy
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 
 logger = logging.getLogger(__name__)
@@ -57,13 +58,19 @@ def _format_timeout_diagnostic(e: subprocess.TimeoutExpired) -> str:
     DEFAULT_DIAGNOSTIC_MAX_CHARS so both cap to the same length.
     """
     cmd = e.cmd
-    cmd_display = (
+    cmd_display = redact_url_credentials(
         " ".join(str(part) for part in cmd)
         if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes))
         else str(cmd)
     )
-    stdout_text = _stream_to_str(e.stdout)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
-    stderr_text = _stream_to_str(e.stderr)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
+    # Redact BEFORE truncating: capping first can sever a credentialed URL
+    # before the `@` the pattern anchors on, leaving a live token prefix.
+    stdout_text = redact_url_credentials(_stream_to_str(e.stdout))[
+        :DEFAULT_DIAGNOSTIC_MAX_CHARS
+    ]
+    stderr_text = redact_url_credentials(_stream_to_str(e.stderr))[
+        :DEFAULT_DIAGNOSTIC_MAX_CHARS
+    ]
     return (
         f"command='{cmd_display}' timeout={e.timeout}s "
         f"stdout={stdout_text!r} stderr={stderr_text!r}"
@@ -295,7 +302,7 @@ class GitPullUpdater(UpdateStrategy):
             if has_remote_changes:
                 logger.info(
                     f"Remote changes detected for {self.repo_path}: "
-                    f"{len(log_result.stdout.strip().splitlines())} commit(s) to pull"
+                    f"{redact_url_credentials(len(log_result.stdout.strip().splitlines()))} commit(s) to pull"
                 )
 
             return has_remote_changes
@@ -551,7 +558,7 @@ class GitPullUpdater(UpdateStrategy):
                     except subprocess.CalledProcessError as retry_exc:
                         raise RuntimeError(
                             f"Git pull failed after untracked-file cleanup for "
-                            f"{self.repo_path}: {retry_exc.stderr}"
+                            f"{self.repo_path}: {redact_url_credentials(retry_exc.stderr)}"
                         )
                     logger.info(
                         "Git pull retry successful after removing untracked files"

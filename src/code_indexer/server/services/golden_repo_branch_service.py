@@ -19,6 +19,7 @@ from code_indexer.server.repositories.golden_repo_manager import (
     GitOperationError,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class GoldenRepoBranchService:
             return branches
 
         except subprocess.CalledProcessError as e:
-            error_msg = f"Git operation failed: {e.stderr or e.stdout or str(e)}"
+            error_msg = f"Git operation failed: {redact_url_credentials(e.stderr or e.stdout or str(e))}"
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-026",

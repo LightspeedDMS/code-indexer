@@ -41,6 +41,7 @@ from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 if TYPE_CHECKING:
     # Bug #1650: type-only imports for the lazily-constructed attributes
@@ -103,7 +104,7 @@ class GitCommandError(Exception):
             parts.append(f"Return code: {self.returncode}")
 
         if self.stderr:
-            parts.append(f"stderr: {self.stderr}")
+            parts.append(f"stderr: {redact_url_credentials(self.stderr)}")
 
         return " | ".join(parts)
 

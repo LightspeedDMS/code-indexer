@@ -21,6 +21,7 @@ from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     get_shared_health_service,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -1071,7 +1072,7 @@ async def list_branches(
         logger.error(f"Git command failed for {user_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list branches: {e.stderr}",
+            detail=f"Failed to list branches: {redact_url_credentials(e.stderr)}",
         )
     except Exception as e:
         logger.error(f"Failed to list branches for {user_alias}: {e}")

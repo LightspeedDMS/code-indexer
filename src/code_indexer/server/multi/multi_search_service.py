@@ -26,6 +26,7 @@ from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -740,7 +741,7 @@ class MultiSearchService:
 
             if process.returncode != 0:
                 raise RuntimeError(
-                    f"Subprocess failed with exit code {process.returncode}: {process.stderr}"
+                    f"Subprocess failed with exit code {process.returncode}: {redact_url_credentials(process.stderr)}"
                 )
 
             # Parse results from subprocess stdout

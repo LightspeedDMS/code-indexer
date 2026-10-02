@@ -69,6 +69,7 @@ from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 # create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
 # unavailable/uninitialized.
 from code_indexer.server.telemetry.spans import create_span
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -1165,7 +1166,7 @@ class GoldenRepoManager:
             except subprocess.CalledProcessError as e:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
-                    f"Failed to clone repository: Git process failed with exit code {e.returncode}: {e.stderr}"
+                    f"Failed to clone repository: Git process failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
                 )
             except subprocess.TimeoutExpired as e:
                 _cleanup_failed_clone(_clone_path_for_cleanup)
@@ -1868,7 +1869,7 @@ class GoldenRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 logging.error(
-                    f"Failed to initialize CIDX for '{alias}': {e.stderr if e.stderr else str(e)}"
+                    f"Failed to initialize CIDX for '{alias}': {redact_url_credentials(e.stderr if e.stderr else str(e))}"
                 )
                 # Continue with registration even if init fails
             except Exception as e:
@@ -2779,7 +2780,7 @@ class GoldenRepoManager:
                 )
             except subprocess.CalledProcessError as e:
                 raise GitOperationError(
-                    f"Git clone failed with code {e.returncode}: {e.stderr}"
+                    f"Git clone failed with code {e.returncode}: {redact_url_credentials(e.stderr)}"
                 )
 
             return clone_path
@@ -3725,7 +3726,7 @@ class GoldenRepoManager:
 
         except subprocess.CalledProcessError as e:
             logging.warning(
-                f"Init conflict resolution failed: Command failed with exit code {e.returncode}: {e.stderr}"
+                f"Init conflict resolution failed: Command failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
             )
             return False
         except subprocess.TimeoutExpired as e:
@@ -3792,7 +3793,7 @@ class GoldenRepoManager:
 
         except subprocess.CalledProcessError as e:
             logging.warning(
-                f"Service conflict resolution failed: Command failed with exit code {e.returncode}: {e.stderr}"
+                f"Service conflict resolution failed: Command failed with exit code {e.returncode}: {redact_url_credentials(e.stderr)}"
             )
             return False
         except subprocess.TimeoutExpired as e:
@@ -4480,7 +4481,7 @@ class GoldenRepoManager:
             except subprocess.CalledProcessError as git_exc:
                 logger.warning(
                     f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{git_exc.stderr} - skipping FTS cleanup"
+                    f"{redact_url_credentials(git_exc.stderr)} - skipping FTS cleanup"
                 )
                 return
 
@@ -4559,7 +4560,7 @@ class GoldenRepoManager:
             except subprocess.CalledProcessError as git_exc:
                 logger.warning(
                     f"[change_branch] git ls-files failed on snapshot '{snapshot_path}': "
-                    f"{git_exc.stderr} - skipping HNSW cleanup"
+                    f"{redact_url_credentials(git_exc.stderr)} - skipping HNSW cleanup"
                 )
                 return
 
@@ -5287,9 +5288,9 @@ class GoldenRepoManager:
                         f"Failed to initialize repo before indexing: {error_details}"
                     )
                 if init_result.stdout:
-                    all_stdout += f"[init] {init_result.stdout}\n"
+                    all_stdout += f"[init] {redact_url_credentials(init_result.stdout)}\n"
                 if init_result.stderr:
-                    all_stderr += f"[init] {init_result.stderr}\n"
+                    all_stderr += f"[init] {redact_url_credentials(init_result.stderr)}\n"
 
                 # Run each requested index type sequentially
                 for index_type in index_types:

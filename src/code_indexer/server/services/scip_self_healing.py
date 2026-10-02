@@ -24,6 +24,7 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.self_monitoring.llm_response_parser import (
     extract_json_from_llm_response,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -669,7 +670,7 @@ Status values:
                     format_error_log(
                         "MCP-GENERAL-158",
                         f"Job {job_id}: SCIP retry failed for {project_path}: "
-                        f"{indexer_result.stderr}",
+                        f"{redact_url_credentials(indexer_result.stderr)}",
                     )
                 )
                 return False

@@ -27,6 +27,7 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -604,7 +605,7 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-014",
                         f"Re-index failed with exit code {_result.returncode}: "
-                        f"{_result.stderr.decode(errors='replace') if _result.stderr else ''}",
+                        f"{redact_url_credentials(_result.stderr.decode(errors='replace') if _result.stderr else '')}",
                     )
                 )
         except Exception as e:
