@@ -279,36 +279,35 @@ build:image:
       # the repo is mounted read-write only so pytest can place its cache.
       # CIDX_REQUIRE_XRAY_EXTRAS turns a missing optional dependency into a
       # failure here rather than another silent skip.
-      docker run --rm --user 0:0 \
+      # Fed over stdin as a QUOTED heredoc, not `sh -c '...'`. The quoted
+      # form looks tidier and is a trap: an apostrophe anywhere in the body --
+      # including inside a comment, e.g. "the image's own ENV" -- closes the
+      # string, and everything after it then runs on the RUNNER instead of in
+      # the container. That is exactly how this step failed twice, reporting
+      # "/usr/bin/python: No module named pip" from the Alpine runner and
+      # looking convincingly like an interpreter-resolution problem.
+      # <<'EOF' quoting also stops the runner expanding anything inside.
+      docker run --rm --user 0:0 -i \
         -v "$CI_PROJECT_DIR:/w" -w /w \
         -e CIDX_REQUIRE_XRAY_EXTRAS=1 \
-        "$FULL" sh -c '
-          set -e
-          # `python -m pip`, not `pip`: the first master run installed with
-          # /usr/local/bin/pip and then ran /usr/bin/python, which reported
-          # "No module named pytest". Going through the interpreter makes the
-          # install target and the run target the same by construction, whatever
-          # PATH resolves to. `sh -c` rather than `sh -lc` for the same reason --
-          # a login shell sources /etc/profile, which rewrites PATH out from
-          # under the image's own ENV.
-          python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
-          # Deliberately NO PYTHONPATH=/w/src: the repo is mounted for the TEST
-          # files, but `code_indexer` must resolve from site-packages so this
-          # exercises the code that actually ships. Pointing at the mount tested
-          # the working tree instead, and the bind mount's import overhead also
-          # pushed `cidx --help` from ~1.0s to ~1.7s, intermittently tripping
-          # the 2s startup assertion -- a harness artifact presented as a
-          # product regression.
-          python -m pytest \
-            tests/unit/xray/ \
-            tests/unit/server/mcp/test_analyze_graph_handler.py \
-            tests/unit/server/mcp/test_analyze_graph_multi_repo_1902.py \
-            tests/unit/server/mcp/test_analyze_graph_refine_1909.py \
-            tests/unit/server/mcp/test_xray_graph_pattern_modes_1859_1860.py \
-            tests/unit/server/mcp/test_xray_graph_excluded_extractor_honesty_1907.py \
-            tests/unit/server/mcp/test_xray_missing_binary_honesty.py \
-            -q -p no:randomly --timeout=600
-        '
+        "$FULL" sh -s <<'IN_IMAGE_VERIFY'
+      set -e
+      # No PYTHONPATH=/w/src: the repo is mounted for the TEST files, but
+      # code_indexer must resolve from site-packages so this exercises the code
+      # that actually ships. Pointing at the mount tested the working tree, and
+      # the bind mount import overhead also pushed `cidx --help` from ~1.0s to
+      # ~1.7s, intermittently tripping the 2s startup assertion.
+      python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
+      python -m pytest \
+        tests/unit/xray/ \
+        tests/unit/server/mcp/test_analyze_graph_handler.py \
+        tests/unit/server/mcp/test_analyze_graph_multi_repo_1902.py \
+        tests/unit/server/mcp/test_analyze_graph_refine_1909.py \
+        tests/unit/server/mcp/test_xray_graph_pattern_modes_1859_1860.py \
+        tests/unit/server/mcp/test_xray_graph_excluded_extractor_honesty_1907.py \
+        tests/unit/server/mcp/test_xray_missing_binary_honesty.py \
+        -q -p no:randomly --timeout=600
+      IN_IMAGE_VERIFY
       echo "In-image xray verification passed for $FULL"
 
       # Keep exactly the cache tag this build just wrote.
