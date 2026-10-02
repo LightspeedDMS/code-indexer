@@ -66,6 +66,26 @@ ways to build a string", enumerate those, in a test.
 **Rule:** state what a check *proves*, not what it is named after. If the proof is
 "X equals X", there is no check.
 
+### Testing something adjacent to what ships
+
+Three errors in one hour, one family. Each time the thing under test differed
+from the thing that would run.
+
+| | |
+|---|---|
+| Probed the image with `bash -lc` and reported `rustc: command not found` | A login shell sources `/etc/profile`, which rewrites `PATH` out from under the image's `ENV`. Under the non-login shell the server uses, it resolves. A **false alarm** about a real image. |
+| "Verified the in-image CI step locally" | The local command said `sh -c`; the CI copy said `sh -lc`. The two were never the same command, so the local run proved nothing about the shipped one. |
+| Diagnosed a CI failure from the Dockerfile | `pip` and `python` were said to resolve to different interpreters. Pulling the image the pipeline actually built showed `python` is `/usr/local/bin/python` and `/usr/bin/python` does not exist. The real cause was an **apostrophe inside a comment** in a `sh -c '...'` body -- `the image's own ENV` closes the quote, so the rest ran on the Alpine runner. Two CI failures, one wrong diagnosis, and a fix for a problem that did not exist. |
+
+The repair is mechanical: run the artifact, not a retyping of it. The step that
+finally worked was verified by parsing the YAML, extracting the block, and
+running it verbatim against the image the pipeline had produced.
+
+Related trap worth naming on its own: a quoted shell body (`sh -c '...'`) is a
+loaded gun in CI, because the failure surfaces as a confusing error from the
+WRONG machine rather than as a syntax error. Feed scripts over a quoted heredoc
+(`sh -s <<'EOF'`) so apostrophes stay literal.
+
 ## 4. Measurement errors
 
 | Claimed | Measured | Lesson |
