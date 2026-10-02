@@ -33,6 +33,8 @@ then the source-tree build output.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -62,19 +64,196 @@ _RE_XRAY_CACHE_PATH = re.compile(r"/[^\s\"']+/xray-cache/(?:[^/\s\"']+/)?[a-f0-9
 # redaction token so callers know a path was present but cannot reconstruct it.
 _RE_SERVER_PATH = re.compile(r"/(?:home|root|tmp)/[^\s\"':,\])\}]+")
 
+# Environment variable that overrides the CIDX data directory root.
+# When set, the xray cache lives at $CIDX_DATA_DIR/xray-cache instead of
+# ~/.cidx-server/xray-cache, matching the server's IPC path alignment (Bug #879).
+_XRAY_CACHE_DIR_ENV = "CIDX_DATA_DIR"
+
+# Named path segments — must match Rust's get_cache_dir() in cache.rs exactly.
+_CIDX_SERVER_DIR_NAME = ".cidx-server"
+_XRAY_CACHE_DIR_NAME = "xray-cache"
+
 # R2-4 (consolidated review, Issue #1811/Bug #1812, Codex re-review):
-# process-wide, deadline-aware semaphore bounding concurrent
-# rustc-invoking xray-cli launches. The graph admission limiter (H8)
-# bounds concurrent GRAPH JOBS, but nothing previously bounded concurrent
-# COMPILES specifically -- multiple users triggering many simultaneous
-# evaluator compiles (each a real rustc process) can exhaust CPU/RAM/
-# temp-disk/NFS at fleet scale (~900 repos). Hardcoded rather than a new
-# Web UI setting (project convention: no new config surface to gate a bug
-# fix; mirrors the documented hardcoded constants in
-# graph::analyze::process.rs -- POLL_INTERVAL/STDOUT_DRAIN_TIMEOUT/
-# REAP_RETRY_COUNT). Revisit if fleet telemetry shows a need to tune it
-# live.
-_MAX_CONCURRENT_COMPILES = 4
+# deadline-aware semaphore bounding concurrent rustc-invoking xray-cli
+# launches. The graph admission limiter (H8) bounds concurrent GRAPH JOBS,
+# but nothing previously bounded concurrent COMPILES specifically --
+# multiple users triggering many simultaneous evaluator compiles (each a
+# real rustc process) can exhaust CPU/RAM/temp-disk/NFS at fleet scale
+# (~900 repos).
+#
+# The budget below is NODE-WIDE, and that distinction is the fix. The
+# constant used to be named as a per-process maximum of 4 and reasoned
+# about as if it bounded the node; a Python module-level semaphore bounds
+# exactly one OS process. The cluster runs `uvicorn --workers 2`
+# (cet-cidx-overlay/cluster-base/statefulset.yaml), so there were TWO
+# independent semaphores of 4 -- up to 8 concurrent rustc against a pod
+# limited to `cpu: "2"` and `memory: 4Gi`. The overlay's own comment on
+# that flag already requires every per-node budget to be divided by the
+# worker count ("...so the HNSW/FTS cache cap (_divided_cap) and the
+# provider concurrency governor divide their budgets by 2 -> no OOM");
+# this one was not, so it is divided here.
+#
+# 4 node-wide: rustc is CPU-bound and the pod's quota is 2 CPUs, so the
+# budget is 2x the quota -- enough to keep both cores busy across the I/O
+# and link phases of a compile without stacking resident compilers (each
+# bounded at _COMPILE_RLIMIT_DATA_BYTES of heap) past what 4Gi holds. On a
+# single-worker node the effective bound is unchanged at 4, so no existing
+# solo/VM deployment changes behaviour.
+#
+# Still hardcoded rather than a Web UI setting (project convention: no new
+# config surface to gate a bug fix; mirrors the documented hardcoded
+# constants in graph::analyze::process.rs), with one escape hatch:
+# CIDX_XRAY_MAX_CONCURRENT_COMPILES pins the PER-PROCESS bound directly for
+# an operator who needs to tune a node live without a release. The contract
+# is: set it to (what this node may run concurrently) DIVIDED BY (the number
+# of uvicorn workers), because it is applied per worker process.
+_XRAY_COMPILE_BUDGET_PER_NODE = 4
+
+# Operator override for the per-PROCESS bound. Deliberately not the node
+# budget: an operator reaching for this is tuning one node they are looking
+# at, and a per-process number is the one that can be verified against a
+# process list.
+_MAX_CONCURRENT_COMPILES_ENV = "CIDX_XRAY_MAX_CONCURRENT_COMPILES"
+
+# Candidate locations of the server config file, in priority order. The
+# cluster's initContainer seeds $CIDX_SERVER_DATA_DIR/config.json from the
+# ConfigMap; the VM deployment uses ~/.cidx-server/config.json.
+_CONFIG_JSON_DIR_ENVS = ("CIDX_SERVER_DATA_DIR", _XRAY_CACHE_DIR_ENV)
+_CONFIG_JSON_NAME = "config.json"
+
+
+def _coerce_worker_count(value: Any) -> Optional[int]:
+    """Return `value` as a worker count, or None if it is not usable.
+
+    `bool` is rejected explicitly: it is an `int` subclass, and True would
+    otherwise silently resolve to "1 worker".
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 1 else None
+
+
+def _read_config_json_workers() -> Optional[int]:
+    """Read `workers` from the server config file, or None.
+
+    This is the rung that works inside a Kubernetes pod. The repo's existing
+    resolver (`get_applied_worker_count`, read below) reads the live systemd
+    ExecStart and then applied_launch.json -- a pod has neither, so on the
+    cluster it always answers 1 and divides nothing. The pod does have the
+    ConfigMap-seeded config.json, whose "workers" the overlay requires to
+    stay in lockstep with the `--workers` it passes in the container args,
+    which makes it an accurate reading of the running process there.
+
+    Never raises: a missing, unreadable or malformed file is "unknown", and
+    this runs at module import.
+    """
+    import os  # noqa: PLC0415 - stdlib, lazy import to keep startup clean
+
+    candidates = []
+    for env_name in _CONFIG_JSON_DIR_ENVS:
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    candidates.append(Path.home() / _CIDX_SERVER_DIR_NAME)
+
+    for directory in candidates:
+        path = directory / _CONFIG_JSON_NAME
+        try:
+            if not path.is_file():
+                continue
+            workers = _coerce_worker_count(json.loads(path.read_text()).get("workers"))
+        except Exception as exc:  # unreadable/malformed -> unknown, not fatal
+            logger.debug("RustNativeBackend: could not read %s: %s", path, exc)
+            continue
+        if workers is not None:
+            return workers
+    return None
+
+
+def _read_applied_worker_count() -> Optional[int]:
+    """Read the APPLIED worker count via the repo's existing resolver.
+
+    Lazily imported: this module is used by the CLI/solo xray path too and
+    must never eagerly pull in server-layer modules.
+
+    Returns None only when the resolver is unavailable or raises. It cannot
+    distinguish "no source found" from "this node really runs one worker" --
+    the resolver collapses both to 1 -- which is why `_detect_worker_count`
+    takes the MAX across sources rather than the first answer: a 1 from here
+    must never out-vote a config.json that says 2.
+    """
+    try:
+        from code_indexer.server.services.applied_worker_count import (  # noqa: PLC0415,E501
+            get_applied_worker_count,
+        )
+
+        return _coerce_worker_count(int(get_applied_worker_count()))
+    except Exception as exc:
+        logger.debug("RustNativeBackend: applied worker count unavailable: %s", exc)
+        return None
+
+
+def _detect_worker_count() -> int:
+    """Number of uvicorn worker processes sharing this node's compile budget.
+
+    Takes the LARGER of the two sources when they disagree. They can:
+    config.json is the TARGET an admin saved, the applied resolver is what
+    the running unit was launched with, and a restart may not have happened
+    yet. The larger count yields the smaller per-process bound, which is the
+    only direction that cannot exceed the node's CPU and memory -- the cost
+    of guessing high is a queued compile, the cost of guessing low is the
+    oversubscription this fix exists to remove.
+
+    Defaults to 1 (no division, unchanged behaviour) and never raises.
+    """
+    counts = []
+    for source in (_read_applied_worker_count, _read_config_json_workers):
+        try:
+            value = source()
+        except Exception as exc:  # a worker-count lookup must never break import
+            logger.debug("RustNativeBackend: worker-count source failed: %s", exc)
+            continue
+        if value is not None:
+            counts.append(value)
+    return max(counts) if counts else 1
+
+
+def _per_process_compile_limit(budget: int, workers: int) -> int:
+    """Split a node-wide compile budget across `workers` processes.
+
+    Floored at 1: a bound of 0 would make every xray query on the node wait
+    out its deadline for a slot that can never free.
+    """
+    return max(1, budget // max(1, workers))
+
+
+def _resolve_max_concurrent_compiles() -> int:
+    """Resolve this PROCESS's compile bound. Never raises."""
+    import os  # noqa: PLC0415 - stdlib, lazy import to keep startup clean
+
+    raw = os.environ.get(_MAX_CONCURRENT_COMPILES_ENV, "").strip()
+    if raw:
+        try:
+            override = int(raw)
+        except ValueError:
+            override = 0
+        if override >= 1:
+            return override
+        logger.warning(
+            "RustNativeBackend: ignoring %s=%r -- not a positive integer",
+            _MAX_CONCURRENT_COMPILES_ENV,
+            raw,
+        )
+    return _per_process_compile_limit(
+        _XRAY_COMPILE_BUDGET_PER_NODE, _detect_worker_count()
+    )
+
+
+# Resolved once at import: this process's share of the node budget. Each
+# uvicorn worker imports this module separately and resolves its own share,
+# which is precisely what makes the product of the two stay inside the node
+# budget.
+_MAX_CONCURRENT_COMPILES = _resolve_max_concurrent_compiles()
 _compile_semaphore = threading.Semaphore(_MAX_CONCURRENT_COMPILES)
 
 
@@ -94,6 +273,124 @@ def _release_compile_slot() -> None:
     _compile_semaphore.release()
 
 
+# ---------------------------------------------------------------------------
+# Per-compile resource bounds
+#
+# The compile path already bounds TIME (rustc_driver.rs's 120s
+# RUSTC_COMPILE_TIMEOUT, with a process-group kill) and COUNT
+# (_MAX_CONCURRENT_COMPILES above). Neither bounds how much MEMORY or SCRATCH
+# DISK one compile may consume, and the thing being compiled is a Rust
+# evaluator supplied by the caller.
+#
+# Measurements, rust:1.98.0-slim-bookworm, the real
+# `rustc --edition 2021 --crate-type cdylib -C opt-level=2` invocation that
+# `evaluator_rustc_command` builds:
+#
+#   representative evaluator (PREAMBLE + a ~40-line evaluate_node + EPILOGUE)
+#     0.36s wall, 138 MiB peak RSS, 4.28 MiB .so
+#     smallest RLIMIT_DATA that still compiles it:  704 MiB  (640 MiB fails
+#     in the LINK step -- the floor is cc/ld, not rustc)
+#     smallest RLIMIT_FSIZE that still compiles it: ~4.5 MiB (the .so itself)
+#
+#   a 150,000-statement function -- straight-line Rust, no loop for rustc's
+#   const-eval step limit to catch and no dead constant for DCE to absorb
+#     58s wall (inside the 120s timeout), 4.0 GiB peak RSS
+#     on a pod whose whole memory limit is 4Gi. Under the RLIMIT_DATA below
+#     the same input dies in the child with "memory allocation of 134217728
+#     bytes failed" and arrives as an ordinary compile error.
+#
+# RLIMIT_DATA rather than RLIMIT_AS: on Linux >= 4.7 RLIMIT_DATA covers
+# private anonymous mappings, i.e. the heap, which is what a compile bomb
+# grows. RLIMIT_AS counts reserved ADDRESS SPACE, and the measurements above
+# show the real toolchain needs over 1536 MiB of it to allocate 138 MiB of
+# heap -- an RLIMIT_AS tuned to pass legitimate compiles would sit so far
+# above actual usage that it bounds nothing.
+#
+# These are per-PROCESS limits inherited across fork/exec, so they reach
+# rustc, cc and ld, each of which gets its own budget; they are not an
+# aggregate cap on a process tree. Together with the concurrency bound they
+# make the worst case finite, which it has not been until now -- they do not
+# by themselves guarantee the pod stays inside 4Gi.
+#
+# Honest scope: no working compile bomb had been built against this path
+# before the 150k-statement one above, and this remains defence in depth
+# rather than a patch for a known live exploit. The limits are deliberately
+# loose enough that no legitimate evaluator gets caught: see the headroom
+# tests in tests/unit/xray/test_rust_backend_compile_resource_limits.py.
+# ---------------------------------------------------------------------------
+
+# 1 GiB of heap per compile-capable invocation: 1.45x the 704 MiB floor a
+# real rustc+cc+ld compile needs, 7.4x the 138 MiB a representative one
+# actually uses, and a quarter of the 4.0 GiB the straight-line bomb above
+# reached. Not tighter, because this bound governs the WHOLE xray-cli
+# invocation -- the legacy scan path compiles AND then runs the evaluator
+# across the repository inside the same process, and that scan's memory
+# profile scales with the repository, not with the evaluator.
+_COMPILE_RLIMIT_DATA_BYTES = 1024 * 1024 * 1024
+
+# 128 MiB per FILE (not per compile): 30x the 4.28 MiB a compiled evaluator
+# occupies, which is the largest file this path legitimately writes. Its job
+# is to stop unbounded growth of a single output file on the scratch volume;
+# it does not bound the total bytes a compile writes across many files.
+_COMPILE_RLIMIT_FSIZE_BYTES = 128 * 1024 * 1024
+
+# 180s of CPU, a backstop for the case where the wall-clock kill path does
+# not fire -- deliberately ABOVE rustc_driver.rs's 120s wall timeout so it
+# never becomes the primary timeout and starts failing slow-but-legitimate
+# compiles with a SIGKILL instead of a diagnosable timeout message. Counted
+# per process and reset by fork, so it does not bound a process tree.
+_COMPILE_RLIMIT_CPU_SECONDS = 180
+
+# No core dumps. A rustc that dies at the 1 GiB heap bound would otherwise
+# write a core of about that size onto the same scratch volume the bound
+# exists to protect.
+_COMPILE_RLIMIT_CORE_BYTES = 0
+
+
+def _clamp_to_hard_limit(requested: int, hard: int) -> int:
+    """Return `requested`, never above the inherited HARD limit.
+
+    An unprivileged process may lower a limit but not raise it, so asking
+    for more than the inherited hard limit raises instead of capping. A
+    deployment with a restrictive hard limit must still be able to compile.
+    """
+    import resource  # noqa: PLC0415 - stdlib, POSIX only
+
+    if hard == resource.RLIM_INFINITY:
+        return requested
+    return min(requested, hard)
+
+
+def _apply_compile_resource_limits() -> None:
+    """`preexec_fn` for a compile-capable xray-cli spawn: bound the child.
+
+    Runs in the forked child between fork and exec. Everything it does is a
+    plain getrlimit/setrlimit syscall -- no locks, no allocation, no logging
+    -- which is what makes it safe in the multi-threaded server process
+    where a preexec_fn that touched a lock held by another thread at fork
+    time would deadlock the child forever.
+
+    For the same reason it cannot report a failure: each limit is set
+    independently and a failure to set one is swallowed rather than being
+    allowed to abort the exec, because a child that refuses to start turns
+    a hardening measure into an outage. What the limits actually are is
+    asserted from inside a real spawned child by the unit tests instead.
+    """
+    import resource  # noqa: PLC0415 - stdlib, POSIX only
+
+    for which, requested in (
+        (resource.RLIMIT_DATA, _COMPILE_RLIMIT_DATA_BYTES),
+        (resource.RLIMIT_FSIZE, _COMPILE_RLIMIT_FSIZE_BYTES),
+        (resource.RLIMIT_CPU, _COMPILE_RLIMIT_CPU_SECONDS),
+        (resource.RLIMIT_CORE, _COMPILE_RLIMIT_CORE_BYTES),
+    ):
+        try:
+            _soft, hard = resource.getrlimit(which)
+            resource.setrlimit(which, (_clamp_to_hard_limit(requested, hard), hard))
+        except (ValueError, OSError):
+            continue
+
+
 def _sanitize_error_message(msg: str) -> str:
     """Replace server-internal file paths in error messages.
 
@@ -105,6 +402,199 @@ def _sanitize_error_message(msg: str) -> str:
     msg = _RE_XRAY_CACHE_PATH.sub("evaluator.rs", msg)
     msg = _RE_SERVER_PATH.sub("<server-path>", msg)
     return msg
+
+
+# ---------------------------------------------------------------------------
+# Cluster-cache integrity envelope
+#
+# `_try_pre_fill` writes bytes fetched from the CLUSTER cache straight into
+# the local xray cache directory, where Rust finds them as a cache hit and
+# `dlopen`s them with no compile. The only load-time gate on the Rust side
+# (`dynlib.rs`) byte-compares an embedded rustc-version string and an ABI
+# export -- both of which a hostile `.so` simply supplies. Nothing re-checked
+# `so_bytes` against the key it was stored under, so a row rewritten in place
+# under a legitimate key executed on every pod that queried that evaluator.
+#
+# The identity the row is keyed by is sha256(assembled_source) + ABI version +
+# rustc version. It is NOT a hash of the `.so`, so it cannot be re-derived
+# from the bytes to check them; the integrity material has to be written at
+# store time and travel WITH the blob.
+#
+# It travels inside the blob rather than in a new column on purpose: the
+# envelope needs no schema migration, no backfill and no coordinated deploy,
+# and it protects any XrayCacheBackend implementation rather than just the
+# PostgreSQL one. The stored BYTEA is:
+#
+#     magic(8) || tag(1) || digest(32) || compiled .so bytes
+#
+# where digest covers a context prefix binding the CACHE IDENTITY and the
+# RUSTC VERSION as well as the payload. Binding the key matters as much as
+# binding the bytes: without it an attacker with DB write never needs to
+# forge anything, they just copy a legitimately-cached artifact of their
+# choosing under the key of the evaluator they want to hit.
+#
+# Two digest flavours:
+#   S  sha256(context || payload)          -- default, no configuration
+#   H  HMAC-SHA256(key, context || payload) -- when CIDX_XRAY_CACHE_HMAC_KEY
+#      is set to a secret shared by the pods and NOT by the database
+#
+# The S flavour detects corruption, truncation, partial writes and
+# key-substitution, but an attacker who can write the whole row can also
+# recompute an S digest -- it raises the bar, it does not close the hole.
+# The H flavour is the one that actually defeats "attacker has DB write",
+# because the key never goes in the table. It is opt-in because requiring a
+# new cluster secret would be a flag day; a cluster that sets it immediately
+# refuses every pre-existing S row (they recompile once, then post-fill
+# rewrites them as H rows), and a node that has lost the key refuses H rows
+# rather than silently dropping to the unauthenticated flavour.
+#
+# Refusal is always and only "recompile locally". No cache row -- poisoned,
+# truncated, or merely written by an older build -- may turn into a failed
+# user query.
+# ---------------------------------------------------------------------------
+
+_SO_ENVELOPE_MAGIC = b"XRAYSOv1"
+_SO_ENVELOPE_TAG_SHA256 = b"S"
+_SO_ENVELOPE_TAG_HMAC = b"H"
+_SO_ENVELOPE_DIGEST_LEN = 32  # sha256 / HMAC-SHA256 output
+_SO_ENVELOPE_HEADER_LEN = (
+    len(_SO_ENVELOPE_MAGIC) + len(_SO_ENVELOPE_TAG_SHA256) + _SO_ENVELOPE_DIGEST_LEN
+)
+
+# Domain-separation prefix: keeps this digest from ever colliding with one
+# computed for some other purpose over the same bytes.
+_SO_ENVELOPE_CONTEXT = b"cidx-xray-cluster-cache-v1\x00"
+
+# Optional cluster-shared secret. Read at call time, never cached, so an
+# operator rotating it takes effect on the next fetch rather than the next
+# restart.
+_XRAY_CACHE_HMAC_KEY_ENV = "CIDX_XRAY_CACHE_HMAC_KEY"
+
+
+def _cluster_cache_hmac_key() -> Optional[bytes]:
+    """Return the configured cluster-cache HMAC key, or None when unset."""
+    raw = os.environ.get(_XRAY_CACHE_HMAC_KEY_ENV, "").strip()
+    return raw.encode("utf-8") if raw else None
+
+
+def _so_envelope_digest(
+    identity: str, rustc_version: str, payload: bytes, key: Optional[bytes]
+) -> Tuple[bytes, bytes]:
+    """Return `(tag, digest)` for `payload` bound to `(identity, rustc_version)`.
+
+    The context prefix is length-delimited by NUL separators so that no two
+    different (identity, rustc_version) pairs can produce the same preimage
+    by moving characters across the boundary.
+    """
+    preimage = (
+        _SO_ENVELOPE_CONTEXT
+        + identity.encode("utf-8")
+        + b"\x00"
+        + rustc_version.encode("utf-8")
+        + b"\x00"
+        + payload
+    )
+    if key is not None:
+        return _SO_ENVELOPE_TAG_HMAC, hmac.new(key, preimage, hashlib.sha256).digest()
+    return _SO_ENVELOPE_TAG_SHA256, hashlib.sha256(preimage).digest()
+
+
+def wrap_so_for_cluster_cache(
+    identity: str, rustc_version: str, so_bytes: bytes
+) -> bytes:
+    """Wrap compiled `.so` bytes in the integrity envelope for cluster storage.
+
+    The inverse of `verified_so_from_cluster_blob`. Everything written to a
+    shared cache backend goes through here, so an unwrapped blob in the table
+    is either a row predating this change or one someone else put there --
+    both of which the reader refuses.
+    """
+    tag, digest = _so_envelope_digest(
+        identity, rustc_version, so_bytes, _cluster_cache_hmac_key()
+    )
+    return _SO_ENVELOPE_MAGIC + tag + digest + so_bytes
+
+
+def verified_so_from_cluster_blob(
+    identity: str, rustc_version: str, blob: bytes
+) -> Optional[bytes]:
+    """Return the `.so` bytes inside `blob`, or None if it cannot be trusted.
+
+    None means exactly one thing to every caller: do not write these bytes,
+    let Rust compile the evaluator locally instead. Never raises -- `blob` is
+    whatever a row in a shared table happened to contain.
+    """
+    if not isinstance(blob, (bytes, bytearray)):
+        return None
+    blob = bytes(blob)
+    if len(blob) <= _SO_ENVELOPE_HEADER_LEN:
+        return None
+    if not blob.startswith(_SO_ENVELOPE_MAGIC):
+        return None
+    tag_offset = len(_SO_ENVELOPE_MAGIC)
+    tag = blob[tag_offset : tag_offset + 1]
+    stored_digest = blob[tag_offset + 1 : _SO_ENVELOPE_HEADER_LEN]
+    payload = blob[_SO_ENVELOPE_HEADER_LEN:]
+
+    key = _cluster_cache_hmac_key()
+    expected_tag, expected_digest = _so_envelope_digest(
+        identity, rustc_version, payload, key
+    )
+    # The tag check is what makes the policy asymmetric in the safe
+    # direction: a node WITH a key refuses unauthenticated rows, and a node
+    # WITHOUT one refuses authenticated rows rather than verifying them with
+    # the forgeable flavour.
+    if not hmac.compare_digest(tag, expected_tag):
+        return None
+    if not hmac.compare_digest(stored_digest, expected_digest):
+        return None
+    return payload
+
+
+# OTEL counter cache for the refusal metric below, keyed on the resolved
+# meter so a meter swap re-creates the instrument instead of reusing a stale
+# one. Created lazily: merely importing this module must never pull in the
+# server telemetry stack (the CLI/solo xray path imports it too).
+_INTEGRITY_METRIC_STATE: Dict[str, Any] = {"meter": None, "counter": None}
+
+
+def _record_cache_integrity_failure(reason: str) -> None:
+    """Count a refused cluster-cache blob as an OTEL event. Never raises.
+
+    A refusal is a security-relevant event (a row that is not what this
+    cluster compiled) AND an efficiency one (a cache miss that costs a
+    recompile on every pod), and a WARNING log alone is not something anyone
+    greps at fleet scale. Mirrors the peek_telemetry_manager() + is_active
+    gating of `_record_identity_failure_metric` above, creating the counter
+    off the same `cidx.application` meter.
+    """
+    try:
+        from code_indexer.server.telemetry.manager import (  # noqa: PLC0415
+            peek_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.metrics_instrumentation import (  # noqa: PLC0415,E501
+            get_application_metrics,
+        )
+
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        if not get_application_metrics(telemetry_manager).is_active:
+            return
+        meter = telemetry_manager.get_meter("cidx.application")
+        if _INTEGRITY_METRIC_STATE["meter"] is not meter:
+            _INTEGRITY_METRIC_STATE["meter"] = meter
+            _INTEGRITY_METRIC_STATE["counter"] = meter.create_counter(
+                name="cidx.xray.cache_integrity_failures",
+                description=(
+                    "Number of cluster xray evaluator-cache blobs refused "
+                    "because they failed integrity verification"
+                ),
+                unit="1",
+            )
+        _INTEGRITY_METRIC_STATE["counter"].add(1, {"reason": reason})
+    except Exception as exc:  # telemetry must never break the xray pipeline
+        logger.debug("Failed to record xray cache integrity failure metric: %s", exc)
 
 
 def _record_identity_failure_metric(reason: str) -> None:
@@ -148,10 +638,21 @@ class XrayCacheBackend(Protocol):
 
     Implementations must support fetch (cache lookup) and store (cache write).
     All methods must be exception-safe — callers assume they never raise.
+
+    The `so_bytes` crossing this interface is an OPAQUE BLOB, not a loadable
+    `.so`: it is the integrity envelope produced by
+    `wrap_so_for_cluster_cache` and checked by
+    `verified_so_from_cluster_blob` (see their comments). A backend must
+    store and return it byte-for-byte and must never try to interpret,
+    rewrite or truncate it — any such change makes the blob unverifiable,
+    which costs a recompile on every node. Equally, a backend is NOT the
+    place to add an integrity check of its own: verification belongs at the
+    point the bytes become a file that gets dlopen'd, which is
+    `RustNativeBackend._try_pre_fill`, so every backend gets it.
     """
 
     def fetch(self, source_hash: str, rustc_version: str) -> Optional[bytes]:
-        """Return cached .so bytes if fresh and rustc_version matches, else None."""
+        """Return the cached envelope if fresh and rustc_version matches, else None."""
         ...
 
     def store(
@@ -161,7 +662,7 @@ class XrayCacheBackend(Protocol):
         so_bytes: bytes,
         compile_ms: int = 0,
     ) -> None:
-        """Upsert compiled .so bytes into the cache."""
+        """Upsert a compiled-evaluator envelope into the cache."""
         ...
 
 
@@ -216,15 +717,6 @@ _XRAY_CLI_STDERR_ERROR_LIMIT = 200
 # just serializing a fixed, tiny static list, so this stays generous
 # without risking a hung candidate-collection walk.
 _GRAPH_EXTRACTOR_EXTENSIONS_TIMEOUT_SECS = 10
-
-# Environment variable that overrides the CIDX data directory root.
-# When set, the xray cache lives at $CIDX_DATA_DIR/xray-cache instead of
-# ~/.cidx-server/xray-cache, matching the server's IPC path alignment (Bug #879).
-_XRAY_CACHE_DIR_ENV = "CIDX_DATA_DIR"
-
-# Named path segments — must match Rust's get_cache_dir() in cache.rs exactly.
-_CIDX_SERVER_DIR_NAME = ".cidx-server"
-_XRAY_CACHE_DIR_NAME = "xray-cache"
 
 # Bug #1796: directory name for X-Ray's per-invocation temp files (evaluator
 # .rs, candidate-file-list .txt), kept distinct from the compile cache above.
@@ -1101,7 +1593,10 @@ class RustNativeBackend:
                 return
             so_bytes = local_so.read_bytes()
             self._xray_cache.store(
-                info.identity, info.rustc_version, so_bytes, compile_ms
+                info.identity,
+                info.rustc_version,
+                wrap_so_for_cluster_cache(info.identity, info.rustc_version, so_bytes),
+                compile_ms,
             )
             logger.info(
                 "XrayCache: uploaded %s to cluster cache (%d bytes)",
@@ -1154,9 +1649,9 @@ class RustNativeBackend:
 
         Early-returns when BOTH .so and .meta already exist for the identity.
         """
-        assert self._xray_cache is not None, (
-            "_try_pre_fill requires non-None _xray_cache"
-        )
+        assert (
+            self._xray_cache is not None
+        ), "_try_pre_fill requires non-None _xray_cache"
         try:
             info = self._get_cache_identity_info(
                 rust_code, deadline_seconds=deadline_seconds, graph_mode=graph_mode
@@ -1171,8 +1666,27 @@ class RustNativeBackend:
             blob = self._xray_cache.fetch(info.identity, info.rustc_version)
             if blob is None:
                 return  # cluster miss — Rust will compile fresh
+            so_bytes = verified_so_from_cluster_blob(
+                info.identity, info.rustc_version, blob
+            )
+            if so_bytes is None:
+                # The bytes in the shared table are not the artifact this
+                # cluster compiled for this key (tampered, truncated, stored
+                # under a different key, or written before the envelope
+                # existed). Writing them would hand Rust a cache hit it
+                # dlopens unverified, so refuse and let the local compile
+                # path run — a refusal costs one recompile, after which
+                # _try_post_fill rewrites the row in the verifiable format.
+                logger.warning(
+                    "XrayCache: REFUSED cluster blob for %s (%d bytes) — "
+                    "integrity verification failed; compiling locally instead",
+                    info.identity[:12],
+                    len(blob) if blob is not None else 0,
+                )
+                _record_cache_integrity_failure("verification_failed")
+                return
             cache_dir.mkdir(parents=True, exist_ok=True)
-            self._write_prefilled_artifact(info, meta_path, local_so, blob)
+            self._write_prefilled_artifact(info, meta_path, local_so, so_bytes)
             logger.info(
                 "XrayCache: pre-filled %s from cluster cache", info.identity[:12]
             )
@@ -1300,6 +1814,15 @@ class RustNativeBackend:
                 stderr=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
+                # Same gate as the compile slot, deliberately: only an
+                # invocation that can trigger a rustc compile gets the
+                # per-compile resource bounds. --build-graph/--analyze-graph
+                # run an already-compiled dylib across a whole repository and
+                # their memory profile has never been measured against these
+                # numbers, so capping a compile must never silently cap them.
+                preexec_fn=(
+                    _apply_compile_resource_limits if acquire_compile_slot else None
+                ),
             )
 
             if on_process_spawned is not None:
