@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import socket
-from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -17,7 +15,9 @@ from code_indexer.server.services.siem_delivery.destination import (
     SECOPS_TOKEN_URI,
     resolve_destination,
 )
+from code_indexer.server.services.siem_delivery.credential import StoredCredential
 from code_indexer.server.services.siem_delivery.sender import (
+    CredentialError,
     CredentialProvider,
     ProbeResult,
     send_batch,
@@ -29,7 +29,12 @@ from code_indexer.server.services.siem_delivery.transport import (
 )
 from tests.fixtures.secops_sidecar.harness import SidecarHandle
 
-from .conftest import harness_destination, harness_section
+from .conftest import (
+    harness_destination,
+    harness_section,
+    sidecar_loader,
+    sidecar_provider,
+)
 
 
 @pytest.fixture()
@@ -50,17 +55,10 @@ def _assert_never_connected(sock: socket.socket) -> None:
         sock.accept()
 
 
-def _write_key(path: Path, sidecar: SidecarHandle, token_uri: str) -> str:
-    doc = sidecar.read_key_file()
-    doc["token_uri"] = token_uri
-    path.write_text(json.dumps(doc), encoding="utf-8")
-    return str(path)
-
-
 def test_probe_ok_mints_a_token_from_the_sidecar(
     siem_sidecar: SidecarHandle, http_factory: HttpClientFactory
 ) -> None:
-    provider = CredentialProvider(http_factory, token_timeout=10.0)
+    provider = sidecar_provider(http_factory, siem_sidecar, token_timeout=10.0)
     dest = harness_destination(siem_sidecar)
     assert provider.probe(dest) is ProbeResult.OK
     assert provider.token(dest)
@@ -79,15 +77,15 @@ def test_probe_ok_mints_a_token_from_the_sidecar(
 def test_harness_token_uri_must_be_exactly_endpoint_token(
     siem_sidecar: SidecarHandle,
     http_factory: HttpClientFactory,
-    scratch_dir: Path,
     idle_listener: Tuple[socket.socket, int],
     variant: str,
 ) -> None:
     sock, other = idle_listener
     uri = variant.format(port=siem_sidecar.coords.ingest_port, other=other)
-    key_path = _write_key(scratch_dir / "key.json", siem_sidecar, uri)
-    dest = harness_destination(siem_sidecar, service_account_key_path=key_path)
-    provider = CredentialProvider(http_factory, token_timeout=5.0)
+    dest = harness_destination(siem_sidecar)
+    provider = CredentialProvider(
+        http_factory, sidecar_loader(siem_sidecar, token_uri=uri), 5.0
+    )
     assert provider.probe(dest) is ProbeResult.TOKEN_URI_NOT_ALLOWED
     _assert_never_connected(sock)
 
@@ -95,46 +93,84 @@ def test_harness_token_uri_must_be_exactly_endpoint_token(
 def test_deployed_mode_never_contacts_a_non_google_token_uri(
     siem_sidecar: SidecarHandle,
     http_factory: HttpClientFactory,
-    scratch_dir: Path,
     idle_listener: Tuple[socket.socket, int],
 ) -> None:
     sock, port = idle_listener
-    key_path = _write_key(
-        scratch_dir / "key.json", siem_sidecar, f"http://127.0.0.1:{port}/token"
-    )
     cfg = dataclasses.replace(
-        harness_section(siem_sidecar, service_account_key_path=key_path),
-        harness_endpoint="",
-        region="us",
+        harness_section(siem_sidecar), harness_endpoint="", region="us"
     )
     dest = resolve_destination(cfg, harness_active=False)
     assert dest is not None and dest.token_uri == SECOPS_TOKEN_URI
-    assert CredentialProvider(http_factory).probe(dest) is (
+    loader = sidecar_loader(siem_sidecar, token_uri=f"http://127.0.0.1:{port}/token")
+    assert CredentialProvider(http_factory, loader).probe(dest) is (
         ProbeResult.TOKEN_URI_NOT_ALLOWED
     )
     _assert_never_connected(sock)
 
 
-def test_key_file_problems_have_distinct_probe_results(
-    siem_sidecar: SidecarHandle, http_factory: HttpClientFactory, scratch_dir: Path
+def test_stored_credential_problems_have_distinct_probe_results(
+    siem_sidecar: SidecarHandle, http_factory: HttpClientFactory
 ) -> None:
-    provider = CredentialProvider(http_factory)
-    missing = harness_destination(
-        siem_sidecar, service_account_key_path=str(scratch_dir / "absent.json")
+    dest = harness_destination(siem_sidecar)
+    assert CredentialProvider(http_factory, lambda: None).probe(dest) is (
+        ProbeResult.CREDENTIAL_MISSING
     )
-    assert provider.probe(missing) is ProbeResult.KEY_FILE_MISSING
-    unreadable_path = scratch_dir / "unreadable.json"
-    unreadable_path.write_text("{}", encoding="utf-8")
-    os.chmod(unreadable_path, 0)
-    unreadable = harness_destination(
-        siem_sidecar, service_account_key_path=str(unreadable_path)
+
+    def _undecryptable() -> StoredCredential:
+        raise CredentialError(ProbeResult.CREDENTIAL_INVALID)
+
+    assert CredentialProvider(http_factory, _undecryptable).probe(dest) is (
+        ProbeResult.CREDENTIAL_INVALID
     )
-    if os.geteuid() != 0:
-        assert provider.probe(unreadable) is ProbeResult.KEY_FILE_UNREADABLE
-    bad = scratch_dir / "bad.json"
-    bad.write_text("not json", encoding="utf-8")
-    invalid = harness_destination(siem_sidecar, service_account_key_path=str(bad))
-    assert provider.probe(invalid) is ProbeResult.KEY_FILE_INVALID
+    wrong_type = sidecar_loader(siem_sidecar, type="authorized_user")
+    assert CredentialProvider(http_factory, wrong_type).probe(dest) is (
+        ProbeResult.CREDENTIAL_INVALID
+    )
+    bad_key = sidecar_loader(siem_sidecar, private_key="not a key")
+    assert CredentialProvider(http_factory, bad_key).probe(dest) is (
+        ProbeResult.CREDENTIAL_INVALID
+    )
+
+
+def test_signer_failure_is_credential_invalid(
+    siem_sidecar: SidecarHandle, http_factory: HttpClientFactory
+) -> None:
+    """A stored key the RSA signer cannot use (here an EC key) must yield a
+    probe result, never an exception escaping the loop."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pem = (
+        ec.generate_private_key(ec.SECP256R1())
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode("ascii")
+    )
+    loader = sidecar_loader(siem_sidecar, private_key=pem)
+    provider = CredentialProvider(http_factory, loader, 5.0)
+    assert provider.probe(harness_destination(siem_sidecar)) is (
+        ProbeResult.CREDENTIAL_INVALID
+    )
+
+
+def test_removed_credential_stops_minting_at_once(
+    siem_sidecar: SidecarHandle, http_factory: HttpClientFactory
+) -> None:
+    """The stored key is read on every token request: a removal through
+    another process takes effect here with no restart."""
+    stored: List[Optional[StoredCredential]] = [
+        StoredCredential("one", dict(siem_sidecar.read_key_file()))
+    ]
+    provider = CredentialProvider(http_factory, lambda: stored[0], 5.0)
+    dest = harness_destination(siem_sidecar)
+    assert provider.token(dest)
+    stored[0] = None
+    with pytest.raises(CredentialError) as exc:
+        provider.token(dest)
+    assert exc.value.result is ProbeResult.CREDENTIAL_MISSING
 
 
 def test_rejected_and_unavailable_token_endpoint(
@@ -143,10 +179,12 @@ def test_rejected_and_unavailable_token_endpoint(
     dest = harness_destination(siem_sidecar)
     control = siem_sidecar.control
     assert control.post("/_control/token-faults", {"mode": "reject"}).status_code == 200
-    assert CredentialProvider(http_factory).probe(dest) is ProbeResult.TOKEN_REJECTED
+    assert sidecar_provider(http_factory, siem_sidecar).probe(dest) is (
+        ProbeResult.TOKEN_REJECTED
+    )
     assert control.post("/_control/outage", {"mode": "refuse"}).status_code == 200
     try:
-        assert CredentialProvider(http_factory, token_timeout=2.0).probe(dest) is (
+        assert sidecar_provider(http_factory, siem_sidecar, 2.0).probe(dest) is (
             ProbeResult.TOKEN_ENDPOINT_UNREACHABLE
         )
     finally:
@@ -173,7 +211,7 @@ def test_send_is_byte_exact_and_classified(
     )
     body = envelope([canonical_json(udm)])
     dest = harness_destination(siem_sidecar)
-    token = CredentialProvider(http_factory).token(dest)
+    token = sidecar_provider(http_factory, siem_sidecar).token(dest)
     result = send_batch(http_factory, dest, token, body, event_count=1, timeout=10.0)
     assert result.cls == "accepted"
     requests = siem_sidecar.control.get("/_control/requests").json()["requests"]
@@ -193,7 +231,7 @@ def test_redirect_is_never_followed(
         {"mode": "redirect", "code": 307, "location": f"http://127.0.0.1:{port}/x"},
     )
     dest = harness_destination(siem_sidecar)
-    token = CredentialProvider(http_factory).token(dest)
+    token = sidecar_provider(http_factory, siem_sidecar).token(dest)
     result = send_batch(
         http_factory,
         dest,

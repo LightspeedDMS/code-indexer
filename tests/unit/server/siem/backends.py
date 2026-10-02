@@ -135,8 +135,9 @@ _PG_RESET = (
     "DROP TRIGGER IF EXISTS siem_test_fail ON siem_delivery_queue",
     "DROP TRIGGER IF EXISTS audit_test_fail ON audit_logs",
     "TRUNCATE siem_delivery_queue, siem_delivery_batches, siem_process_status, "
-    "siem_destinations, siem_backlog_samples, audit_logs",
+    "siem_destinations, siem_backlog_samples, siem_delivery_credential, audit_logs",
     "DELETE FROM siem_delivery_state",
+    "DELETE FROM server_config",
     "INSERT INTO siem_delivery_state (id) VALUES (1)",
 )
 

@@ -54,6 +54,7 @@ SIEM_SELF_REPORT_TYPES: FrozenSet[str] = frozenset(
         "siem_batch_rebatched",
         "siem_destination_retargeted",
         "siem_destination_abandoned",
+        "siem_credential_changed",
     }
 )
 

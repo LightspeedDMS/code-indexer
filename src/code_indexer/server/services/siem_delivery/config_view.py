@@ -1,8 +1,10 @@
 """The ``siem_delivery`` Web Config section: settings readout, typed updates,
 candidate validation and the read-only status block.
 
-The section holds references only (a region, path segments and a key PATH);
-no field accepts key contents or a token, and nothing here renders one.
+The section holds references only (a region and path segments); no field
+accepts key contents or a token, and nothing here renders one.  The
+service-account key is set, replaced and removed through its own write-only
+form (``credential.py``); only its identity is shown.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ _STR_FIELDS = frozenset(
         "project_id",
         "location",
         "instance_id",
-        "service_account_key_path",
         "source_instance_label",
         "harness_endpoint",
     }
@@ -85,9 +86,89 @@ def status_block(scheduler: Any, startup_error: Optional[str]) -> List[Tuple[str
         ("This process", f"{liveness['process_id']} probe={liveness['probe_result']}"),
         ("Config", str(liveness["config_lkg_status"])),
     ]
+    rows.append(("Service account credential", credential_label(scheduler)))
     if scheduler.harness_active:
         rows.append(("Mode", "harness mode (non-production test receiver)"))
     return rows
+
+
+def single_text_input(
+    pasted: str, uploaded: Optional[bytes], *, max_bytes: int, noun: str
+) -> str:
+    """The text of EXACTLY one of a pasted value or an uploaded file; raises
+    ValueError (the message never carries the content)."""
+    text = (pasted or "").strip()
+    raw = uploaded or b""
+    if len(raw) > max_bytes:
+        raise ValueError(f"the uploaded {noun} is larger than {max_bytes // 1024} KiB")
+    try:
+        file_text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise ValueError(f"the uploaded {noun} is not UTF-8 text") from None
+    if text and file_text:
+        raise ValueError(f"paste the {noun} OR upload its file, not both")
+    if not text and not file_text:
+        raise ValueError(f"paste the {noun} or upload its file")
+    return text or file_text
+
+
+def credential_text_from_inputs(pasted: str, uploaded: Optional[bytes]) -> str:
+    """The service-account key JSON (the message never carries the key)."""
+    from code_indexer.server.services.siem_delivery.credential import (
+        MAX_CREDENTIAL_JSON_BYTES,
+    )
+
+    return single_text_input(
+        pasted,
+        uploaded,
+        max_bytes=MAX_CREDENTIAL_JSON_BYTES,
+        noun="service-account key JSON",
+    )
+
+
+def ca_text_from_inputs(pasted: str, uploaded: Optional[bytes]) -> str:
+    from code_indexer.server.services.siem_delivery.trust import MAX_CA_PEM_BYTES
+
+    return single_text_input(
+        pasted, uploaded, max_bytes=MAX_CA_PEM_BYTES, noun="CA certificate PEM"
+    )
+
+
+def trusted_ca_rows(section: Mapping[str, Any]) -> List[Tuple[str, str]]:
+    """Display rows for the configured trusted CA (public data only)."""
+    from code_indexer.server.services.siem_delivery.trust import (
+        SiemTrustInvalid,
+        describe_ca_pem,
+    )
+
+    pem = str(section.get("trusted_ca_pem") or "")
+    if not pem:
+        return [("Additional trusted CA", "none (default trust only)")]
+    try:
+        certs = describe_ca_pem(pem)
+    except SiemTrustInvalid as exc:
+        return [("Additional trusted CA", f"unreadable: {exc.reason}")]
+    rows = [("Bundle SHA-256", str(section.get("trusted_ca_fingerprint") or ""))]
+    for index, cert in enumerate(certs, start=1):
+        rows.append(
+            (
+                f"CA {index}",
+                f"subject {cert['subject']}; issuer {cert['issuer']}; "
+                f"SHA-256 {cert['sha256']}; expires {cert['not_after']}",
+            )
+        )
+    return rows
+
+
+def credential_label(scheduler: Any) -> str:
+    """The stored key's non-secret identity as this process last saw it."""
+    ident = scheduler.credential_identity
+    if not ident:
+        return "not configured"
+    return (
+        f"{ident['client_email']} (key id {ident['private_key_id']}), "
+        f"set by {ident['set_by']} at {ident['set_at']}"
+    )
 
 
 def validate_form(

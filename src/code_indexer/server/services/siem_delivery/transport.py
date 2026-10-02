@@ -37,6 +37,20 @@ def request_allowed(method: str, url: str, dest: Destination) -> bool:
     return url in (dest.token_uri, dest.origin + dest.import_path)
 
 
+def env_proxy_for(url: str) -> Optional[str]:
+    """The environment proxy for *url* (``HTTPS_PROXY`` / ``HTTP_PROXY`` /
+    ``ALL_PROXY``), or None when unset or bypassed by ``NO_PROXY``."""
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    proxies = urllib.request.getproxies()
+    proxy = proxies.get(parts.scheme) or proxies.get("all")
+    if not proxy or urllib.request.proxy_bypass(parts.hostname or ""):
+        return None
+    return str(proxy)
+
+
 def guarded_send(
     http_factory: Any,
     dest: Destination,
@@ -49,8 +63,22 @@ def guarded_send(
     """Send one allowlisted request; raises before connecting otherwise."""
     if not request_allowed(method, url, dest):
         raise SiemDestinationNotAllowed()
+    extra: Dict[str, Any] = {}
+    if dest.trusted_ca_pem:
+        # Default trust PLUS the configured CA, verification ON (the context
+        # is built once per bundle).  An explicit transport carries it on
+        # every factory path, including the fault-injection wrapper; it keeps
+        # honouring the environment proxy (a TLS-inspecting proxy is exactly
+        # why a CA gets added).
+        from code_indexer.server.services.siem_delivery.trust import (
+            ssl_context_for,
+        )
+
+        extra["transport"] = httpx.HTTPTransport(
+            verify=ssl_context_for(dest.trusted_ca_pem), proxy=env_proxy_for(url)
+        )
     with http_factory.create_sync_client(
-        timeout=timeout, follow_redirects=False
+        timeout=timeout, follow_redirects=False, **extra
     ) as client:
         response: httpx.Response = client.request(
             method.upper(), url, content=body, headers=dict(headers)

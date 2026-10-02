@@ -11,7 +11,8 @@ All tests are unit-level and do NOT call real providers.
 """
 
 import os
-from typing import Any, Dict, List
+import threading
+from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -38,6 +39,23 @@ _GOOD_RESPONSE: Dict[str, Any] = {
 def _make_client() -> CohereEmbeddingProvider:
     with patch.dict(os.environ, {"CO_API_KEY": _FAKE_KEY}):
         return CohereEmbeddingProvider(CohereConfig())
+
+
+def _record_own_thread_sleeps(sleep_calls: List[float]) -> Callable[[float], None]:
+    """Return a time.sleep stand-in that records only this thread's calls.
+
+    time.sleep is patched process-wide, so a background thread left running
+    by another test (looping on time.sleep) would otherwise land in
+    sleep_calls. The provider runs in the calling thread, so its sleeps are
+    still recorded.
+    """
+    test_thread_id = threading.get_ident()
+
+    def _sleep(seconds: float) -> None:
+        if threading.get_ident() == test_thread_id:
+            sleep_calls.append(seconds)
+
+    return _sleep
 
 
 def _install_fake_transport(client: CohereEmbeddingProvider, post_fn: Any) -> None:
@@ -110,7 +128,7 @@ class TestCohereMAkeSyncRequestRetryFalse:
         _install_fake_transport(client, fake_post)
 
         sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with patch("time.sleep", side_effect=_record_own_thread_sleeps(sleep_calls)):
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 
@@ -134,7 +152,7 @@ class TestCohereMAkeSyncRequestRetryFalse:
         _install_fake_transport(client, fake_post)
 
         sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with patch("time.sleep", side_effect=_record_own_thread_sleeps(sleep_calls)):
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 
@@ -220,7 +238,7 @@ class TestCohereMAkeSyncRequestRetryTrue429Retries:
         _install_fake_transport(client, fake_post)
 
         sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with patch("time.sleep", side_effect=_record_own_thread_sleeps(sleep_calls)):
             result = client._make_sync_request(["hello"], retry=True)
 
         assert call_count >= 2, (
@@ -247,7 +265,7 @@ class TestCohereMAkeSyncRequestRetryTrue429Retries:
         _install_fake_transport(client, fake_post)
 
         sleep_calls: List[float] = []
-        with patch("time.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        with patch("time.sleep", side_effect=_record_own_thread_sleeps(sleep_calls)):
             with pytest.raises(Exception):
                 client._make_sync_request(["hello"], retry=False)
 

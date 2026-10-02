@@ -7,7 +7,6 @@ access tracking, and thread-safe concurrency control.
 import logging
 import os
 import threading
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
@@ -392,20 +391,25 @@ class TTLEvictionThread(threading.Thread):
         self.daemon_service = daemon_service
         self.check_interval = check_interval
         self.running = True
+        # Set by stop() so the interval wait ends immediately and join()
+        # completes promptly instead of after up to check_interval seconds.
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
         """Run eviction loop.
 
         Checks for expired cache every check_interval seconds.
-        Exits when running flag is set to False.
+        Exits when stop() is called (or the running flag is cleared).
         """
         while self.running:
-            time.sleep(self.check_interval)
+            if self._stop_event.wait(self.check_interval):
+                break
             self._check_and_evict()
 
     def stop(self) -> None:
-        """Stop the eviction thread gracefully."""
+        """Stop the eviction thread gracefully, waking it from its wait."""
         self.running = False
+        self._stop_event.set()
 
     def _check_and_evict(self) -> None:
         """Check for expired cache and evict if necessary.

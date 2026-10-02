@@ -89,7 +89,7 @@ def test_one_live_process_not_ok_blocks_arming(
 ) -> None:
     _confirmed_canary(siem_backend)
     _ready_process(siem_backend, "solo:1:a")
-    _ready_process(siem_backend, "solo:2:b", result="key_file_unreadable")
+    _ready_process(siem_backend, "solo:2:b", result="credential_missing")
     assert _cycle(siem_backend, 1)["armed_destination_key"] is None
     ss.register_process(siem_backend.db, "solo:3:c", node_id="solo", ttl_seconds=TTL)
     ss.record_probe(siem_backend.db, "solo:2:b", destination_key=DEST, result="ok")

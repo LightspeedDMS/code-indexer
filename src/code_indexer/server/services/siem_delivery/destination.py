@@ -77,8 +77,10 @@ class Destination:
     import_path: str
     token_uri: str
     harness: bool
-    key_path: str
     api_version: str
+    # Additional CA certificates (PEM) trusted ON TOP of the default trust
+    # for both legs; "" = default trust only.  Not part of the key.
+    trusted_ca_pem: str = ""
 
 
 def parse_harness_endpoint(value: str) -> Tuple[str, str, int]:
@@ -90,7 +92,7 @@ def parse_harness_endpoint(value: str) -> Tuple[str, str, int]:
         raise SiemConfigInvalid("harness_endpoint", "not a URL") from exc
     host = parts.hostname or ""
     if (
-        parts.scheme != "http"
+        parts.scheme not in ("http", "https")
         or host not in HARNESS_HOSTS
         or port is None
         or parts.username is not None
@@ -102,7 +104,7 @@ def parse_harness_endpoint(value: str) -> Tuple[str, str, int]:
         or "#" in value
     ):
         raise SiemConfigInvalid(
-            "harness_endpoint", "must be http://<loopback host>:<port> only"
+            "harness_endpoint", "must be http(s)://<loopback host>:<port> only"
         )
     if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
         raise SiemConfigInvalid("harness_endpoint", "not a loopback address")
@@ -130,12 +132,19 @@ def _check_formats(cfg: SiemDeliveryConfig, harness_active: bool) -> None:
         value = getattr(cfg, name)
         if value and not _SEGMENT_RE.match(value):
             raise SiemConfigInvalid(name, "must be a single path segment")
-    path = cfg.service_account_key_path
-    if path and not path.startswith("/"):
-        raise SiemConfigInvalid("service_account_key_path", "must be absolute")
     label = cfg.source_instance_label
     if label and not _LABEL_RE.match(label):
         raise SiemConfigInvalid("source_instance_label", "invalid characters")
+    if cfg.trusted_ca_pem:
+        from code_indexer.server.services.siem_delivery.trust import (
+            SiemTrustInvalid,
+            check_stored_ca_pem,
+        )
+
+        try:
+            check_stored_ca_pem(cfg.trusted_ca_pem)
+        except SiemTrustInvalid as exc:
+            raise SiemConfigInvalid("trusted_ca_pem", exc.reason) from None
 
 
 def _check_required(cfg: SiemDeliveryConfig) -> None:
@@ -145,7 +154,6 @@ def _check_required(cfg: SiemDeliveryConfig) -> None:
         "project_id",
         "location",
         "instance_id",
-        "service_account_key_path",
         "source_instance_label",
     ):
         if not getattr(cfg, name):
@@ -165,7 +173,6 @@ def destination_complete(cfg: SiemDeliveryConfig) -> bool:
         and cfg.project_id
         and cfg.location
         and cfg.instance_id
-        and cfg.service_account_key_path
     )
 
 
@@ -212,6 +219,6 @@ def resolve_destination(
         import_path=import_path(cfg),
         token_uri=token_uri,
         harness=bool(cfg.harness_endpoint),
-        key_path=cfg.service_account_key_path,
         api_version=cfg.api_version,
+        trusted_ca_pem=cfg.trusted_ca_pem,
     )

@@ -957,7 +957,24 @@ class FilesystemVectorStore:
             resolve_chunk_layout,
         )
 
-        return bool(resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB)
+        # Bug #1997: this runs on the per-file hot path (get_point,
+        # upsert_points) of every incremental/resume/reconcile run against an
+        # EXISTING collection, where _chunks_db_mode is empty. Feed the
+        # resolver the stat-keyed parsed metadata instead of letting it
+        # re-read and re-parse the whole file on every call. The resolver
+        # remains the sole layout authority. This store's own metadata
+        # writes call CollectionMetaCache.invalidate() explicitly, at three
+        # sites: _atomic_write_json (collection_meta.json targets),
+        # end_indexing (after the HNSW publish + discriminator commit) and
+        # clear_collection (finally). Writers outside this store are caught
+        # by the cache's stat-identity key (see collection_meta_cache.py).
+        return bool(
+            resolve_chunk_layout(
+                collection_path,
+                cached_meta=self._collection_meta_cache.get(collection_path),
+            )
+            == ChunkLayout.CHUNKS_DB
+        )
 
     def _id_cache_key(
         self, collection_name: str, subdirectory: Optional[str] = None
@@ -1753,6 +1770,12 @@ class FilesystemVectorStore:
 
             write_chunks_db_discriminator(collection_path)
 
+        # Bug #1997: finalize wrote collection_meta.json through writers that
+        # do not go through _atomic_write_json (the HNSW publish in
+        # HNSWIndexManager, the discriminator commit above) -- drop the
+        # cached parse so the next reader sees exactly what was committed.
+        self._collection_meta_cache.invalidate(collection_path)
+
         self.logger.info(
             f"Indexing finalized for '{collection_name}': {vector_count} vectors indexed "
             f"({unique_file_count} unique files)"
@@ -2438,8 +2461,23 @@ class FilesystemVectorStore:
                 )
                 return (quant_range["min"], quant_range["max"])
 
-        # Fallback: read from disk if not cached (shouldn't happen if using lifecycle properly)
+        # Not populated by _get_vector_size(): the SHARDED_JSON upsert path
+        # never calls it, so this branch runs on EVERY upsert_points() call.
+        # Bug #1997: serve the parsed metadata from the stat-keyed cache
+        # rather than re-reading and re-parsing the whole file per call.
         collection_path = self.base_path / collection_name
+        cached_meta = self._collection_meta_cache.get(collection_path)
+        if cached_meta is not None:
+            cached_range = cached_meta.get(
+                "quantization_range", {"min": -2.0, "max": 2.0}
+            )
+            try:
+                return (cached_range["min"], cached_range["max"])
+            except KeyError:
+                return (-2.0, 2.0)
+
+        # The cache yields None only for a missing / unreadable / non-object
+        # file: keep the original direct-read semantics for those cases.
         metadata_path = collection_path / "collection_meta.json"
 
         if not metadata_path.exists():
@@ -3692,6 +3730,10 @@ class FilesystemVectorStore:
             # Atomic rename — visible to readers only after this completes.
             # Last writer wins; all intermediate writers produce valid JSON files.
             tmp_file.replace(file_path)
+            if file_path.name == "collection_meta.json":
+                # Bug #1997: never rely on stat identity alone for our own
+                # writes -- the next cached read must see this content.
+                self._collection_meta_cache.invalidate(file_path.parent)
         except Exception:
             try:
                 tmp_file.unlink(missing_ok=True)
@@ -7940,7 +7982,22 @@ class FilesystemVectorStore:
                 if matrix_data is not None:
                     matrix_file.write_bytes(matrix_data)
                 if metadata_data is not None:
-                    metadata_file.write_bytes(metadata_data)
+                    # Bug #1997: temp file + os.replace like every other
+                    # collection_meta.json writer -- a NEW inode is what lets a
+                    # warm stat-keyed CollectionMetaCache in another process
+                    # see this rewrite even within one mtime tick.
+                    tmp_meta = metadata_file.with_name(
+                        f"collection_meta.{os.getpid()}.{threading.get_ident()}.tmp"
+                    )
+                    try:
+                        with open(tmp_meta, "wb") as tmp_fh:
+                            tmp_fh.write(metadata_data)
+                            tmp_fh.flush()
+                            os.fsync(tmp_fh.fileno())
+                        os.replace(tmp_meta, metadata_file)
+                    except Exception:
+                        tmp_meta.unlink(missing_ok=True)
+                        raise
 
             # Bug #1644 round 3: recommit the CHUNKS_DB layout ON DISK,
             # truthfully, for a collection that was CHUNKS_DB before the
@@ -7962,6 +8019,11 @@ class FilesystemVectorStore:
 
         except Exception:
             return False
+        finally:
+            # Bug #1997: the restore above is an in-place write_bytes() of a
+            # fresh file (its inode may reuse the one rmtree just freed), so
+            # never rely on stat identity alone -- drop the cached parse.
+            self._collection_meta_cache.invalidate(collection_path)
 
     def delete_collection(self, collection_name: str) -> bool:
         """Delete entire collection including structure and metadata.

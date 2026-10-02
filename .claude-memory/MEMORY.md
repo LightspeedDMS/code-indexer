@@ -17,6 +17,7 @@
 - [feedback_versioned_path_trap.md](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
 - [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
+- [feedback_staging_creds_local_exposure_ok.md](feedback_staging_creds_local_exposure_ok.md) - staging creds in local output are not an incident; never commit credentials anywhere
 - [feedback_never_retry_loop_auth_endpoint.md](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - never revert another subagent's changes; own everything in the tree
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - N agents, one tree: forbid git checkout/restore/reset/clean/stash per prompt

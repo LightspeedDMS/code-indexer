@@ -34,6 +34,7 @@ upper bounds; every poll returns as soon as its condition holds.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -156,7 +157,15 @@ QUARANTINE_LISTING_LIMIT = 1000
 DETAIL_CHARS = 160  # how much of an unexpected response body a failure quotes
 HTTP_TIMEOUT_SECONDS = 60.0
 SOURCE_INSTANCE_LABEL = os.environ.get("E2E_SIEM_SOURCE_LABEL", "phase7-e2e")
+CREDENTIAL_PATH = "/admin/config/siem_delivery/credential"
 _CSRF = re.compile(r'name="csrf_token"\s+value="([^"]+)"')
+_VALIDATION_ERROR = re.compile(r'class="validation-error">([^<]*)<')
+
+
+def validation_error(page: str) -> str:
+    """The section's rendered validation error, if any (never the key)."""
+    found = _VALIDATION_ERROR.search(page)
+    return found.group(1).strip() if found else ""
 
 
 class SiemDelivery:
@@ -184,8 +193,13 @@ class SiemDelivery:
         body: Dict[str, Any] = resp.json()
         return body
 
-    def save_config(self, fields: Dict[str, str]) -> None:
-        """Save the siem_delivery section through the elevated Web Config form."""
+    def web_post(
+        self,
+        path: str,
+        fields: Dict[str, str],
+        files: Optional[Dict[str, Tuple[str, bytes, str]]] = None,
+    ) -> httpx.Response:
+        """POST an admin Web Config form (fresh admin web session + CSRF)."""
         with httpx.Client(
             base_url=self.config.server_url, timeout=HTTP_TIMEOUT_SECONDS
         ) as web:
@@ -204,10 +218,65 @@ class SiemDelivery:
             )
             page_csrf = _CSRF.search(web.get("/admin/config").text)
             assert page_csrf, "config page has no csrf token"
-            resp = web.post(
-                "/admin/config/siem_delivery",
+            return web.post(
+                path,
                 data={**fields, "csrf_token": page_csrf.group(1)},
+                files=files,
             )
+
+    def config_page(self) -> str:
+        """The admin Web Config page HTML (fresh admin web session)."""
+        with httpx.Client(
+            base_url=self.config.server_url, timeout=HTTP_TIMEOUT_SECONDS
+        ) as web:
+            login_csrf = _CSRF.search(web.get("/login").text)
+            assert login_csrf, "login page has no csrf token"
+            web.post(
+                "/login",
+                data={
+                    "username": self.config.admin_user,
+                    "password": self.config.admin_pass,
+                    "csrf_token": login_csrf.group(1),
+                },
+            )
+            return web.get("/admin/config").text
+
+    def upload_credential(self, key_bytes: bytes) -> httpx.Response:
+        """Upload a service-account key FILE through the Web Config form."""
+        return self.web_post(
+            CREDENTIAL_PATH,
+            {},
+            files={
+                "service_account_file": ("sa-key.json", key_bytes, "application/json")
+            },
+        )
+
+    def paste_credential(self, key_text: str) -> httpx.Response:
+        """Paste a service-account key through the Web Config form."""
+        return self.web_post(CREDENTIAL_PATH, {"service_account_json": key_text})
+
+    def remove_credential(self) -> httpx.Response:
+        return self.web_post(CREDENTIAL_PATH + "/remove", {})
+
+    def ensure_credential(self) -> None:
+        """The sidecar's key is the stored credential (uploaded only when the
+        stored identity differs, so scenarios do not churn it)."""
+        key_bytes = self.sidecar.key_file_path.read_bytes()
+        wanted = json.loads(key_bytes)["private_key_id"]
+        current = self.stats().get("credential") or {}
+        if current.get("private_key_id") == wanted:
+            return
+        resp = self.upload_credential(key_bytes)
+        assert resp.status_code == 200, (
+            f"credential upload refused: {resp.status_code} "
+            f"{validation_error(resp.text)}"
+        )
+        stored = self.stats()["credential"]
+        assert stored and stored["private_key_id"] == wanted
+
+    def save_config(self, fields: Dict[str, str]) -> None:
+        """Save the siem_delivery section through the elevated Web Config form."""
+        resp = self.web_post("/admin/config/siem_delivery", fields)
         if resp.status_code != 200 or "Invalid section" in resp.text:
             found = re.search(r"Invalid section[^<]*", resp.text)
             detail = found.group(0) if found else resp.text[:DETAIL_CHARS]
@@ -217,7 +286,11 @@ class SiemDelivery:
             )
 
     def configure_harness_destination(self, enabled: bool = True) -> None:
-        """Point delivery at the sidecar (harness mode, behind the gate)."""
+        """Point delivery at the sidecar (harness mode, behind the gate).
+
+        The key is uploaded FIRST, through the Web form, so no loop cycle
+        ever probes a configured destination without a credential."""
+        self.ensure_credential()
         coords = self.sidecar.coords
         self.save_config(
             {
@@ -227,7 +300,6 @@ class SiemDelivery:
                 "project_id": coords.project,
                 "location": coords.location,
                 "instance_id": coords.instance,
-                "service_account_key_path": str(self.sidecar.key_file_path),
                 "source_instance_label": SOURCE_INSTANCE_LABEL,
             }
         )
@@ -286,6 +358,21 @@ class SiemDelivery:
         )
         rows = self._require(resp, "GET /api/admin/siem-delivery/quarantine")["rows"]
         return [str(r["event_uuid"]) for r in rows]
+
+    def abandon(self, destination_key: str) -> httpx.Response:
+        """POST .../destinations/{key}/abandon (raw response: callers assert)."""
+        return self.http.post(
+            f"/api/admin/siem-delivery/destinations/{destination_key}/abandon",
+            headers=self._headers(),
+            json={},
+        )
+
+    def siem_health_reasons(self) -> List[str]:
+        """The SIEM entries of /api/system/health's failure reasons."""
+        resp = self.http.get("/api/system/health", headers=self._headers())
+        assert resp.status_code == 200, resp.text[:DETAIL_CHARS]
+        reasons = resp.json().get("failure_reasons") or []
+        return [str(r) for r in reasons if "SIEM" in str(r)]
 
     def resolve_halt(self) -> None:
         """Clear whatever halt is present through the admin front door (bounded)."""

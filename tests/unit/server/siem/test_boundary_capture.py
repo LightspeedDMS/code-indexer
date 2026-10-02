@@ -25,7 +25,6 @@ A = SiemDeliveryConfig(
     project_id="example-project",
     location="us",
     instance_id="instance-a",
-    service_account_key_path="/keys/sa.json",
     source_instance_label="lbl",
 )
 B = dataclasses.replace(A, instance_id="instance-b")

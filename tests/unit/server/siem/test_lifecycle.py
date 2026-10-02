@@ -101,6 +101,72 @@ def test_registration_is_offloaded_awaited_and_keeps_the_loop_responsive(
     assert wired.app.state.siem_delivery_startup_error is None
 
 
+def test_constructed_scheduler_stores_credentials_under_the_server_salt_key(
+    wired: SimpleNamespace, tmp_path: Path
+) -> None:
+    """The credential store encrypts with the server's stored-secret key
+    (derived from server_dir/.encryption_key_salt, exactly as the CI-token
+    and git-credential managers do), so every node of a cluster decrypts."""
+    from code_indexer.server.services.encryption_key_salt import (
+        read_encryption_key_salt,
+    )
+    from code_indexer.server.services.siem_delivery.credential import (
+        SiemCredentialStore,
+    )
+    from code_indexer.server.services.token_encryption import derive_key_from_salt
+
+    scheduler = lifecycle.construct_scheduler(wired.app, wired.registry, None)
+    server_dir = tmp_path / "server"
+    scheduler.credential_store.set(
+        {
+            "type": "service_account",
+            "client_email": "sa@example-project.iam.example.com",
+            "private_key_id": "abc123",
+            "private_key": "example",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        },
+        actor="alice",
+    )
+    salt = read_encryption_key_salt(server_dir)  # seeded on first use
+    other = SiemCredentialStore(
+        wired.registry.siem_delivery, derive_key_from_salt(salt)
+    )
+    loaded = other.load()
+    assert loaded is not None and loaded.info["private_key_id"] == "abc123"
+
+
+class _UntouchablePool:
+    """A PostgreSQL pool double: construction must never open a connection
+    (it runs on the event loop); the first use records the thread."""
+
+    def __init__(self) -> None:
+        self.threads: List[int] = []
+
+    def connection(self) -> Any:
+        self.threads.append(threading.get_ident())
+        raise RuntimeError("no database in this test")
+
+
+def test_construction_reads_no_key_material_on_the_calling_thread(
+    wired: SimpleNamespace, tmp_path: Path
+) -> None:
+    """construct_scheduler runs inside ``async def`` startup: it must derive
+    no key there (no salt-file I/O solo, no cluster_secrets query cluster)."""
+    from code_indexer.server.services.siem_delivery.db import SiemDb
+
+    lifecycle.construct_scheduler(wired.app, wired.registry, None)
+    assert not (tmp_path / "server" / ".encryption_key_salt").exists()
+
+    pool = _UntouchablePool()
+    cluster = SimpleNamespace(siem_delivery=SiemDb.postgres(pool))
+    scheduler = lifecycle.construct_scheduler(wired.app, cluster, None)
+    assert pool.threads == []
+    # the key is derived lazily, on first use (the scheduler/worker thread)
+    with pytest.raises(RuntimeError):
+        scheduler.credential_store.load()
+    assert pool.threads
+
+
 def test_startup_failure_degrades_and_is_recorded(wired: SimpleNamespace) -> None:
     scheduler = asyncio.run(lifecycle.start_scheduler(wired.app, None, None))
     assert scheduler is None
