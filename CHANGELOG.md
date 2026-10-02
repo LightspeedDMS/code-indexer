@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.81.0] - 2026-10-02
+
+### Fixed
+
+- Cluster PostgreSQL connections ask the server to detect a dead client: per-session TCP keepalive and `tcp_user_timeout` settings are sent through the libpq `options` startup parameter, alongside client keepalives. A crashed node's backend, and the leader election advisory lock it held, is released roughly 60 seconds after the last packet instead of after the operating system's 2 hour keepalive default. Applied to the leader election connection, the connection pool, the alias lock store and the migration runner. Values already in `postgres_dsn` are kept and `PGOPTIONS` seeds the options when the DSN has none. Requires PostgreSQL 12 or later and a direct connection (#2005).
+- A CLI query no longer constructs the server application: the search service reads application state only when the server has already built it. The audit log file is opened on first use, and the session and user managers honour `CIDX_SERVER_DATA_DIR` (#1996).
+
+### Tests
+
+- Every test session points the server data directories and the systemd unit directory at a scratch home before any server module is imported, and a write guard fails a test that writes into the real server home. `e2e-automation.sh` gives each phase a fresh client server home, validates every directory it deletes against the account's real server home, and gives every e2e server a stub systemd unit with its own bind settings (#1996).
+- The Phase 7 log audit excuses a SIEM credential probe warning only for the log rows proven to fall inside the scripted outage of the outage test.
+- The query repository-access tests build their schema database and search indexes once per module and copy them per test.
+
 ## [12.80.0] - 2026-10-01
 
 ### Added
