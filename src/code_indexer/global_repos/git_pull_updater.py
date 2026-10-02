@@ -247,8 +247,8 @@ class GitPullUpdater(UpdateStrategy):
                 raise GitFetchError(
                     f"Git fetch failed for {self.repo_path}: {diagnostic}",
                     category=category,
-                    stderr=fetch_exc.stderr,
-                    stdout=fetch_exc.stdout,
+                    stderr=redact_url_credentials(fetch_exc.stderr),
+                    stdout=redact_url_credentials(fetch_exc.stdout),
                     returncode=fetch_exc.returncode,
                     cmd=getattr(fetch_exc, "cmd", None),
                 )

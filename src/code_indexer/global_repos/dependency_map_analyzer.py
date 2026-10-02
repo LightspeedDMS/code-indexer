@@ -2924,7 +2924,7 @@ Rules:
                     f"Claude CLI failed: {format_completed_process_diagnostic(result)}"
                 )
                 raise subprocess.CalledProcessError(
-                    result.returncode, cmd, result.stdout, result.stderr
+                    result.returncode, cmd, redact_url_credentials(result.stdout), redact_url_credentials(result.stderr)
                 )
 
             return self._strip_code_fences(result.stdout)

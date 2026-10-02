@@ -324,7 +324,7 @@ class GitSyncExecutor:
                 f"Git pull failed: {redact_url_credentials(e.stderr or e.stdout)}",
                 error_code,
                 recovery_suggestions=recovery_suggestions,
-                git_output=e.stderr or e.stdout,
+                git_output=redact_url_credentials(e.stderr) or redact_url_credentials(e.stdout),
             )
         finally:
             repo_lock.release()

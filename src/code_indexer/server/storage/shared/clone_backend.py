@@ -36,6 +36,7 @@ from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
     run_cancellable_subprocess,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 if TYPE_CHECKING:
     from requests import Response  # pragma: no cover
@@ -263,8 +264,8 @@ class LocalCloneBackend:
             raise subprocess.CalledProcessError(
                 result.returncode,
                 result.args,
-                output=result.stdout,
-                stderr=result.stderr,
+                output=redact_url_credentials(result.stdout),
+                stderr=redact_url_credentials(result.stderr),
             )
         return dest_path
 

@@ -6,9 +6,20 @@ compiled evaluator cache, avoiding per-node recompilation.
 Table: xray_evaluator_cache
   source_hash   TEXT PRIMARY KEY  — opaque cache identity (see below)
   rustc_version TEXT NOT NULL     — rustc version string (ABI guard)
-  so_bytes      BYTEA NOT NULL    — compiled .so content
+  so_bytes      BYTEA NOT NULL    — integrity envelope around the .so
   compiled_at   TIMESTAMPTZ       — when the .so was compiled
   compile_ms    BIGINT            — compilation time in milliseconds
+
+`so_bytes` is NOT a loadable `.so`. It is the opaque envelope produced by
+`rust_backend.wrap_so_for_cluster_cache` — magic + digest + payload, with the
+digest bound to the `source_hash` key and the rustc version — and it is
+verified by `rust_backend.verified_so_from_cluster_blob` at the moment a
+reader would turn it into a file Rust `dlopen`s. This table stores and
+returns it byte-for-byte and never interprets it; a row whose bytes do not
+verify is simply not served to the loader, and the next local compile
+overwrites it through the upsert below. Rows written before the envelope
+existed carry a bare `.so`, fail verification once, and are rewritten the
+same way — no migration, no backfill, no flag day.
 
 TTL is enforced ON READ ONLY: fetch() passes a cutoff timestamp in the WHERE
 clause so an expired row can never be SERVED, regardless of whether it has been

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .ssh_input_validation import RESERVED_SSH_FILE_NAMES, is_valid_key_name
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 
 class InvalidKeyNameError(Exception):
@@ -116,7 +117,7 @@ class SSHKeyGenerator:
         )
 
         if result.returncode != 0:
-            raise KeyGenerationError(result.stderr)
+            raise KeyGenerationError(redact_url_credentials(result.stderr))
 
         # Set correct permissions
         os.chmod(key_path, 0o600)

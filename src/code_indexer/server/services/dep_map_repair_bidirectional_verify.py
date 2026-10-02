@@ -35,6 +35,7 @@ from code_indexer.server.services.dep_map_repair_bidirectional_parser import (
     CitationLine,
     EdgeAuditVerdict,
 )
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def _run_rg(
             "Verification: rg exit %d (%s): %s",
             cp.returncode,
             context,
-            cp.stderr.strip(),
+            redact_url_credentials(cp.stderr).strip(),
         )
         return "error"
     except subprocess.TimeoutExpired as exc:

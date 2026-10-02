@@ -1025,7 +1025,7 @@ class RefreshScheduler:
                 "access rights are valid.",
                 alias_name,
                 count,
-                error.stderr.strip(),
+                redact_url_credentials(error.stderr).strip(),
                 self.PERMANENT_BACKOFF_CAP_SECONDS,
             )
         else:

@@ -2666,7 +2666,7 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to configure origin remote for golden clone %s: %s",
                 clone_path,
-                set_url_result.stderr,
+                redact_url_credentials(set_url_result.stderr),
             )
             return False
         return True
@@ -2686,7 +2686,7 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to fetch origin for golden clone %s: %s",
                 clone_path,
-                fetch_result.stderr,
+                redact_url_credentials(fetch_result.stderr),
             )
             return False
         return True
@@ -2707,7 +2707,7 @@ class GoldenRepoManager:
             logging.warning(
                 "Bug #1534: failed to detect current branch for golden clone %s: %s",
                 clone_path,
-                branch_result.stderr,
+                redact_url_credentials(branch_result.stderr),
             )
             return None
 
@@ -2741,7 +2741,7 @@ class GoldenRepoManager:
                 "%s branch %s: %s",
                 clone_path,
                 branch,
-                upstream_result.stderr,
+                redact_url_credentials(upstream_result.stderr),
             )
 
     def _clone_remote_repository(
@@ -3351,7 +3351,7 @@ class GoldenRepoManager:
                 )
 
                 if result.returncode != 0:
-                    combined_output = result.stdout + result.stderr
+                    combined_output = redact_url_credentials(result.stdout) + redact_url_credentials(result.stderr)
                     if self._is_recoverable_init_error(combined_output):
                         logging.warning(
                             f"Recoverable configuration conflict during init. "
@@ -4345,18 +4345,18 @@ class GoldenRepoManager:
             )
             if result.stdout:
                 logger.debug(
-                    "[change_branch] cidx index stdout:\n%s", result.stdout[-2000:]
+                    "[change_branch] cidx index stdout:\n%s", redact_url_credentials(result.stdout)[-2000:]
                 )
             if result.stderr:
                 logger.warning(
-                    "[change_branch] cidx index stderr:\n%s", result.stderr[-2000:]
+                    "[change_branch] cidx index stderr:\n%s", redact_url_credentials(result.stderr)[-2000:]
                 )
         except subprocess.CalledProcessError as e:
             logger.error(
                 "[change_branch] cidx index failed (exit %d):\nstdout: %s\nstderr: %s",
                 e.returncode,
-                (e.stdout or "")[-2000:],
-                (e.stderr or "")[-2000:],
+                (redact_url_credentials(e.stdout) or "")[-2000:],
+                (redact_url_credentials(e.stderr) or "")[-2000:],
             )
             raise
 
@@ -5274,7 +5274,7 @@ class GoldenRepoManager:
                     text=True,
                     env=build_cidx_subprocess_env(),
                 )
-                init_output = (init_result.stdout or "") + (init_result.stderr or "")
+                init_output = (redact_url_credentials(init_result.stdout) or "") + (redact_url_credentials(init_result.stderr) or "")
                 if (
                     init_result.returncode != 0
                     and "already exists" not in init_output.lower()

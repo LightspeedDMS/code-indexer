@@ -46,6 +46,7 @@ from code_indexer.global_repos.trigram_index_manager import (
 from .clone_backend import _RETRYABLE_DELETE_ERRNOS
 from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
 from .snapshot_paths import resolve_versioned_snapshot_root
+from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
 
 if TYPE_CHECKING:
     from .clone_backend import CloneBackend  # pragma: no cover
@@ -116,7 +117,7 @@ def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
                     entry_type,
                     source_path,
                     result.returncode,
-                    result.stderr.strip(),
+                    redact_url_credentials(result.stderr).strip(),
                 )
         except OSError as exc:
             logger.warning(
