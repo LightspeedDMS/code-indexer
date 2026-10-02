@@ -30,7 +30,16 @@ use xray_core::validator::validate_evaluator_source;
 // ---------------------------------------------------------------------------
 
 /// std modules rejected by `visit_path` and by `check_forbidden_std_subpath`.
-const FORBIDDEN_STD_MODULES: &[&str] = &["fs", "net", "process", "env", "io"];
+///
+/// Mirrors validator.rs's `FORBIDDEN_STD_MODULES` constant, drift-guarded by
+/// `rule_tables_match_validator_source` below. Both reject sites read that ONE
+/// constant now; they used to hand-roll a `matches!` arm each, and the copies
+/// diverged in REACH (`visit_path` checked `segments[1]` only, the `use`
+/// checker recursed every segment), which made `std::os::unix::fs::symlink(..)`
+/// accepted while `use std::os::unix::fs::symlink;` was rejected.
+const FORBIDDEN_STD_MODULES: &[&str] = &[
+    "backtrace", "env", "fs", "io", "net", "os", "panic", "path", "process", "thread",
+];
 
 /// Syntactic forms in which a forbidden std module can appear. Each form is a
 /// SEPARATE reject site in validator.rs, so each needs its own test.
@@ -64,6 +73,8 @@ const SINGLETON_CONSTRUCTS: &[&str] = &[
     "extern_abi_fn",
     "mod_decl",
     "use_std_glob",
+    "std_root_rename",
+    "std_subpath_rename",
     "syntax_error",
     "macro_rules_definition",
     "macro_body_smuggled_forbidden_construct",
@@ -237,6 +248,90 @@ reject_site_tests! {
         => "use std::io as stdio;",
            "`use std::io` (renamed) is not allowed";
 
+    // ---- std modules added when the depth bypass was closed ----
+    //
+    // `os` is the module the bypass actually reached: `visit_path` only
+    // ever inspected `segments[1]`, so `std::os::unix::fs::symlink(a, b)`
+    // sailed through while the `use` form was rejected. It is banned
+    // wholesale (not per-submodule) because `os::unix::fs`, `os::unix::net`,
+    // `os::unix::process`, `os::fd` and `os::linux` are all OS reach and
+    // the set grows every Rust release. `thread`/`panic`/`backtrace`/`path`
+    // were found in the same sweep -- see validator.rs's
+    // `FORBIDDEN_STD_MODULES` doc comment for the per-module reasoning.
+    rejects_std_os_path_expr: "std_module:os:path_expr"
+        => r#"fn f() { let _ = std::os::unix::fs::symlink("/a", "/b"); }"#,
+           "`std::os` is not allowed";
+    rejects_std_os_use_path: "std_module:os:use_path"
+        => "use std::os::unix::net::UnixStream;",
+           "`use std::os` (or sub-path) is not allowed";
+    rejects_std_os_use_name: "std_module:os:use_name"
+        => "use std::os;",
+           "`use std::os` is not allowed";
+    rejects_std_os_use_rename: "std_module:os:use_rename"
+        => "use std::os as operating_system;",
+           "`use std::os` (renamed) is not allowed";
+
+    rejects_std_thread_path_expr: "std_module:thread:path_expr"
+        => "fn f() { std::thread::spawn(|| loop {}); }",
+           "`std::thread` is not allowed";
+    rejects_std_thread_use_path: "std_module:thread:use_path"
+        => "use std::thread::JoinHandle;",
+           "`use std::thread` (or sub-path) is not allowed";
+    rejects_std_thread_use_name: "std_module:thread:use_name"
+        => "use std::thread;",
+           "`use std::thread` is not allowed";
+    rejects_std_thread_use_rename: "std_module:thread:use_rename"
+        => "use std::thread as threading;",
+           "`use std::thread` (renamed) is not allowed";
+
+    rejects_std_panic_path_expr: "std_module:panic:path_expr"
+        => "fn f() { std::panic::set_hook(Box::new(|_| {})); }",
+           "`std::panic` is not allowed";
+    rejects_std_panic_use_path: "std_module:panic:use_path"
+        => "use std::panic::set_hook;",
+           "`use std::panic` (or sub-path) is not allowed";
+    rejects_std_panic_use_name: "std_module:panic:use_name"
+        => "use std::panic;",
+           "`use std::panic` is not allowed";
+    rejects_std_panic_use_rename: "std_module:panic:use_rename"
+        => "use std::panic as panicking;",
+           "`use std::panic` (renamed) is not allowed";
+
+    rejects_std_backtrace_path_expr: "std_module:backtrace:path_expr"
+        => "fn f() { let _ = std::backtrace::Backtrace::capture(); }",
+           "`std::backtrace` is not allowed";
+    rejects_std_backtrace_use_path: "std_module:backtrace:use_path"
+        => "use std::backtrace::Backtrace;",
+           "`use std::backtrace` (or sub-path) is not allowed";
+    rejects_std_backtrace_use_name: "std_module:backtrace:use_name"
+        => "use std::backtrace;",
+           "`use std::backtrace` is not allowed";
+    rejects_std_backtrace_use_rename: "std_module:backtrace:use_rename"
+        => "use std::backtrace as bt;",
+           "`use std::backtrace` (renamed) is not allowed";
+
+    rejects_std_path_path_expr: "std_module:path:path_expr"
+        => r#"fn f() { let _ = std::path::Path::new("/etc").read_dir(); }"#,
+           "`std::path` is not allowed";
+    rejects_std_path_use_path: "std_module:path:use_path"
+        => "use std::path::PathBuf;",
+           "`use std::path` (or sub-path) is not allowed";
+    rejects_std_path_use_name: "std_module:path:use_name"
+        => "use std::path;",
+           "`use std::path` is not allowed";
+    rejects_std_path_use_rename: "std_module:path:use_rename"
+        => "use std::path as p;",
+           "`use std::path` (renamed) is not allowed";
+
+    // ---- alias-root bypass: a rename rebinds a std path to a root that
+    // `visit_path`'s `segments[0] == "std"` test cannot recognise ----
+    rejects_std_crate_root_rename: "std_root_rename"
+        => "use std as s;\nfn f() { let _ = s::fs::read_to_string(\"/etc/passwd\"); }\n",
+           "(renaming the `std` crate root) is not allowed";
+    rejects_std_subpath_rename_to_new_root: "std_subpath_rename"
+        => "use std::collections::HashMap as Map;",
+           "(renaming a `std` path) is not allowed";
+
     // ---- forbidden macros ----
     rejects_include_macro: "macro:include"
         => r#"fn f() { include!("evil.rs"); }"#,
@@ -407,28 +502,58 @@ fn rule_tables_match_validator_source() {
         );
     }
 
-    // Forbidden std modules, as literally listed in `visit_path`. "std" is the
-    // path root, not a forbidden module, so it is excluded from the comparison.
+    // Forbidden std modules. There is now exactly ONE list in validator.rs --
+    // the `FORBIDDEN_STD_MODULES` constant -- so this mirrors that constant
+    // rather than two hand-rolled `matches!` arms. The duplicate-arm shape
+    // this replaces is precisely what let the two reject sites diverge in
+    // REACH and produced the `std::os::unix::fs::symlink` bypass.
     let mut expected_modules: Vec<String> =
         FORBIDDEN_STD_MODULES.iter().map(|s| s.to_string()).collect();
     expected_modules.sort();
-    let actual_path_modules: Vec<String> =
-        ident_literals_between("fn visit_path", "syn::visit::visit_path")
-            .into_iter()
-            .filter(|s| s != "std")
-            .collect();
+    let actual_modules =
+        ident_literals_between("const FORBIDDEN_STD_MODULES: &[&str] = &[", "];");
     assert_eq!(
-        actual_path_modules, expected_modules,
-        "FORBIDDEN_STD_MODULES is out of sync with validator.rs's visit_path."
+        actual_modules, expected_modules,
+        "FORBIDDEN_STD_MODULES is out of sync with validator.rs's constant."
     );
 
-    // The same module list is repeated in check_forbidden_std_subpath for the
-    // `use` forms; it must agree with the path-expression list.
-    let actual_use_modules =
-        ident_literals_between("fn check_forbidden_std_subpath", "#[cfg(test)]");
-    assert_eq!(
-        actual_use_modules, expected_modules,
-        "FORBIDDEN_STD_MODULES is out of sync with check_forbidden_std_subpath."
+    // ...and BOTH reject sites must actually consult that constant. Without
+    // this, a future edit could reintroduce a private inline list at one site
+    // and the comparison above would still pass while the two sites drifted
+    // apart again -- the exact regression this guard exists to prevent.
+    for (site_marker, site_end) in [
+        ("fn visit_path", "syn::visit::visit_path"),
+        ("fn check_forbidden_std_subpath", "#[cfg(test)]"),
+    ] {
+        let start = VALIDATOR_SOURCE
+            .find(site_marker)
+            .unwrap_or_else(|| panic!("validator.rs no longer contains {site_marker:?}"));
+        let rest = &VALIDATOR_SOURCE[start..];
+        let end = rest
+            .find(site_end)
+            .unwrap_or_else(|| panic!("validator.rs no longer contains {site_end:?}"));
+        let body = &rest[..end];
+        assert!(
+            body.contains("is_forbidden_std_module"),
+            "{site_marker} no longer consults the shared is_forbidden_std_module() \
+             helper -- a reject site with its own private module list is how the two \
+             checks diverged in reach last time."
+        );
+    }
+
+    // Both sites must also match at EVERY depth, never at a fixed segment
+    // index. `segments[1]` is literally the bug: it accepted
+    // `std::os::unix::fs::symlink(..)` because the second segment is `os`.
+    let visit_path_start = VALIDATOR_SOURCE
+        .find("fn visit_path")
+        .expect("validator.rs no longer contains fn visit_path");
+    let visit_path_body = &VALIDATOR_SOURCE[visit_path_start..];
+    let visit_path_body =
+        &visit_path_body[..visit_path_body.find("syn::visit::visit_path").unwrap()];
+    assert!(
+        !visit_path_body.contains("segments[1]"),
+        "visit_path indexes segments[1] again -- the forbidden-module check must \
+         scan EVERY segment of a std-rooted path, not a fixed depth."
     );
 }
 

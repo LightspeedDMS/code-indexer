@@ -80,6 +80,71 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 }
 """,
     ),
+    # Modules added so the Python front door matches validator.rs. Each sample
+    # is written in the NESTED form the old two-segment patterns could not see.
+    (
+        # `std::os::fd::...` deliberately: a sample containing `::fs` would be
+        # caught by the std::fs pattern first and pin the wrong construct.
+        "std_os_nested",
+        "std::os",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _x: Option<std::os::fd::RawFd> = None;
+    Vec::new()
+}
+""",
+    ),
+    (
+        "std_thread",
+        "std::thread",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = std::thread::spawn(|| {});
+    Vec::new()
+}
+""",
+    ),
+    (
+        "std_panic",
+        "std::panic",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = std::panic::catch_unwind(|| {});
+    Vec::new()
+}
+""",
+    ),
+    (
+        "std_path",
+        "std::path",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = std::path::Path::new("/etc").read_dir();
+    Vec::new()
+}
+""",
+    ),
+    (
+        "std_backtrace",
+        "std::backtrace",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = std::backtrace::Backtrace::capture();
+    Vec::new()
+}
+""",
+    ),
+    (
+        "use_std_as",
+        "use std as",
+        """\
+use std as s;
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = s::fs::read_to_string("/etc/passwd");
+    Vec::new()
+}
+""",
+    ),
     (
         "std_net",
         "std::net",
@@ -625,8 +690,16 @@ def test_front_door_meta_test_covers_authoritative_table() -> None:
             False,
         ),
         (
+            # Flipped True -> False. The front door strips comments before
+            # matching, so this arrives as `std ::fs`; the old pattern
+            # `\bstd::fs\b` required the two colons to touch `std` and so let
+            # it through, and this case recorded that gap. The any-depth
+            # patterns tolerate whitespace around `::`, which closes it.
+            # Rust rejected this all along -- Python being the permissive one is
+            # the divergence direction that misleads, so matching Rust here is
+            # the fix, not a behaviour regression.
             "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = std /* comment */ ::fs::dummy; Vec::new() }",
-            True,
+            False,
         ),
     ],
 )

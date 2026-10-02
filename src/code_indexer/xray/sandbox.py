@@ -1217,12 +1217,77 @@ def _run_driver_batch(
 _RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
     # Unsafe code — top priority
     ("forbidden_unsafe", "unsafe", r"\bunsafe\b"),
-    # Forbidden std namespaces
-    ("forbidden_stdlib", "std::fs", r"\bstd::fs\b"),
-    ("forbidden_stdlib", "std::net", r"\bstd::net\b"),
-    ("forbidden_stdlib", "std::process", r"\bstd::process\b"),
-    ("forbidden_stdlib", "std::env", r"\bstd::env\b"),
-    ("forbidden_stdlib", "std::io", r"\bstd::io\b"),
+    # Forbidden std namespaces, matched at ANY DEPTH under `std`.
+    #
+    # These were five fixed two-segment patterns, which is exactly the depth
+    # hole validator.rs had: `std::os::unix::fs::symlink` reaches the
+    # filesystem with no `fs` in the second position, so `\bstd::fs\b` never
+    # matched it. One entry per module is kept deliberately -- the construct
+    # name is what the error message shows the user, and "std::os" is a far
+    # better diagnostic than a collapsed "forbidden module".
+    #
+    # The module list mirrors validator.rs::FORBIDDEN_STD_MODULES. Python runs
+    # FIRST, so anything it accepts that Rust rejects surfaces as a confusing
+    # failure at the compile step instead of a validation error -- and reads as
+    # "allowed" to anyone reasoning about the gate from this file.
+    (
+        "forbidden_stdlib",
+        "std::fs",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*fs\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::net",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*net\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::process",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*process\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::env",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*env\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::io",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*io\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::os",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*os\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::thread",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*thread\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::panic",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*panic\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::path",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*path\b",
+    ),
+    (
+        "forbidden_stdlib",
+        "std::backtrace",
+        r"(?<![\w:])(?:::)?std(?:\s*::\s*\w+)*?\s*::\s*backtrace\b",
+    ),
+    # `use std as s;` rebinds the whole crate past every pattern above -- after
+    # it, `s::fs::read_to_string(...)` contains no `std::` substring at all.
+    # validator.rs rejects renames under `std` for the same reason.
+    (
+        "forbidden_stdlib",
+        "use std as",
+        r"\buse\s+(?:::)?std(?:\s*::\s*\w+)*\s+as\b",
+    ),
     # Raw pointer types
     ("forbidden_raw_ptr", "*const", r"\*const\b"),
     ("forbidden_raw_ptr", "*mut", r"\*mut\b"),

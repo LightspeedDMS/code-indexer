@@ -73,6 +73,87 @@ pub fn validate_rust_graph_evaluator(source: &str) -> Result<(), Vec<ValidationE
     }
 }
 
+/// The `std` modules an evaluator may never reach, in ANY syntactic form.
+///
+/// ONE list, consulted by BOTH reject sites (`visit_path` for
+/// fully-qualified call/type paths, `check_forbidden_std_subpath` for
+/// `use` imports). It is a single constant on purpose: the two sites
+/// previously hand-rolled their own copies of the list AND applied them
+/// with different reach, and that asymmetry was a real, exploitable
+/// bypass -- `use std::os::unix::fs::symlink;` was rejected (the import
+/// checker recursed every segment and saw `fs`) while the equivalent
+/// call `std::os::unix::fs::symlink(a, b)` was ACCEPTED, because the
+/// path checker only ever looked at `segments[1]`, which is `os`. The
+/// resulting evaluator compiled with no `unsafe` and was dlopen()'d into
+/// the host process, handing anyone who can submit a query a filesystem
+/// symlink-write primitive plus UNIX-socket connect/bind.
+///
+/// Two invariants keep that class closed. Both sites must consult THIS
+/// constant, and both must match a forbidden name at EVERY depth -- never
+/// at a fixed segment index, and never by enumerating known-bad shapes
+/// such as `os::unix::fs` or `os::unix::net` one at a time. Enumerating
+/// shapes is what produced the bug; the next re-export under an
+/// unenumerated name would reopen it.
+///
+/// Why each entry is here:
+///   - `fs`, `io`, `net`, `env`, `process`: direct filesystem, I/O,
+///     network and process reach.
+///   - `os`: banned wholesale rather than per-submodule. `os::unix::fs`
+///     (symlink/chown/chroot), `os::unix::net` (UnixStream/UnixListener),
+///     `os::unix::process`, `os::fd`, `os::linux` and the `os::*::ffi`
+///     extension traits are all OS reach, and the set grows with every
+///     Rust release. Nothing in a pure source-analysis evaluator needs
+///     any of it.
+///   - `thread`: an evaluator is dlopen()'d INTO the host server process.
+///     A detached `thread::spawn` outlives the evaluation that created it
+///     and keeps running unbounded in the host -- only the compile step is
+///     time-limited, so this is both a resource-exhaustion primitive and a
+///     way out of any per-evaluation deadline. Evaluators are pure
+///     per-node / per-graph callbacks; the host owns all parallelism.
+///   - `panic`: `panic::set_hook` installs a PROCESS-GLOBAL hook that
+///     outlives the dlopen'd call and fires for unrelated panics elsewhere
+///     in the host -- the same shared-mutable-state class `static` is
+///     already banned for. (The `panic!` MACRO is separately rejected by
+///     `visit_macro`'s allowlist.)
+///   - `backtrace`: `Backtrace::capture()` renders the HOST process's
+///     stack -- symbol names, source paths, addresses -- into a string the
+///     evaluator can return as a finding. That is host-internals
+///     disclosure, not analysis of the user's repository.
+///   - `path`: `Path`/`PathBuf` carry INHERENT filesystem methods
+///     (`exists`, `metadata`, `symlink_metadata`, `read_dir`, `read_link`,
+///     `canonicalize`) that issue real syscalls with no `fs` or `io`
+///     segment anywhere in the source. Once a `Path` VALUE exists no
+///     path-segment rule can tell a safe use from a filesystem probe, so
+///     the only sound boundary is to keep `Path` out of evaluator code
+///     entirely. Evaluators receive file identifiers as `&str`; string
+///     operations cover every legitimate need, and the preamble hands out
+///     no `Path` value of its own.
+///
+/// Deliberately NOT listed, because every dangerous entry point behind
+/// them is `unsafe` (which `visit_expr_unsafe`/`visit_item_fn` reject
+/// independently) or needs a raw-pointer type / `extern` block that is
+/// already banned: `ptr`, `alloc`, `mem` (`transmute` is unsafe;
+/// `forget`/`swap`/`take` are not OS reach), `hint`
+/// (`unreachable_unchecked` is unsafe), `ffi` (inert without `extern`).
+const FORBIDDEN_STD_MODULES: &[&str] = &[
+    "backtrace",
+    "env",
+    "fs",
+    "io",
+    "net",
+    "os",
+    "panic",
+    "path",
+    "process",
+    "thread",
+];
+
+/// Single membership test for `FORBIDDEN_STD_MODULES`, so neither reject
+/// site can drift into its own inline `matches!` arm again.
+fn is_forbidden_std_module(name: &str) -> bool {
+    FORBIDDEN_STD_MODULES.contains(&name)
+}
+
 // ---- Visitor implementation ----
 
 struct ForbiddenConstructVisitor {
@@ -234,37 +315,67 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
         syn::visit::visit_item_fn(self, node);
     }
 
-    // Reject `use std::fs`, `use std::net`, `use std::process`, `use std::env`,
-    // `use std::io` (and sub-paths)
+    // Reject any `use` that reaches a `FORBIDDEN_STD_MODULES` entry at any
+    // depth, and any `use` that renames the `std` crate root.
+    //
+    // `use std as s;` is the widest hole of this family: it rebinds the
+    // WHOLE of std to a root name `visit_path` does not recognise, so
+    // `s::fs::read_to_string(..)` afterwards sails past every
+    // forbidden-module check in this file. Renaming a std SUB-path (`use
+    // std::os::unix as o;` -> `o::fs::symlink(..)`) does the same thing one
+    // level down and is rejected inside `check_forbidden_std_subpath`.
     fn visit_use_tree(&mut self, node: &'ast syn::UseTree) {
-        if let syn::UseTree::Path(path) = node {
-            let ident = path.ident.to_string();
-            if ident == "std" {
+        match node {
+            syn::UseTree::Path(path) if path.ident == "std" => {
                 check_forbidden_std_subpath(&path.tree, &mut self.errors);
             }
+            syn::UseTree::Rename(rename) if rename.ident == "std" => {
+                let line = Self::span_line(rename.ident.span());
+                self.add_error(
+                    line,
+                    format!(
+                        "`use std as {}` (renaming the `std` crate root) is not allowed in \
+                         evaluator code -- it rebinds every std module, forbidden ones \
+                         included, to a root name the forbidden-module check cannot follow",
+                        rename.rename
+                    ),
+                );
+            }
+            _ => {}
         }
         syn::visit::visit_use_tree(self, node);
     }
 
-    // Reject fully-qualified std::fs::*, std::net::*, std::process::*,
-    // std::env::*, std::io::* path expressions used directly without import.
+    // Reject a fully-qualified `std`-rooted path that reaches a
+    // `FORBIDDEN_STD_MODULES` entry at ANY depth -- not just at
+    // `segments[1]`.
+    //
+    // THIS IS THE FIX FOR THE DEPTH BYPASS. The previous version tested
+    // `segments[1]` ONLY, so `std::os::unix::fs::symlink(a, b)` was
+    // accepted (its second segment is `os`) even though the import form
+    // `use std::os::unix::fs::symlink;` was correctly rejected by
+    // `check_forbidden_std_subpath`, which has always recursed every
+    // segment. Both sites now consult the same list with the same reach.
+    //
+    // The `std` root check stays: it is what keeps the rule from firing on
+    // an ordinary user associated function whose name happens to collide
+    // with a module name, e.g. `Analyzer::process(node)`. Paths rooted at
+    // an ALIAS of std cannot reach here, because `visit_use_tree` and
+    // `check_forbidden_std_subpath` reject the renames that would create
+    // one. A leading `::` (`::std::os::unix::fs::symlink`) does not change
+    // `segments`, so it is covered by the same test.
     fn visit_path(&mut self, node: &'ast syn::Path) {
-        if node.segments.len() >= 2 {
-            let first = node.segments[0].ident.to_string();
-            let second = node.segments[1].ident.to_string();
-            if first == "std"
-                && matches!(
-                    second.as_str(),
-                    "fs" | "net" | "process" | "env" | "io"
-                )
+        if node.segments.len() >= 2 && node.segments[0].ident == "std" {
+            if let Some(forbidden) = node
+                .segments
+                .iter()
+                .skip(1)
+                .find(|segment| is_forbidden_std_module(&segment.ident.to_string()))
             {
                 let line = Self::span_line(node.segments[0].ident.span());
                 self.add_error(
                     line,
-                    format!(
-                        "`std::{}` is not allowed in evaluator code",
-                        second
-                    ),
+                    format!("`std::{}` is not allowed in evaluator code", forbidden.ident),
                 );
             }
         }
@@ -459,12 +570,18 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
     }
 }
 
-/// Recursively checks `use std::<subpath>` for forbidden modules.
+/// Recursively checks everything under a `use std::...` tree.
+///
+/// Walks EVERY segment -- a forbidden module is rejected no matter how
+/// deep it sits (`use std::os::unix::fs::symlink;`). `visit_path` now
+/// applies the same reach to fully-qualified call/type paths; keeping the
+/// two in step, via the shared `FORBIDDEN_STD_MODULES`, is the whole point
+/// (see that constant's comment for the bypass their divergence caused).
 fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationError>) {
     match tree {
         syn::UseTree::Path(path) => {
             let name = path.ident.to_string();
-            if matches!(name.as_str(), "fs" | "net" | "process" | "env" | "io") {
+            if is_forbidden_std_module(&name) {
                 let line = path.ident.span().start().line;
                 errors.push(ValidationError {
                     line,
@@ -484,26 +601,46 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
         }
         syn::UseTree::Name(name) => {
             let ident = name.ident.to_string();
-            if matches!(ident.as_str(), "fs" | "net" | "process" | "env" | "io") {
+            if is_forbidden_std_module(&ident) {
                 let line = name.ident.span().start().line;
                 errors.push(ValidationError {
                     line,
-                    message: format!(
-                        "`use std::{}` is not allowed in evaluator code",
-                        ident
-                    ),
+                    message: format!("`use std::{}` is not allowed in evaluator code", ident),
                 });
             }
         }
+        // Every rename under `std` is rejected, not just renames of a
+        // forbidden module. A rename binds whatever it names to a NEW root
+        // identifier, and nothing downstream can tell whether that
+        // identifier is an item (harmless) or a module (`use std::os::unix
+        // as o;` -> `o::fs::symlink(..)`, which `visit_path` cannot follow
+        // because the path is no longer rooted at `std`). Deciding that
+        // syntactically is impossible, so this fails CLOSED. The cost is
+        // cosmetic -- `use std::collections::HashMap as Map;` must be
+        // written `use std::collections::HashMap;` -- and the message says
+        // so. Narrowing this to "renames that look like modules" would
+        // reintroduce exactly the guess-the-shape reasoning that produced
+        // the original bypass.
         syn::UseTree::Rename(rename) => {
             let ident = rename.ident.to_string();
-            if matches!(ident.as_str(), "fs" | "net" | "process" | "env" | "io") {
-                let line = rename.ident.span().start().line;
+            let line = rename.ident.span().start().line;
+            if is_forbidden_std_module(&ident) {
                 errors.push(ValidationError {
                     line,
                     message: format!(
                         "`use std::{}` (renamed) is not allowed in evaluator code",
                         ident
+                    ),
+                });
+            } else {
+                errors.push(ValidationError {
+                    line,
+                    message: format!(
+                        "`use std::{} as {}` (renaming a `std` path) is not allowed in \
+                         evaluator code -- an alias becomes a new path root that the \
+                         forbidden-module check cannot follow; import the item under its \
+                         own name instead",
+                        ident, rename.rename
                     ),
                 });
             }
@@ -1180,5 +1317,275 @@ fn foo() {}
         let code = "const X: i32 = 42; fn f() {}";
         let result = validate_evaluator_source(code);
         assert!(result.is_ok(), "const declaration must be allowed, got: {:?}", result.err());
+    }
+
+    // --- CRITICAL: forbidden `std` modules were only checked at a FIXED
+    // DEPTH on fully-qualified call paths, while the `use`-import checker
+    // recursed EVERY segment ---
+    //
+    // `visit_path` tested only `segments[0] == "std" && segments[1] in
+    // {fs, net, process, env, io}`. `use std::os::unix::fs::symlink;` was
+    // therefore correctly rejected (the use-checker recurses and sees
+    // `fs`), but the equivalent fully-qualified CALL
+    // `std::os::unix::fs::symlink(a, b)` was ACCEPTED, because its
+    // `segments[1]` is `os`, not `fs`. The resulting evaluator compiles
+    // with no `unsafe` and is dlopen()'d by the host, handing any
+    // principal who can submit a query a filesystem symlink-write and
+    // UNIX-socket connect/bind primitive inside the serving process.
+    //
+    // The tests below pin the CLASS, not the individual shapes: a
+    // forbidden module name must be rejected at ANY depth, through ANY
+    // root binding, in BOTH the import checker and the path checker.
+
+    #[test]
+    fn std_os_unix_fs_symlink_fully_qualified_call_must_be_rejected() {
+        let code = r#"fn f() { let _ = std::os::unix::fs::symlink("/etc/passwd", "/tmp/pwn"); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(
+            result.is_err(),
+            "`std::os::unix::fs::symlink` is a filesystem-write primitive and must be rejected \
+             even though its second path segment is `os` rather than `fs`"
+        );
+    }
+
+    #[test]
+    fn std_os_unix_fs_chown_fully_qualified_call_must_be_rejected() {
+        let code = r#"fn f() { let _ = std::os::unix::fs::chown("/tmp/x", Some(0), Some(0)); }"#;
+        assert!(validate_evaluator_source(code).is_err(), "`std::os::unix::fs::chown` must be rejected");
+    }
+
+    #[test]
+    fn std_os_unix_fs_chroot_fully_qualified_call_must_be_rejected() {
+        let code = r#"fn f() { let _ = std::os::unix::fs::chroot("/tmp"); }"#;
+        assert!(validate_evaluator_source(code).is_err(), "`std::os::unix::fs::chroot` must be rejected");
+    }
+
+    #[test]
+    fn std_os_unix_net_unix_stream_connect_must_be_rejected() {
+        let code = r#"fn f() { let _ = std::os::unix::net::UnixStream::connect("/var/run/docker.sock"); }"#;
+        assert!(
+            validate_evaluator_source(code).is_err(),
+            "`std::os::unix::net::UnixStream::connect` is a UNIX-socket IPC primitive and must be rejected"
+        );
+    }
+
+    #[test]
+    fn std_os_unix_net_unix_listener_bind_must_be_rejected() {
+        let code = r#"fn f() { let _ = std::os::unix::net::UnixListener::bind("/tmp/s"); }"#;
+        assert!(
+            validate_evaluator_source(code).is_err(),
+            "`std::os::unix::net::UnixListener::bind` must be rejected"
+        );
+    }
+
+    #[test]
+    fn std_os_module_is_rejected_wholesale_at_every_reach() {
+        // Every one of these reaches the OS through `std::os` without a
+        // forbidden SECOND segment. Pinning the whole `std::os` subtree is
+        // what closes the class -- enumerating `unix::fs`, `unix::net`,
+        // `unix::process`, `linux::fs`, `fd`, ... one shape at a time is
+        // exactly the mistake that produced this bug.
+        for code in [
+            r#"fn f() { let _ = std::os::unix::process::parent_id(); }"#,
+            r#"fn f() { let _ = std::os::unix::ffi::OsStrExt::from_bytes(b"x"); }"#,
+            r#"use std::os::unix::fs::MetadataExt;"#,
+            r#"use std::os::linux::fs::MetadataExt;"#,
+            r#"use std::os::fd::AsRawFd;"#,
+            r#"use std::os::unix::ffi::OsStrExt;"#,
+            r#"fn f() { let _: Option<std::os::fd::RawFd> = None; }"#,
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "every `std::os` reach must be rejected, but this was accepted: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn leading_colon_std_path_is_rejected_at_depth() {
+        let code = r#"fn f() { let _ = ::std::os::unix::fs::symlink("/a", "/b"); }"#;
+        assert!(
+            validate_evaluator_source(code).is_err(),
+            "a leading `::` must not change the outcome for a forbidden std path"
+        );
+    }
+
+    #[test]
+    fn renaming_the_std_crate_root_must_be_rejected() {
+        // `use std as s;` rebinds the entire std crate to a root name the
+        // path checker does not recognise -- `s::fs::read_to_string(..)`
+        // then bypasses EVERY forbidden-module check in this file. This is
+        // a strictly wider hole than the depth bug above.
+        let code = r#"
+use std as s;
+fn f() { let _ = s::fs::read_to_string("/etc/passwd"); }
+"#;
+        assert!(
+            validate_evaluator_source(code).is_err(),
+            "`use std as s;` rebinds the std root and must be rejected"
+        );
+    }
+
+    #[test]
+    fn renaming_a_std_module_to_a_new_root_must_be_rejected() {
+        for code in [
+            "use std::os::unix as o;\nfn f() { let _ = o::fs::symlink(\"/a\", \"/b\"); }\n",
+            "use std::os as o;\nfn f() { let _ = o::unix::net::UnixListener::bind(\"/tmp/s\"); }\n",
+            "use std::collections as c;\nfn f() { let _: c::HashMap<i32, i32> = c::HashMap::new(); }\n",
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "renaming a std path binds it to a root the path checker cannot follow and \
+                 must be rejected, but this was accepted: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn std_thread_must_be_rejected() {
+        // An evaluator is dlopen()'d INTO the host server process. A
+        // detached `std::thread::spawn` outlives the evaluation that
+        // created it and keeps running in the host with no runtime bound
+        // (only the compile step is time-limited), so it is an unbounded
+        // resource-exhaustion and timeout-escape primitive. Evaluators are
+        // pure per-node / per-graph analysis callbacks; the host owns all
+        // parallelism, so no legitimate evaluator needs threads.
+        for code in [
+            r#"fn f() { std::thread::spawn(|| loop {}); }"#,
+            r#"fn f() { let _ = std::thread::Builder::new().spawn(|| {}); }"#,
+            r#"use std::thread;"#,
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "`std::thread` must be rejected, but this was accepted: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn std_panic_must_be_rejected() {
+        // `std::panic::set_hook` installs a PROCESS-GLOBAL hook that
+        // survives the evaluator's dlopen'd call and fires for unrelated
+        // panics elsewhere in the host -- the same shared-mutable-state
+        // class this file already bans `static` for.
+        for code in [
+            r#"fn f() { std::panic::set_hook(Box::new(|_| {})); }"#,
+            r#"fn f() { let _ = std::panic::catch_unwind(|| 1); }"#,
+            r#"use std::panic::set_hook;"#,
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "`std::panic` must be rejected, but this was accepted: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn std_backtrace_must_be_rejected() {
+        // `Backtrace::capture()` renders the HOST process's stack --
+        // its symbol names, source paths and addresses -- into a string
+        // the evaluator can return as a finding. That is host-internals
+        // disclosure, not analysis of the user's repository.
+        let code = r#"fn f() { let _ = std::backtrace::Backtrace::capture(); }"#;
+        assert!(validate_evaluator_source(code).is_err(), "`std::backtrace` must be rejected");
+    }
+
+    #[test]
+    fn std_path_must_be_rejected() {
+        // `Path`/`PathBuf` carry INHERENT filesystem methods --
+        // `exists`, `metadata`, `symlink_metadata`, `read_dir`,
+        // `read_link`, `canonicalize` -- that hit real syscalls with no
+        // `fs` or `io` segment anywhere in the source. Once a `Path`
+        // value exists, no path-segment rule can tell a safe use from a
+        // filesystem probe, so the only sound boundary is to keep `Path`
+        // values out of evaluator code. Evaluators receive file
+        // identifiers as `&str`; string operations cover every
+        // legitimate need.
+        for code in [
+            r#"fn f() { let _ = std::path::Path::new("/etc").read_dir(); }"#,
+            r#"fn f() { let _ = std::path::Path::new("/etc/shadow").exists(); }"#,
+            r#"use std::path::PathBuf;"#,
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "`std::path` must be rejected, but this was accepted: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_std_module_rejection_names_the_offending_module() {
+        let result = validate_evaluator_source(
+            r#"fn f() { let _ = std::os::unix::fs::symlink("/a", "/b"); }"#,
+        );
+        let errors = result.expect_err("must be rejected");
+        assert!(
+            errors.iter().any(|e| e.message.contains("std::os")),
+            "the error must name the forbidden module `std::os`, got: {:?}",
+            errors
+        );
+    }
+
+    // --- false-positive guards: the shipped evaluator corpus and every
+    // pure-computation std module must still validate ---
+
+    #[test]
+    fn pure_computation_std_modules_are_still_accepted() {
+        let code = r#"
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::Write;
+use std::cmp::Ordering;
+const LIMIT: usize = 42;
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(node.kind.clone());
+    *counts.entry(node.kind.clone()).or_insert(0) += 1;
+    let _ = std::cmp::max(node.start_line, LIMIT);
+    let _ = std::mem::take(&mut counts);
+    let _ = std::time::Duration::from_secs(1);
+    let _ = u32::MAX;
+    let _ = Ordering::Less;
+    let _ = format!("{:?}", node.start_line);
+    let _ = std::collections::BTreeMap::<String, usize>::new();
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(code).is_ok(),
+            "pure-computation std modules must still be accepted, got: {:?}",
+            validate_evaluator_source(code).err()
+        );
+    }
+
+    #[test]
+    fn user_associated_functions_named_like_forbidden_modules_are_still_accepted() {
+        // The forbidden-module rule must key on `std`-rooted paths, not on
+        // the bare segment name -- `Analyzer::process(..)` is an ordinary
+        // user associated function, not `std::process`.
+        let code = r#"
+struct Analyzer;
+impl Analyzer {
+    fn process(n: &OwnedNode) -> usize { n.start_line }
+    fn io(n: &OwnedNode) -> usize { n.start_byte }
+}
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = Analyzer::process(node) + Analyzer::io(node);
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(code).is_ok(),
+            "a user associated function whose name collides with a forbidden std module \
+             must still be accepted, got: {:?}",
+            validate_evaluator_source(code).err()
+        );
     }
 }
