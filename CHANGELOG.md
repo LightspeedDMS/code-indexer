@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.80.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery: the Google SecOps service-account key is pasted or uploaded in the SIEM Delivery section of the Web UI configuration screen. It is validated (RSA service-account key with the expected token endpoint), stored encrypted in the database and never returned; only its identity is shown. In cluster mode the encryption key is derived from the shared cluster secret, and a stored key check reports a key mismatch distinctly. The key-file path setting is removed.
+- SIEM delivery: an optional additional trusted CA bundle (CA certificates only, not expired) is added to the default trust for the token and import requests. Certificate and hostname verification stay on, and environment proxy settings are honoured. Credential and CA changes require TOTP elevation and are audited by identity or fingerprint. Upload forms are size-capped before parsing.
+
+### Fixed
+
+- SIEM delivery: abandoning queued rows works when no destination is configured, so rows left behind by a decommission can be cleared. Abandon and retarget move only rows that existed when the operation started, re-check the committed destination every round and refuse while a send to that destination is in flight.
+- Incremental, resume and crash-recovery indexing no longer re-read and re-parse the collection metadata file for every indexed file; the parsed metadata is reused through the collection metadata cache, which now keys on size and inode as well as modification time. A crash-recovery reconcile of a large repository after a restart no longer runs for hours (#1997).
+- Reconcile analysis is linear in the number of files, failed-path de-duplication is linear, and a stored absolute path outside the codebase root no longer aborts reconcile; such a path is removed only when its file no longer exists (#1998).
+- The daemon cache eviction thread stops immediately when the daemon stops, instead of at its next 60-second wake-up.
+
+### Tests
+
+- Server unit tests in the gate's fast mode disable per-commit fsync on every SQLite connection and no longer wait out the primary-instance lock bound when a second application is built in the same process (#1995).
+- Unit tests stop any daemon cache eviction thread they start; the SIEM TLS test relays use the selectors module.
+
 ## [12.79.0] - 2026-10-01
 
 ### Added
