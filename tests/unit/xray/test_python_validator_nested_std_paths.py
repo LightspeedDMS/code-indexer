@@ -63,3 +63,26 @@ class TestPythonMatchesRustOnNestedStdPaths:
         ):
             assert validate_rust_evaluator(src).ok, src
 
+
+
+class TestExternCrateParity:
+    """`extern crate std as s;` must be rejected on BOTH sides.
+
+    Python already rejects it via the broad `\\bextern\\b` pattern, so this is
+    not a live leak -- but that was luck, not design: nothing pinned it, and
+    the Rust validator (the authoritative gate, and the only one on a path that
+    reaches xray-cli without the Python pre-check) accepted it outright. This
+    test exists so the parity is checked rather than coincidental.
+    """
+
+    def test_extern_crate_is_rejected(self) -> None:
+        from code_indexer.xray.sandbox import validate_rust_evaluator
+
+        for src in (
+            "extern crate std as s;\n"
+            "fn evaluate_node(n: &OwnedNode) -> Vec<EvalFinding> "
+            '{ let _ = s::fs::read_to_string("/etc/passwd"); Vec::new() }',
+            "extern crate alloc as a;\n"
+            "fn evaluate_node(n: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }",
+        ):
+            assert not validate_rust_evaluator(src).ok, src

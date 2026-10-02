@@ -403,6 +403,26 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
         syn::visit::visit_type_ptr(self, node);
     }
 
+    // Reject `extern crate`, which rebinds a crate root the path checks never
+    // see. `use std as s;` is rejected as a rename, but `extern crate std as s;`
+    // is a different syn item (ItemExternCrate, not ItemUse) and had no visitor
+    // at all, so `s::fs::read_to_string(...)` passed every check: visit_path
+    // only matches when segments[0] is literally `std`. Edition 2021 still
+    // accepts the form, and rustc_driver compiles with --edition 2021.
+    //
+    // Banned outright rather than only for `std`: an evaluator is compiled as a
+    // single file with a fixed dependency set, so it has no legitimate reason
+    // to name a crate this way, and an allowlist here would be one more list to
+    // keep in step with the path checks.
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        let line = Self::span_line(node.extern_token.span);
+        self.add_error(
+            line,
+            "`extern crate` is not allowed in evaluator code".to_string(),
+        );
+        syn::visit::visit_item_extern_crate(self, node);
+    }
+
     // Reject `extern` blocks
     fn visit_item_foreign_mod(&mut self, node: &'ast syn::ItemForeignMod) {
         let line = Self::span_line(node.brace_token.span.open());
@@ -1409,6 +1429,35 @@ fn foo() {}
             validate_evaluator_source(code).is_err(),
             "a leading `::` must not change the outcome for a forbidden std path"
         );
+    }
+
+    #[test]
+    fn extern_crate_rebinding_std_must_be_rejected() {
+        // The same rebinding as `use std as s;` without a `use`. ItemExternCrate
+        // is a different syn item, so visit_use_tree never ran and visit_path
+        // saw segments ["s","fs",..] with segments[0] != "std".
+        let code = r#"
+extern crate std as s;
+fn f() { let _ = s::fs::read_to_string("/etc/passwd"); }
+"#;
+        assert!(
+            validate_evaluator_source(code).is_err(),
+            "`extern crate std as s;` rebinds the std root and must be rejected"
+        );
+    }
+
+    #[test]
+    fn any_extern_crate_is_rejected() {
+        for code in [
+            "extern crate std;\nfn f() {}",
+            "extern crate alloc as a;\nfn f() {}",
+            "extern crate core;\nfn f() {}",
+        ] {
+            assert!(
+                validate_evaluator_source(code).is_err(),
+                "`extern crate` must be rejected: {code}"
+            );
+        }
     }
 
     #[test]
