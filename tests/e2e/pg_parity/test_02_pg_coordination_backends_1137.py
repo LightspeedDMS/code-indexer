@@ -82,6 +82,7 @@ import httpx
 import pyotp
 import pytest
 
+from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.e2e.helpers import (
     login,
     require_postgres,
@@ -1047,12 +1048,17 @@ def test_ac2_pg_api_metrics_drain_on_shutdown(
 
         shutil.rmtree(data_dir, ignore_errors=True)
     _write_throwaway_config(data_dir, _THROWAWAY_PORT)
+    # Bug #1996: its own stub unit with its own bind values (never the
+    # harness's stub for another server, nor the host's real unit).
+    unit_dir = data_dir / "systemd-units"
+    write_stub_systemd_unit(unit_dir, _THROWAWAY_PORT, host=_THROWAWAY_HOST)
 
     url = f"http://{_THROWAWAY_HOST}:{_THROWAWAY_PORT}"
     env = dict(os.environ)
     env["PYTHONPATH"] = str(src_dir)
     env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
     env["CIDX_DATA_DIR"] = str(data_dir)
+    env["SYSTEMD_UNIT_DIR"] = str(unit_dir)
     voyage = os.environ.get("E2E_VOYAGE_API_KEY") or os.environ.get(
         "VOYAGE_API_KEY", ""
     )

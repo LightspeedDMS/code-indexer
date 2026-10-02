@@ -457,10 +457,9 @@ class ProgressiveMetadata:
         when given, also sets ``failed_files`` for a run that records no
         other progress.
         """
-        unique: List[str] = []
-        for path in file_paths:
-            if str(path) not in unique:
-                unique.append(str(path))
+        # Bug #1998: order-preserving O(F) dedup -- every file can fail in one
+        # run, so a list-membership dedup here was O(files^2).
+        unique: List[str] = list(dict.fromkeys(str(path) for path in file_paths))
         self.metadata["failed_file_paths"] = unique
         if failed_count is not None:
             self.metadata["failed_files"] = failed_count

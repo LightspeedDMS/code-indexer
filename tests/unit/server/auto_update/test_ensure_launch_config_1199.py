@@ -6,7 +6,10 @@ Behavioral: calls real main() with patched uvicorn.run and asserts kwargs.
 
 from unittest.mock import patch
 
+import pytest
 
+
+@pytest.mark.usefixtures("home_in_tmp")  # Bug #1996: main() creates ~/.cidx-server
 class TestAC0MainPy:
     """AC0: code_indexer.server.main accepts --workers and forwards to uvicorn.run."""
 

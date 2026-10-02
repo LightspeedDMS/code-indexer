@@ -34,6 +34,14 @@ from code_indexer.server.services.audit_log_query import (
     build_terminal_rows_sql,
 )
 
+from code_indexer.server.services.siem_delivery.capture import (
+    SiemDestinations,
+    prepare_captures,
+    record_transaction_failure,
+    write_captures,
+)
+from code_indexer.server.services.siem_delivery.db import POSTGRES
+
 from .pg_utils import sanitize_row
 
 
@@ -129,16 +137,30 @@ class AuditLogPostgresBackend:
     # Write
     # ------------------------------------------------------------------
 
-    def insert_events(self, events: Sequence[AuditEvent]) -> None:
+    def insert_events(
+        self,
+        events: Sequence[AuditEvent],
+        *,
+        siem_destinations: Optional[SiemDestinations] = None,
+    ) -> None:
         """Insert *events* in ONE transaction (not one commit per row).
 
-        Raises on failure; the whole batch is rolled back.
+        SIEM capture joins it: projection runs before the transaction, and
+        each queue row is a savepointed (nested transaction), fail-open
+        INSERT after the audit rows.  Raises on failure; the whole batch is
+        rolled back.
         """
         if not events:
             return
-        with self._conn() as conn:
-            with conn.transaction():
-                _insert_event_rows(conn, events)
+        prepared = prepare_captures(events, siem_destinations)
+        try:
+            with self._conn() as conn:
+                with conn.transaction():
+                    _insert_event_rows(conn, events)
+                    write_captures(conn, prepared, POSTGRES)
+        except Exception as exc:
+            record_transaction_failure(prepared, exc)
+            raise
 
     def log(
         self,

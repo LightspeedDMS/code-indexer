@@ -86,6 +86,19 @@ class TestIsAllowlisted:
         )
         assert is_allowlisted(entry) is False
 
+    def test_phase7_only_entries_are_not_global(self):
+        """The fault-injection banner and the scripted SIEM halt/quarantine
+        warnings are allowed ONLY for the Phase 7 audits that pass them."""
+        from tests.e2e.siem_delivery.log_allowlist import PHASE7_LOG_ALLOWLIST
+
+        assert any("FAULT INJECTION HARNESS ACTIVE" in p for p in PHASE7_LOG_ALLOWLIST)
+        for pattern in PHASE7_LOG_ALLOWLIST:
+            entry = _make_entry(level="WARNING", message=f"x {pattern} y")
+            assert is_allowlisted(entry) is False, pattern
+            assert is_allowlisted(entry, extra_allowlist=PHASE7_LOG_ALLOWLIST)
+        other = _make_entry(level="WARNING", message="SIEM delivery halted: class=x")
+        assert is_allowlisted(other, extra_allowlist=PHASE7_LOG_ALLOWLIST) is False
+
     def test_unknown_warning_returns_false(self):
         """A WARNING whose message is not on the allowlist fails the check."""
         entry = _make_entry(

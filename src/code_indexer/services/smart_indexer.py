@@ -15,7 +15,17 @@ import time
 import datetime
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, FrozenSet, Optional, Callable, Tuple, TYPE_CHECKING
+from typing import (
+    List,
+    Dict,
+    Any,
+    FrozenSet,
+    Optional,
+    Callable,
+    Set,
+    Tuple,
+    TYPE_CHECKING,
+)
 from dataclasses import dataclass
 
 from ..config import Config, VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
@@ -2088,6 +2098,24 @@ class SmartIndexer(HighThroughputProcessor):
         # as failed so the partial result is never silent.
         analysis_failed_paths: List[str] = []
 
+        # Bug #1998: normalize the indexed paths into a set ONCE. Rebuilding
+        # (and linearly scanning) this collection per file on disk made the
+        # analysis O(files_on_disk x indexed_files).
+        # A stored absolute path outside the codebase root is keyed by its
+        # own string, exactly as _get_indexed_files_snapshot keys it -- it
+        # can never match an on-disk relative path, and must not abort the
+        # run (reconcile is also the crash-recovery path).
+        indexed_relative_paths: Set[Any] = set()
+        for p in indexed_files_with_timestamps.keys():
+            try:
+                indexed_relative_paths.add(
+                    str(Path(p).relative_to(self.config.codebase_dir))
+                    if Path(p).is_absolute()
+                    else p
+                )
+            except ValueError:
+                indexed_relative_paths.add(str(p))
+
         for file_path in all_files_to_index:
             try:
                 # Get relative path for content ID generation
@@ -2100,14 +2128,7 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # RECONCILE FIX: Check if file exists in database AT ALL, not just visible in current branch
                 # Reconcile is about disk-to-database consistency, not branch visibility
-                file_in_db = relative_path in [
-                    (
-                        str(Path(p).relative_to(self.config.codebase_dir))
-                        if Path(p).is_absolute()
-                        else p
-                    )
-                    for p in indexed_files_with_timestamps.keys()
-                ]
+                file_in_db = relative_path in indexed_relative_paths
 
                 if not file_in_db:
                     # File exists on disk but NOT in database at all
@@ -2226,14 +2247,28 @@ class SmartIndexer(HighThroughputProcessor):
         }
 
         for indexed_file_path in indexed_files_with_timestamps:
-            # Convert to string for comparison
-            indexed_file_str = (
-                str(indexed_file_path.relative_to(self.config.codebase_dir))
-                if hasattr(indexed_file_path, "relative_to")
-                else str(indexed_file_path)
-            )
+            # Convert to string for comparison. A stored path outside the
+            # codebase root keeps its own absolute string (snapshot
+            # semantics).
+            outside_root = False
+            try:
+                indexed_file_str = (
+                    str(indexed_file_path.relative_to(self.config.codebase_dir))
+                    if hasattr(indexed_file_path, "relative_to")
+                    else str(indexed_file_path)
+                )
+            except ValueError:
+                indexed_file_str = str(indexed_file_path)
+                outside_root = True
 
-            if indexed_file_str not in disk_files_set:
+            if outside_root:
+                # An out-of-root path can never appear in the relative
+                # on-disk scan, so "not scanned" says nothing about it: remove
+                # it (git hide / non-git hard delete) only when the file is
+                # really gone from its own absolute location.
+                if not Path(indexed_file_str).exists():
+                    deleted_files.append(indexed_file_str)
+            elif indexed_file_str not in disk_files_set:
                 # CRITICAL: Check if file genuinely deleted from filesystem vs just branch switch
                 if self.is_git_aware():
                     # For git projects, check if file exists in current working directory

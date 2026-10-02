@@ -19,14 +19,42 @@ path or bumps this file's own mtime -- never an in-place mutation whose
 content changes while the mtime stays fixed); every other (mutable) path
 gets a SHORT-TTL bounded cache so a missed invalidation still self-heals.
 
-Cache key is ``(str(collection_dir), mtime_ns)`` -- an actual ``os.stat()``
-(cheap, microseconds) is performed on EVERY ``.get()`` call to read the
-CURRENT mtime, so a real on-disk content change (which always changes the
-file's mtime, since every writer in this codebase uses the atomic
-temp-file + ``os.replace`` pattern) is a structural cache MISS on the very
-next call, regardless of TTL. This is what makes the cache genuinely
-drift-safe rather than merely TTL-bounded-stale: the file's own identity
-(mtime) is part of the key, not just a coarse periodic re-check.
+Cache key is ``(str(collection_dir), mtime_ns, size, inode)`` -- an actual
+``os.stat()`` (cheap, microseconds) is performed on EVERY ``.get()`` call to
+read the CURRENT file identity, so a real on-disk content change is a
+structural cache MISS on the very next call, regardless of TTL. This is what
+makes the cache drift-safe rather than merely TTL-bounded-stale: the file's
+own identity is part of the key, not just a coarse periodic re-check.
+
+Bug #1997: an mtime-only key is not a sufficient identity. On a
+coarse-timestamp filesystem, or for two writes inside the same timestamp
+tick, a rewrite keeps the mtime unchanged. Size catches an in-place rewrite
+that adds or removes the ``chunks_db`` discriminator; the inode catches a
+temp-file + ``os.replace`` write.
+
+Writer invariant this cache relies on (audited for Bug #1997): EVERY writer
+of ``collection_meta.json`` writes a temp file in the same directory and
+``os.replace``-s it onto the target, so each rewrite is a NEW inode --
+``FilesystemVectorStore._atomic_write_json`` and ``clear_collection``,
+``chunk_layout.write_chunks_db_discriminator``, ``HNSWIndexManager``'s
+metadata writer, fleet migration (``collection_migration``) and the
+temporal projection-matrix backfill. A new writer MUST follow the same
+pattern. Layout flips (adding or removing the discriminator) happen only
+under the collection's index write lock -- end-of-build finalize, clear,
+fleet migration -- never while another process holds an active indexing
+session on that collection.
+
+Residual window: a replacement that lands in the same mtime tick, with the
+same size, AND reuses the freed inode number would be a stale hit. For this
+store's OWN writes it is closed by :meth:`CollectionMetaCache.invalidate`,
+called by ``FilesystemVectorStore`` at three sites (``_atomic_write_json``
+for this file, ``end_indexing`` after the HNSW publish and discriminator
+commit, and ``clear_collection``). Other writers (HNSW manager, fleet
+migration, other processes) rely on the stat key alone; a layout flip
+always changes the size. Across cluster nodes, NFS attribute caching
+(``acregmax``) can delay a remote write's new stat identity -- the same
+window ``search()`` already accepted when this cache was introduced (Story
+#1492); the mutable-path TTL bounds it.
 
 Path handling: ``collection_dir`` is normalized via ``Path(...).resolve()``
 before use, collapsing any ``..``/symlink indirection into a canonical
@@ -55,10 +83,11 @@ This module intentionally does NOT thread ``chunk_layout_token``/
 ``_activation_scoped_cache_key`` does for the HNSW/id_index caches --
 THIS cache's value IS the full parsed ``collection_meta.json`` (the
 authoritative source those discriminators are themselves derived FROM), so
-consolidation/reactivation are naturally observed via the mtime change
-alone: a fresh consolidation write to ``collection_meta.json`` bumps its
-mtime, giving a fresh key and a fresh parse with the updated
-``chunks_db``/``hnsw_index`` content immediately.
+consolidation/reactivation are naturally observed via the file's changed
+stat identity: a fresh consolidation write to ``collection_meta.json`` is a
+temp-file + ``os.replace`` (new inode, normally new size and mtime), giving
+a fresh key and a fresh parse with the updated ``chunks_db``/``hnsw_index``
+content immediately.
 """
 
 from __future__ import annotations
@@ -87,19 +116,19 @@ _COLLECTION_META_FILENAME = "collection_meta.json"
 _MUTABLE_TTL_SECONDS = 30.0
 _MAX_ENTRIES = 512
 
-# (collection_dir as str, mtime_ns) -- mtime_ns is always a real,
-# just-stat'd value; see CollectionMetaCache.get().
-_MetaCacheKey = Tuple[str, int]
+# (collection_dir as str, mtime_ns, size, inode) -- always real, just-stat'd
+# values; see CollectionMetaCache._stat_key().
+_MetaCacheKey = Tuple[str, int, int, int]
 
 
 def _read_collection_meta(key: _MetaCacheKey) -> Optional[Dict[str, Any]]:
     """Loader: read+parse collection_meta.json. Fail-closed to None.
 
-    The ``mtime_ns`` component of ``key`` is used only for cache-key
-    identity (see module docstring) -- the read itself always re-reads the
-    CURRENT file content at the given path.
+    The stat components of ``key`` are used only for cache-key identity (see
+    module docstring) -- the read itself always re-reads the CURRENT file
+    content at the given path.
     """
-    collection_dir_str, _mtime_ns = key
+    collection_dir_str = key[0]
     meta_path = Path(collection_dir_str) / _COLLECTION_META_FILENAME
     try:
         content = meta_path.read_text(encoding="utf-8")
@@ -187,25 +216,52 @@ class CollectionMetaCache:
         # key is stable across equivalent path spellings of the SAME
         # directory -- see module docstring for why this is a key-
         # stability normalization rather than an access-control boundary.
-        collection_dir_str = _resolve_collection_dir(collection_dir)
-        if collection_dir_str is None:
-            return None
-
-        meta_path = Path(collection_dir_str) / _COLLECTION_META_FILENAME
-        try:
-            mtime_ns = os.stat(meta_path).st_mtime_ns
-        except OSError:
+        key = self._stat_key(collection_dir)
+        if key is None:
             # Missing/unreadable RIGHT NOW -- never cached as a "real" key,
             # so a later appearance is observed on the very next call.
             return None
 
-        key: _MetaCacheKey = (collection_dir_str, mtime_ns)
         result: Optional[Dict[str, Any]]
-        if is_immutable_versioned_snapshot(collection_dir_str):
+        if is_immutable_versioned_snapshot(key[0]):
             result = self._immutable.get(key)
         else:
             result = self._mutable.get(key)
         return result
+
+    def invalidate(self, collection_dir: Union[str, Path]) -> None:
+        """Drop the cached parse for the file's CURRENT on-disk identity.
+
+        Bug #1997: in-process writers call this right AFTER writing
+        ``collection_meta.json``. The only cached entry a later ``get()``
+        could wrongly hit is one whose key equals the file's current stat
+        identity (same mtime tick, same size, reused inode), so dropping
+        exactly that key closes the gap. Entries for older identities are
+        unreachable already and age out via TTL/LRU. Never raises; a missing
+        file has nothing cached to drop.
+        """
+        key = self._stat_key(collection_dir)
+        if key is None:
+            return
+        self._immutable.invalidate(key)
+        self._mutable.invalidate(key)
+
+    @staticmethod
+    def _stat_key(collection_dir: Union[str, Path]) -> Optional[_MetaCacheKey]:
+        """Build the cache key from ONE ``os.stat()``; None when unavailable."""
+        # Canonicalize (collapses '..'/symlink indirection) so the cache
+        # key is stable across equivalent path spellings of the SAME
+        # directory -- see module docstring for why this is a key-
+        # stability normalization rather than an access-control boundary.
+        collection_dir_str = _resolve_collection_dir(collection_dir)
+        if collection_dir_str is None:
+            return None
+        meta_path = Path(collection_dir_str) / _COLLECTION_META_FILENAME
+        try:
+            st = os.stat(meta_path)
+        except OSError:
+            return None
+        return (collection_dir_str, st.st_mtime_ns, st.st_size, st.st_ino)
 
     def counters(self) -> Dict[str, Dict[str, int]]:
         return {

@@ -5,6 +5,10 @@ Provides common fixtures for E2E tests including service management,
 configuration setup, and cleanup.
 """
 
+# Bug #1996: MUST stay the first import -- isolates the server data-dir
+# environment before any test module (or this file) imports server code.
+from . import _isolated_server_home  # noqa: F401 - side effect
+
 import os
 import subprocess
 import time

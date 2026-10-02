@@ -203,7 +203,27 @@ The lock identifier is the 64-bit integer `0x434944585F4C4452` (ASCII encoding o
 
 The lock is held on a dedicated psycopg connection that is kept open for the duration of leadership. This is the key mechanism: PostgreSQL automatically releases an advisory lock when the connection that holds it closes, whether by graceful shutdown or by network failure or process crash. Another node can then acquire the lock.
 
-The dedicated lock connection is configured with TCP keepalive parameters: `keepalives=1`, `keepalives_idle=10`, `keepalives_interval=5`, `keepalives_count=3`. This detects dead connections at the TCP level within approximately 25 seconds, complementing the application-level `SELECT 1` ping. Without TCP keepalive, a half-open TCP connection (caused by network partition or firewall state loss) could leave a ghost leader for the duration of the OS TCP timeout (typically 15+ minutes on Linux).
+Both ends of the dedicated lock connection detect a dead peer quickly (Bug #2005, `storage/postgres/dead_peer_detection.py`):
+
+- Client end (libpq, leader connection only): `keepalives=1`, `keepalives_idle=10`, `keepalives_interval=5`, `keepalives_count=3`, `tcp_user_timeout=30000`. Together with the `SELECT 1` ping every 10 seconds, a partitioned leader usually fails its ping and steps down quickly.
+- Server end: the session GUCs `tcp_keepalives_idle=30`, `tcp_keepalives_interval=10`, `tcp_keepalives_count=3`, `tcp_user_timeout=60000`, sent through the libpq `options` startup parameter (`-c name=value`). PostgreSQL applies them to the backend's own socket, so it drops a crashed or partitioned leader's backend, and releases the advisory lock, roughly 60 seconds after the last packet. Client keepalives alone cannot do this. Without the server GUCs, the server uses the OS default of 7200 seconds idle, and a dead leader's lock survives for up to about 2 hours.
+
+These timings are observed and approximate, not guarantees. In a blackhole test the old leader stepped down after about 40 s, and the server released the lock after about 60-65 s. The step-down does not provably come before the release: `tcp_user_timeout` bounds only unacknowledged sent data, not a stalled response, and the ping has no response deadline. Leadership is not fenced, so leader-only work already in flight may still be running after another node becomes leader.
+
+Requirements:
+
+- PostgreSQL 12 or later, because the `tcp_user_timeout` server GUC was added in 12. Older servers reject the connection.
+- Every node connects to PostgreSQL directly over TCP. A proxy or pooler in between must accept the libpq `options` startup parameter, or the connection fails. It would also keep its own backend socket alive after a node dies, so the lock would not be released on time.
+
+The same server GUCs, with gentler client values (`keepalives_idle=30`, `keepalives_interval=10`, `keepalives_count=3`, `tcp_user_timeout=60000`), are applied to every pooled connection (`ConnectionPool`), the alias lock store, and the migration runner.
+
+Precedence:
+
+- Any parameter, or `options` GUC, already present in the operator's `postgres_dsn` is kept as-is.
+- When `postgres_dsn` has no `options`, the `PGOPTIONS` environment value is used as the starting point, as libpq would.
+- With a `service=` DSN, the service file's `options` value is replaced entirely, so any session settings in it (such as `search_path`) are lost, and its keepalive and `tcp_user_timeout` values are overridden. Put `options` and any of these parameters in `postgres_dsn` itself.
+
+If the operator's DSN sets one of these values to zero (which turns that detection off, or falls back to the OS default), the leader election service logs one WARNING per service instance when it starts.
 
 Leadership acquisition uses `SELECT pg_try_advisory_lock(%s)` with `autocommit=True`. A session-level advisory lock (as opposed to a transaction-level lock) remains held until the connection closes, not until the transaction ends.
 

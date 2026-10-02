@@ -149,7 +149,16 @@ def _connect(dsn: str, connect_timeout_seconds: float) -> Any:
     """
     import psycopg
 
-    return psycopg.connect(dsn, connect_timeout=int(connect_timeout_seconds))
+    from code_indexer.server.storage.postgres.dead_peer_detection import (
+        apply_dead_peer_detection,
+    )
+
+    # Bug #2005: the server must drop a crashed holder's session (and its
+    # row locks) within ~60s, not the ~2h OS keepalive default.
+    return psycopg.connect(
+        apply_dead_peer_detection(dsn),
+        connect_timeout=int(connect_timeout_seconds),
+    )
 
 
 def _execute_acquire_insert(

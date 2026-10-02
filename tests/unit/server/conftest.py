@@ -96,9 +96,17 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
+import sqlite3
+from pathlib import Path
 from typing import Any, Callable, Generator, List, Set, Type
 
 import pytest
+
+# Bug #1996: MUST precede every server import -- isolates the server data-dir
+# env vars before any module fixes its directory at import time.
+from tests import _isolated_server_home  # noqa: F401 - side effect
+from tests.fixtures import real_server_home_guard as _real_home_guard
 
 import code_indexer.server.app as _server_app_module
 import code_indexer.server.auth.dependencies as _auth_dependencies_module
@@ -108,8 +116,60 @@ from code_indexer.server.auth.login_rate_limiter import (
 from code_indexer.server.auth.token_bucket import rate_limiter as _login_token_bucket
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
+from code_indexer.server.utils import primary_instance_lock as _primary_instance_lock
+from tests.unit.server._fast_sqlite import connect_without_fsync, fast_sqlite_enabled
+from tests.unit.server._fast_startup_lock import acquire_without_startup_wait
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_server_home() -> Generator[None, None, None]:
+    """Bug #1996: fail any server unit test whose thread touches the real
+    ~/.cidx-server (see tests/fixtures/real_server_home_guard.py)."""
+    _real_home_guard.start()
+    try:
+        yield
+    finally:
+        hits = _real_home_guard.stop()
+    assert not hits, _real_home_guard.failure_message(hits)
+
+
+@pytest.fixture
+def home_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Bug #1996: opt-in for tests that build production objects whose default
+    directory is ``Path.home() / ".cidx-server"`` (or that verify that home
+    default): HOME -- hence ``Path.home()`` -- points at a temp dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _gate_test_mode_speedups() -> Generator[None, None, None]:
+    """Issue #1995: under the gate's ``CIDX_TEST_FAST_SQLITE=1`` flag,
+
+    - every SQLite connection the server unit suite opens skips per-commit
+      fsync (``synchronous=OFF``), see ``tests/unit/server/_fast_sqlite.py``;
+    - startup's primary-instance acquire uses a zero default bound, so a
+      second ``create_app()`` in this process is refused at once instead of
+      after 5 s, see ``tests/unit/server/_fast_startup_lock.py``.
+    """
+    if not fast_sqlite_enabled(os.environ):
+        yield
+        return
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(sqlite3, "connect", connect_without_fsync)
+    patcher.setattr(
+        _primary_instance_lock,
+        "acquire_primary_instance_lock",
+        acquire_without_startup_wait,
+    )
+    try:
+        yield
+    finally:
+        patcher.undo()
 
 
 def _reset_login_rate_limiter_state() -> None:

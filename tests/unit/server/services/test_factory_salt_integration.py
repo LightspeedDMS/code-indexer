@@ -13,11 +13,14 @@ is called directly to produce ciphertext, then inserted; get_token() decrypts it
 This approach avoids any real-format token string in the test file.
 """
 
+import json
 import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
+
+from tests.unit.server._pg_factory_pools import UNREACHABLE_PG_DSN, FactoryPools
 
 from code_indexer.server.services.ci_token_manager import create_token_manager
 from code_indexer.server.services.git_credential_manager import (
@@ -159,17 +162,31 @@ class TestCreateGitCredentialManagerSaltIntegration:
     """Step 7: create_git_credential_manager seeds .encryption_key_salt and uses it."""
 
     @pytest.fixture
-    def server_dir(self, tmp_path):
+    def server_dir(self, tmp_path, monkeypatch):
+        # Bug #1996: the postgres-mode factory reads postgres_dsn through the
+        # ConfigService singleton; give it this dir's own bootstrap config
+        # instead of the developer's real ~/.cidx-server/config.json.
         sd = tmp_path / ".cidx-server"
         sd.mkdir()
+        (sd / "config.json").write_text(
+            json.dumps({"server_dir": str(sd), "postgres_dsn": UNREACHABLE_PG_DSN})
+        )
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(sd))
         return sd
+
+    @pytest.fixture
+    def factory_pools(self):
+        """Close the postgres-mode pools a test builds; fail on leaked threads."""
+        pools = FactoryPools()
+        yield pools
+        pools.close_and_check()
 
     @pytest.fixture
     def db_path(self, server_dir):
         return _make_git_db(server_dir / "cidx_server.db")
 
     def test_postgres_factory_creates_salt_file_from_jwt_secret(
-        self, server_dir, db_path
+        self, server_dir, db_path, factory_pools
     ):
         """create_git_credential_manager in postgres mode creates .encryption_key_salt from .jwt_secret."""
         jwt_file = server_dir / ".jwt_secret"
@@ -177,29 +194,37 @@ class TestCreateGitCredentialManagerSaltIntegration:
         salt_file = server_dir / ".encryption_key_salt"
         assert not salt_file.exists()
 
-        create_git_credential_manager(
-            db_path=str(db_path),
-            server_dir=str(server_dir),
-            storage_mode="postgres",
+        factory_pools.track(
+            create_git_credential_manager(
+                db_path=str(db_path),
+                server_dir=str(server_dir),
+                storage_mode="postgres",
+            )
         )
 
         assert salt_file.exists()
         assert salt_file.read_text() == "my-git-cluster-secret"
 
-    def test_postgres_factory_two_instances_derive_same_key(self, server_dir, db_path):
+    def test_postgres_factory_two_instances_derive_same_key(
+        self, server_dir, db_path, factory_pools
+    ):
         """Two create_git_credential_manager factories with same .jwt_secret produce same key."""
         jwt_file = server_dir / ".jwt_secret"
         jwt_file.write_text("shared-git-secret")
 
-        mgr1 = create_git_credential_manager(
-            db_path=str(db_path),
-            server_dir=str(server_dir),
-            storage_mode="postgres",
+        mgr1 = factory_pools.track(
+            create_git_credential_manager(
+                db_path=str(db_path),
+                server_dir=str(server_dir),
+                storage_mode="postgres",
+            )
         )
-        mgr2 = create_git_credential_manager(
-            db_path=str(db_path),
-            server_dir=str(server_dir),
-            storage_mode="postgres",
+        mgr2 = factory_pools.track(
+            create_git_credential_manager(
+                db_path=str(db_path),
+                server_dir=str(server_dir),
+                storage_mode="postgres",
+            )
         )
 
         assert mgr1._encryption_key == mgr2._encryption_key

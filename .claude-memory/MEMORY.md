@@ -17,6 +17,7 @@
 - [feedback_versioned_path_trap.md](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
 - [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
+- [feedback_staging_creds_local_exposure_ok.md](feedback_staging_creds_local_exposure_ok.md) - staging creds in local output are not an incident; never commit credentials anywhere
 - [feedback_never_retry_loop_auth_endpoint.md](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - never revert another subagent's changes; own everything in the tree
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - N agents, one tree: forbid git checkout/restore/reset/clean/stash per prompt
@@ -55,6 +56,7 @@
 - [feedback_holistic_anomaly_scan_every_loop.md](feedback_holistic_anomaly_scan_every_loop.md) - scan jobs/logs/health/artifacts holistically each loop
 - [feedback_tdd_red_must_be_discriminating.md](feedback_tdd_red_must_be_discriminating.md) - RED must fail on the BEHAVIOUR, never on a missing symbol or a happy case
 - [feedback_mtime_not_valid_isolation_proof.md](feedback_mtime_not_valid_isolation_proof.md) - mtime/md5 is not proof a test never touched the DB — use open-tracing
+- [feedback_scratch_test_copies_bypass_isolation.md](feedback_scratch_test_copies_bypass_isolation.md) - a test copied outside tests/ with its own --rootdir skips the home isolation; point CIDX_* dirs at scratch
 - [feedback_git_worktree_isolation_invalid_dual_import_path.md](feedback_git_worktree_isolation_invalid_dual_import_path.md) - never use git worktree here — editable-install dual import path mixes trees
 
 ## Workflow Preferences

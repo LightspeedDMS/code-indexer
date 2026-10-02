@@ -36,6 +36,7 @@ from tests.unit.server.query.query_repo_access_env import (
     UNGRANTED_REPO,
     USER,
     QueryAccessEnv,
+    build_server_db_template,
     global_alias,
     result_repos,
 )
@@ -44,14 +45,21 @@ GRANTED_ALIASES = {global_alias(GRANTED_REPO), global_alias(GRANTED_REPO_2)}
 ALL_ALIASES = GRANTED_ALIASES | {global_alias(UNGRANTED_REPO)}
 
 
+@pytest.fixture(scope="module")
+def server_db_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_server_db_template(tmp_path_factory.mktemp("server_db_template"))
+
+
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[QueryAccessEnv]:
+def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_db_template: Path
+) -> Iterator[QueryAccessEnv]:
     # One embedding provider configured -> deterministic primary-only
     # routing, including for submit_query_job (which takes no strategy).
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
-    e = QueryAccessEnv(tmp_path)
+    e = QueryAccessEnv(tmp_path, server_db_template)
     try:
         yield e
     finally:

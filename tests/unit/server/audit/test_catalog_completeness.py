@@ -123,6 +123,9 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
             "update_totp_elevation_audited",
             "reset_to_defaults_audited",
             "set_config",
+            # SIEM trusted CA (one apply_audited_change each)
+            "set_trusted_ca",
+            "remove_trusted_ca",
         },
         "git_settings_changed": {"apply_git_settings_change"},
         "provider_api_key_set": {"apply_audited_change"},
@@ -134,6 +137,16 @@ _ENTRY_POINTS: Dict[str, FrozenSet[str]] = {
         "server_restart_requested": {"request_server_restart"},
         "user_repo_activated_by_admin": {"activate_repository_for_user"},
         "user_repo_deactivated_by_admin": {"deactivate_repository_for_user"},
+        # SIEM delivery self-reports (audited in the shared admin service).
+        "siem_canary_sent": {"run_canary"},
+        "siem_canary_visibility_confirmed": {"confirm_visible"},
+        "siem_quarantine_requeued": {"requeue_quarantined", "record_requeue_event"},
+        "siem_delivery_resumed": {"resume"},
+        "siem_batch_acknowledged": {"acknowledge_batch"},
+        "siem_batch_rebatched": {"rebatch_batch"},
+        "siem_destination_retargeted": {"retarget_destination"},
+        "siem_destination_abandoned": {"abandon_destination"},
+        "siem_credential_changed": {"set_credential", "remove_credential"},
         # Legacy types whose rows now come from one audited entry point.
         "user_group_change": {"assign_user_to_group_audited"},
         "repo_access_revoke": {
@@ -361,9 +374,32 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /admin/config/reset": _CONFIG,
     "POST /admin/config/langfuse_pull": _CONFIG,
     "POST /admin/config/cidx_meta_backup": _CONFIG,
+    "POST /admin/config/siem_delivery/trusted_ca": _CONFIG,
+    "POST /admin/config/siem_delivery/trusted_ca/remove": _CONFIG,
+    "POST /admin/config/siem_delivery/credential": ("siem_credential_changed",),
+    "POST /admin/config/siem_delivery/credential/remove": ("siem_credential_changed",),
     "POST /admin/self-monitoring": _CONFIG,
     "POST /admin/config/api-keys/{platform}": ("ci_token_set",),
     "DELETE /admin/config/api-keys/{platform}": ("ci_token_deleted",),
+    # SIEM delivery admin actions
+    "POST /api/admin/siem-delivery/canary": ("siem_canary_sent",),
+    "POST /api/admin/siem-delivery/canary/confirm-visible": (
+        "siem_canary_visibility_confirmed",
+    ),
+    "POST /api/admin/siem-delivery/resume": ("siem_delivery_resumed",),
+    "POST /api/admin/siem-delivery/quarantine/requeue": ("siem_quarantine_requeued",),
+    "POST /api/admin/siem-delivery/batches/{batch_id}/acknowledge": (
+        "siem_batch_acknowledged",
+    ),
+    "POST /api/admin/siem-delivery/batches/{batch_id}/rebatch": (
+        "siem_batch_rebatched",
+    ),
+    "POST /api/admin/siem-delivery/destinations/{destination_key}/retarget": (
+        "siem_destination_retargeted",
+    ),
+    "POST /api/admin/siem-delivery/destinations/{destination_key}/abandon": (
+        "siem_destination_abandoned",
+    ),
     # Server operations
     "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
     "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),

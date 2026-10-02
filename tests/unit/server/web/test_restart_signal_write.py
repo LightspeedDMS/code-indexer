@@ -381,13 +381,15 @@ class TestSignalFileConstantImport:
 
     def test_restart_signal_path_is_in_cidx_server_dir(self):
         """
-        RESTART_SIGNAL_PATH must be in ~/.cidx-server/ directory.
+        RESTART_SIGNAL_PATH must be in the cidx data dir (~/.cidx-server/ by
+        default; Bug #1996: the test session points CIDX_DATA_DIR elsewhere).
         """
+        from code_indexer.server.auto_update import deployment_executor
         from code_indexer.server.auto_update.deployment_executor import (
             RESTART_SIGNAL_PATH,
         )
 
-        assert RESTART_SIGNAL_PATH.parent == Path.home() / ".cidx-server"
+        assert RESTART_SIGNAL_PATH.parent == deployment_executor._cidx_data_dir
 
     def test_restart_signal_path_filename_is_restart_signal(self):
         """

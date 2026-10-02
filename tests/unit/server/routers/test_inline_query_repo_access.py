@@ -11,6 +11,7 @@ replaced (see query_repo_access_env).
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from tests.unit.server.query.query_repo_access_env import (
     UNGRANTED_REPO,
     USER,
     QueryAccessEnv,
+    build_server_db_template,
     global_alias,
 )
 
@@ -56,10 +58,13 @@ ADMIN_USER = _user(ADMIN, UserRole.ADMIN)
 OTHER_NON_ADMIN = _user("example_other_user", UserRole.NORMAL_USER)
 
 
-def _build_fts_index(repo_path: Path, repo: str) -> None:
-    manager = TantivyIndexManager(
-        index_dir=repo_path / ".code-indexer" / "tantivy_index"
-    )
+def _fts_index_dir(repo_path: Path) -> Path:
+    """Where the query path reads a repo's FTS index."""
+    return repo_path / ".code-indexer" / "tantivy_index"
+
+
+def _build_fts_index(index_dir: Path, repo: str) -> None:
+    manager = TantivyIndexManager(index_dir=index_dir)
     manager.initialize_index()
     body = f"def authenticate(user): return '{repo}'"
     manager.add_document(
@@ -74,19 +79,46 @@ def _build_fts_index(repo_path: Path, repo: str) -> None:
         }
     )
     manager.commit()
+    # Drop the writer and await merges so the files on disk are final.
+    manager.close()
+
+
+@pytest.fixture(scope="module")
+def fts_index_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build each repo's real Tantivy FTS index once per module.
+
+    A committed, closed Tantivy index is immutable segment files plus
+    meta.json naming them by segment id (no absolute paths), so a plain
+    file copy is a valid index at its new location. Each test copies these
+    instead of paying a fsync'd Tantivy commit per repo.
+    """
+    template = tmp_path_factory.mktemp("fts_index_template")
+    for repo in ALL_REPOS:
+        _build_fts_index(template / repo, repo)
+    return template
+
+
+@pytest.fixture(scope="module")
+def server_db_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_server_db_template(tmp_path_factory.mktemp("server_db_template"))
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[QueryAccessEnv]:
+def env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    server_db_template: Path,
+    fts_index_template: Path,
+) -> Iterator[QueryAccessEnv]:
     # No embedding provider key: deterministic primary-only routing and no
     # path can reach a real provider (the search boundary is faked).
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
-    e = QueryAccessEnv(tmp_path)
+    e = QueryAccessEnv(tmp_path, server_db_template)
     # UNGRANTED_REPO is registered first, so it is the first FTS candidate.
     for repo in ALL_REPOS:
-        _build_fts_index(e.repo_paths[repo], repo)
+        shutil.copytree(fts_index_template / repo, _fts_index_dir(e.repo_paths[repo]))
     try:
         yield e
     finally:

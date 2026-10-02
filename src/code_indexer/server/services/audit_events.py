@@ -69,6 +69,8 @@ class SystemComponent(str, Enum):
     GOLDEN_REPO_RECONCILER = "golden-repo-reconciler"
     # The loopback-only maintenance switch, driven by the local auto-updater.
     LOCALHOST_MAINTENANCE = "localhost-maintenance"
+    # The SIEM delivery worker (automatic requeue after a mapping change).
+    SIEM_DELIVERY = "siem-delivery"
 
 
 class AuditEventInvalid(ValueError):
@@ -423,6 +425,70 @@ AUDIT_ACTION_CATALOG: Dict[str, ActionSpec] = {
     "pr_creation_disabled": _spec("auth", None, _Q),
     "git_cleanup": _spec("auth", None, _Q),
 }
+
+# --- SIEM delivery self-reports (target: the "siem_delivery" config section) ---
+_SIEM_HALT_CLASS = _enum(
+    "local_validation_burst",
+    "row_rejection_burst",
+    "request_rejection",
+    "credential",
+    "duplicate_response",
+    "unclassified",
+)
+_SIEM_BATCH = {"batch_id": OPAQUE_ID, "event_count": INT}
+_SIEM_MISSING_TYPES_MAX = 200
+AUDIT_ACTION_CATALOG.update(
+    {
+        "siem_canary_sent": _spec(
+            "config",
+            {
+                "canary_run_id": OPAQUE_ID,
+                "event_count": INT,
+                "result": _enum("accepted", "rejected"),
+                "mapping_version": INT,
+            },
+        ),
+        "siem_canary_visibility_confirmed": _spec(
+            "config",
+            {
+                "canary_run_id": OPAQUE_ID,
+                "expected_count": INT,
+                "confirmed_count": INT,
+                "missing_action_types": _list(
+                    _enum(*AUDIT_ACTION_CATALOG), _SIEM_MISSING_TYPES_MAX
+                ),
+            },
+        ),
+        "siem_quarantine_requeued": _spec(
+            "config",
+            {
+                "count": INT,
+                "mapping_version": INT,
+                "trigger": _enum("mapping_version_change", "admin"),
+            },
+        ),
+        "siem_delivery_resumed": _spec(
+            "config", {"halted_class": _SIEM_HALT_CLASS, "signature_reset": BOOL}
+        ),
+        "siem_batch_acknowledged": _spec("config", _SIEM_BATCH),
+        "siem_batch_rebatched": _spec("config", _SIEM_BATCH),
+        "siem_destination_retargeted": _spec(
+            "config", {"from_destination_key": OPAQUE_ID, "count": INT}
+        ),
+        "siem_destination_abandoned": _spec(
+            "config", {"destination_key": OPAQUE_ID, "count": INT}
+        ),
+        # The service-account key: its non-secret identity only, never the key.
+        "siem_credential_changed": _spec(
+            "config",
+            {
+                "change": _enum("set", "replaced", "removed"),
+                "client_email": USERNAME,
+                "private_key_id": OPAQUE_ID,
+            },
+        ),
+    }
+)
 
 JOB_BASED_ACTION_TYPES: FrozenSet[str] = frozenset(
     name for name, spec in AUDIT_ACTION_CATALOG.items() if spec.job_based

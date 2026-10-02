@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.81.0] - 2026-10-02
+
+### Fixed
+
+- Cluster PostgreSQL connections ask the server to detect a dead client: per-session TCP keepalive and `tcp_user_timeout` settings are sent through the libpq `options` startup parameter, alongside client keepalives. A crashed node's backend, and the leader election advisory lock it held, is released roughly 60 seconds after the last packet instead of after the operating system's 2 hour keepalive default. Applied to the leader election connection, the connection pool, the alias lock store and the migration runner. Values already in `postgres_dsn` are kept and `PGOPTIONS` seeds the options when the DSN has none. Requires PostgreSQL 12 or later and a direct connection (#2005).
+- A CLI query no longer constructs the server application: the search service reads application state only when the server has already built it. The audit log file is opened on first use, and the session and user managers honour `CIDX_SERVER_DATA_DIR` (#1996).
+
+### Tests
+
+- Every test session points the server data directories and the systemd unit directory at a scratch home before any server module is imported, and a write guard fails a test that writes into the real server home. `e2e-automation.sh` gives each phase a fresh client server home, validates every directory it deletes against the account's real server home, and gives every e2e server a stub systemd unit with its own bind settings (#1996).
+- The Phase 7 log audit excuses a SIEM credential probe warning only for the log rows proven to fall inside the scripted outage of the outage test.
+- The query repository-access tests build their schema database and search indexes once per module and copy them per test.
+
+## [12.80.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery: the Google SecOps service-account key is pasted or uploaded in the SIEM Delivery section of the Web UI configuration screen. It is validated (RSA service-account key with the expected token endpoint), stored encrypted in the database and never returned; only its identity is shown. In cluster mode the encryption key is derived from the shared cluster secret, and a stored key check reports a key mismatch distinctly. The key-file path setting is removed.
+- SIEM delivery: an optional additional trusted CA bundle (CA certificates only, not expired) is added to the default trust for the token and import requests. Certificate and hostname verification stay on, and environment proxy settings are honoured. Credential and CA changes require TOTP elevation and are audited by identity or fingerprint. Upload forms are size-capped before parsing.
+
+### Fixed
+
+- SIEM delivery: abandoning queued rows works when no destination is configured, so rows left behind by a decommission can be cleared. Abandon and retarget move only rows that existed when the operation started, re-check the committed destination every round and refuse while a send to that destination is in flight.
+- Incremental, resume and crash-recovery indexing no longer re-read and re-parse the collection metadata file for every indexed file; the parsed metadata is reused through the collection metadata cache, which now keys on size and inode as well as modification time. A crash-recovery reconcile of a large repository after a restart no longer runs for hours (#1997).
+- Reconcile analysis is linear in the number of files, failed-path de-duplication is linear, and a stored absolute path outside the codebase root no longer aborts reconcile; such a path is removed only when its file no longer exists (#1998).
+- The daemon cache eviction thread stops immediately when the daemon stops, instead of at its next 60-second wake-up.
+
+### Tests
+
+- Server unit tests in the gate's fast mode disable per-commit fsync on every SQLite connection and no longer wait out the primary-instance lock bound when a second application is built in the same process (#1995).
+- Unit tests stop any daemon cache eviction thread they start; the SIEM TLS test relays use the selectors module.
+
+## [12.79.0] - 2026-10-01
+
+### Added
+
+- SIEM delivery to Google SecOps. Pilot audit events (logins on the REST, MCP and Web doors, MFA changes, group and permission changes, and admin actions) are captured into a durable delivery queue in the same transaction as their audit row and delivered to a configured Google SecOps instance as UDM events. Capture never fails an audit write: a capture problem is counted and reported, not raised.
+- Delivery is single-flight across the fleet with fenced leases, persists every request body and resends it byte for byte after an unknown outcome, isolates a rejected row by bisection under a fleet-wide hourly quarantine cap, halts on credential failures and duplicate responses, and recovers through automatic probes. Events whose mapping failed are re-projected automatically when the mapping changes.
+- Delivery is armed only after a canary event per mapping is accepted and searchable, through a single atomic arming step. Disabling or changing the destination is enforced within a bounded window and any capture after that boundary is counted.
+- A "SIEM Delivery" section in the Web UI configuration page (runtime setting, stored in the database). Destinations are limited to the documented regional Google SecOps endpoints; credentials are service-account key files referenced by path.
+- Admin API under `/api/admin/siem-delivery`: stats, quarantine listing, canary, resume, acknowledge, rebatch, retarget, abandon and quarantine requeue. Write actions require TOTP elevation.
+- A delivery backlog or halt reports DEGRADED on `/health`, the Web status block and OTEL gauges. Terminal delivery rows are pruned by data retention in paced transactions.
+- New dependency: `google-auth`, loaded only when delivery requests a token.
+- Operator guide: `docs/siem-delivery.md`.
+
+### Tests
+
+- End-to-end Phase 7 drives the delivery scenarios through the REST, MCP and Web front doors against a loopback mock of the SecOps ingestion API with fault modes, which runs only behind the non-production fault-injection gate.
+- SIEM delivery unit tests run against SQLite and PostgreSQL and fail if a test touches the real server data directory.
+
 ## [12.78.0] - 2026-09-30
 
 ### Security

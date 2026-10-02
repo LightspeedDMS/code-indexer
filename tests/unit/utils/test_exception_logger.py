@@ -65,10 +65,15 @@ class TestExceptionLoggerInitialization:
         assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
         assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
-    def test_server_mode_creates_log_file_in_home_directory(self, tmp_path):
+    def test_server_mode_creates_log_file_in_home_directory(
+        self, tmp_path, monkeypatch
+    ):
         """Test that Server mode creates error log in ~/.cidx-server/logs/."""
         from code_indexer.utils.exception_logger import ExceptionLogger
 
+        # Bug #1996: the session isolates CIDX_SERVER_DATA_DIR; this test
+        # exercises the home default (Path.home patched to tmp below).
+        monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
         with patch("pathlib.Path.home") as mock_home:
             mock_home.return_value = tmp_path
             project_root = tmp_path / "test_project"

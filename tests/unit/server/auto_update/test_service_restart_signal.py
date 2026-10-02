@@ -741,11 +741,16 @@ class TestSignalConstantsExist:
         """
         RESTART_SIGNAL_PATH constant must exist in deployment_executor.
         """
+        from code_indexer.server.auto_update import deployment_executor
         from code_indexer.server.auto_update.deployment_executor import (
             RESTART_SIGNAL_PATH,
         )
 
-        assert RESTART_SIGNAL_PATH == Path.home() / ".cidx-server" / "restart.signal"
+        # Bug #1996: the cidx data dir (~/.cidx-server by default); the test
+        # session points CIDX_DATA_DIR away from the real home.
+        assert (
+            RESTART_SIGNAL_PATH == deployment_executor._cidx_data_dir / "restart.signal"
+        )
 
     def test_service_imports_restart_signal_constants(self):
         """

@@ -71,8 +71,12 @@ import httpx
 import pyotp
 import pytest
 
+from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import run_cidx
+
+# T5's throwaway server binds all interfaces (non-loopback probe).
+_THROWAWAY_BIND_HOST = "0.0.0.0"
 
 # ---------------------------------------------------------------------------
 # Skip guard: skip the entire module when admin credentials are absent
@@ -680,6 +684,11 @@ class TestAC2MaintenanceLocalhostOnly:
         env["CIDX_TEST_FAST_SQLITE"] = "1"
         env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
         env["CIDX_DATA_DIR"] = str(data_dir)
+        # Bug #1996: its own stub unit with its own bind values (never the
+        # harness's stub for the shared server, nor the host's real unit).
+        unit_dir = data_dir / "systemd-units"
+        write_stub_systemd_unit(unit_dir, port, host=_THROWAWAY_BIND_HOST)
+        env["SYSTEMD_UNIT_DIR"] = str(unit_dir)
 
         proc = subprocess.Popen(
             [
@@ -688,7 +697,7 @@ class TestAC2MaintenanceLocalhostOnly:
                 "uvicorn",
                 "code_indexer.server.app:app",
                 "--host",
-                "0.0.0.0",
+                _THROWAWAY_BIND_HOST,
                 "--port",
                 str(port),
                 "--log-level",

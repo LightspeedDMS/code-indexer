@@ -4947,6 +4947,20 @@ def make_lifespan(
         # Story #746: wire fault injection harness from bootstrap config
         _apply_fault_injection_state(app, startup_config)
 
+        # SIEM delivery: constructed after the audit binding and the
+        # fault-injection gate.  start_scheduler AWAITS the offloaded
+        # registration barrier (anyio.to_thread.run_sync(
+        # scheduler.register_process)) before the lifespan yields, so the
+        # process is registered before it serves any request without
+        # blocking the event loop; a failure degrades, never kills boot.
+        from code_indexer.server.services.siem_delivery import (
+            lifecycle as _siem_lifecycle,
+        )
+
+        await _siem_lifecycle.start_scheduler(
+            app, backend_registry, background_job_manager
+        )
+
         # Bug #878 Fix A.2: start the DatabaseConnectionManager cleanup daemon.
         # The former get_connection() piggyback trigger was removed because it
         # lost races against thread churn (RC-3).  A dedicated wall-clock
@@ -5673,6 +5687,20 @@ def make_lifespan(
                         f"Error stopping data retention scheduler: {e}",
                     ),
                     exc_info=True,
+                )
+
+        # Shutdown: stop the SIEM delivery loop, then remove this process's
+        # readiness row (offloaded; a failure only leaves a row that expires).
+        siem_scheduler_state = getattr(app.state, "siem_delivery_scheduler", None)
+        if siem_scheduler_state is not None:
+            try:
+                await anyio.to_thread.run_sync(siem_scheduler_state.stop)
+                await anyio.to_thread.run_sync(siem_scheduler_state.deregister_process)
+            except Exception as e:
+                logger.warning(
+                    "SIEM delivery scheduler shutdown incomplete (%s); its "
+                    "readiness row will expire",
+                    type(e).__name__,
                 )
 
         # Shutdown: Stop fleet migration scheduler (Story #1458, Epic

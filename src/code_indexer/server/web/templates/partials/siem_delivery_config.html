@@ -1,0 +1,125 @@
+<!-- SIEM Delivery (Google SecOps) Settings Section -->
+<details class="config-section" id="section-siem-delivery">
+    <summary>
+        <h2>SIEM Delivery (Google SecOps)</h2>
+    </summary>
+    <p class="section-description">
+        Delivers pilot security events (logins, MFA, group and permission changes, admin actions)
+        to Google Security Operations. Capture starts only after a canary covering every mapping
+        is accepted and confirmed visible, and every server process can mint tokens. The
+        service-account key is pasted or uploaded below and stored encrypted in the database for
+        every node; it is never shown again, only its identity.
+    </p>
+    <article>
+        <table class="config-table" id="siem-delivery-status">
+            {% for label, value in config.siem_delivery_status %}
+            <tr>
+                <td class="config-label">{{ label }}</td>
+                <td class="config-value">{{ value }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <div id="display-siem-delivery">
+            <table class="config-table">
+                <tr><td class="config-label">Enabled</td><td class="config-value">{{ 'Yes' if config.siem_delivery.enabled else 'No' }}</td></tr>
+                <tr><td class="config-label">Region</td><td class="config-value">{{ config.siem_delivery.region }}</td></tr>
+                <tr><td class="config-label">API Version</td><td class="config-value">{{ config.siem_delivery.api_version }}</td></tr>
+                <tr><td class="config-label">Project / Location / Instance</td><td class="config-value">{{ config.siem_delivery.project_id }} / {{ config.siem_delivery.location }} / {{ config.siem_delivery.instance_id }}</td></tr>
+                <tr><td class="config-label">Max Batch Events</td><td class="config-value">{{ config.siem_delivery.max_batch_events }}</td></tr>
+                <tr><td class="config-label">Source Instance Label</td><td class="config-value">{{ config.siem_delivery.source_instance_label }}</td></tr>
+                <tr><td class="config-label">Harness Endpoint (test only)</td><td class="config-value">{{ config.siem_delivery.harness_endpoint }}</td></tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('siem-delivery')">Edit</button>
+            </div>
+        </div>
+        <form id="edit-form-siem-delivery" method="post" action="/admin/config/siem_delivery" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.siem_delivery %}
+            <div class="validation-error">{{ validation_errors.siem_delivery }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="siem-delivery-enabled">
+                    Enabled
+                    <select id="siem-delivery-enabled" name="enabled">
+                        <option value="true" {% if config.siem_delivery.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.siem_delivery.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Controls capture; already captured events keep being delivered</small>
+                </label>
+                <label>Region<input type="text" name="region" value="{{ config.siem_delivery.region }}"><small>A documented SecOps region (e.g. us, eu, europe-west2)</small></label>
+                <label>API Version<input type="text" name="api_version" value="{{ config.siem_delivery.api_version }}"><small>v1, v1beta or v1alpha</small></label>
+                <label>Project ID<input type="text" name="project_id" value="{{ config.siem_delivery.project_id }}"></label>
+                <label>Location<input type="text" name="location" value="{{ config.siem_delivery.location }}"></label>
+                <label>Instance ID<input type="text" name="instance_id" value="{{ config.siem_delivery.instance_id }}"></label>
+                <label>Max Batch Events<input type="number" name="max_batch_events" value="{{ config.siem_delivery.max_batch_events }}" min="1" max="1000"></label>
+                <label>Source Instance Label<input type="text" name="source_instance_label" value="{{ config.siem_delivery.source_instance_label }}"></label>
+                <label>Harness Endpoint<input type="text" name="harness_endpoint" value="{{ config.siem_delivery.harness_endpoint }}"><small>Non-production test receiver only; requires the fault-injection gate</small></label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('siem-delivery')">Cancel</button>
+            </div>
+        </form>
+        <h3>Service Account Credential</h3>
+        <p class="section-description">
+            Write-only. The key is validated (a service_account key whose private key loads and whose
+            token_uri is Google's token endpoint), stored encrypted, and never returned by any page
+            or API. The current identity is shown in the status table above.
+        </p>
+        <form id="siem-delivery-credential-form" method="post" action="/admin/config/siem_delivery/credential" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-grid">
+                <label>Paste the service-account key JSON
+                    <textarea name="service_account_json" rows="4" autocomplete="off" spellcheck="false"></textarea>
+                </label>
+                <label>Or upload the key file
+                    <input type="file" name="service_account_file" accept=".json,application/json">
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Set / Replace Credential</button>
+            </div>
+        </form>
+        <form id="siem-delivery-credential-remove-form" method="post" action="/admin/config/siem_delivery/credential/remove">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-actions">
+                <button type="submit" class="secondary">Remove Credential</button>
+            </div>
+        </form>
+        <h3>Additional Trusted CA (optional)</h3>
+        <p class="section-description">
+            CA certificates (PEM) ADDED to the default trust for the token exchange and the event
+            import, for a TLS-inspecting proxy or a test emulator. Each must be a CA (CA=true) and
+            unexpired. Certificate verification is always on; there is no way to skip it.
+        </p>
+        <table class="config-table" id="siem-delivery-trusted-ca">
+            {% for label, value in config.siem_delivery_trusted_ca %}
+            <tr>
+                <td class="config-label">{{ label }}</td>
+                <td class="config-value">{{ value }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <form id="siem-delivery-trusted-ca-form" method="post" action="/admin/config/siem_delivery/trusted_ca" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-grid">
+                <label>Paste the CA certificate(s) PEM
+                    <textarea name="trusted_ca_pem" rows="4" spellcheck="false"></textarea>
+                </label>
+                <label>Or upload the PEM file
+                    <input type="file" name="trusted_ca_file" accept=".pem,.crt,application/x-pem-file">
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Set / Replace Trusted CA</button>
+            </div>
+        </form>
+        <form id="siem-delivery-trusted-ca-remove-form" method="post" action="/admin/config/siem_delivery/trusted_ca/remove">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-actions">
+                <button type="submit" class="secondary">Remove Trusted CA</button>
+            </div>
+        </form>
+    </article>
+</details>
