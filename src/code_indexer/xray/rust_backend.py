@@ -347,6 +347,17 @@ _COMPILE_RLIMIT_CPU_SECONDS = 180
 _COMPILE_RLIMIT_CORE_BYTES = 0
 
 
+# POSIX only. Imported at module scope because the two helpers below run INSIDE
+# the post-fork child, where their docstrings promise no allocation and no
+# locks -- and an import does both. `resource` is absent on Windows, where the
+# CLI still has to import this module, so the failure is absorbed here once
+# rather than inside the child.
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - non-POSIX
+    _resource = None  # type: ignore[assignment]
+
+
 def _clamp_to_hard_limit(requested: int, hard: int) -> int:
     """Return `requested`, never above the inherited HARD limit.
 
@@ -354,9 +365,8 @@ def _clamp_to_hard_limit(requested: int, hard: int) -> int:
     for more than the inherited hard limit raises instead of capping. A
     deployment with a restrictive hard limit must still be able to compile.
     """
-    import resource  # noqa: PLC0415 - stdlib, POSIX only
 
-    if hard == resource.RLIM_INFINITY:
+    if hard == _resource.RLIM_INFINITY:
         return requested
     return min(requested, hard)
 
@@ -376,17 +386,22 @@ def _apply_compile_resource_limits() -> None:
     a hardening measure into an outage. What the limits actually are is
     asserted from inside a real spawned child by the unit tests instead.
     """
-    import resource  # noqa: PLC0415 - stdlib, POSIX only
+    if _resource is None:  # pragma: no cover - non-POSIX
+        # The tuple below dereferences _resource before the try, so without
+        # this the child would raise between fork and exec on a platform
+        # lacking the module -- turning a hardening measure into the outage
+        # the paragraph above says it must never become.
+        return
 
     for which, requested in (
-        (resource.RLIMIT_DATA, _COMPILE_RLIMIT_DATA_BYTES),
-        (resource.RLIMIT_FSIZE, _COMPILE_RLIMIT_FSIZE_BYTES),
-        (resource.RLIMIT_CPU, _COMPILE_RLIMIT_CPU_SECONDS),
-        (resource.RLIMIT_CORE, _COMPILE_RLIMIT_CORE_BYTES),
+        (_resource.RLIMIT_DATA, _COMPILE_RLIMIT_DATA_BYTES),
+        (_resource.RLIMIT_FSIZE, _COMPILE_RLIMIT_FSIZE_BYTES),
+        (_resource.RLIMIT_CPU, _COMPILE_RLIMIT_CPU_SECONDS),
+        (_resource.RLIMIT_CORE, _COMPILE_RLIMIT_CORE_BYTES),
     ):
         try:
-            _soft, hard = resource.getrlimit(which)
-            resource.setrlimit(which, (_clamp_to_hard_limit(requested, hard), hard))
+            _soft, hard = _resource.getrlimit(which)
+            _resource.setrlimit(which, (_clamp_to_hard_limit(requested, hard), hard))
         except (ValueError, OSError):
             continue
 
@@ -1771,6 +1786,7 @@ class RustNativeBackend:
         timeout_seconds: int,
         on_process_spawned: Optional[Callable],
         acquire_compile_slot: bool,
+        apply_compile_limits: bool = False,
     ) -> Tuple[str, Optional[str]]:
         """Spawn xray-cli, wait for completion, return (stdout, error_msg).
 
@@ -1821,7 +1837,7 @@ class RustNativeBackend:
                 # their memory profile has never been measured against these
                 # numbers, so capping a compile must never silently cap them.
                 preexec_fn=(
-                    _apply_compile_resource_limits if acquire_compile_slot else None
+                    _apply_compile_resource_limits if apply_compile_limits else None
                 ),
             )
 
@@ -1923,7 +1939,29 @@ class RustNativeBackend:
                 "--json",
             ]
             return self._run_xray_cli_process(
-                cmd, timeout_seconds, on_process_spawned, acquire_compile_slot=True
+                cmd,
+                timeout_seconds,
+                on_process_spawned,
+                acquire_compile_slot=True,
+                # NOT apply_compile_limits: this spawn compiles AND scans in one
+                # process, and the scan is rayon-parallel. RLIMIT_CPU is
+                # process-wide CPU time summed across threads, so a bound sized
+                # for rustc (180s) is ~22s of wall clock on 8 cores -- a
+                # large-repo query with a warm cache compiles nothing and would
+                # still be SIGKILLed. RLIMIT_DATA was likewise measured against
+                # rustc, never against a scan's ASTs and findings.
+                #
+                # Residual, stated rather than papered over: a compile reached
+                # through THIS path is therefore unbounded in memory, and that
+                # is the path xray_search uses. Time is still bounded by the
+                # 120s wall timeout and the process-group kill. Closing it
+                # properly means compiling in its own limited process, which
+                # needs `--dylib <path.so>` on xray-cli's default scan
+                # subcommand (it exists only on the graph subcommands today) so
+                # the scan can consume a prebuilt artifact. Capping the user's
+                # scan with a number measured for the compiler is the worse
+                # trade: it converts a hypothetical into a certain regression.
+                apply_compile_limits=False,
             )
         except OSError as exc:
             # Broadened from FileNotFoundError (Bug #1612): ANY OS-level
@@ -2074,7 +2112,13 @@ class RustNativeBackend:
         """
         cmd = [str(self._xray_cli_path), "--compile-only", "--dynlib", eval_path]
         stdout, error = self._run_xray_cli_process(
-            cmd, timeout_seconds, None, acquire_compile_slot=True
+            cmd,
+            timeout_seconds,
+            None,
+            acquire_compile_slot=True,
+            # This process compiles and does nothing else, so the bound is
+            # measured against exactly what runs in it.
+            apply_compile_limits=True,
         )
         if error is not None:
             return {}, error

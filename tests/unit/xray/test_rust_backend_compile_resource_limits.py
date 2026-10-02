@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import resource
 import sys
+from unittest.mock import patch
 
 
 from code_indexer.xray import rust_backend
@@ -33,13 +34,21 @@ _OVER_LIMIT_ALLOC_MIB = 4096  # a compile-bomb-scale allocation
 _TIMEOUT_SECONDS = 120
 
 
-def _run(cmd, *, acquire_compile_slot: bool = True):
+def _run(cmd, *, acquire_compile_slot: bool = True, apply_compile_limits=None):
+    # The limits used to ride on acquire_compile_slot. They have their own gate
+    # now, because that flag is also true for the fused compile+scan spawn,
+    # whose rayon-parallel scan would inherit a CPU bound sized for rustc.
+    # Defaulting to mirror it keeps every existing case below meaning what it
+    # meant when it was written.
+    if apply_compile_limits is None:
+        apply_compile_limits = acquire_compile_slot
     backend = rust_backend.RustNativeBackend()
     return backend._run_xray_cli_process(
         cmd,
         timeout_seconds=_TIMEOUT_SECONDS,
         on_process_spawned=None,
         acquire_compile_slot=acquire_compile_slot,
+        apply_compile_limits=apply_compile_limits,
     )
 
 
@@ -227,3 +236,91 @@ def test_limits_never_raise_the_inherited_hard_limit() -> None:
         rust_backend._clamp_to_hard_limit(requested, hard=resource.RLIM_INFINITY)
         == requested
     )
+
+
+class TestLimitsDoNotReachTheScan:
+    """The legacy scan must not inherit the compile's resource limits.
+
+    `--dynlib <eval> --files-from <list> --json` compiles AND scans in one
+    process, and the scan is rayon-parallel (`scanner.rs: files.par_iter()`).
+    RLIMIT_CPU is process-wide CPU time summed across threads, so 180s is about
+    22s of wall clock on 8 cores: a large-repo query with a warm cache -- which
+    compiles nothing at all -- gets SIGKILLed and the user sees a failed search.
+    The limits were measured for rustc alone; the scan's heap (ASTs, findings,
+    rayon stacks) was never measured against them.
+
+    Applying them was gated on `acquire_compile_slot`, which is true for both
+    spawns. The gate is now explicit about which process is doing a compile and
+    nothing else.
+    """
+
+    def _spawn_kwargs(self, backend, cmd, **kw):
+        seen = {}
+
+        class _P:
+            def __init__(self, *a, **k):
+                seen.update(k)
+                self.pid = 1234
+
+            def communicate(self, timeout=None):
+                return ("{}", "")
+
+            def poll(self):
+                return 0
+
+            returncode = 0
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        with patch("subprocess.Popen", _P):
+            backend._run_xray_cli_process(cmd, 30, None, **kw)
+        return seen
+
+    def test_a_scan_spawn_gets_no_preexec_limits(self) -> None:
+        backend = rust_backend.RustNativeBackend()
+        kwargs = self._spawn_kwargs(
+            backend,
+            ["xray-cli", "--dynlib", "/tmp/e.rs", "--files-from", "/tmp/f", "--json"],
+            acquire_compile_slot=True,
+            apply_compile_limits=False,
+        )
+        assert kwargs.get("preexec_fn") is None, (
+            "the fused compile+scan must not run under a CPU bound sized for rustc"
+        )
+
+    def test_a_compile_only_spawn_still_gets_them(self) -> None:
+        backend = rust_backend.RustNativeBackend()
+        kwargs = self._spawn_kwargs(
+            backend,
+            ["xray-cli", "--compile-only", "--dynlib", "/tmp/e.rs"],
+            acquire_compile_slot=True,
+            apply_compile_limits=True,
+        )
+        assert kwargs.get("preexec_fn") is not None, (
+            "a compile-only spawn is where the bomb bound belongs"
+        )
+
+    def test_the_real_scan_call_site_does_not_request_limits(self) -> None:
+        """Pins the call site, not just the plumbing: the fused scan at
+        `_invoke_xray_cli` must pass apply_compile_limits=False."""
+        import inspect
+
+        src = inspect.getsource(rust_backend.RustNativeBackend._invoke_xray_cli)
+        assert "apply_compile_limits=False" in src, src[-400:]
+
+
+def test_limits_are_a_no_op_without_the_resource_module() -> None:
+    """On a platform with no `resource`, the preexec must return quietly.
+
+    It runs between fork and exec, so anything it raises kills the child
+    before it can start -- and the docstring's whole argument for swallowing
+    per-limit failures is that a child which refuses to start turns hardening
+    into an outage. The limit tuple dereferences the module before the try, so
+    the absent-module case needs its own guard.
+    """
+    with patch.object(rust_backend, "_resource", None):
+        rust_backend._apply_compile_resource_limits()  # must not raise
