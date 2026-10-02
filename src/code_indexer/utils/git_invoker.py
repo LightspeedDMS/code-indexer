@@ -239,18 +239,31 @@ def _positionals(rest: List[str]) -> List[str]:
     return [t for t in rest if not t.startswith("-")]
 
 
+def _flag_names(rest: List[str]) -> List[str]:
+    """Flag tokens with any ``=value`` suffix stripped.
+
+    git accepts `--set-upstream-to=origin/x` and `--set-upstream-to origin/x`
+    interchangeably, but the classifiers below test raw-token membership in a
+    flag set, so the `=`-joined spelling matched nothing and fell through to the
+    read default. `git branch --set-upstream-to=origin/x` classified as a read
+    and ran locally while the spaced form delegated -- a caller picking the
+    other spelling silently bypassed the seam.
+    """
+    return [t.split("=", 1)[0] if t.startswith("-") else t for t in rest]
+
+
 def _classify_branch(rest: List[str]) -> bool:
-    if any(t in _BRANCH_WRITE_FLAGS for t in rest):
+    if any(t in _BRANCH_WRITE_FLAGS for t in _flag_names(rest)):
         return True
-    if any(t in _BRANCH_READ_FLAGS for t in rest):
+    if any(t in _BRANCH_READ_FLAGS for t in _flag_names(rest)):
         return False
     return len(_positionals(rest)) > 0  # ``branch foo`` creates; bare ``branch`` lists
 
 
 def _classify_tag(rest: List[str]) -> bool:
-    if any(t in _TAG_WRITE_FLAGS for t in rest):
+    if any(t in _TAG_WRITE_FLAGS for t in _flag_names(rest)):
         return True
-    if any(t in _TAG_READ_FLAGS for t in rest):
+    if any(t in _TAG_READ_FLAGS for t in _flag_names(rest)):
         return False
     return len(_positionals(rest)) > 0  # ``tag v1`` creates; bare ``tag`` lists
 
@@ -263,9 +276,9 @@ def _classify_remote(rest: List[str]) -> bool:
 
 
 def _classify_config(rest: List[str]) -> bool:
-    if any(t in _CONFIG_WRITE_FLAGS for t in rest):
+    if any(t in _CONFIG_WRITE_FLAGS for t in _flag_names(rest)):
         return True
-    if any(t in _CONFIG_READ_FLAGS for t in rest):
+    if any(t in _CONFIG_READ_FLAGS for t in _flag_names(rest)):
         return False
     return (
         len(_positionals(rest)) >= 2
@@ -287,12 +300,25 @@ def _classify_notes(rest: List[str]) -> bool:
 
 
 def _classify_symbolic_ref(rest: List[str]) -> bool:
-    if any(t in {"-d", "--delete"} for t in rest):
+    if any(t in {"-d", "--delete"} for t in _flag_names(rest)):
         return True
     return len(_positionals(rest)) >= 2  # ``symbolic-ref HEAD refs/..`` writes
 
 
+def _classify_hash_object(rest: List[str]) -> bool:
+    """`git hash-object` only writes with `-w`; otherwise it just computes an id.
+
+    Treating the read form as a mutation is fail-closed, so it costs no
+    correctness -- but `hash-object --stdin-paths` is a hot batch call over
+    every changed file in a repo, and delegating it buys nothing. It also made
+    the seam guard report a legitimate read as a bypass, which invites an
+    exemption for code that never needed one.
+    """
+    return "-w" in _flag_names(rest)
+
+
 _DUAL_FORM_CLASSIFIERS = {
+    "hash-object": _classify_hash_object,
     "branch": _classify_branch,
     "tag": _classify_tag,
     "remote": _classify_remote,

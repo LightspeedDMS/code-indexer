@@ -250,3 +250,71 @@ class TestRemoteSubverbFailsClosed:
             ["git", "remote", "remove", "origin"],
         ):
             assert is_mutating_git(argv), f"write misclassified: {argv}"
+
+
+class TestEqualsJoinedFlagsAreNotInvisible:
+    """`--flag=value` and `--flag value` are the same flag to git.
+
+    The classifiers test membership of each raw token in a flag set, so an
+    `=`-joined long option never matches: `git branch --set-upstream-to=origin/x`
+    classified as a READ and ran locally, while the space-separated form
+    correctly classified as a write. A caller choosing the other spelling
+    silently bypassed the seam.
+    """
+
+    def test_equals_joined_write_flags_classify_as_writes(self) -> None:
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "branch", "--set-upstream-to=origin/x"],
+            ["git", "config", "--replace-all=core.hooksPath", "/tmp"],
+            ["git", "branch", "--force=x"],
+        ):
+            spaced = argv[:2] + argv[2].split("=", 1) + argv[3:]
+            assert is_mutating_git(argv) == is_mutating_git(spaced), (
+                f"{' '.join(argv)} and {' '.join(spaced)} must classify alike"
+            )
+            assert is_mutating_git(argv), f"fail-open on {argv}"
+
+    def test_equals_joined_read_flags_stay_reads(self) -> None:
+        """The normalisation must not turn reads into writes and cost a round
+        trip on every call."""
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "config", "--get=core.editor"],
+            ["git", "branch", "--contains=HEAD"],
+            ["git", "log", "--max-count=5"],
+        ):
+            assert not is_mutating_git(argv), f"read wrongly delegated: {argv}"
+
+
+class TestHashObjectWritesOnlyWithW:
+    """`git hash-object` computes an object id; it only WRITES with `-w`.
+
+    Classifying the read form as a mutation is a fail-CLOSED error, so it costs
+    correctness nothing -- but it sends a hot per-file batch call
+    (`--stdin-paths` over every changed file in a repo) through git-mcp for no
+    reason, and it makes the seam guard report a legitimate read as a bypass,
+    which is how exemptions get written for code that never needed one.
+    """
+
+    def test_without_w_it_is_a_read(self) -> None:
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "hash-object", "--stdin-paths"],
+            ["git", "hash-object", "somefile"],
+            ["git", "hash-object", "--stdin"],
+        ):
+            assert not is_mutating_git(argv), f"read misclassified: {argv}"
+
+    def test_with_w_it_is_a_write(self) -> None:
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "hash-object", "-w", "somefile"],
+            ["git", "hash-object", "-w", "--stdin-paths"],
+            ["git", "hash-object", "--stdin-paths", "-w"],
+        ):
+            assert is_mutating_git(argv), f"write misclassified: {argv}"

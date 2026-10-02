@@ -35,8 +35,35 @@ _SRC = Path(__file__).resolve().parents[3] / "src" / "code_indexer"
 # Directories the seam governs. The CLI runs on a developer's own machine, so
 # client-side git is out of scope; auto_update/ and scripts/ are deploy tooling
 # that runs outside the request path.
+# SEEDS, not the whole fence. What the seam governs is what the server can
+# REACH: the fence is the transitive first-party import closure of these, so a
+# raw mutating git call one directory away is not invisible just because it
+# lives outside `server/`. `services/git_topology_service.py` is imported by
+# `server/mcp/handlers/repos.py` and was never scanned under the old rule.
 _GOVERNED = ("server", "global_repos")
-_EXEMPT_DIRS = ("auto_update", "scripts")
+
+# Deploy tooling that runs outside the request path. Matched as a PATH PREFIX:
+# as "any component" it would have exempted a future
+# `server/repositories/scripts/` for free.
+_EXEMPT_DIRS = ("scripts", "server/scripts")
+
+# auto_update is NOT a blanket exemption any more. Its git calls act on the
+# server's OWN source tree and on hnswlib -- never on a tenant golden repo --
+# so git-mcp, which exists to hold golden-repo credentials, is the wrong
+# destination for them. That justification is real, but it belongs against each
+# CALL: as a directory rule it silently covered any future mutation dropped in
+# the same folder, and three request-path modules import DeploymentExecutor.
+# Keyed (path, verb) so a new verb in the same file fails until justified.
+ALLOWED_SELF_UPDATE_MUTATIONS = {
+    # `git fetch` / `git pull origin <branch>` on the cidx checkout itself
+    ("server/auto_update/change_detector.py", "fetch"),
+    ("server/auto_update/deployment_executor.py", "pull"),
+    # `git clone <hnswlib>` to a fallback path, and submodule sync for the build
+    ("server/auto_update/deployment_executor.py", "clone"),
+    ("server/auto_update/deployment_executor.py", "submodule"),
+    # `git config` on the server's own checkout (safe.directory / build config)
+    ("server/auto_update/deployment_executor.py", "config"),
+}
 
 _SUBPROCESS_CALLS = {"run", "Popen", "check_output", "check_call", "call"}
 # asyncio spawns take the program and its arguments as *varargs*, not a list.
@@ -115,6 +142,12 @@ ALLOWED_READS = {
     # annotated local: `cmd: list[str] = ["git", "log", "--follow", ...]`
     ("server/routers/git.py", "log"),
     ("server/routers/inline_repos.py", "log"),
+    # Self-update reads on the server's OWN checkout (see
+    # ALLOWED_SELF_UPDATE_MUTATIONS for why this directory is not delegated).
+    ("server/auto_update/change_detector.py", "rev-parse"),
+    ("server/auto_update/deployment_executor.py", "ls-files"),
+    # Reads are listed only for the CORE (see _CORE): a read outside it is local
+    # by definition and listing 50+ of them would bury the entries that matter.
     # variable-argv reads (cmd = ["git", ...]; subprocess.run(cmd, ...)) -- only
     # visible since the guard resolves a Name to its assignment.
     ("server/services/golden_repo_branch_service.py", "for-each-ref"),
@@ -141,8 +174,6 @@ ALLOWED_UNREADABLE_ARGV = {
     ("server/installer.py", "<dynamic-program>"),
     # Popen of the cidx server itself during lifecycle start
     ("server/lifecycle/server_lifecycle_manager.py", "<dynamic-program>"),
-    # `["rg"] + flags + ["--", pattern] + targets` -- ripgrep
-    ("server/services/dep_map_repair_bidirectional_verify.py", "<concatenation>"),
     # `create_subprocess_exec(program, *args)` where program is `command.split()[0]`
     # of a caller-supplied tool-version string ("rg --version")
     ("server/services/diagnostics_service.py", "<starred-argv>"),
@@ -150,7 +181,25 @@ ALLOWED_UNREADABLE_ARGV = {
     ("server/services/scip_self_healing.py", "<starred-argv>"),
     # `os.execv(sys.executable, [sys.executable] + sys.argv)` -- dev-mode re-exec
     ("server/web/routes.py", "<dynamic-program>"),
+    # Self-update tooling: builds `cidx`/`python`/`pip`/shell invocations to
+    # rebuild and restart the server itself. Not git, and not reachable with a
+    # tenant's credentials -- see ALLOWED_SELF_UPDATE_MUTATIONS.
+    ("server/auto_update/deployment_executor.py", "<concatenation>"),
+    ("server/auto_update/deployment_executor.py", "<dynamic-program>"),
+    ("server/auto_update/deployment_executor.py", "<expression>"),
+    ("server/auto_update/deployment_executor.py", "<shell-wrapper>"),
+    # `[str(xray_cli_path), "--print-graph-extractor-extensions"]` -- the xray
+    # binary, whose path is resolved at runtime (CIDX_XRAY_CLI_PATH).
+    ("xray/rust_backend.py", "<dynamic-program>"),
 }
+
+# Where the READ allowlist is enforced. Mutations and unreadable argv are
+# enforced across the whole reachable closure -- those are the safety
+# properties -- but ALLOWED_READS exists to force a human to look at each read
+# in the request path, and extending it to every reachable module would add
+# ~50 entries of noise and devalue the ones that matter. A read outside the
+# core runs locally either way; the seam's rule is about mutations.
+_CORE = ("server/", "global_repos/")
 
 _GLOBAL_FLAGS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 
@@ -201,7 +250,11 @@ def _resolve_name(
     # that this reports a real-looking bypass at a location that has none.
     for n in _statements_of(scope):
         line = getattr(n, "lineno", None)
-        if line is None or line >= before_line:
+        if line is None:
+            continue
+        if line >= before_line and not (
+            call is not None and _loop_carried(n, call, scope)
+        ):
             continue
         # `cmd = [...]` and the annotated `cmd: list[str] = [...]` bind a name the
         # same way. This codebase is mypy-typed and annotates locals routinely, so
@@ -389,6 +442,17 @@ def _walk_this_scope(scope: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
+def _dead_blocks(scope: ast.AST):
+    """(owner, body) for branches a constant test makes unreachable.
+
+    Blaming `if False:` names a command the program cannot run, and an
+    unexplainable finding is how a guard gets deleted.
+    """
+    for n in _statements_of(scope):
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Constant):
+            yield n, (n.body if not n.test.value else n.orelse)
+
+
 def _exclusive_regions(scope: ast.AST):
     """(owner, body) for each mutually exclusive branch arm in *scope*."""
     for n in _statements_of(scope):
@@ -415,6 +479,26 @@ def _in_block(node: ast.AST, body: List[ast.AST]) -> bool:
     return ln is not None and lo <= ln <= hi
 
 
+def _enclosing_loops(scope: ast.AST):
+    """(owner, body) for each loop in *scope*; a loop body has a back edge."""
+    for n in _statements_of(scope):
+        if isinstance(n, (ast.For, ast.AsyncFor, ast.While)):
+            yield n, n.body
+
+
+def _loop_carried(assign_node: ast.AST, call: ast.Call, scope: ast.AST) -> bool:
+    """True if a textually-later assignment can still supply *call*'s argv.
+
+    Resolution stops at the call's line, which is sound for straight-line code
+    and wrong inside a loop: on the second iteration the call runs the argv
+    assigned at the BOTTOM of the first.
+    """
+    for _owner, body in _enclosing_loops(scope):
+        if _in_block(assign_node, body) and _in_block(call, body):
+            return True
+    return False
+
+
 def _reaches(assign_line: int, assign_node: ast.AST, call: ast.Call, scope) -> bool:
     """Can the argv bound at *assign_node* be the one *call* runs?
 
@@ -427,6 +511,9 @@ def _reaches(assign_line: int, assign_node: ast.AST, call: ast.Call, scope) -> b
     call comes after the whole statement (the classic `if/else` then `run(cmd)`),
     but not when the call sits inside the sibling arm.
     """
+    for owner, body in _dead_blocks(scope):
+        if _in_block(assign_node, body):
+            return False
     for owner, body in _exclusive_regions(scope):
         if _in_block(assign_node, body) and not _in_block(call, body):
             owner_end = getattr(owner, "end_lineno", None) or getattr(
@@ -582,10 +669,28 @@ def _git_argv(
             if resolved is None:
                 return [None], builders
             argv = resolved
+        elif isinstance(first, ast.BinOp) and isinstance(first.op, ast.Add):
+            # `["git", "log", ...] + files`. The literal HEAD carries the
+            # program and verb, and `+` only appends, so this is classifiable
+            # -- the same reasoning the append/extend exemption rests on, and
+            # it inherits the same dual-form safeguard below. Treating it as
+            # opaque pushed real reads into an allowlist keyed on the builder,
+            # where a later `["git","push"] + args` in the same file would have
+            # been covered by the existing entry.
+            head = first.left
+            while isinstance(head, ast.BinOp) and isinstance(head.op, ast.Add):
+                head = head.left
+            if not isinstance(head, (ast.List, ast.Tuple)):
+                return [None], [_builder_name(first)]
+            argv = _literal_elements(head)
+            if argv and argv[0] == "git":
+                verb = _verb(argv)
+                if verb is None or verb in _DUAL_FORM_VERBS:
+                    return [None], ["<dual-form verb completed by concatenation>"]
         else:
-            # An inline expression -- `BASE + [...]`, `self._cmd`, `CMDS["push"]`.
-            # Binding the identical expression to a name was reported while
-            # passing it inline was not, so deleting one line hid a bypass.
+            # An inline expression -- `self._cmd`, `CMDS["push"]`. Binding the
+            # identical expression to a name was reported while passing it
+            # inline was not, so deleting one line hid a bypass.
             return [None], [_builder_name(first)]
 
     if not argv:
@@ -670,6 +775,18 @@ def _direct_import_aliases(tree: ast.Module) -> Dict[str, str]:
                     out[al.asname or al.name] = kind
         # `import subprocess as sp` rebinds the MODULE, so sp.run(...) is a
         # spawn too. Reading only ImportFrom made that whole style invisible.
+        if isinstance(n, ast.ImportFrom) and n.module in (
+            "subprocess",
+            "asyncio",
+            "os",
+        ):
+            # `from subprocess import *` binds every public name with no alias
+            # to record, so a bare `run(...)` had nothing to match against.
+            if any(al.name == "*" for al in n.names):
+                for spawn in _MODULE_SPAWNS.get(n.module, ()):
+                    kind = _kind_for_spawn_name(spawn)
+                    if kind is not None:
+                        out.setdefault(spawn, kind)
         elif isinstance(n, ast.Import):
             for al in n.names:
                 if al.asname and al.name in ("subprocess", "asyncio", "os"):
@@ -688,6 +805,32 @@ def _kind_for_spawn_name(name: str) -> Optional[str]:
     if name in _SUBPROCESS_CALLS:
         return "list"
     return None
+
+
+def _partial_spawn(node: ast.Call, aliases: Dict[str, str]):
+    """(kind, args) when *node* is `partial(<spawn>, argv, ...)`, else None.
+
+    `functools.partial` defers the call but binds argv at this line, so the
+    site is where a reviewer would look -- and the call whose func is `partial`
+    is not itself a spawn, so it was invisible.
+    """
+    fn = node.func
+    name = (
+        fn.id
+        if isinstance(fn, ast.Name)
+        else fn.attr
+        if isinstance(fn, ast.Attribute)
+        else None
+    )
+    if name != "partial" or not node.args:
+        return None
+    inner = node.args[0]
+    if not isinstance(inner, (ast.Name, ast.Attribute)):
+        return None
+    probe = ast.Call(func=inner, args=list(node.args[1:]), keywords=list(node.keywords))
+    ast.copy_location(probe, node)
+    kind = _call_kind(probe, aliases)
+    return (kind, probe) if kind is not None else None
 
 
 def _call_kind(node: ast.Call, aliases: Dict[str, str]) -> Optional[str]:
@@ -724,15 +867,90 @@ def _call_kind(node: ast.Call, aliases: Dict[str, str]) -> Optional[str]:
     return None
 
 
-def _governed_files() -> List[Path]:
-    out: List[Path] = []
-    for top in _GOVERNED:
-        for path in sorted((_SRC / top).rglob("*.py")):
-            rel = path.relative_to(_SRC)
-            if any(part in _EXEMPT_DIRS for part in rel.parts):
-                continue
-            out.append(path)
+_PARSE_CACHE: Dict[str, ast.Module] = {}
+
+
+def _parse_cached(rel: str, source: str) -> ast.Module:
+    """Parse once per file per run.
+
+    The tree is walked more than once -- the two production assertions plus the
+    allowlist-staleness checks, which re-scan with an allowlist emptied -- and
+    this guard runs in CI, where parsing 775 modules repeatedly was the whole
+    runtime. Keyed on the source as well as the path so synthetic sources in
+    the self-tests never collide with the real file at that path.
+    """
+    key = f"{rel}\0{hash(source)}"
+    tree = _PARSE_CACHE.get(key)
+    if tree is None:
+        tree = ast.parse(source)
+        _PARSE_CACHE[key] = tree
+    return tree
+
+
+def _is_exempt(rel: str) -> bool:
+    """True if *rel* is deploy tooling outside the request path."""
+    return any(rel == d or rel.startswith(d + "/") for d in _EXEMPT_DIRS)
+
+
+def _module_path(mod: str) -> Optional[Path]:
+    direct = _SRC / (mod.replace(".", "/") + ".py")
+    if direct.exists():
+        return direct
+    pkg = _SRC / mod.replace(".", "/") / "__init__.py"
+    return pkg if pkg.exists() else None
+
+
+def _first_party_imports(path: Path) -> set:
+    out: set = set()
+    try:
+        tree = _parse_cached(str(path), path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return out
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+            if n.module.startswith("code_indexer."):
+                out.add(n.module[len("code_indexer.") :])
+        elif isinstance(n, ast.Import):
+            for al in n.names:
+                if al.name.startswith("code_indexer."):
+                    out.add(al.name[len("code_indexer.") :])
     return out
+
+
+_GOVERNED_CACHE: Optional[List[Path]] = None
+
+
+def _governed_files() -> List[Path]:
+    """Every first-party module the server can reach by import.
+
+    Seeded from _GOVERNED and closed over imports, so moving a file out of
+    `server/` no longer moves it out of the seam's scope. Client-only modules
+    the server never imports stay out: the CLI runs on a developer's machine
+    with their own credentials, and widening the fence to the whole package
+    would bury real findings under code the seam was never about.
+    """
+    global _GOVERNED_CACHE
+    if _GOVERNED_CACHE is not None:
+        return _GOVERNED_CACHE
+    seeds: List[Path] = []
+    for top in _GOVERNED:
+        root = _SRC / top
+        if root.is_dir():
+            seeds.extend(sorted(root.rglob("*.py")))
+    seen: dict = {}
+    stack = list(seeds)
+    while stack:
+        path = stack.pop()
+        rel = str(path.relative_to(_SRC))
+        if rel in seen or _is_exempt(rel):
+            continue
+        seen[rel] = path
+        for mod in _first_party_imports(path):
+            nxt = _module_path(mod)
+            if nxt is not None and str(nxt.relative_to(_SRC)) not in seen:
+                stack.append(nxt)
+    _GOVERNED_CACHE = [seen[k] for k in sorted(seen)]
+    return _GOVERNED_CACHE
 
 
 def _scope_index(tree: ast.Module) -> List[Tuple[int, int, ast.AST]]:
@@ -771,23 +989,29 @@ def _scan() -> Tuple[List[str], List[str]]:
     return violations, unknown
 
 
-def _scan_source(rel: str, source: str) -> Tuple[List[str], List[str]]:
+def _scan_source(
+    rel: str, source: str, apply_self_update_allowlist: bool = True
+) -> Tuple[List[str], List[str]]:
     """Scan one module's source. Split out from :func:`_scan` so the guard's own
     behaviour can be tested against synthetic sources rather than only against
     whatever the tree happens to contain today."""
     violations: List[str] = []
     unknown: List[str] = []
-    tree = ast.parse(source)
+    tree = _parse_cached(rel, source)
     aliases = _direct_import_aliases(tree)
     spans = _scope_index(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         kind = _call_kind(node, aliases)
+        target = node
         if kind is None:
-            continue
+            deferred = _partial_spawn(node, aliases)
+            if deferred is None:
+                continue
+            kind, target = deferred
         argv, builders = _git_argv(
-            node, kind, _enclosing_scope(tree, spans, node), tree
+            target, kind, _enclosing_scope(tree, spans, node), tree
         )
         if argv is None:
             continue
@@ -812,8 +1036,12 @@ def _scan_source(rel: str, source: str) -> Tuple[List[str], List[str]]:
         # so a global flag cannot swallow the verb during classification.
         concrete = [a if a is not None else "<dynamic>" for a in argv]
         if is_mutating_git(concrete):
+            if apply_self_update_allowlist and (
+                (rel, verb) in ALLOWED_SELF_UPDATE_MUTATIONS
+            ):
+                continue
             violations.append(f"{where}  MUTATING: git {verb}")
-        elif (rel, verb) not in ALLOWED_READS:
+        elif rel.startswith(_CORE) and (rel, verb) not in ALLOWED_READS:
             violations.append(f"{where}  unlisted read: git {verb}")
     return violations, unknown
 
@@ -1530,3 +1758,175 @@ def test_scan_is_live() -> None:
         'import subprocess\ndef f():\n    subprocess.run(["git", "push", "o", "m"])\n',
     )
     assert any("MUTATING: git push" in x for x in v), "the scan path is not classifying"
+
+
+class TestRemainingBypassClasses:
+    """The tail an adversarial pass found after the fail-closed rewrite."""
+
+    def test_partial_bound_argv_is_seen(self) -> None:
+        """`functools.partial(subprocess.run, argv)` defers the spawn but binds
+        argv now. The call whose func is `partial` is not itself a spawn, so the
+        site was invisible -- and `partial` appears 35x in governed roots."""
+        for src in (
+            "import functools, subprocess\n"
+            "def f():\n"
+            '    r = functools.partial(subprocess.run, ["git", "push", "o", "m"])\n'
+            "    r()\n",
+            "from functools import partial\n"
+            "import subprocess\n"
+            "def f():\n"
+            '    r = partial(subprocess.run, ["git", "push", "o", "m"])\n'
+            "    r()\n",
+        ):
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"partial-bound argv not seen:\n{src}"
+
+    def test_star_import_binds_the_spawn(self) -> None:
+        """`from subprocess import *` binds `run` with no alias to record."""
+        src = (
+            "from subprocess import *\n"
+            "def f():\n"
+            '    run(["git", "push", "origin", "main"])\n'
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert v or u
+
+    def test_an_assignment_later_in_the_loop_reaches_the_call(self) -> None:
+        """A loop back-edge makes a textually-later assignment reachable.
+
+        Resolution stops at `line >= call.lineno`, which is sound for straight
+        line code and wrong inside a loop: on iteration 2 the call runs the argv
+        assigned at the BOTTOM of iteration 1. Reported as the harmless
+        `rev-parse` while the push was never mentioned.
+        """
+        src = (
+            "import subprocess\n"
+            "def f(items):\n"
+            '    cmd = ["git", "rev-parse", "HEAD"]\n'
+            "    for i in items:\n"
+            "        subprocess.run(cmd)\n"
+            '        cmd = ["git", "push", "origin", "main"]\n'
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert any("push" in x for x in v + u), f"loop back-edge missed: {v + u}"
+
+    def test_a_statically_dead_branch_is_not_reported(self) -> None:
+        """`if False:` cannot run, so blaming its contents names a command the
+        program will never execute."""
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            "    if False:\n"
+            '        cmd = ["git", "push", "origin", "main"]\n'
+            "    else:\n"
+            '        cmd = ["cidx", "index"]\n'
+            "    subprocess.run(cmd)\n"
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert not v and not u, f"dead branch reported: {v + u}"
+
+
+class TestTheFenceIsReachabilityNotDirectory:
+    """What the seam governs is what the SERVER can reach, not two directories.
+
+    `_GOVERNED` named `server/` and `global_repos/`, so a raw mutating git call
+    one directory outside was invisible with no allowlist entry needed --
+    `services/git_topology_service.py` is imported by
+    `server/mcp/handlers/repos.py` and was never scanned. A directory boundary
+    pretending to be a reachability boundary is defeated by moving a file.
+    """
+
+    def test_a_module_reachable_only_by_import_is_governed(self) -> None:
+        governed = {str(p.relative_to(_SRC)) for p in _governed_files()}
+        assert "services/git_topology_service.py" in governed, (
+            "a module the server imports must be scanned, wherever it lives"
+        )
+
+    def test_client_only_modules_stay_out_of_scope(self) -> None:
+        """The CLI runs on a developer's machine with their own credentials, so
+        client-side git is deliberately not the seam's business. Widening the
+        fence to the whole package would bury real findings."""
+        governed = {str(p.relative_to(_SRC)) for p in _governed_files()}
+        assert "sync/conflict_resolution.py" not in governed
+
+    def test_exempt_dirs_match_a_path_prefix_not_any_component(self) -> None:
+        """`_EXEMPT_DIRS` matched ANY path component, so a future
+        `server/repositories/scripts/` would be exempt for free."""
+        assert not _is_exempt("server/repositories/scripts/thing.py")
+        assert _is_exempt("scripts/thing.py")
+
+
+class TestSelfUpdateMutationsAreJustifiedPerCall:
+    """auto_update's git calls are exempt per CALL, not per directory.
+
+    They operate on the server's OWN source tree and on hnswlib -- not on a
+    tenant golden repo -- so git-mcp, which exists to hold golden-repo
+    credentials, is the wrong destination for them. That is a real
+    justification, and it belongs against each call so a NEW mutating call in
+    the same directory still fails until someone justifies it too.
+    """
+
+    def test_every_self_update_entry_is_live(self) -> None:
+        live = set()
+        for path in _governed_files():
+            rel = str(path.relative_to(_SRC))
+            violations, _ = _scan_source(
+                rel, path.read_text(encoding="utf-8"), apply_self_update_allowlist=False
+            )
+            for v in violations:
+                for arel, averb in ALLOWED_SELF_UPDATE_MUTATIONS:
+                    if v.startswith(f"{arel}:") and v.endswith(f"git {averb}"):
+                        live.add((arel, averb))
+        stale = ALLOWED_SELF_UPDATE_MUTATIONS - live
+        assert not stale, f"stale self-update exemptions: {sorted(map(str, stale))}"
+
+    def test_an_unjustified_mutation_in_the_same_dir_still_fails(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    subprocess.run(["git", "push", "origin", "main"])\n'
+        )
+        v, _ = _scan_source("server/auto_update/deployment_executor.py", src)
+        assert any("MUTATING: git push" in x for x in v), v
+
+
+class TestLiteralHeadConcatenationIsReadable:
+    """`["git", "log", ...] + files` carries its verb in the literal head.
+
+    Reporting it as opaque pushed real, classifiable reads into
+    ALLOWED_UNREADABLE_ARGV, where they stop being checked against the
+    classifier at all -- the allowlist is keyed on the BUILDER, so an entry for
+    `<concatenation>` in a file would also cover a future
+    `["git","push"] + args` in it. Classifying is strictly safer than exempting.
+    """
+
+    def test_a_concatenated_read_is_classified_not_exempted(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(files):\n"
+            '    subprocess.run(["git", "log", "--format=%H", "--"] + files)\n'
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert not u, f"should be readable, not opaque: {u}"
+        assert any("unlisted read: git log" in x for x in v), v
+
+    def test_a_concatenated_mutation_is_caught(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(args):\n"
+            '    subprocess.run(["git", "push"] + args)\n'
+        )
+        v, _ = _scan_source("server/services/synthetic.py", src)
+        assert any("MUTATING: git push" in x for x in v), v
+
+    def test_a_dual_form_head_stays_opaque(self) -> None:
+        """The appended tail is exactly where `git remote`'s sub-verb arrives,
+        so the same rule that governs append/extend must govern `+`."""
+        src = (
+            "import subprocess\n"
+            "def f(args):\n"
+            '    subprocess.run(["git", "remote"] + args)\n'
+        )
+        v, u = _scan_source("server/startup/lifespan.py", src)
+        assert v or u, "a dual-form verb completed by the tail must not read as clean"
+        assert not any("unlisted read" in x for x in v), v
