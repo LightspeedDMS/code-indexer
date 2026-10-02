@@ -6,7 +6,7 @@ collects settings/pom/pattern files correctly, and discover()'s output is unchan
 the multi-module and mixed cases.
 """
 
-from src.code_indexer.scip.discovery import ProjectDiscovery
+from code_indexer.scip.discovery import ProjectDiscovery
 
 
 class TestPruning:

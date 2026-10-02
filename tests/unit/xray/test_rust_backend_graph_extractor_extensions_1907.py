@@ -23,20 +23,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from code_indexer.xray.rust_backend import (
-    _XRAY_CLI_DEFAULT,
     get_graph_extractor_extensions,
 )
 
 
 def _require_xray_cli_binary() -> None:
-    if not _XRAY_CLI_DEFAULT.exists():
-        pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
-            "run 'cargo build --release' inside rust/ to enable this test."
-        )
+    """Ensure the real xray-cli release binary is available, or skip loudly.
+
+    Delegates to the shared tests/unit/xray/conftest.py helper, which
+    resolves the path the SAME way production does
+    (``resolve_xray_cli_path()`` -- ``$CIDX_XRAY_CLI_PATH`` first, then the
+    source-tree build output). The previous gate read the import-time
+    ``_XRAY_CLI_DEFAULT`` snapshot, so on a packaged install that exports
+    ``CIDX_XRAY_CLI_PATH`` -- the whole reason that override exists -- this
+    test SKIPPED while the binary it needs was sitting right there. The
+    shared helper also builds on demand and fails loudly when a build is
+    attempted and fails, instead of skipping silently.
+    """
+    from tests.unit.xray.conftest import require_xray_cli_binary
+
+    require_xray_cli_binary()
 
 
 def test_get_graph_extractor_extensions_reports_java_and_kotlin() -> None:

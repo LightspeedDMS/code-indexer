@@ -30,6 +30,11 @@ variables:
   ECR_REPOSITORY_NAME: "gitlab-runner"
   IMAGE_PREFIX: "cidx"
   LATEST_TAG: "cidx-tools-latest"
+  # Tag prefix for the BuildKit multi-stage layer cache (see build:image).
+  # Cache tags are unique per build -- the repo is IMMUTABLE, so a fixed cache
+  # tag could never be re-exported -- and pruned to the newest one at the end
+  # of each successful build.
+  CACHE_TAG_PREFIX: "cidx-buildcache"
 
 # One pipeline per change: merge-request pipelines, master branch pipelines, and
 # manual web-triggered pipelines (to build a pre-merge branch image on demand) --
@@ -45,8 +50,22 @@ smoke:
   stage: test
   tags: [default]
   image: python:3.11-slim-bookworm
+  # A real PostgreSQL, because ~46 tests across four files are gated on
+  # TEST_POSTGRES_DSN and have skipped on every pipeline since they were
+  # written. They are the only coverage of the cluster-mode storage backends --
+  # the code path production actually runs. Measured locally: without the DSN
+  # 85 passed / 46 skipped; with it 131 passed / 0 skipped. The gate was hiding
+  # working tests, not flaky ones.
+  services:
+    - name: public.ecr.aws/docker/library/postgres:16-alpine
+      alias: postgres
+      variables:
+        POSTGRES_PASSWORD: ci
+        POSTGRES_DB: cidx
   variables:
     PIP_NO_CACHE_DIR: "1"
+    # psycopg arrives via the `cluster` extra already installed below.
+    TEST_POSTGRES_DSN: "postgresql://postgres:ci@postgres:5432/cidx"
   before_script:
     # hnswlib + psycopg build from source; the git+https hnswlib dep needs git.
     - apt-get update && apt-get install -y --no-install-recommends build-essential cmake git pkg-config
@@ -72,6 +91,10 @@ smoke:
       tests/unit/utils/test_subprocess_diagnostics_1832.py
       tests/unit/xray/test_python_validator_nested_std_paths.py
       tests/unit/server/storage/postgres/test_xray_cache_backend.py
+      tests/unit/server/storage/test_search_event_log_backends.py
+      tests/unit/server/storage/test_windowed_cache_metrics_backends_1294.py
+      tests/unit/server/mcp/test_query_audit_logs_shared_read.py
+      tests/unit/server/auth/test_token_bucket_pg_atomic_concurrency_1334.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
   rules:
@@ -124,6 +147,19 @@ build:image:
     - apk add --no-cache --upgrade aws-cli jq
     - aws --version
     - until docker info >/dev/null 2>&1; do sleep 2; done
+    # A buildx builder on the docker-container driver, NOT the default `docker`
+    # driver. This is not a style preference: `--cache-to type=registry` is
+    # rejected outright by the docker driver ("cache export is not supported"),
+    # and registry cache is the only mechanism that carries the `builder` and
+    # `xray-builder` stages (see the cache note in `script:`). buildx ships in
+    # this image (verified: docker:24 -> buildx v0.16.2).
+    #
+    # The driver pulls moby/buildkit:buildx-stable-1 from Docker Hub into the
+    # dind daemon. If that ever starts flaking on Hub's anonymous pull limits,
+    # mirror that image into this same ECR and add
+    # `--driver-opt image=<ecr>/<repo>:<buildkit-tag>` here.
+    - docker buildx create --name cidx-builder --driver docker-container --use
+    - docker buildx inspect --bootstrap
   script:
     - |
       ECR_REPOSITORY="${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
@@ -141,20 +177,126 @@ build:image:
       fi
       FULL="${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-      # Best-effort layer cache from the current moving-latest.
-      docker pull "${ECR_REPOSITORY}:${LATEST_TAG}" || true
+      # -- layer cache -------------------------------------------------------
+      # The previous `--build-arg BUILDKIT_INLINE_CACHE=1 --cache-from <latest>`
+      # cached NOTHING in the two stages that cost real time. Inline cache is
+      # embedded in the pushed image's config, so it can only describe the
+      # layers of the FINAL stage; the `builder` and `xray-builder` stages leave
+      # no record. And because the final stage COPYs from `builder` before it
+      # COPYs from `xray-builder`, any src/ commit misses on the first COPY,
+      # which misses every later step in that stage, which forces xray-builder
+      # to be materialized for real -- i.e. `cargo build --release -p xray-cli`
+      # plus the ~20 tree-sitter grammar crates compiled from scratch on every
+      # single build, inside a job already at timeout: 90m behind a
+      # resource_group that serializes it.
+      #
+      # Measured on a reduced two-builder-stage reproduction of this exact
+      # topology, both runs on a provably empty local BuildKit cache, one
+      # single-file src change between seed and run:
+      #   inline cache  : 0 cached steps, full rebuild of xray-builder (28s)
+      #   registry max  : xray-builder fully CACHED, never executed (8s)
+      # The stamps baked into the two images confirmed the xray steps were
+      # restored rather than re-run.
+      #
+      # `mode=max` is the point: it exports every layer of every stage, not
+      # just the final one. `image-manifest=true,oci-mediatypes=true` makes the
+      # cache a single OCI image manifest, which is the shape ECR accepts (the
+      # older multi-manifest cache format is not an ECR-supported artifact).
+      #
+      # Tagging: this ECR repo is IMMUTABLE, so the cache CANNOT be re-exported
+      # to a fixed tag, and the delete-then-put-image trick used for
+      # ${LATEST_TAG} below is not available either -- cache-from reads at the
+      # start of the build and cache-to writes at the end, so there is no point
+      # at which the tag could be freed. Instead every build writes a FRESH,
+      # unique cache tag (always a create, which immutability allows), reads
+      # the newest cache tag left by the previous build, and prunes the rest at
+      # the end. Storage is therefore bounded at one cache manifest. Its layers
+      # are content-addressed in the same repo, so layers it shares with the
+      # pushed image are stored once; the extra is the intermediate-stage
+      # layers (python builder site-packages, the cargo target dir), order of a
+      # few GB -> low single-digit dollars/month at ECR's per-GB rate. If a
+      # MUTABLE repo is ever available for build caches, this whole
+      # discover/prune dance collapses to one fixed `--cache-to` tag.
+      NEW_CACHE_TAG="${CACHE_TAG_PREFIX}-${VERSION}-${SHORT_SHA}"
+      PREV_CACHE_TAG=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY_NAME" \
+        --region "$ECR_REGION" \
+        --query 'sort_by(imageDetails[?imageTags], &imagePushedAt)[*].imageTags[]' \
+        --output text 2>/dev/null | tr '\t' '\n' | grep "^${CACHE_TAG_PREFIX}-" | tail -1 || true)
 
-      docker build \
-        --build-arg BUILDKIT_INLINE_CACHE=1 \
-        --cache-from "${ECR_REPOSITORY}:${LATEST_TAG}" \
-        -t "$FULL" .
+      CACHE_FROM="--cache-from type=registry,ref=${ECR_REPOSITORY}:${LATEST_TAG}"
+      if [ -n "$PREV_CACHE_TAG" ]; then
+        CACHE_FROM="--cache-from type=registry,ref=${ECR_REPOSITORY}:${PREV_CACHE_TAG} ${CACHE_FROM}"
+        echo "Reusing build cache ${ECR_REPOSITORY}:${PREV_CACHE_TAG}"
+      else
+        echo "No ${CACHE_TAG_PREFIX}-* cache tag yet; this build seeds one."
+      fi
 
-      # Unique versioned tag -> plain push (immutable repo accepts a fresh tag);
-      # the pre-delete covers a same-minute rerun of the same commit.
+      # Pre-delete covers a same-minute rerun of the same commit (immutable repo
+      # accepts a fresh tag, not an overwrite). Must happen BEFORE the build now
+      # that buildx pushes the image itself.
       aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
         --image-ids imageTag="$IMAGE_TAG" --region "$ECR_REGION" || true
-      docker push "$FULL"
+      aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$NEW_CACHE_TAG" --region "$ECR_REGION" || true
+
+      # --provenance=false --sbom=false: buildx attaches a provenance
+      # attestation on --push by default, which turns the pushed artifact into
+      # an OCI index instead of the plain single-platform image manifest that
+      # `docker push` produced before. The ${LATEST_TAG} re-point below copies
+      # that manifest verbatim via put-image, and the ArgoCD overlay consumes
+      # it, so keep the artifact shape byte-for-byte what it has always been.
+      docker buildx build \
+        --builder cidx-builder \
+        --provenance=false --sbom=false \
+        $CACHE_FROM \
+        --cache-to "type=registry,ref=${ECR_REPOSITORY}:${NEW_CACHE_TAG},mode=max,image-manifest=true,oci-mediatypes=true" \
+        -t "$FULL" --push .
       echo "Pushed $FULL"
+
+      # -- run the tests that can ONLY run inside this image -----------------
+      # Both test jobs above use python:3.11-slim-bookworm, which has no cargo
+      # and no xray-cli, so every test gated on the real binary SKIPS in CI --
+      # roughly 30 of them, on every pipeline, since the gate was written. A
+      # suite that always skips is not coverage; it is a green tick with
+      # nothing behind it, and it skipped silently right through the release
+      # that shipped xray with no binary at all.
+      #
+      # This image is the first artifact that can run them: it carries xray-cli
+      # AND the pinned toolchain, and sets CIDX_XRAY_CLI_PATH, so the gates
+      # resolve to a real binary and the tests execute against the EXACT
+      # artifact being shipped -- including the glibc it will run on in the pod.
+      #
+      # --user 0:0 because the image runs as `cidx` and pip needs to write;
+      # the repo is mounted read-write only so pytest can place its cache.
+      # CIDX_REQUIRE_XRAY_EXTRAS turns a missing optional dependency into a
+      # failure here rather than another silent skip.
+      docker run --rm --user 0:0 \
+        -v "$CI_PROJECT_DIR:/w" -w /w \
+        -e CIDX_REQUIRE_XRAY_EXTRAS=1 \
+        "$FULL" sh -lc '
+          set -e
+          pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
+          PYTHONPATH=/w/src python -m pytest \
+            tests/unit/xray/ \
+            tests/unit/server/mcp/test_analyze_graph_handler.py \
+            tests/unit/server/mcp/test_analyze_graph_multi_repo_1902.py \
+            tests/unit/server/mcp/test_analyze_graph_refine_1909.py \
+            tests/unit/server/mcp/test_xray_graph_pattern_modes_1859_1860.py \
+            tests/unit/server/mcp/test_xray_graph_excluded_extractor_honesty_1907.py \
+            tests/unit/server/mcp/test_xray_missing_binary_honesty.py \
+            -q -p no:randomly --timeout=600
+        '
+      echo "In-image xray verification passed for $FULL"
+
+      # Keep exactly the cache tag this build just wrote.
+      for STALE in $(aws ecr describe-images --repository-name "$ECR_REPOSITORY_NAME" \
+            --region "$ECR_REGION" --query 'imageDetails[?imageTags].imageTags[]' \
+            --output text 2>/dev/null | tr '\t' '\n' \
+            | grep "^${CACHE_TAG_PREFIX}-" | grep -v "^${NEW_CACHE_TAG}$"); do
+        aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY_NAME" \
+          --image-ids imageTag="$STALE" --region "$ECR_REGION" || true
+        echo "Pruned stale build cache tag $STALE"
+      done
 
       # Re-point the moving latest by manifest copy (immutable tag -> put-image),
       # master builds only.

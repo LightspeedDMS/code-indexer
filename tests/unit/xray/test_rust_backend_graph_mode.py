@@ -20,7 +20,7 @@ from typing import Any, Dict
 
 import pytest
 
-from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+from code_indexer.xray.rust_backend import RustNativeBackend
 
 # Cross-file graph-mode evaluator: `helper()` is declared ONLY in B.java and
 # called ONLY from A.java. A single-file (legacy) scan of B.java alone would
@@ -68,12 +68,21 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 
 
 def _require_xray_cli_binary() -> None:
-    """Skip this test if the real xray-cli release binary is not built locally."""
-    if not _XRAY_CLI_DEFAULT.exists():
-        pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
-            "run 'cargo build --release' inside rust/ to enable this test."
-        )
+    """Ensure the real xray-cli release binary is available, or skip loudly.
+
+    Delegates to the shared tests/unit/xray/conftest.py helper, which
+    resolves the path the SAME way production does
+    (``resolve_xray_cli_path()`` -- ``$CIDX_XRAY_CLI_PATH`` first, then the
+    source-tree build output). The previous gate read the import-time
+    ``_XRAY_CLI_DEFAULT`` snapshot, so on a packaged install that exports
+    ``CIDX_XRAY_CLI_PATH`` -- the whole reason that override exists -- this
+    test SKIPPED while the binary it needs was sitting right there. The
+    shared helper also builds on demand and fails loudly when a build is
+    attempted and fails, instead of skipping silently.
+    """
+    from tests.unit.xray.conftest import require_xray_cli_binary
+
+    require_xray_cli_binary()
 
 
 def _write_cross_file_fixture(repo_root: Path) -> None:

@@ -11,7 +11,15 @@ authors = [
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9,<3.13"
+# Floor is 3.10, not 3.9: nothing in this project is built, tested or run on
+# 3.9 any more (both CI jobs use python:3.11-slim-bookworm, and so do the
+# Dockerfile `builder` and runtime stages), and mypy >=1.15 refuses
+# `python_version = "3.9"` outright -- which made ./lint.sh fail at mypy
+# startup for anyone on a current mypy. 3.10 is the lowest version the type
+# checker can still verify, so it is the lowest version we can honestly claim.
+# Keep this in lockstep with [tool.mypy] python_version and the black/ruff
+# target-version below; the CI and runtime images (3.11) sit inside the range.
+requires-python = ">=3.10,<3.13"
 keywords = ["ai", "code-search", "semantic-search", "ollama", "qdrant"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -20,7 +28,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -103,14 +110,14 @@ dependencies = [
     "markdown>=3.4.0",
     "bleach>=6.0.0",
     # Wiki front matter parsing
-    # Bug #1443: python-frontmatter==1.2.0's util.py imports typing.TypeGuard,
-    # which does not exist in the Python 3.9 stdlib (this project's requires-python
-    # floor). The wheel declares no Requires-Python guard, so pip happily resolves
-    # the unbounded pin to 1.2.0 on 3.9 and `import frontmatter` raises ImportError.
-    # Verified: 1.1.0 is the last pre-1.2.0 release, is available on PyPI, and
-    # imports + parses correctly on Python 3.9.25 in an isolated venv.
-    "python-frontmatter>=1.0.0,<1.2.0 ; python_version < '3.10'",
-    "python-frontmatter>=1.0.0 ; python_version >= '3.10'",
+    # Bug #1443 (historical): python-frontmatter==1.2.0's util.py imports
+    # typing.TypeGuard, which does not exist in the Python 3.9 stdlib, and the
+    # wheel declares no Requires-Python guard -- so pip resolved an unbounded
+    # pin to 1.2.0 on 3.9 and `import frontmatter` raised ImportError. The
+    # `python_version < '3.10'` branch that pinned <1.2.0 existed solely for
+    # that case and is unreachable now that requires-python floors at 3.10
+    # (TypeGuard is in the 3.10 stdlib), so the pin is plain again.
+    "python-frontmatter>=1.0.0",
     # Excel export for query analytics (Story #1160)
     "openpyxl>=3.1.0",
     # MFA/TOTP dependencies (Epic #556)
@@ -174,11 +181,13 @@ allow-direct-references = true
 
 [tool.black]
 line-length = 88
-target-version = ["py39"]
+# Tracks `requires-python`'s floor (3.10). See the note there.
+target-version = ["py310"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+# Tracks `requires-python`'s floor (3.10). See the note there.
+target-version = "py310"
 exclude = [
     "tests/fixtures/cidx-test-repo/",
     "tests/manual/"
@@ -189,7 +198,10 @@ exclude = [
 "src/code_indexer/server/app.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.9"
+# Must match `requires-python`'s floor (3.10). mypy >=1.15 hard-rejects "3.9"
+# ("Python 3.9 is not supported (must be 3.10 or higher)"), which broke
+# ./lint.sh at mypy startup on any current mypy.
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

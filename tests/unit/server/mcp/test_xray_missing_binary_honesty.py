@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,10 +38,60 @@ VALID_EVAL = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }"
 DRIVER_REGEX = r"prepareStatement"
 
 
+# Unit-suite analogue of tests/e2e/helpers.py's CIDX_E2E_REQUIRE_ALL switch
+# (Story #1123): locally a missing optional dependency is a LOUD, specific
+# skip; in CI it is a hard failure.
+#
+# Why this file in particular needs it. Every test here is autouse-gated on
+# tree_sitter_languages, which ships only in cidx's `xray` extra -- and CI
+# installs `.[dev,cluster,cohere]`. Left as a bare importorskip, this file
+# goes from "proves a missing binary can never look like a clean empty scan"
+# to "0 tests collected" with NO signal at all, which is strictly worse than
+# not listing it in the smoke job: the job stays green while the regression
+# it exists to catch is unguarded. The skip itself must stay -- the
+# dependency really can be absent on a developer machine -- so the fix is to
+# make the skip explicit and make CI able to forbid it.
+XRAY_EXTRAS_REQUIRED_ENV_VAR = "CIDX_REQUIRE_XRAY_EXTRAS"
+
+_TRUTHY = ("true", "1", "yes")
+
+
+def _xray_extras_are_required() -> bool:
+    """True when the environment forbids skipping for missing xray extras.
+
+    Honours this file's own switch and the e2e suite's CIDX_E2E_REQUIRE_ALL,
+    so a job that already declares "all prerequisites must be present" does
+    not need a second variable.
+    """
+    for var in (XRAY_EXTRAS_REQUIRED_ENV_VAR, "CIDX_E2E_REQUIRE_ALL"):
+        if os.environ.get(var, "").strip().lower() in _TRUTHY:
+            return True
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _require_tree_sitter() -> None:
-    """These tests run the real Phase 1 / Phase 2 engine."""
-    pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
+    """These tests run the real Phase 1 / Phase 2 engine.
+
+    Skips loudly when tree_sitter_languages is absent, or hard-fails when
+    the environment set CIDX_REQUIRE_XRAY_EXTRAS (see above).
+    """
+    try:
+        import tree_sitter_languages  # noqa: F401  (presence check only)
+    except ImportError as exc:
+        reason = (
+            "tree_sitter_languages is not installed, so the real xray Phase 1/2 "
+            "engine cannot run and the missing-binary honesty contract "
+            "(BinaryNotFound must never look like a clean empty scan) is NOT "
+            "being verified. Install cidx's 'xray' extra -- pip install -e "
+            f"'.[xray]' -- to enable it. [{exc}]"
+        )
+        if _xray_extras_are_required():
+            raise RuntimeError(
+                f"{reason}  [Hard-fail: {XRAY_EXTRAS_REQUIRED_ENV_VAR}=true "
+                "requires all prerequisites present]"
+            ) from exc
+        pytest.skip(reason)
 
 
 @pytest.fixture

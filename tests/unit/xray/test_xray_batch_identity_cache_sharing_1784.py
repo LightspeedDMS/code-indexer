@@ -56,19 +56,21 @@ _VALID_EVALUATOR = (
 
 
 def _require_xray_cli_binary() -> None:
-    """Skip when the real xray-cli release binary is not built locally.
+    """Ensure the real xray-cli release binary is available, or skip loudly.
 
-    Mirrors test_rust_backend.py's _require_xray_cli_binary(): this is a
-    genuine, near-zero-mocking regression test that needs the real compiled
-    binary to prove the fix at the actual OS process-exec layer.
+    Delegates to the shared tests/unit/xray/conftest.py helper, which
+    resolves the path the SAME way production does
+    (``resolve_xray_cli_path()`` -- ``$CIDX_XRAY_CLI_PATH`` first, then the
+    source-tree build output). The previous gate read the import-time
+    ``_XRAY_CLI_DEFAULT`` snapshot, so on a packaged install that exports
+    ``CIDX_XRAY_CLI_PATH`` -- the whole reason that override exists -- this
+    test SKIPPED while the binary it needs was sitting right there. The
+    shared helper also builds on demand and fails loudly when a build is
+    attempted and fails, instead of skipping silently.
     """
-    from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+    from tests.unit.xray.conftest import require_xray_cli_binary
 
-    if not _XRAY_CLI_DEFAULT.exists():
-        pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
-            "run 'cargo build --release' inside rust/ to enable this test."
-        )
+    require_xray_cli_binary()
 
 
 class _FakeClusterCache:

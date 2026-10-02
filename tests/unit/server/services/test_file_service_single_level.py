@@ -11,8 +11,8 @@ dir), and pin the old over-match so the behavior change is intentional.
 
 import pytest
 
-from src.code_indexer.server.models.api_models import FileListQueryParams
-from src.code_indexer.server.services.file_service import FileListingService
+from code_indexer.server.models.api_models import FileListQueryParams
+from code_indexer.server.services.file_service import FileListingService
 
 
 def _qp(path_pattern=None, language=None, sort_by="path", limit=500, page=1):

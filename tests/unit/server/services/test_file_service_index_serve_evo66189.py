@@ -3,7 +3,7 @@
 
 import msgpack
 
-from src.code_indexer.server.services.file_service import FileListingService
+from code_indexer.server.services.file_service import FileListingService
 
 
 def _svc():
