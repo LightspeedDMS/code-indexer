@@ -109,6 +109,7 @@
 - [project_cluster_temporal_metadata_pg_backed.md](project_cluster_temporal_metadata_pg_backed.md) - cluster temporal metadata is PG-backed (#1313); 5 launch sites need the bootstrap dir
 - [project_staging_workers_config_durability.md](project_staging_workers_config_durability.md) - durable worker count is the DB runtime.workers setting, web-UI only
 - [project_local_server_solo_sqlite.md](project_local_server_solo_sqlite.md) - local server is solo/SQLite; PG/cluster needs staging
+- [project_production_is_solo_sqlite.md](project_production_is_solo_sqlite.md) - PRODUCTION is solo/SQLite: verify SQLite first, PG is parity
 - [project_backup_scope_dev_staging_only.md](project_backup_scope_dev_staging_only.md) - backup-before-migration is dev/staging only; production has no room
 - [project_config_default_flip_is_inert.md](project_config_default_flip_is_inert.md) - changing a dataclass default is inert on existing deployments
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - write mode is context-dependent (server=sqlite, CLI=json)
