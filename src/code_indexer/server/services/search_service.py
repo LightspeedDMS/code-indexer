@@ -41,6 +41,21 @@ logger = logging.getLogger(__name__)
 _HNSW_CACHE_USE_SERVER_DEFAULT = object()
 
 
+def _app_state_attr(name: str) -> Any:
+    """``app.state.<name>`` when the server app exists, else None.
+
+    Bug #1996: peeks at the lazily built app (``peek_app``) instead of
+    reading ``app`` from the module, which would run the full
+    ``create_app()`` -- e.g. inside a standalone ``cidx query`` process.
+    """
+    from ..app import peek_app
+
+    app = peek_app()
+    if app is None:
+        return None
+    return getattr(cast("FastAPI", app).state, name, None)
+
+
 def _get_http_client_factory() -> Any:
     """Get http_client_factory from app.state for fault-injection-aware HTTP clients.
 
@@ -54,9 +69,7 @@ def _get_http_client_factory() -> Any:
     http_client_factory=None and falls back to per-call client creation, which
     is correct for the non-server path. Matches the _get_query_executor() pattern.
     """
-    from ..app import app as _app
-
-    return getattr(cast("FastAPI", _app).state, "http_client_factory", None)
+    return _app_state_attr("http_client_factory")
 
 
 def _get_query_executor() -> Any:
@@ -76,9 +89,7 @@ def _get_query_executor() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     setting up the full app.state (mirrors _get_http_client_factory()).
     """
-    from ..app import app as _app
-
-    return getattr(cast("FastAPI", _app).state, "query_executor", None)
+    return _app_state_attr("query_executor")
 
 
 def _get_repo_config_cache() -> Any:
@@ -94,9 +105,7 @@ def _get_repo_config_cache() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     setting up the full app.state (mirrors _get_query_executor()).
     """
-    from ..app import app as _app
-
-    return getattr(cast("FastAPI", _app).state, "repo_config_cache", None)
+    return _app_state_attr("repo_config_cache")
 
 
 def _load_repo_config(repo_path: str) -> Any:

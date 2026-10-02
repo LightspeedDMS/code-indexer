@@ -6,6 +6,7 @@ Following CLAUDE.md principles: NO MOCKS - Real session management implementatio
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Set, Dict, Optional
@@ -55,9 +56,15 @@ class PasswordChangeSessionManager:
             if session_file_path:
                 self.session_file_path = session_file_path
             else:
-                # Default session data location
-                server_dir = Path.home() / ".cidx-server"
-                server_dir.mkdir(exist_ok=True)
+                # Default session data location.  Bug #1996: honour
+                # CIDX_SERVER_DATA_DIR (Bug #1778 pattern) -- the module-level
+                # singleton below is built at import time.
+                server_dir = Path(
+                    os.environ.get(
+                        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                    )
+                )
+                server_dir.mkdir(parents=True, exist_ok=True)
                 self.session_file_path = str(server_dir / "invalidated_sessions.json")
 
             # In-memory cache of invalidated sessions

@@ -35,8 +35,20 @@ def test_cidx_data_dir_env_override_used(tmp_path):
     assert journal.journal_path.name == _JOURNAL_FILENAME
 
 
-def test_cidx_data_dir_unset_defaults_to_home_cidx_server():
-    """When CIDX_DATA_DIR is unset, journal defaults to ~/.cidx-server/dep_map_repair_journal.jsonl."""
+def test_cidx_data_dir_unset_defaults_to_home_cidx_server(tmp_path, monkeypatch):
+    """When CIDX_DATA_DIR is unset, journal defaults to ~/.cidx-server/dep_map_repair_journal.jsonl.
+
+    Bug #1996: the home default is fixed at import (Path.home() at module
+    load), so point it at a temp home -- the journal creates its directory,
+    which must never be the developer's real server home.
+    """
+    from code_indexer.server.services import dep_map_repair_phase37
+
+    monkeypatch.setattr(
+        dep_map_repair_phase37,
+        "_DEFAULT_CIDX_DATA_DIR",
+        tmp_path / "home" / ".cidx-server",
+    )
     env_without = {k: v for k, v in os.environ.items() if k != "CIDX_DATA_DIR"}
     with patch.dict(os.environ, env_without, clear=True):
         journal = _make_journal_default()

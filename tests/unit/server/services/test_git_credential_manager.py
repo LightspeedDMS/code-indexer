@@ -10,11 +10,14 @@ Tests cover:
 - Factory handles missing .jwt_secret gracefully (falls back to hostname key)
 """
 
+import json
 import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
+
+from tests.unit.server._pg_factory_pools import UNREACHABLE_PG_DSN, FactoryPools
 
 from code_indexer.server.services.git_credential_manager import (
     GitCredentialManager,
@@ -142,11 +145,27 @@ class TestCreateGitCredentialManagerFactory:
     """Tests for create_git_credential_manager factory function."""
 
     @pytest.fixture
-    def server_dir(self, tmp_path):
-        """Create a temp server directory."""
+    def server_dir(self, tmp_path, monkeypatch):
+        """Create a temp server directory the server config resolves to.
+
+        Bug #1996: the postgres-mode factory reads postgres_dsn through the
+        ConfigService singleton; point it at this dir's own bootstrap
+        config.json instead of the developer's real ~/.cidx-server.
+        """
         sd = tmp_path / ".cidx-server"
         sd.mkdir()
+        (sd / "config.json").write_text(
+            json.dumps({"server_dir": str(sd), "postgres_dsn": UNREACHABLE_PG_DSN})
+        )
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(sd))
         return sd
+
+    @pytest.fixture
+    def factory_pools(self):
+        """Close the postgres-mode pools a test builds; fail on leaked threads."""
+        pools = FactoryPools()
+        yield pools
+        pools.close_and_check()
 
     @pytest.fixture
     def db_path(self, server_dir):
@@ -170,7 +189,7 @@ class TestCreateGitCredentialManagerFactory:
         assert mgr1._encryption_key == mgr2._encryption_key
 
     def test_create_git_credential_manager_cluster_uses_jwt_secret(
-        self, server_dir, db_path
+        self, server_dir, db_path, factory_pools
     ):
         """In postgres mode, factory uses .jwt_secret — key matches direct cluster construction."""
         jwt_secret = uuid.uuid4().hex
@@ -178,8 +197,10 @@ class TestCreateGitCredentialManagerFactory:
         jwt_file.write_text(jwt_secret)
 
         # Factory-created cluster manager
-        mgr_factory = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode="postgres"
+        mgr_factory = factory_pools.track(
+            create_git_credential_manager(
+                db_path=db_path, server_dir=str(server_dir), storage_mode="postgres"
+            )
         )
 
         # Directly-constructed cluster manager with same secret (ground truth)
@@ -189,14 +210,16 @@ class TestCreateGitCredentialManagerFactory:
         assert mgr_factory._encryption_key == mgr_direct._encryption_key
 
     def test_create_git_credential_manager_no_jwt_secret_in_cluster_mode(
-        self, server_dir, db_path
+        self, server_dir, db_path, factory_pools
     ):
         """In postgres mode without .jwt_secret, factory falls back to hostname key."""
         jwt_file = server_dir / ".jwt_secret"
         assert not jwt_file.exists()
 
-        mgr_cluster = create_git_credential_manager(
-            db_path=db_path, server_dir=str(server_dir), storage_mode="postgres"
+        mgr_cluster = factory_pools.track(
+            create_git_credential_manager(
+                db_path=db_path, server_dir=str(server_dir), storage_mode="postgres"
+            )
         )
         mgr_standalone = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode="sqlite"

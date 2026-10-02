@@ -39,11 +39,14 @@ def test_data_dir_honors_cidx_server_data_dir_env_var(tmp_path, monkeypatch):
     assert service.data_dir != home_default_data_dir
 
 
-def test_data_dir_defaults_to_home_cidx_server_when_env_absent(monkeypatch):
+def test_data_dir_defaults_to_home_cidx_server_when_env_absent(
+    monkeypatch, home_in_tmp
+):
     """Regression guard: with CIDX_SERVER_DATA_DIR unset, behavior for the
     common (non-relocated) deployment must remain byte-identical to before
     the fix -- ~/.cidx-server/data, matching ServerConfigManager's own
-    default (server/utils/config_manager.py)."""
+    default (server/utils/config_manager.py).  Bug #1996: HOME is a temp
+    dir, so the data dir the service creates is not the real server home."""
     monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
 
     service = HealthCheckService()

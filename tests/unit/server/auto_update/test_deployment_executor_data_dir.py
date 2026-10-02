@@ -16,6 +16,20 @@ from unittest.mock import Mock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_deployment_executor_constants():
+    """Bug #1996: tests here importlib.reload() deployment_executor under a
+    modified CIDX_DATA_DIR (or none: the real home).  Reload it again after
+    the test -- autouse, so this teardown runs AFTER monkeypatch restored the
+    env -- or every later test in the process keeps the module's data-dir
+    constants pointing at the developer's real ~/.cidx-server and writes there.
+    """
+    yield
+    import code_indexer.server.auto_update.deployment_executor as dx
+
+    importlib.reload(dx)
+
+
 @pytest.fixture
 def executor():
     """Create DeploymentExecutor instance for testing."""

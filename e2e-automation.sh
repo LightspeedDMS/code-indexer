@@ -58,6 +58,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${E2E_SEED_CACHE_DIR:=$HOME/.tmp/cidx-e2e-seed-repos}"
 : "${E2E_SERVER_DATA_DIR:=$HOME/.tmp/cidx-e2e-server-data}"
 : "${E2E_WORK_DIR:=$HOME/.tmp/cidx-e2e-work}"
+# Bug #1996: server home (CIDX_SERVER_DATA_DIR / CIDX_DATA_DIR) for every phase's
+# pytest process and the CLI subprocesses it spawns, so nothing the suite runs
+# resolves the developer's real ~/.cidx-server.  Re-created empty before EACH
+# phase (wipe_client_server_home), and only ever inside E2E_SCRATCH_ROOT.
+: "${E2E_SCRATCH_ROOT:=$HOME/.tmp}"
+# Set ONLY by preflight_protected_paths in this process (never inherited):
+# gates the destructive pytest-temp prune in reset_test_environment.
+E2E_PREFLIGHT_PASSED=""
+: "${E2E_CLIENT_SERVER_HOME:=$E2E_SCRATCH_ROOT/cidx-e2e-client-server-home}"
 : "${E2E_MARKUPSAFE_URL:=https://github.com/pallets/markupsafe.git}"
 : "${E2E_MARKUPSAFE_TAG:=2.1.5}"
 : "${E2E_TYPEFEST_URL:=https://github.com/sindresorhus/type-fest.git}"
@@ -160,6 +169,118 @@ _yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 _bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------------------
+# Bug #1996: the developer's real server home (~/.cidx-server) is never
+# deleted and never handed to a phase.  Paths are resolved (realpath -m)
+# before any check, so "..", symlinks and trailing slashes cannot sneak past.
+# ---------------------------------------------------------------------------
+# The account's home from the password database -- independent of $HOME,
+# which a caller can empty or override.  Prints nothing when there is none.
+_account_home() {
+    getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true
+}
+
+# Prints why PATH is off-limits and returns 0 when it is empty or /, or when,
+# for EITHER protected home ($HOME and the password-database home), it is that
+# home, its .cidx-server, a directory inside that, or a directory containing
+# it.  Fails closed when either home cannot be determined.
+_real_server_home_conflict() {
+    local raw="$1" account_home target base home real_home
+    if [[ -z "$raw" ]]; then
+        echo "an empty path"
+        return 0
+    fi
+    if [[ -z "${HOME:-}" ]]; then
+        echo "unverifiable: HOME is empty"
+        return 0
+    fi
+    account_home="$(_account_home)"
+    if [[ -z "$account_home" ]]; then
+        echo "unverifiable: no home for uid $(id -u) in the password database"
+        return 0
+    fi
+    target="$(realpath -m -- "$raw")"
+    if [[ -z "$target" || "$target" == "/" ]]; then
+        echo "'$target' (empty or the filesystem root)"
+        return 0
+    fi
+    for base in "$HOME" "$account_home"; do
+        home="$(realpath -m -- "$base")"
+        real_home="$(realpath -m -- "$base/.cidx-server")"
+        if [[ "$target" == "$home" ]]; then
+            echo "'$target' (a home directory)"
+            return 0
+        fi
+        if [[ "$target" == "$real_home" || "$target" == "$real_home"/* ]]; then
+            echo "'$target' (the real server home $real_home or inside it)"
+            return 0
+        fi
+        if [[ "$real_home" == "$target"/* ]]; then
+            echo "'$target' (contains the real server home $real_home)"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Returns 0 when LABEL's PATH may be deleted; otherwise prints REFUSING.
+safe_to_wipe() {
+    local label="$1" raw="$2" reason
+    if reason="$(_real_server_home_conflict "$raw")"; then
+        _red "REFUSING to wipe $label='$raw': it is $reason" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Re-create E2E_CLIENT_SERVER_HOME empty -- only strictly inside a scratch
+# root that is itself safe.  Every failure (empty/unsafe root or target,
+# unresolvable path, failed rm/mkdir) refuses loudly: it fails closed.
+wipe_client_server_home() {
+    local raw="${E2E_CLIENT_SERVER_HOME:-}" root="${E2E_SCRATCH_ROOT:-}"
+    local target scratch
+    safe_to_wipe E2E_SCRATCH_ROOT "$root" || return 1
+    safe_to_wipe E2E_CLIENT_SERVER_HOME "$raw" || return 1
+    target="$(realpath -m -- "$raw")" && [[ -n "$target" ]] \
+        || { _red "REFUSING: cannot resolve E2E_CLIENT_SERVER_HOME='$raw'" >&2; return 1; }
+    scratch="$(realpath -m -- "$root")" && [[ -n "$scratch" ]] \
+        || { _red "REFUSING: cannot resolve E2E_SCRATCH_ROOT='$root'" >&2; return 1; }
+    if [[ "$target" != "$scratch"/* ]]; then
+        _red "REFUSING to wipe E2E_CLIENT_SERVER_HOME='$raw': not inside the harness scratch root $scratch" >&2
+        return 1
+    fi
+    rm -rf -- "$target" || { _red "Failed to wipe $target" >&2; return 1; }
+    mkdir -p -- "$target" || { _red "Failed to create $target" >&2; return 1; }
+}
+
+# Refuse a caller environment whose server data dir points at the real home.
+check_caller_server_env() {
+    local var value reason
+    for var in CIDX_SERVER_DATA_DIR CIDX_DATA_DIR; do
+        value="${!var:-}"
+        [[ -z "$value" ]] && continue
+        if reason="$(_real_server_home_conflict "$value")"; then
+            _red "REFUSING to run: the caller's $var='$value' is $reason" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Called first by main (before any mkdir/clone/copy): a usable HOME, a safe
+# caller environment and safe seed/work roots (both caller-overridable).
+preflight_protected_paths() {
+    if [[ -z "${HOME:-}" ]]; then
+        _red "REFUSING to run: HOME is empty, so the real server home cannot be protected" >&2
+        return 1
+    fi
+    check_caller_server_env || return 1
+    safe_to_wipe E2E_SEED_CACHE_DIR "${E2E_SEED_CACHE_DIR:-}" || return 1
+    safe_to_wipe E2E_WORK_DIR "${E2E_WORK_DIR:-}" || return 1
+    # Only now may reset_test_environment (incl. the EXIT trap) prune.
+    E2E_PREFLIGHT_PASSED=yes
+}
+
+# ---------------------------------------------------------------------------
 # Server subprocess state (Phase 4, Phase 5, and Phase 6 use separate PIDs)
 # ---------------------------------------------------------------------------
 SERVER_PID=""
@@ -197,7 +318,8 @@ cleanup_all_servers() {
         PG_CLUSTER_STARTED=""
     fi
     # Wipe Phase 6 ephemeral PG data dir (eliminate leaked cluster data)
-    if [[ -d "${E2E_PG_DATA:-}" ]]; then
+    # Bug #1996: never exit from the EXIT trap; an unsafe path is only skipped.
+    if [[ -d "${E2E_PG_DATA:-}" ]] && safe_to_wipe E2E_PG_DATA "$E2E_PG_DATA"; then
         _yellow "Wiping ephemeral PG data dir: $E2E_PG_DATA"
         rm -rf "$E2E_PG_DATA"
     fi
@@ -268,9 +390,18 @@ reset_test_environment() {
     local reaped="$_REAP_COUNT"
 
     # --- Step 2: prune old pytest temp dirs (keep newest PYTEST_DIRS_TO_KEEP) ---
-    local pruned=0
-    local pytest_base="/tmp/pytest-of-${USER:-$(whoami)}"
-    if [[ -d "$pytest_base" ]]; then
+    local pruned=0 reason
+    local pytest_base="${E2E_PYTEST_TEMP_BASE:-/tmp/pytest-of-${USER:-$(whoami)}}"
+    # Bug #1996: destructive only after preflight_protected_paths passed in
+    # this run (also on the EXIT trap), and never through a symlinked,
+    # foreign or protected-home base.
+    if [[ "${E2E_PREFLIGHT_PASSED:-}" != "yes" ]]; then
+        _yellow "Skipping pytest temp prune: protected-path preflight has not passed"
+    elif [[ -L "$pytest_base" ]] || { [[ -e "$pytest_base" ]] && ! [[ -d "$pytest_base" && -O "$pytest_base" ]]; }; then
+        _yellow "Skipping pytest temp prune: $pytest_base is a symlink or not a directory owned by this user"
+    elif reason="$(_real_server_home_conflict "$pytest_base")"; then
+        _yellow "Skipping pytest temp prune: $pytest_base is $reason"
+    elif [[ -d "$pytest_base" ]]; then
         # List pytest-NN dirs sorted newest-first, skip the N newest, remove the rest
         local dirs_to_remove=()
         local idx=0
@@ -283,8 +414,9 @@ reset_test_environment() {
 
         pruned="${#dirs_to_remove[@]}"
         for dir in "${dirs_to_remove[@]}"; do
-            # Extra safety: only remove paths that are genuinely under pytest_base
-            if [[ "$dir" == "${pytest_base}/"* ]]; then
+            # Extra safety: only remove real directories genuinely under
+            # pytest_base -- never through a symlink (Bug #1996).
+            if [[ "$dir" == "${pytest_base}/"* && ! -L "$dir" ]]; then
                 rm -rf "$dir" 2>/dev/null || true
             fi
         done
@@ -348,6 +480,7 @@ copy_seed_repo() {
     local name="$1"
     local dest="$E2E_WORK_DIR/$name"
 
+    safe_to_wipe "E2E_WORK_DIR/$name" "$dest" || exit 2  # Bug #1996
     rm -rf "$dest"
     cp -r "$E2E_SEED_CACHE_DIR/$name" "$dest"
     _yellow "  Copied $name -> $dest"
@@ -430,6 +563,10 @@ run_phase() {
         return 0
     fi
 
+    # Bug #1996: a fresh client server home per phase, so one phase's server
+    # files cannot leak into the next; an unsafe path aborts the whole run.
+    wipe_client_server_home || exit 2
+
     # Capture pytest output to a temp file so we can extract skip lines
     # while still streaming to stdout (-v --tb=short for normal visibility).
     local phase_output_file
@@ -443,6 +580,9 @@ run_phase() {
     local pytest_exit=0
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_TEST_FAST_SQLITE=1 \
+    CIDX_SERVER_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+    CIDX_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/no-systemd-units" \
     E2E_SERVER_PORT="$E2E_SERVER_PORT" \
     E2E_SERVER_HOST="$E2E_SERVER_HOST" \
     E2E_ADMIN_USER="$E2E_ADMIN_USER" \
@@ -511,12 +651,18 @@ run_otel_live_collector_subcheck() {
         return 0
     fi
 
+    # Bug #1996: its own fresh client server home (see run_phase)
+    wipe_client_server_home || exit 2
+
     local subcheck_output_file
     subcheck_output_file=$(mktemp)
 
     local subcheck_exit=0
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_TEST_FAST_SQLITE=1 \
+    CIDX_SERVER_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+    CIDX_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+    SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/no-systemd-units" \
     E2E_ADMIN_USER="$E2E_ADMIN_USER" \
     E2E_ADMIN_PASS="$E2E_ADMIN_PASS" \
     E2E_VOYAGE_API_KEY="$E2E_VOYAGE_API_KEY" \
@@ -690,6 +836,7 @@ provision_pg_cluster() {
     local E2E_PGDATA="$E2E_PG_DATA/pgdata"
 
     # Wipe any leftover data dir from a previous failed run
+    safe_to_wipe E2E_PG_DATA "$E2E_PG_DATA" || exit 2
     rm -rf "$E2E_PG_DATA"
     mkdir -p "$E2E_PG_DATA"
     # pgdata subdir must NOT be pre-created — initdb creates it itself
@@ -870,6 +1017,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 # above) for every exit path of a direct execution, not just the phase loop.
 trap cleanup_all_servers_and_reset EXIT
 
+# Bug #1996: refuse an empty HOME and any caller-chosen root inside the real
+# server home BEFORE a single directory is created, cloned into or copied.
+preflight_protected_paths || exit 2
+
 # ---------------------------------------------------------------------------
 # Required credentials — no built-in defaults; must come from .e2e-automation
 # or the environment. Script exits immediately if either is missing.
@@ -904,8 +1055,12 @@ reset_test_environment
 
 # Wipe server data dir (clean slate each run)
 _yellow "Wiping server data dir: $E2E_SERVER_DATA_DIR"
+safe_to_wipe E2E_SERVER_DATA_DIR "$E2E_SERVER_DATA_DIR" || exit 2
 rm -rf "$E2E_SERVER_DATA_DIR"
 mkdir -p "$E2E_SERVER_DATA_DIR"
+
+# Bug #1996: each phase gets a fresh E2E_CLIENT_SERVER_HOME (run_phase); the
+# caller's environment was validated by preflight_protected_paths above.
 
 # Clone seed repos into persistent cache
 _bold "--- Seed Repo Cache ---"
@@ -975,6 +1130,7 @@ for phase_def in "${PHASE_DEFS[@]}"; do
         # Phase 5 requires a fault-injection server: write config, start it, run tests, stop it
         _bold "=== Phase 5: $phase_label ==="
         _yellow "  Wiping fault server data dir: $E2E_FAULT_SERVER_DATA_DIR"
+        safe_to_wipe E2E_FAULT_SERVER_DATA_DIR "$E2E_FAULT_SERVER_DATA_DIR" || exit 2
         rm -rf "$E2E_FAULT_SERVER_DATA_DIR"
         write_fault_bootstrap_config
         start_fault_server
@@ -1003,6 +1159,7 @@ for phase_def in "${PHASE_DEFS[@]}"; do
         fi
 
         _yellow "  Wiping PG server data dir: $E2E_PG_SERVER_DATA_DIR"
+        safe_to_wipe E2E_PG_SERVER_DATA_DIR "$E2E_PG_SERVER_DATA_DIR" || exit 2
         rm -rf "$E2E_PG_SERVER_DATA_DIR"
         mkdir -p "$E2E_PG_SERVER_DATA_DIR"
 

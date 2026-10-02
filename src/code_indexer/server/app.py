@@ -433,6 +433,24 @@ def _ensure_initialized() -> None:
         _initializing = False
 
 
+def peek_app() -> Optional[Any]:
+    """Return the FastAPI app only if it ALREADY exists; never build it.
+
+    Bug #1996: reading ``app`` from this module (``from ..app import app``)
+    runs the full ``create_app()`` through ``__getattr__`` below.  Callers that
+    only want ``app.state`` when running inside the server -- and None in a
+    standalone process such as the CLI -- use this side-effect-free probe.
+    A value assigned to the module attribute (lazy init, or a test patch)
+    is returned as is.
+    """
+    with _lazy_init_lock:
+        if "app" in globals():
+            return globals()["app"]
+        if _initialized:
+            return _lazy_values.get("app")
+        return None
+
+
 def __getattr__(name: str) -> Any:
     """PEP 562 lazy module attribute access (Bug #1638).
 

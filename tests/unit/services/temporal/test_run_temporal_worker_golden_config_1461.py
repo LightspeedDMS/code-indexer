@@ -221,6 +221,10 @@ class TestRunTemporalWorkerUsesGoldenConfig:
         # the worker's internally-constructed manager and this test's
         # setup manager share the SAME on-disk data_dir.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Bug #1996: the session isolates CIDX_SERVER_DATA_DIR, which the
+        # worker prefers over Path.home(); this test exercises the home
+        # default (patched to tmp above).
+        monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
         data_dir = tmp_path / ".cidx-server" / "data"
         golden_dir = data_dir / "golden-repos" / "my-repo"
 

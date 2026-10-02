@@ -112,7 +112,11 @@ class TestPasswordChangeAuditLoggerLegacyFilePathDataDir:
 
         expected_path = str(nested_dir / "password_audit.log")
         assert logger.log_file_path == expected_path
-        assert nested_dir.exists()
+        # Bug #1996: nothing is created at construction (import time for the
+        # module-level singleton); the first record creates the nested dirs.
+        assert not nested_dir.exists()
+        logger.audit_logger.info("probe")
+        assert (nested_dir / "password_audit.log").is_file()
 
 
 class TestPasswordChangeSuccessMapping:
