@@ -557,3 +557,77 @@ def test_live_servers_read_their_own_stub_unit(
     log = (data_dir / "server.log").read_text()
     assert f"UNIT_DIR={data_dir}/systemd-units\n" in log, log
     assert _parsed_stub(data_dir / "systemd-units") == _stub_flags(port)
+
+
+# Test-owned e2e servers (pg throwaway, cli_remote throwaway, the SIEM
+# restartable server) write their stub through ONE Python helper whose output
+# must match the bash writer's exactly.
+
+
+def test_python_and_bash_stub_units_are_identical(home: Path, tmp_path: Path) -> None:
+    from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
+
+    bash_dir, py_dir = tmp_path / "bash-units", tmp_path / "py-units"
+    result = _bash(home, f'write_stub_systemd_unit "{bash_dir}" {STUB_ROUND_TRIP_PORT}')
+    assert result.returncode == 0, result.stderr
+
+    written = write_stub_systemd_unit(py_dir, STUB_ROUND_TRIP_PORT)
+
+    assert written == py_dir / "cidx-server.service"
+    assert written.read_bytes() == (bash_dir / "cidx-server.service").read_bytes()
+    assert _parsed_stub(py_dir) == _stub_flags(STUB_ROUND_TRIP_PORT)
+    assert _parsed_stub(bash_dir) == _stub_flags(STUB_ROUND_TRIP_PORT)
+
+
+def test_python_stub_carries_the_servers_own_host_and_port(tmp_path: Path) -> None:
+    from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
+
+    write_stub_systemd_unit(tmp_path / "units", PHASE4_PORT, host="0.0.0.0")
+
+    assert _parsed_stub(tmp_path / "units") == {
+        "host": "0.0.0.0",
+        "port": PHASE4_PORT,
+        "workers": 1,
+    }
+
+
+def test_python_stub_refuses_the_real_server_home() -> None:
+    from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
+    from tests.fixtures.real_server_home_guard import REAL_SERVER_HOME
+
+    target = Path(REAL_SERVER_HOME) / "__bug_1996_stub_probe_never_exists__"
+    assert not target.exists()
+
+    with pytest.raises(ValueError, match="real server home"):
+        write_stub_systemd_unit(target, STUB_ROUND_TRIP_PORT)
+
+    assert not target.exists()
+
+
+def test_prepare_client_server_home_writes_a_stub_for_the_given_port(
+    home: Path,
+) -> None:
+    client_home = home / ".tmp" / "client-home"
+    client_home.mkdir()
+    (client_home / "config.json").write_text("written by the previous phase")
+
+    result = _bash(
+        home,
+        f"prepare_client_server_home {PG_PORT}",
+        E2E_CLIENT_SERVER_HOME=str(client_home),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert [p.name for p in client_home.iterdir()] == ["systemd-units"]
+    assert _parsed_stub(client_home / "systemd-units") == _stub_flags(PG_PORT)
+
+
+def test_bash_stub_writer_refuses_the_protected_home(home: Path) -> None:
+    unit_dir = home / ".cidx-server" / "units"
+
+    result = _bash(home, f'write_stub_systemd_unit "{unit_dir}" {STUB_ROUND_TRIP_PORT}')
+
+    assert result.returncode != 0
+    assert "REFUSING" in result.stderr, result.stderr
+    assert not unit_dir.exists()
+    assert _sentinel_intact(home)

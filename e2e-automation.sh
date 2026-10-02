@@ -258,6 +258,8 @@ wipe_client_server_home() {
 # The ExecStart shape matches what read_execstart_flags (Bug #1232) parses.
 write_stub_systemd_unit() {
     local unit_dir="$1" port="$2"
+    # Never create or write anything in (or around) a protected server home.
+    safe_to_wipe "stub unit dir" "$unit_dir" || return 1
     mkdir -p -- "$unit_dir" || { _red "Failed to create $unit_dir" >&2; return 1; }
     printf '%s\n' \
         "[Unit]" \
@@ -267,6 +269,14 @@ write_stub_systemd_unit() {
         "ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app --host 127.0.0.1 --port $port --workers 1" \
         > "$unit_dir/cidx-server.service" \
         || { _red "Failed to write $unit_dir/cidx-server.service" >&2; return 1; }
+}
+
+# A fresh E2E_CLIENT_SERVER_HOME holding only a stub unit for PORT -- the
+# server home every phase's pytest process (and the servers it starts) uses.
+prepare_client_server_home() {
+    local port="$1"
+    wipe_client_server_home || return 1
+    write_stub_systemd_unit "$E2E_CLIENT_SERVER_HOME/systemd-units" "$port"
 }
 
 # Refuse a caller environment whose server data dir points at the real home.
@@ -582,9 +592,7 @@ run_phase() {
 
     # Bug #1996: a fresh client server home per phase, so one phase's server
     # files cannot leak into the next; an unsafe path aborts the whole run.
-    wipe_client_server_home || exit 2
-    write_stub_systemd_unit "$E2E_CLIENT_SERVER_HOME/systemd-units" "$E2E_SERVER_PORT" \
-        || exit 2
+    prepare_client_server_home "$E2E_SERVER_PORT" || exit 2
 
     # Capture pytest output to a temp file so we can extract skip lines
     # while still streaming to stdout (-v --tb=short for normal visibility).
@@ -671,9 +679,7 @@ run_otel_live_collector_subcheck() {
     fi
 
     # Bug #1996: its own fresh client server home + stub unit (see run_phase)
-    wipe_client_server_home || exit 2
-    write_stub_systemd_unit "$E2E_CLIENT_SERVER_HOME/systemd-units" "$E2E_SERVER_PORT" \
-        || exit 2
+    prepare_client_server_home "$E2E_SERVER_PORT" || exit 2
 
     local subcheck_output_file
     subcheck_output_file=$(mktemp)
@@ -1208,8 +1214,14 @@ for phase_def in "${PHASE_DEFS[@]}"; do
                 _red "       Check log: $E2E_PG_SERVER_DATA_DIR/server.log"
                 phase6_exit=1
             else
-                # Run the Phase 6 tests with the PG server env vars passed through
+                # Run the Phase 6 tests with the PG server env vars passed through.
+                # Bug #1996: like run_phase, a fresh client home + stub unit, so
+                # servers the tests start themselves never see the host's unit.
+                prepare_client_server_home "$E2E_PG_SERVER_PORT" || exit 2
                 PYTHONPATH="$SCRIPT_DIR/src" \
+                CIDX_SERVER_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+                CIDX_DATA_DIR="$E2E_CLIENT_SERVER_HOME" \
+                SYSTEMD_UNIT_DIR="$E2E_CLIENT_SERVER_HOME/systemd-units" \
                 E2E_PG_SERVER_HOST="$E2E_PG_SERVER_HOST" \
                 E2E_PG_SERVER_PORT="$E2E_PG_SERVER_PORT" \
                 E2E_PG_DATA="$E2E_PG_DATA" \

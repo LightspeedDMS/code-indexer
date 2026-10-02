@@ -31,6 +31,10 @@ import pytest
 
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.siem_delivery.log_allowlist import PHASE7_LOG_ALLOWLIST
+from tests.e2e.siem_delivery.outage_probe_window import (
+    EXCUSED_LOG_IDS,
+    without_excused,
+)
 from tests.fixtures.secops_sidecar.harness import SidecarControl, SidecarCoordinates
 
 if TYPE_CHECKING:
@@ -291,5 +295,8 @@ def _phase7_log_audit_gate(
         phase_name="Phase 7 (SIEM Delivery)",
         extra_allowlist=PHASE7_LOG_ALLOWLIST,
     )
+    # Only the exact rows test_03 proved were logged inside its own scripted
+    # outage (outage_probe_window); never excused by text.
+    result = without_excused(result, EXCUSED_LOG_IDS)
     if not result.passed:
         raise AssertionError(result.failure_message())
