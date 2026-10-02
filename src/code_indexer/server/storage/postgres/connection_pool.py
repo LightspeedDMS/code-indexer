@@ -116,11 +116,17 @@ class ConnectionPool:
 
             _PsycopgPool = _imported_psycopg_pool
 
+        from code_indexer.server.storage.postgres.dead_peer_detection import (
+            apply_dead_peer_detection,
+        )
+
         self._connection_string = connection_string
         self._name = name
         self._timeout = timeout
+        # Bug #2005: a crashed node's pooled backends must be dropped by the
+        # server within ~60s, not the ~2h OS keepalive default.
         self._pool = _PsycopgPool(
-            connection_string,
+            apply_dead_peer_detection(connection_string),
             min_size=min_size,
             max_size=max_size,
             timeout=timeout,
