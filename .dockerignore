@@ -1,0 +1,49 @@
+# Build-context exclusions for Dockerfile.
+#
+# The repo had no .dockerignore at all, so every `docker build` uploaded the
+# whole working tree to the daemon -- including a local `rust/target/`, which
+# on a developer machine that has run `cargo build` is hundreds of MB to a few
+# GB of intermediate artifacts that NO stage copies (the xray-builder stage
+# compiles from source inside the image). Nothing below is consumed by any
+# COPY in the Dockerfile; the five things the build actually needs are
+# pyproject.toml, README.md, src/, plugins/ and rust/.
+#
+# Measured on one checkout with no rust/target/ present, the caches below
+# alone were ~111MiB of a 212MiB tree (.mypy_cache 40MB, __pycache__ 69MiB
+# across 191 directories, .pytest_cache 1.3MB, .ruff_cache 0.6MB); the build
+# context shrank from 40.18MB to 212.13kB. With a local cargo build present,
+# rust/target/ dwarfs all of it.
+
+# Local Rust build output. `COPY rust/ /xray/rust/` would otherwise drag it in,
+# and a host-built target/ in the image is both huge and wrong (built by a
+# different toolchain, for a different glibc).
+rust/target/
+
+# Git metadata. The package version comes from src/code_indexer/__init__.py via
+# [tool.hatch.version], NOT from VCS, so no build step needs git history.
+# (In a git worktree .git is a FILE, not a directory -- this pattern matches
+# both forms.)
+.git
+.gitignore
+.gitattributes
+
+# Python build/test detritus. Stale __pycache__ from the host would be copied
+# into site-packages by `COPY src ./src` and shadow freshly-installed sources.
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# Never ship local developer state or scratch output into a build context.
+.env
+.idea/
+.vscode/

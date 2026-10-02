@@ -110,14 +110,25 @@ WORKDIR /xray/rust
 # -p xray-cli, not a bare `cargo build --release`: the workspace also contains
 # xray-core's dev/bench targets, and only this one binary is shipped.
 #
+# --locked: an image build must compile the dependency versions the lockfile
+# names, not whatever cargo would resolve today. Without it a transitive
+# semver-compatible release silently changes the shipped binary between two
+# builds of the same commit, and cargo rewrites Cargo.lock inside the build
+# context where nobody ever sees the diff. Verified in-tree: `cargo metadata
+# --locked` succeeds against rust/Cargo.lock, so the lockfile is in sync with
+# both member manifests and the flag is a no-op today -- which is exactly when
+# it is cheap to add.
+#
 # The second command is a build-time smoke test: it fails the image here,
 # where the error is readable, rather than in a pod at query time, if the
 # binary did not link or cannot execute on this glibc. It must be a REAL flag
 # that exits non-zero when broken -- xray-cli treats an unrecognised argument
 # as a scan target and still exits 0, so `--help` would pass unconditionally.
 # `--print-graph-extractor-extensions` does no compilation and no repo walk,
-# so it is cheap as well as genuinely discriminating.
-RUN cargo build --release -p xray-cli \
+# so it is cheap as well as genuinely discriminating. NOTE this proves the
+# binary runs on the BUILDER's glibc; the runtime stage repeats it on the
+# runtime glibc, which is the one that matters.
+RUN cargo build --locked --release -p xray-cli \
     && ./target/release/xray-cli --print-graph-extractor-extensions > /dev/null
 
 # Capture the toolchain that just built xray-cli, to ship to the runtime stage.
@@ -131,20 +142,26 @@ RUN cargo build --release -p xray-cli \
 # of evaluator loads fail -- after compiling successfully, so the failure would
 # surface at load time, not build time. Copying the sysroot out of this stage
 # makes the runtime compiler the same compiler by construction; the runtime
-# stage then re-asserts it rather than trusting this comment.
+# stage then re-asserts it against the SHIPPED BINARY rather than trusting this
+# comment (see the assertion in the runtime stage).
+#
+# No sidecar `.rustc-version` file is produced. One used to be, and the runtime
+# stage compared `rustc --version` against it -- but both sides of that
+# comparison were `rustc --version` run in THIS stage, so the check could only
+# fail if `cp -a` were broken. The honest reference value lives in the binary.
 #
 # Pruned to what compiling an evaluator at query time actually needs. Measured:
-# the full rustup install costs +1.02GiB, this costs ~510MB of toolchain. The
-# remainder is irreducible -- libLLVM (191MB) is rustc's codegen backend,
-# librustc_driver (144MB) is rustc, and the std rlibs (173MB) are what a cdylib
-# links against. Dropped: cargo (never used at query time -- xray-cli invokes
-# rustc directly), rustdoc, clippy, the docs, and the std SOURCE tree.
+# the full rustup install costs +1.02GiB, this costs ~534MB (509MiB) of
+# toolchain in the runtime image. The remainder is irreducible -- libLLVM
+# (191MB) is rustc's codegen backend, librustc_driver (144MB) is rustc, and the
+# std rlibs (173MB) are what a cdylib links against. Dropped: cargo (never used
+# at query time -- xray-cli invokes rustc directly), rustdoc, clippy, the docs,
+# and the std SOURCE tree.
 RUN set -eux; \
-    rustc --version > /xray-rustc-version.txt; \
+    rustc --version; \
     cp -a "$(rustc --print sysroot)" /xray-toolchain; \
     rm -rf /xray-toolchain/share /xray-toolchain/lib/rustlib/src /xray-toolchain/etc; \
-    find /xray-toolchain/bin -type f ! -name rustc -delete; \
-    cat /xray-rustc-version.txt
+    find /xray-toolchain/bin -type f ! -name rustc -delete
 
 # ---- Runtime stage ----
 FROM python:3.11-slim-bookworm
@@ -204,26 +221,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
 # JAVA_HOME points at the 17 launcher; 21 is a toolchain (installations.paths).
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
-# Bring over the installed site-packages + the `cidx` console script from the builder.
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# The xray-cli binary ONLY -- not cargo, not rustc, not ~/.cargo, not the
-# target/ directory (hundreds of MB of intermediate artifacts for a single
-# 32MB executable; the image grows by 37.6MB, measured). MUST come after the `COPY --from=builder /usr/local/bin`
-# above, which replaces the whole directory and would otherwise delete it.
-COPY --from=xray-builder /xray/rust/target/release/xray-cli /usr/local/bin/xray-cli
-
-# Tell the Python side where the binary is. Without this the backend falls back
-# to looking for `<some ancestor of the installed package>/rust/target/release/
-# xray-cli`, which does not exist in a site-packages install -- see
-# code_indexer/xray/rust_backend.py::resolve_xray_cli_path for the full
-# resolution order. This is the deployment half of that override: the path is a
-# property of how THIS IMAGE was built, so it belongs next to the COPY that
-# decides it, not in a runtime config file.
-ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
-
-# ---- query-time Rust toolchain ----
+# ---- xray-cli + its query-time Rust toolchain ----
+# ORDERING: this whole block sits ABOVE the site-packages COPY below on
+# purpose. Every instruction in it is keyed on `rust/` alone, and together they
+# are by far the most expensive part of the image (measured below). Underneath
+# the Python COPY -- where they used to be -- editing any one .py file
+# invalidated and re-ran all of it: the gcc/libc6-dev apt install, the 534MB
+# toolchain COPY and the assertion, on every single application change.
+#
+# Moving them up is safe because `COPY --from=<stage> <dir> <dir>` MERGES into
+# the destination; it does NOT replace it. Verified by build (2026-10-01): a
+# file placed in a destination directory survives a later whole-directory COPY
+# over that same path, and only same-named entries are overwritten. The comment
+# that used to live here claimed the opposite -- that `COPY --from=builder
+# /usr/local/bin /usr/local/bin` "replaces the whole directory and would
+# otherwise delete it" -- and that claim was false. It was also only a comment:
+# nothing failed the build if it were violated. The one-command gate after the
+# Python COPYs below now enforces the real invariant instead.
+#
 # WHY A COMPILER IS IN THE RUNTIME IMAGE: xray-cli compiles each evaluator at
 # QUERY time (rust/xray-core/src/compiler/rustc_driver.rs spawns `rustc`), so
 # shipping only the binary gives a loud "Is rustc installed and on PATH?" on
@@ -238,15 +253,40 @@ ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
 # degrades to the literal string "unknown" without rustc, so a rustc-less pod
 # computes a different identity and misses every entry a seeder wrote.
 #
-# COST, measured rather than estimated: +987MB, on nodes whose root volumes are
-# 50GiB (tools-* Karpenter general-purpose) -- the image moves from ~5% to ~7%
-# of node disk. The alternative, moving compilation behind a seam into its own
-# service, buys back that space at the price of a version-locked second
-# deployable (see the byte-equality check below), a network hop in the cold
-# path, a fleet-wide outage mode, and a wider trust boundary: evaluator source
-# is user-supplied Rust, and the validator (validator.rs) is a syn AST
-# whitelist, not a sandbox. That trade was judged not worth it at this fleet
-# size; the reasoning is in scratchpad/XRAY_SIDECAR_SCOPE.md.
+# COST, re-measured against a build of this same Dockerfile with this block
+# deleted (decimal bytes; MiB in brackets). Two different numbers are both
+# correct, which is where the previously-quoted figures came from:
+#
+#   FILES added to the image -- `docker export <container> | wc -c`, and
+#   `docker history` layer diffs, which agree to within tar padding:
+#     gcc + libc6-dev ........ 188,182,528  (179.5MiB)
+#     /opt/rust toolchain .... 533,831,680  (509.1MiB)
+#     ---------------------------------------------------
+#     flattened delta ........ 717,400,576  (684.2MiB)
+#     (layer-diff sum .......  721,985,536  (688.5MiB))
+#     xray-cli binary ........  33,759,232  (32.2MiB)  <- the feature, not the compiler
+#
+#   What `docker images` / `docker image inspect .Size` REPORTS:
+#     delta .................. 971,756,548  (926.7MiB)
+#
+# The 254MB gap is not missing files. Under the containerd image store that
+# size also counts the retained COMPRESSED layer blobs alongside the unpacked
+# snapshot, and /opt/rust alone gzips to 196,437,314 bytes (measured) -- which,
+# with the gcc/libc6-dev layer, is the whole difference. So the "+972MB" in
+# commit 00acbe4d3 is the `docker images` number and is reproducible; the
+# "+987MB" this comment used to claim is not reproducible by either method and
+# is simply wrong. Quote 717MB of files, ~972MB of node disk if the content
+# store is not pruned.
+#
+# On nodes whose root volumes are 50GiB (tools-* Karpenter general-purpose) the
+# image moves from ~5% to ~7% of node disk. The alternative, moving compilation
+# behind a seam into its own service, buys back that space at the price of a
+# version-locked second deployable (see the byte-equality check below), a
+# network hop in the cold path, a fleet-wide outage mode, and a wider trust
+# boundary: evaluator source is user-supplied Rust, and the validator
+# (validator.rs) is a syn AST whitelist, not a sandbox. That trade was judged
+# not worth it at this fleet size; the reasoning is in
+# scratchpad/XRAY_SIDECAR_SCOPE.md.
 #
 # gcc + libc6-dev, not build-essential: rustc shells out to a C linker (`cc`)
 # and needs the crt objects and libc.so that libc6-dev provides. The toolchain's
@@ -257,8 +297,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# The xray-cli binary ONLY -- not cargo, not rustc, not ~/.cargo, not the
+# target/ directory (hundreds of MB of intermediate artifacts for a single
+# 32MB executable; the image grows by 33.8MB, measured).
+COPY --from=xray-builder /xray/rust/target/release/xray-cli /usr/local/bin/xray-cli
+
+# Tell the Python side where the binary is. Without this the backend falls back
+# to looking for `<some ancestor of the installed package>/rust/target/release/
+# xray-cli`, which does not exist in a site-packages install -- see
+# code_indexer/xray/rust_backend.py::resolve_xray_cli_path for the full
+# resolution order. This is the deployment half of that override: the path is a
+# property of how THIS IMAGE was built, so it belongs next to the COPY that
+# decides it, not in a runtime config file.
+ENV CIDX_XRAY_CLI_PATH=/usr/local/bin/xray-cli
+
 COPY --from=xray-builder /xray-toolchain /opt/rust
-COPY --from=xray-builder /xray-rustc-version.txt /opt/rust/.rustc-version
 
 # /opt/rust/bin/rustc is the real compiler, not a rustup shim, so it ignores
 # RUSTUP_TOOLCHAIN (which xray-cli sets from the embedded channel) and resolves
@@ -267,17 +320,43 @@ COPY --from=xray-builder /xray-rustc-version.txt /opt/rust/.rustc-version
 ENV PATH=/opt/rust/bin:$PATH
 
 # Fail the BUILD on the mismatch that would otherwise fail every dlopen at
-# query time, long after deploy. Also links a real cdylib, because a toolchain
-# that is present and version-correct can still be unable to produce the one
-# artifact xray needs -- that is a missing linker or crt object, and this is the
-# cheapest place to find out.
+# query time, long after deploy.
+#
+# WHAT THIS PROVES, precisely. dynlib.rs:28 holds
+# `const HOST_RUSTC_VERSION: &str = env!("CIDX_HOST_RUSTC_VERSION")`, and
+# xray-core/build.rs sets that env var to the full `rustc --version` string of
+# whatever compiler cargo used. `env!` is expanded at compile time, so that
+# exact string is a literal in xray-cli's rodata -- and it is the string
+# verify_rustc_version_match compares BYTE-FOR-BYTE against each evaluator .so
+# at dlopen. So grepping the shipped binary for the runtime `rustc --version`
+# output compares the runtime compiler against the value the running process
+# will actually use.
+#
+# WHAT IT DOES NOT PROVE, and why the previous version of this check proved
+# nothing at all. The check used to compare `rustc --version` against
+# /opt/rust/.rustc-version -- a file written by `rustc --version` in the SAME
+# xray-builder stage the sysroot was copied from. Both sides had one source, so
+# it was a tautology: it could only fail if `cp -a` were broken. The residual
+# gap in the current form is narrower but real: `grep -qaF` proves the string is
+# PRESENT in the binary, not that it is the value bound to
+# CIDX_HOST_RUSTC_VERSION. Verified by build (2026-10-01) that the live string
+# occurs exactly once in the binary and that a fabricated version string does
+# not match, so the check does discriminate; closing the gap entirely would need
+# xray-cli to print CIDX_HOST_RUSTC_VERSION on demand, which is a change to
+# rust/ and is deliberately not made here.
+#
+# The second half links a real cdylib, because a toolchain that is present and
+# version-correct can still be unable to produce the one artifact xray needs --
+# that is a missing linker or crt object, and this is the cheapest place to find
+# out.
 RUN set -eux; \
-    want="$(cat /opt/rust/.rustc-version)"; \
+    test -x "$CIDX_XRAY_CLI_PATH"; \
     got="$(rustc --version)"; \
-    if [ "$want" != "$got" ]; then \
-        echo "FATAL: runtime rustc does not match the one that built xray-cli."; \
-        echo "  xray-cli embeds: $want"; \
-        echo "  runtime rustc:   $got"; \
+    if ! grep -qaF -- "$got" "$CIDX_XRAY_CLI_PATH"; then \
+        echo "FATAL: runtime rustc is not the compiler that built xray-cli."; \
+        echo "  runtime rustc: $got"; \
+        echo "  that exact string is NOT embedded in $CIDX_XRAY_CLI_PATH,"; \
+        echo "  so dynlib.rs's HOST_RUSTC_VERSION names a different compiler."; \
         echo "dynlib.rs compares these byte-for-byte; every evaluator would"; \
         echo "compile and then fail to load."; \
         exit 1; \
@@ -287,6 +366,29 @@ RUN set -eux; \
     test -s /tmp/abi_probe.so; \
     rm -f /tmp/abi_probe.rs /tmp/abi_probe.so; \
     echo "query-time toolchain OK: $got"
+
+# Bring over the installed site-packages + the `cidx` console script from the builder.
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# The gate on everything above. Two distinct things are asserted, both of which
+# were previously only asserted in prose:
+#  1. xray-cli is still at CIDX_XRAY_CLI_PATH and executable after the
+#     whole-directory COPY into /usr/local/bin above -- i.e. that COPY really
+#     does merge rather than replace.
+#  2. the SHIPPED binary actually RUNS, on the RUNTIME stage's glibc. The only
+#     execution smoke test before this one ran in the xray-builder stage, on
+#     the BUILDER's glibc, against a binary in a different filesystem. That
+#     cannot catch an image that ships an xray-cli which dies with "Exec format
+#     error" in the pod -- a green build shipping exactly that has been
+#     demonstrated.
+# `--print-graph-extractor-extensions` must be a REAL flag: xray-cli treats an
+# unrecognised argument as a scan target and still exits 0, so `--help` would
+# pass unconditionally. It does no compilation and no repo walk, so this layer
+# costs well under a second.
+RUN set -eux; \
+    test -x "$CIDX_XRAY_CLI_PATH"; \
+    "$CIDX_XRAY_CLI_PATH" --print-graph-extractor-extensions > /dev/null
 
 # Non-root runtime. /data is the server data dir — the Deployment mounts a volume here.
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
