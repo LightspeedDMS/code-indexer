@@ -282,9 +282,16 @@ build:image:
       docker run --rm --user 0:0 \
         -v "$CI_PROJECT_DIR:/w" -w /w \
         -e CIDX_REQUIRE_XRAY_EXTRAS=1 \
-        "$FULL" sh -lc '
+        "$FULL" sh -c '
           set -e
-          pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
+          # `python -m pip`, not `pip`: the first master run installed with
+          # /usr/local/bin/pip and then ran /usr/bin/python, which reported
+          # "No module named pytest". Going through the interpreter makes the
+          # install target and the run target the same by construction, whatever
+          # PATH resolves to. `sh -c` rather than `sh -lc` for the same reason --
+          # a login shell sources /etc/profile, which rewrites PATH out from
+          # under the image's own ENV.
+          python -m pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
           # Deliberately NO PYTHONPATH=/w/src: the repo is mounted for the TEST
           # files, but `code_indexer` must resolve from site-packages so this
           # exercises the code that actually ships. Pointing at the mount tested
