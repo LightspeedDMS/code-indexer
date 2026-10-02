@@ -276,7 +276,14 @@ build:image:
         "$FULL" sh -lc '
           set -e
           pip install --quiet --no-input pytest pytest-asyncio pytest-timeout
-          PYTHONPATH=/w/src python -m pytest \
+          # Deliberately NO PYTHONPATH=/w/src: the repo is mounted for the TEST
+          # files, but `code_indexer` must resolve from site-packages so this
+          # exercises the code that actually ships. Pointing at the mount tested
+          # the working tree instead, and the bind mount's import overhead also
+          # pushed `cidx --help` from ~1.0s to ~1.7s, intermittently tripping
+          # the 2s startup assertion -- a harness artifact presented as a
+          # product regression.
+          python -m pytest \
             tests/unit/xray/ \
             tests/unit/server/mcp/test_analyze_graph_handler.py \
             tests/unit/server/mcp/test_analyze_graph_multi_repo_1902.py \
