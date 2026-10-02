@@ -158,7 +158,16 @@ build:image:
     # dind daemon. If that ever starts flaking on Hub's anonymous pull limits,
     # mirror that image into this same ECR and add
     # `--driver-opt image=<ecr>/<repo>:<buildkit-tag>` here.
-    - docker buildx create --name cidx-builder --driver docker-container --use
+    # The docker-container driver cannot read DOCKER_TLS_VERIFY/DOCKER_CERT_PATH
+    # from the environment -- it fails with "could not create a builder instance
+    # with TLS data loaded from environment" and tells you to make a context.
+    # dind here is TLS-only (tcp://docker:2376 + /certs/client), so the context
+    # is not optional. Built from the same variables the job already sets, so
+    # there is no second copy of the endpoint to drift.
+    - >
+      docker context create cidx-dind
+      --docker "host=${DOCKER_HOST},ca=${DOCKER_CERT_PATH}/ca.pem,cert=${DOCKER_CERT_PATH}/cert.pem,key=${DOCKER_CERT_PATH}/key.pem"
+    - docker buildx create --name cidx-builder --driver docker-container --use cidx-dind
     - docker buildx inspect --bootstrap
   script:
     - |
