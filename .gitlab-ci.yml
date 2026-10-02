@@ -53,12 +53,25 @@ smoke:
     - python -m pip install --upgrade pip
     - pip install ".[dev,cluster,cohere]"
   script:
-    # Same smoke subset the upstream GitHub CI runs (no live Postgres required).
+    # Same smoke subset the upstream GitHub CI runs (no live Postgres required),
+    # plus the fork's own invariant guards.
+    #
+    # The git-seam guard is here because it only earns its keep in CI. It exists
+    # to catch raw git calls that an upstream snapshot merge reintroduces --
+    # precisely the moment nobody is running a local script -- and it was
+    # previously referenced by no CI job, no pre-commit hook and no automation
+    # script, while fast-automation.sh passes --ignore=tests/unit/server/. It
+    # runs in seconds and build:image is already gated on this stage.
     - >
       python -m pytest
       tests/unit/server/storage/test_factory.py
       tests/unit/server/mcp/test_protocol.py
       tests/unit/services/test_database_health_cluster.py
+      tests/unit/server/test_git_seam_no_raw_subprocess.py
+      tests/unit/utils/test_git_invoker.py
+      tests/unit/utils/test_subprocess_diagnostics_1832.py
+      tests/unit/xray/test_python_validator_nested_std_paths.py
+      tests/unit/server/storage/postgres/test_xray_cache_backend.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
   rules:

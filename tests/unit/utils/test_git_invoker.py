@@ -203,3 +203,50 @@ def test_result_is_cached(monkeypatch):
     assert first is second is not None
     git_invoker.reset_cache()
     assert get_git_invoker_factory() is None
+
+
+class TestRemoteSubverbFailsClosed:
+    """`git remote <unknown>` must classify as a MUTATION, like its siblings.
+
+    `_classify_remote` asked whether the sub-verb was in a WRITE set, so any
+    sub-verb it did not recognise -- a newly added git sub-command, or a
+    sub-verb supplied at runtime -- classified as a read and ran LOCALLY, with
+    the credentials the seam exists to keep in git-mcp. `branch`, `tag` and
+    `stash` all default the other way: unknown positional means write.
+
+    The guard that enforces the seam statically shares this classifier, so a
+    fail-open here is a fail-open there too.
+    """
+
+    def test_an_unrecognised_subverb_is_a_mutation(self) -> None:
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "remote", "<dynamic>", "https://host/r.git"],
+            ["git", "remote", "set-url-ish", "origin"],
+            ["git", "remote", "some-future-subcommand"],
+        ):
+            assert is_mutating_git(argv), f"fail-open on {argv}"
+
+    def test_known_reads_stay_reads(self) -> None:
+        """The fix must not delegate every `remote` call -- a read needs no PAT
+        and delegating it would cost a round trip per call."""
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "remote"],
+            ["git", "remote", "-v"],
+            ["git", "remote", "show", "origin"],
+            ["git", "remote", "get-url", "origin"],
+        ):
+            assert not is_mutating_git(argv), f"read wrongly delegated: {argv}"
+
+    def test_known_writes_stay_writes(self) -> None:
+        from code_indexer.utils.git_invoker import is_mutating_git
+
+        for argv in (
+            ["git", "remote", "add", "origin", "https://host/r.git"],
+            ["git", "remote", "set-url", "origin", "https://host/r.git"],
+            ["git", "remote", "remove", "origin"],
+        ):
+            assert is_mutating_git(argv), f"write misclassified: {argv}"

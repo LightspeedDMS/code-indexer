@@ -200,16 +200,18 @@ _TAG_WRITE_FLAGS = {
     "--create-reflog",
     "-F",
 }
-_REMOTE_WRITE_SUBVERBS = {
-    "add",
-    "remove",
-    "rm",
-    "rename",
-    "set-url",
-    "set-head",
-    "set-branches",
-    "prune",
-    "update",
+# Sub-verbs of `git remote` that only READ. Everything else is treated as a
+# write, including a sub-verb we do not recognise.
+#
+# This used to be the inverse -- a set of WRITE sub-verbs, with anything
+# unrecognised falling through to "read, run it locally". That is fail-open in
+# the one direction that matters: an unrecognised sub-verb is either a future
+# git sub-command or one supplied at runtime, and running it locally hands it
+# the credentials this seam exists to confine to git-mcp. `branch`, `tag` and
+# `stash` all default the other way already; `remote` was the odd one out.
+_REMOTE_READ_SUBVERBS = {
+    "show",
+    "get-url",
 }
 _CONFIG_READ_FLAGS = {
     "--get",
@@ -255,7 +257,9 @@ def _classify_tag(rest: List[str]) -> bool:
 
 def _classify_remote(rest: List[str]) -> bool:
     pos = _positionals(rest)
-    return bool(pos) and pos[0] in _REMOTE_WRITE_SUBVERBS
+    if not pos:
+        return False  # bare `git remote` lists configured remotes
+    return pos[0] not in _REMOTE_READ_SUBVERBS
 
 
 def _classify_config(rest: List[str]) -> bool:

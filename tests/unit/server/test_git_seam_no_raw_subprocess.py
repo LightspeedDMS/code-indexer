@@ -23,6 +23,8 @@ is never allowed: route it through ``run_git_command``.
 from __future__ import annotations
 
 import ast
+import shlex
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +41,49 @@ _EXEMPT_DIRS = ("auto_update", "scripts")
 _SUBPROCESS_CALLS = {"run", "Popen", "check_output", "check_call", "call"}
 # asyncio spawns take the program and its arguments as *varargs*, not a list.
 _ASYNC_EXEC = {"create_subprocess_exec"}
+# Spawns whose argv arrives as ONE STRING the shell parses. Cheap to cover and
+# invisible otherwise: `subprocess.run("git push", shell=True)` and
+# `os.system("git push")` reach git exactly like a list does.
+_STRING_SPAWNS = {
+    "system",
+    "popen",
+    "getoutput",
+    "getstatusoutput",
+    "create_subprocess_shell",
+}
+# os.exec* / posix_spawn take the program plus a sequence.
+_OS_EXEC = {"execv", "execve", "execvp", "execvpe", "posix_spawn"}
+
+# Which module each spawn belongs to. Keyed by module because the generic names
+# are not unique: `asyncio.run(coro)` is the EVENT LOOP RUNNER, not a spawn, and
+# matching a bare `run` on any receiver reported every `asyncio.run` in the tree
+# as an unreadable git call. Only the distinctive names below may match on any
+# receiver, because `loop.create_subprocess_exec(...)` is a real spawn whose
+# receiver is not a module.
+_MODULE_SPAWNS = {
+    "subprocess": _SUBPROCESS_CALLS | {"getoutput", "getstatusoutput", "run", "Popen"},
+    "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+    "os": {"system", "popen"} | _OS_EXEC,
+}
+_DISTINCTIVE_SPAWNS = (
+    _ASYNC_EXEC | _OS_EXEC | {"create_subprocess_shell", "getstatusoutput"}
+)
+
+# Verbs whose MUTATING-ness is decided by a sub-verb rather than the verb.
+# `is_mutating_git(["git","remote"])` is False; `["git","remote","add",...]` is
+# True -- so for these the append/extend exemption below cannot apply, because
+# the appended tail is exactly where the mutation arrives.
+_DUAL_FORM_VERBS = {
+    "remote",
+    "branch",
+    "tag",
+    "config",
+    "stash",
+    "submodule",
+    "worktree",
+    "notes",
+    "bisect",
+}
 
 # Read-only git that deliberately runs locally. is_mutating_git() returns False
 # for every entry; each is keyed by (path relative to src/code_indexer, git verb)
@@ -88,6 +133,23 @@ ALLOWED_UNREADABLE_ARGV = {
     ("server/services/claude_invoker.py", "_build_claude_command"),
     # `base_cmd + [...]` where base_cmd is the `claude` CLI invocation
     ("server/services/research_assistant_service.py", "<concatenation>"),
+    # Sites the fail-closed rewrite made visible. Each was triaged by reading
+    # the call: none is git, and none can become git without editing the line.
+    # `append_server_layout_args(["cidx", "index"])` -- the cidx CLI again
+    ("server/services/claude_cli_manager.py", "append_server_layout_args"),
+    # `[indexer_name, "--version"]` -- probes whether an indexer is installed
+    ("server/installer.py", "<dynamic-program>"),
+    # Popen of the cidx server itself during lifecycle start
+    ("server/lifecycle/server_lifecycle_manager.py", "<dynamic-program>"),
+    # `["rg"] + flags + ["--", pattern] + targets` -- ripgrep
+    ("server/services/dep_map_repair_bidirectional_verify.py", "<concatenation>"),
+    # `create_subprocess_exec(program, *args)` where program is `command.split()[0]`
+    # of a caller-supplied tool-version string ("rg --version")
+    ("server/services/diagnostics_service.py", "<starred-argv>"),
+    # `create_subprocess_exec(*cmd)` -- cmd is a parameter holding the claude CLI
+    ("server/services/scip_self_healing.py", "<starred-argv>"),
+    # `os.execv(sys.executable, [sys.executable] + sys.argv)` -- dev-mode re-exec
+    ("server/web/routes.py", "<dynamic-program>"),
 }
 
 _GLOBAL_FLAGS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
@@ -109,6 +171,7 @@ def _resolve_name(
     scope: ast.AST,
     before_line: int,
     module: Optional[ast.Module] = None,
+    call: Optional[ast.Call] = None,
 ) -> Tuple[bool, Optional[List[Optional[str]]], List[str]]:
     """Resolve `name` to the argv it was last assigned above *before_line*.
 
@@ -153,11 +216,25 @@ def _resolve_name(
             if not (isinstance(tgt, ast.Name) and tgt.id == name):
                 continue
             assigned = True
+            if not _reaches(line, n, call, scope):
+                continue
             if isinstance(value, (ast.List, ast.Tuple)):
                 candidates.append((line, _literal_elements(value), "<literal>"))
             else:
                 candidates.append((line, None, _builder_name(value)))
             best_line = max(best_line, line)
+
+    # Bound by something we cannot read a literal out of -- a for-target, a
+    # with-item, a walrus, tuple unpacking, an except-as, a comprehension.
+    # These are BOUND, so they are this scope's responsibility, and unreadable,
+    # so they must be reported rather than skipped.
+    for opaque_line, label in _opaque_bindings(name, scope):
+        # `<=`, not `<`: a comprehension target and a walrus bind on the same
+        # line as the use that consumes them.
+        if opaque_line <= before_line:
+            assigned = True
+            candidates.append((opaque_line, None, label))
+            best_line = max(best_line, opaque_line)
 
     # Several assignments can reach one call -- `if force: cmd = ["git", "push"]`
     # / `else: cmd = ["git", "status"]`. Picking by highest line number reads
@@ -205,15 +282,159 @@ def _resolve_name(
     # assignment can rewrite any position, so the argv becomes unreadable.
     # Measured from the CHOSEN assignment, not the last one: when a mutating
     # candidate wins, a rewrite between it and a later sibling still applies to it.
-    if best is not None and _prefix_rewritten_after(name, scope, best_at, before_line):
+    is_git_literal = bool(best) and best[0] == "git"
+    if is_git_literal and _prefix_rewritten_after(name, scope, best_at, before_line):
         return True, None, ["<argv front rewritten after assignment>"]
+
+    # A verb whose MUTATING-ness is decided by a sub-verb cannot be classified
+    # from a literal that stops before the sub-verb. The append/extend exemption
+    # reasoned that those only add to the END, so program and verb survive --
+    # true, and beside the point for `git remote` / `git branch` / `git config`,
+    # where the appended tail IS the decision. `cmd = ["git","remote"]` then
+    # `cmd.extend(["add", name, url])` classified as the allowlisted read
+    # `git remote`, which is precisely the smuggling this file's own docstring
+    # claims is impossible. storage/shared/git_backend.py:481 is this idiom.
+    if is_git_literal and _tail_extended_after(name, scope, best_at, before_line):
+        verb = _verb(best)
+        if verb is None or verb in _DUAL_FORM_VERBS:
+            return True, None, ["<dual-form verb completed after assignment>"]
 
     # Not a local: a module-level constant (`_PUSH = ["git", "push"]`) used inside a
     # function is still a literal we can read, and treating it as a caller-supplied
     # parameter would hide it.
     if not assigned and module is not None and scope is not module:
-        return _resolve_name(name, module, before_line=10**9)
+        # A parameter is the caller's business and the ONLY legitimate silence.
+        if name in _parameters_of(scope):
+            return False, None, builders
+        return _resolve_name(name, module, before_line=10**9, call=call)
     return assigned, best, builders
+
+
+def _parameters_of(scope: ast.AST) -> set:
+    """Parameter names of a function scope.
+
+    The ONE legitimate silence is "argv is a parameter": the caller supplies it
+    and the caller is scanned on its own, so flagging the helper would make
+    every subprocess wrapper a permanent violation while catching nothing.
+    That has to be decided from the SIGNATURE. Inferring it from "no Assign
+    found in this scope" is what made every other binding form -- for-targets,
+    with-items, walrus, tuple unpacking, except-as, comprehensions -- look like
+    parameters and vanish.
+    """
+    args = getattr(scope, "args", None)
+    if args is None:
+        return set()
+    names = set()
+    for a in (
+        list(getattr(args, "posonlyargs", []))
+        + list(args.args)
+        + list(getattr(args, "kwonlyargs", []))
+    ):
+        names.add(a.arg)
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    return names
+
+
+def _opaque_bindings(name: str, scope: ast.AST) -> List[Tuple[int, str]]:
+    """(line, label) for every binding of *name* we cannot read a literal from.
+
+    Bound-but-unreadable is a world away from unbound: unbound means a caller
+    owns it, unreadable means a mutation could be hiding in it.
+    """
+    out: List[Tuple[int, str]] = []
+
+    def note(target, label: str) -> None:
+        if isinstance(target, ast.Name):
+            if target.id == name:
+                out.append((getattr(target, "lineno", 0), label))
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for el in target.elts:
+                note(el, label)
+
+    for n in _statements_of(scope):
+        if isinstance(n, (ast.For, ast.AsyncFor)):
+            note(n.target, "<for-target>")
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    note(item.optional_vars, "<with-item>")
+        elif isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, (ast.Tuple, ast.List)):
+                    note(t, "<tuple-unpack>")
+        elif isinstance(n, ast.Try):
+            for h in n.handlers:
+                if h.name == name:
+                    out.append((getattr(h, "lineno", 0), "<except-as>"))
+    # Expression-level binders live inside statements, so walk for these --
+    # but stop at a nested def, same reason _statements_of does.
+    for n in _walk_this_scope(scope):
+        if isinstance(n, ast.NamedExpr):
+            note(n.target, "<walrus>")
+        elif isinstance(n, (ast.comprehension,)):
+            note(n.target, "<comprehension-target>")
+    return out
+
+
+def _walk_this_scope(scope: ast.AST):
+    """ast.walk, but not descending into nested function/class scopes."""
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _exclusive_regions(scope: ast.AST):
+    """(owner, body) for each mutually exclusive branch arm in *scope*."""
+    for n in _statements_of(scope):
+        if isinstance(n, ast.If):
+            yield n, n.body
+            yield n, n.orelse
+        elif isinstance(n, ast.Try):
+            for h in n.handlers:
+                yield n, h.body
+            yield n, n.orelse
+        elif isinstance(n, ast.Match):
+            for case in n.cases:
+                yield n, case.body
+
+
+def _in_block(node: ast.AST, body: List[ast.AST]) -> bool:
+    if not body:
+        return False
+    lines = [getattr(b, "lineno", None) for b in body]
+    ends = [getattr(b, "end_lineno", None) or getattr(b, "lineno", None) for b in body]
+    lo = min(x for x in lines if x is not None)
+    hi = max(x for x in ends if x is not None)
+    ln = getattr(node, "lineno", None)
+    return ln is not None and lo <= ln <= hi
+
+
+def _reaches(assign_line: int, assign_node: ast.AST, call: ast.Call, scope) -> bool:
+    """Can the argv bound at *assign_node* be the one *call* runs?
+
+    Severity ordering alone picked the worst candidate anywhere in the function,
+    with no notion of which assignments a call can actually see. That blamed a
+    `git push` in one arm of an if/else on the `tar` call in the other arm --
+    naming a command that line cannot run, which is how a guard gets deleted.
+
+    An assignment in a branch the call is NOT in still reaches the call when the
+    call comes after the whole statement (the classic `if/else` then `run(cmd)`),
+    but not when the call sits inside the sibling arm.
+    """
+    for owner, body in _exclusive_regions(scope):
+        if _in_block(assign_node, body) and not _in_block(call, body):
+            owner_end = getattr(owner, "end_lineno", None) or getattr(
+                owner, "lineno", 0
+            )
+            if getattr(call, "lineno", 0) <= owner_end:
+                return False
+    return True
 
 
 def _statements_of(scope: ast.AST) -> List[ast.AST]:
@@ -241,9 +462,32 @@ def _statements_of(scope: ast.AST) -> List[ast.AST]:
     return out
 
 
+def _tail_extended_after(name: str, scope: ast.AST, after: int, before: int) -> bool:
+    """True if *name* gains trailing elements between *after* and *before*."""
+    for n in _walk_this_scope(scope):
+        line = getattr(n, "lineno", None)
+        if line is None or not (after < line < before):
+            continue
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("append", "extend")
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+        ):
+            return True
+        if (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == name
+        ):
+            return True
+    return False
+
+
 def _prefix_rewritten_after(name: str, scope: ast.AST, after: int, before: int) -> bool:
     """True if *name*'s leading elements may change between *after* and *before*."""
-    for n in ast.walk(scope):
+    for n in _walk_this_scope(scope):
         line = getattr(n, "lineno", None)
         if line is None or not (after < line < before):
             continue
@@ -286,35 +530,103 @@ def _builder_name(node: ast.AST) -> str:
 def _git_argv(
     node: ast.Call, kind: str, scope: ast.AST, module: Optional[ast.Module] = None
 ) -> Tuple[Optional[List[Optional[str]]], Optional[List[str]]]:
-    """argv of a spawn call on git, or None if it is not one.
+    """argv of a spawn call on git, or None if it is provably not one.
 
-    Returns a list whose unknowable elements are None. A caller that gets back a
-    list starting with something other than "git" is not our business.
+    FAIL CLOSED. The recurring defect in this guard was that every path it
+    could not read returned ``(None, None)``, which `_scan_source` cannot tell
+    apart from "this call is not git at all" -- so an unreadable spawn was
+    indistinguishable from an irrelevant one, and 41 shapes of raw `git push`
+    scanned clean. Only two things may be silent now: argv that is a parameter
+    of this scope, and argv whose program is a LITERAL that is not git.
     """
-    if not node.args:
+    args = list(node.args)
+    if not args:
+        # `subprocess.run(args=[...], check=True)` is ordinary Python; skipping
+        # the whole call because `node.args` was empty was a one-line hole.
+        for kw in node.keywords:
+            if kw.arg in ("args", "cmd", "command", "popenargs"):
+                args = [kw.value]
+                break
+    if not args:
         return None, None
+
+    if any(isinstance(a, ast.Starred) for a in args):
+        return [None], ["<starred-argv>"]
+
+    if kind == "string":
+        return _argv_from_string(args[0])
+
+    if kind == "list_if_literal_git":
+        first = args[0]
+        if not isinstance(first, (ast.List, ast.Tuple)):
+            return None, None
+        argv = _literal_elements(first)
+        if not argv or argv[0] != "git":
+            return None, None
+        return argv, None
+
     if kind == "varargs":
-        argv = _literal_elements(ast.List(elts=list(node.args), ctx=ast.Load()))
+        argv = _literal_elements(ast.List(elts=args, ctx=ast.Load()))
     else:
-        first = node.args[0]
+        first = args[0]
         if isinstance(first, (ast.List, ast.Tuple)):
             argv = _literal_elements(first)
+        elif isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return _argv_from_string(first)
         elif isinstance(first, ast.Name):
             assigned, resolved, builders = _resolve_name(
-                first.id, scope, node.lineno, module
+                first.id, scope, node.lineno, module, call=node
             )
             if not assigned:
                 return None, None  # generic runner: argv comes from its caller
             if resolved is None:
-                # built locally in a way we cannot read -- it could be git, and a
-                # future `cmd = build(["git", "push", ...])` must not slip through.
                 return [None], builders
             argv = resolved
         else:
-            return None, None
-    if not argv or argv[0] != "git":
+            # An inline expression -- `BASE + [...]`, `self._cmd`, `CMDS["push"]`.
+            # Binding the identical expression to a name was reported while
+            # passing it inline was not, so deleting one line hid a bypass.
+            return [None], [_builder_name(first)]
+
+    if not argv:
         return None, None
+    if argv[0] is None:
+        # Dynamic PROGRAM. A dynamic verb was already reported; this was not,
+        # because `argv[0] != "git"` conflates "unknown" with "definitely not
+        # git". diagnostics_service.py spawns exactly this shape.
+        return [None], ["<dynamic-program>"]
+    if argv[0] in ("sh", "bash", "/bin/sh", "/bin/bash"):
+        # `["sh", "-c", "git push ..."]` hides the real command one level down,
+        # exactly as the single-string form does.
+        for i, tok in enumerate(argv[1:], 1):
+            if tok == "-c" and i + 1 < len(argv) and argv[i + 1] is not None:
+                return _argv_from_string(ast.Constant(value=argv[i + 1]))
+        return [None], ["<shell-wrapper>"]
+    if argv[0] != "git":
+        return None, None  # a literal non-git program: provably not our business
     return argv, None
+
+
+def _argv_from_string(
+    node: ast.AST,
+) -> Tuple[Optional[List[Optional[str]]], Optional[List[str]]]:
+    """argv for a spawn whose command arrives as one shell string."""
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return [None], ["<dynamic-shell-string>"]
+    try:
+        parts: List[Optional[str]] = list(shlex.split(node.value))
+    except ValueError:
+        return [None], ["<unparsable-shell-string>"]
+    if not parts:
+        return None, None
+    # `sh -c "git push ..."` hides the real command one level down.
+    if parts[0] in ("sh", "bash", "/bin/sh", "/bin/bash") and len(parts) >= 3:
+        for i, tok in enumerate(parts[1:], 1):
+            if tok == "-c" and i + 1 < len(parts):
+                return _argv_from_string(ast.Constant(value=parts[i + 1]))
+    if parts[0] != "git":
+        return None, None
+    return parts, None
 
 
 def _verb(argv: List[Optional[str]]) -> Optional[str]:
@@ -347,30 +659,68 @@ def _direct_import_aliases(tree: ast.Module) -> Dict[str, str]:
     """
     out: Dict[str, str] = {}
     for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom) and n.module in ("subprocess", "asyncio"):
+        if isinstance(n, ast.ImportFrom) and n.module in (
+            "subprocess",
+            "asyncio",
+            "os",
+        ):
             for al in n.names:
-                if al.name in _ASYNC_EXEC:
-                    out[al.asname or al.name] = "varargs"
-                elif al.name in _SUBPROCESS_CALLS:
-                    out[al.asname or al.name] = "list"
+                kind = _kind_for_spawn_name(al.name)
+                if kind is not None:
+                    out[al.asname or al.name] = kind
+        # `import subprocess as sp` rebinds the MODULE, so sp.run(...) is a
+        # spawn too. Reading only ImportFrom made that whole style invisible.
+        elif isinstance(n, ast.Import):
+            for al in n.names:
+                if al.asname and al.name in ("subprocess", "asyncio", "os"):
+                    out.setdefault("__module__" + al.asname, al.name)
     return out
 
 
+def _kind_for_spawn_name(name: str) -> Optional[str]:
+    """Calling convention for a spawn function, or None if it is not one."""
+    if name in _ASYNC_EXEC:
+        return "varargs"
+    if name in _STRING_SPAWNS:
+        return "string"
+    if name in _OS_EXEC:
+        return "varargs"
+    if name in _SUBPROCESS_CALLS:
+        return "list"
+    return None
+
+
 def _call_kind(node: ast.Call, aliases: Dict[str, str]) -> Optional[str]:
-    """ "list" if argv arrives as one sequence, "varargs" if spread, else None."""
+    """ "list" if argv arrives as one sequence, "varargs" if spread, "string" if
+    the shell parses it, else None.
+
+    Keyed on the FUNCTION NAME, not the receiver. Requiring a receiver literally
+    named `subprocess` meant `import subprocess as sp` and a stashed `self._sp`
+    were both invisible. Matching on the attribute alone is safe because argv
+    must still resolve to a command starting with `git` before anything is
+    reported -- an unrelated `self.queue.run(...)` resolves to a non-git literal
+    and is dropped.
+    """
     fn = node.func
     if isinstance(fn, ast.Attribute):
-        if (
-            isinstance(fn.value, ast.Name)
-            and fn.value.id == "subprocess"
-            and fn.attr in _SUBPROCESS_CALLS
-        ):
-            return "list"
-        # asyncio.create_subprocess_exec(...) / loop.create_subprocess_exec(...)
-        if fn.attr in _ASYNC_EXEC:
-            return "varargs"
+        if fn.attr in _DISTINCTIVE_SPAWNS:
+            return _kind_for_spawn_name(fn.attr)
+        base = fn.value
+        base_name = base.id if isinstance(base, ast.Name) else None
+        if base_name is not None:
+            module = aliases.get("__module__" + base_name, base_name)
+            if fn.attr in _MODULE_SPAWNS.get(module, ()):
+                return _kind_for_spawn_name(fn.attr)
+        # A generic spawn name on a receiver we cannot identify -- `self._sp.run`,
+        # a stashed module, an injected runner. Scanned, but only reported when
+        # argv READS as a literal git command: an unidentified receiver cannot
+        # carry the fail-closed rule, because `asyncio.run(coro)` and every other
+        # method in the tree that happens to be called `run` would land here.
+        if fn.attr in _SUBPROCESS_CALLS:
+            return "list_if_literal_git"
     if isinstance(fn, ast.Name):
-        return aliases.get(fn.id)
+        kind = aliases.get(fn.id)
+        return kind if kind and not kind.startswith("__") else None
     return None
 
 
@@ -494,6 +844,34 @@ def test_no_raw_git_with_unknowable_argv() -> None:
         "whether they mutate -- route them through run_git_command() and let "
         "is_mutating_git() classify each call (EVO-64678).\n\n"
         + "\n".join(f"  - {u}" for u in unknown)
+    )
+
+
+def test_unreadable_allowlist_has_no_stale_entries() -> None:
+    """Keep ALLOWED_UNREADABLE_ARGV honest too.
+
+    Mutation testing found that adding a fabricated entry here left all tests
+    green: the staleness check below only ever subtracted from ALLOWED_READS.
+    An allowlist nobody audits is how a justified exemption outlives the code
+    that justified it.
+
+    Scans ONCE with the allowlist emptied rather than re-scanning per entry --
+    this runs in CI, and a per-entry rescan made the file take a minute.
+    """
+    import unittest.mock as _mock
+
+    with _mock.patch.object(sys.modules[__name__], "ALLOWED_UNREADABLE_ARGV", set()):
+        _, raw_unknown = _scan()
+
+    stale = {
+        (rel, builder)
+        for rel, builder in ALLOWED_UNREADABLE_ARGV
+        if not any(u.startswith(f"{rel}:") and repr(builder) in u for u in raw_unknown)
+    }
+    assert not stale, (
+        "these ALLOWED_UNREADABLE_ARGV entries no longer match any call site -- "
+        "remove them so the allowlist keeps meaning something:\n"
+        + "\n".join(f"  - {e}" for e in sorted(map(str, stale)))
     )
 
 
@@ -835,3 +1213,320 @@ class TestGuardClassifiesCorrectly:
         unknown = _unknowns(src)
         assert any("build_a" in u for u in unknown), unknown
         assert any("build_b" in u for u in unknown), unknown
+
+
+class TestGuardFailsClosed:
+    """The contract: anything the guard cannot statically read is REPORTED.
+
+    Six review rounds each closed the one shape the reviewer named, and an
+    adversarial pass then found 41 more. These tests pin the CLASSES instead,
+    because the recurring defect was never a missing shape -- it was
+    `_git_argv` returning ``(None, None)``, which `_scan_source` cannot tell
+    apart from "this call is not git at all". Silence is the bug.
+    """
+
+    def test_bindings_other_than_assignment_are_not_mistaken_for_parameters(
+        self,
+    ) -> None:
+        """A name bound by any construct is bound; only a PARAMETER is a
+        caller's business. Reading only Assign/AnnAssign made every other
+        binding form look unbound, and unbound was treated as "generic runner,
+        skip" -- so argv bound by a for-loop, a with-item or a walrus reached
+        subprocess.run with no report at all."""
+        shapes = {
+            "for": (
+                "import subprocess\n"
+                "def f():\n"
+                '    for cmd in [["git", "push", "origin", "main"]]:\n'
+                "        subprocess.run(cmd)\n"
+            ),
+            "with": (
+                "import subprocess\n"
+                "def f(ctx):\n"
+                "    with ctx as cmd:\n"
+                "        subprocess.run(cmd)\n"
+            ),
+            "walrus": (
+                "import subprocess\n"
+                "def f():\n"
+                '    subprocess.run(cmd := ["git", "push", "origin", "main"])\n'
+            ),
+            "tuple-unpack": (
+                "import subprocess\n"
+                "def f():\n"
+                '    cmd, env = (["git", "push", "origin", "main"], {})\n'
+                "    subprocess.run(cmd)\n"
+            ),
+            "except-as": (
+                "import subprocess\n"
+                "def f():\n"
+                "    try:\n"
+                "        pass\n"
+                "    except OSError as cmd:\n"
+                "        subprocess.run(cmd)\n"
+            ),
+            "comprehension": (
+                "import subprocess\n"
+                "def f(xs):\n"
+                "    [subprocess.run(cmd) for cmd in xs]\n"
+            ),
+        }
+        for name, src in shapes.items():
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"{name}: argv reached a spawn with no report"
+
+    def test_a_parameter_shadowing_a_module_constant_is_not_the_constant(
+        self,
+    ) -> None:
+        """Pins `_parameters_of`, which mutation testing found unpinned.
+
+        The module-level fallback exists so `_PUSH = ["git","push"]` used inside
+        a function is still read. But a PARAMETER of the same name is the
+        caller's value, not the module's -- without consulting the signature the
+        fallback adopts the constant and reports a mutation at a generic runner
+        that never runs one.
+        """
+        src = (
+            "import subprocess\n"
+            '_PUSH = ["git", "push", "origin", "main"]\n'
+            "def run_it(_PUSH):\n"
+            "    subprocess.run(_PUSH)\n"
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert not v and not u, f"a parameter was read as the module constant: {v + u}"
+
+    def test_a_module_constant_is_still_read(self) -> None:
+        """Negative control for the test above: the fallback must still work."""
+        src = (
+            "import subprocess\n"
+            '_PUSH = ["git", "push", "origin", "main"]\n'
+            "def f():\n"
+            "    subprocess.run(_PUSH)\n"
+        )
+        v, _ = _scan_source("server/services/synthetic.py", src)
+        assert any("MUTATING: git push" in x for x in v), v
+
+    def test_a_real_parameter_is_still_skipped(self) -> None:
+        """Negative control for the test above. A generic runner whose argv IS
+        a parameter must stay silent -- its callers are scanned on their own,
+        and flagging it would make every subprocess helper a permanent
+        violation while catching nothing. This is the one legitimate silence,
+        and it must be decided from the signature, not inferred from the
+        absence of an assignment."""
+        src = "import subprocess\ndef run_it(cmd):\n    subprocess.run(cmd)\n"
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert not v and not u, f"generic runner wrongly reported: {v + u}"
+
+    def test_append_cannot_smuggle_a_mutating_subverb(self) -> None:
+        """THE critical one, and it refutes this file's own docstring.
+
+        The append/extend exemption reasoned that those only add to the END, so
+        the program and verb survive and the literal stays safe to classify.
+        True -- and incomplete. For a dual-form verb the SUB-verb decides:
+        `is_mutating_git(["git","remote"])` is False but
+        `is_mutating_git(["git","remote","add",...])` is True. So the exempted
+        append is exactly where the mutation arrives, and `git remote` is an
+        allowlisted read in lifespan.py. This is the house idiom --
+        storage/shared/git_backend.py:481 is literally `cmd = ["git","remote"]`
+        followed by a conditional append.
+        """
+        for rel, head, tail in (
+            ("server/startup/lifespan.py", '["git", "remote"]', '["add", n, u]'),
+            (
+                "server/services/git_operations_service.py",
+                '["git", "config"]',
+                '["--unset", k]',
+            ),
+            (
+                "server/repositories/activated_repo_manager.py",
+                '["git", "branch"]',
+                '["-D", n]',
+            ),
+        ):
+            src = (
+                "import subprocess\n"
+                "def f(n, u, k):\n"
+                f"    cmd = {head}\n"
+                f"    cmd.extend({tail})\n"
+                "    subprocess.run(cmd)\n"
+            )
+            v, u_ = _scan_source(rel, src)
+            assert v or u_, f"{rel}: mutating sub-verb smuggled past {head}"
+
+    def test_append_still_trusts_an_unambiguous_read(self) -> None:
+        """The exemption exists for a reason and must survive: a verb with no
+        mutating form cannot be turned into one by appending."""
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    cmd = ["git", "status"]\n'
+            '    cmd.append("--short")\n'
+            "    subprocess.run(cmd)\n"
+        )
+        _, u = _scan_source("server/repositories/activated_repo_manager.py", src)
+        assert not u, f"an unambiguous read was made unreadable: {u}"
+
+    def test_keyword_argv_is_scanned(self) -> None:
+        """`if not node.args: return None, None` skipped the entire call.
+        `args=` is ordinary Python and appears in governed code."""
+        src = (
+            "import subprocess\n"
+            "def f():\n"
+            '    subprocess.run(args=["git", "push", "origin", "main"], check=True)\n'
+        )
+        v, u = _scan_source("server/services/synthetic.py", src)
+        assert v or u
+
+    def test_spawn_is_recognised_by_function_not_receiver(self) -> None:
+        """`_call_kind` required a receiver literally named `subprocess`, and
+        the alias map was built from ImportFrom only -- so `import subprocess
+        as sp` was invisible, as was a stashed `self._sp`."""
+        for name, src in {
+            "import-as": (
+                "import subprocess as sp\n"
+                "def f():\n"
+                '    sp.run(["git", "push", "origin", "main"])\n'
+            ),
+            # An unidentified receiver is scanned, but only a LITERAL git argv
+            # is reported there -- see _call_kind. Reporting unreadable argv on
+            # any receiver named `run` flagged every `asyncio.run(coro)` in the
+            # tree, which is the cry-wolf failure that gets a guard deleted.
+            "attribute-receiver": (
+                "class C:\n"
+                "    def f(self):\n"
+                '        self._sp.run(["git", "push", "origin", "main"])\n'
+            ),
+        }.items():
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"{name}: spawn not recognised"
+
+    def test_dynamic_program_is_unreadable_not_invisible(self) -> None:
+        """The guard only failed closed AFTER proving argv[0] was literally
+        "git". A dynamic verb was caught; a dynamic PROGRAM was silently
+        skipped, because `argv[0] != "git"` is indistinguishable from "not a
+        git call". diagnostics_service.py:631 has this shape today."""
+        for name, src in {
+            "list": (
+                "import subprocess\n"
+                "def f(p):\n"
+                '    subprocess.run([p, "push", "origin", "main"])\n'
+            ),
+            "varargs": (
+                "import asyncio\n"
+                "async def f(p):\n"
+                '    await asyncio.create_subprocess_exec(p, "push", "origin")\n'
+            ),
+            "hoisted-const": (
+                "import subprocess\n"
+                'GIT = "git"\n'
+                "def f():\n"
+                '    subprocess.run([GIT, "push", "origin", "main"])\n'
+            ),
+        }.items():
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"{name}: dynamic program silently skipped"
+
+    def test_starred_and_inline_expression_argv_are_unreadable(self) -> None:
+        """Binding the expression to a name was reported; passing the SAME
+        expression inline was not. Deleting one line made a bypass invisible."""
+        for name, src in {
+            "starred": (
+                "import subprocess\n"
+                "def f():\n"
+                '    a = (["git", "push", "origin", "main"],)\n'
+                "    subprocess.run(*a)\n"
+            ),
+            "inline-concat": (
+                "import subprocess\n"
+                'BASE = ["git"]\n'
+                "def f():\n"
+                '    subprocess.run(BASE + ["push", "origin", "main"])\n'
+            ),
+            "inline-subscript": (
+                'import subprocess\ndef f(cmds):\n    subprocess.run(cmds["push"])\n'
+            ),
+        }.items():
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"{name}: inline argv silently skipped"
+
+    def test_shell_and_other_spawn_families_are_seen(self) -> None:
+        """A string argv and the os.* spawn family were entirely unknown."""
+        for name, src in {
+            "shell-string": (
+                "import subprocess\n"
+                "def f():\n"
+                '    subprocess.run("git push origin main", shell=True)\n'
+            ),
+            "sh-c": (
+                "import subprocess\n"
+                "def f():\n"
+                '    subprocess.run(["sh", "-c", "git push origin main"])\n'
+            ),
+            "os-system": (
+                'import os\ndef f():\n    os.system("git push origin main")\n'
+            ),
+        }.items():
+            v, u = _scan_source("server/services/synthetic.py", src)
+            assert v or u, f"{name}: spawn family not seen"
+
+
+class TestGuardDoesNotCryWolf:
+    """A guard that reports a command a line cannot run gets disabled.
+
+    These are the cost of the round-5 severity ordering: it picks the worst
+    candidate reaching a call with no notion of which assignments actually
+    DOMINATE that call.
+    """
+
+    def test_a_mutation_in_one_branch_does_not_taint_the_other(self) -> None:
+        src = (
+            "import subprocess\n"
+            "def f(force):\n"
+            "    if force:\n"
+            '        cmd = ["git", "push", "origin", "main"]\n'
+            "        subprocess.run(cmd)\n"
+            "    else:\n"
+            '        cmd = ["tar", "xf", "a.tar"]\n'
+            "        subprocess.run(cmd)\n"
+        )
+        v, _ = _scan_source("server/services/synthetic.py", src)
+        assert len(v) == 1, f"the tar call was blamed for the push: {v}"
+
+    def test_a_nested_def_does_not_poison_the_outer_call(self) -> None:
+        """`_prefix_rewritten_after` still uses ast.walk, so it descends into
+        nested defs -- the exact leak `_statements_of` was written to stop."""
+        src = (
+            "import subprocess\n"
+            "def f(repo):\n"
+            '    cmd = ["git", "rev-parse", "HEAD"]\n'
+            "    def helper():\n"
+            '        inner = ["a", "b"]\n'
+            '        inner.insert(0, "c")\n'
+            "    subprocess.run(cmd)\n"
+        )
+        _, u = _scan_source("server/routers/git.py", src)
+        assert not u, f"an unrelated nested local poisoned the outer call: {u}"
+
+
+def test_scan_is_live() -> None:
+    """Liveness control for `_scan()` itself.
+
+    Mutation testing found that making `_scan()` return ``([], [])`` -- the
+    guard going completely blind -- left all 26 self-tests passing, because the
+    two production assertions are vacuous while the tree is clean. Nothing
+    proved the live scan path still executed. This asserts it does real work.
+    """
+    files = _governed_files()
+    assert len(files) > 50, f"the governed tree should be substantial, got {len(files)}"
+    scanned = 0
+    for path in files:
+        rel = str(path.relative_to(_SRC))
+        _scan_source(rel, path.read_text(encoding="utf-8"))
+        scanned += 1
+    assert scanned == len(files)
+    # and the production path must still classify a known bypass
+    v, _ = _scan_source(
+        "server/services/synthetic.py",
+        'import subprocess\ndef f():\n    subprocess.run(["git", "push", "o", "m"])\n',
+    )
+    assert any("MUTATING: git push" in x for x in v), "the scan path is not classifying"
