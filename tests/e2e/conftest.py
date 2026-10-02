@@ -29,7 +29,26 @@ from typing import Iterator
 import httpx
 import pytest
 
+# Bug #1996: no e2e process -- nor the CLI subprocesses it spawns, which
+# inherit os.environ -- may resolve the server home to the developer's real
+# ~/.cidx-server.  The root tests/conftest.py already isolated the server
+# data-dir environment (this import is a no-op reminder of that contract);
+# e2e-automation.sh additionally gives every phase a fresh client home.
+from tests import _isolated_server_home  # noqa: F401 - side effect
 from tests.e2e.helpers import login, sanitize_cli_subprocess_env
+from tests.fixtures import real_server_home_guard as _real_home_guard
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_server_home() -> Iterator[None]:
+    """Bug #1996: fail any e2e test whose thread touches the real
+    ~/.cidx-server (see tests/fixtures/real_server_home_guard.py)."""
+    _real_home_guard.start()
+    try:
+        yield
+    finally:
+        hits = _real_home_guard.stop()
+    assert not hits, _real_home_guard.failure_message(hits)
 
 
 # ---------------------------------------------------------------------------

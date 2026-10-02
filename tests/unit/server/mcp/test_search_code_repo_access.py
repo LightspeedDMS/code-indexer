@@ -27,6 +27,7 @@ from tests.unit.server.query.query_repo_access_env import (
     OWN_ACTIVATION,
     USER,
     QueryAccessEnv,
+    build_server_db_template,
     global_alias,
 )
 
@@ -44,14 +45,21 @@ NON_ADMIN = _user(USER, UserRole.NORMAL_USER)
 ADMIN_USER = _user(ADMIN, UserRole.ADMIN)
 
 
+@pytest.fixture(scope="module")
+def server_db_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_server_db_template(tmp_path_factory.mktemp("server_db_template"))
+
+
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[QueryAccessEnv]:
+def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_db_template: Path
+) -> Iterator[QueryAccessEnv]:
     # No embedding provider key: deterministic primary-only routing and no
     # path can reach a real provider (the search boundary is faked).
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
-    e = QueryAccessEnv(tmp_path)
+    e = QueryAccessEnv(tmp_path, server_db_template)
     try:
         yield e
     finally:

@@ -21,6 +21,7 @@ from typing import IO, Optional
 
 import httpx
 
+from tests.e2e._stub_systemd_unit import write_stub_systemd_unit
 from tests.fixtures.secops_sidecar.harness import REPO_ROOT, find_free_port
 
 READY_TIMEOUT_SECONDS = 90.0
@@ -52,6 +53,11 @@ class RestartableServer:
             ),
             encoding="utf-8",
         )
+        # Bug #1996: its own stub unit with its own bind values, so its first
+        # boot finds every launch key (no absent-key warning) and never reads
+        # the host's real unit.
+        self.unit_dir = self.data_dir / "systemd-units"
+        write_stub_systemd_unit(self.unit_dir, self.port, host="127.0.0.1")
 
     @property
     def url(self) -> str:
@@ -68,7 +74,7 @@ class RestartableServer:
             "CIDX_TEST_FAST_SQLITE": "1",
             "CIDX_SERVER_DATA_DIR": str(self.data_dir),
             "CIDX_DATA_DIR": str(self.data_dir),
-            "SYSTEMD_UNIT_DIR": str(self.data_dir / "no-systemd-units"),
+            "SYSTEMD_UNIT_DIR": str(self.unit_dir),
         }
         self._log = open(self.data_dir / "server.log", "ab")
         self.process = subprocess.Popen(

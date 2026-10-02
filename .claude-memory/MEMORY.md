@@ -56,6 +56,7 @@
 - [feedback_holistic_anomaly_scan_every_loop.md](feedback_holistic_anomaly_scan_every_loop.md) - scan jobs/logs/health/artifacts holistically each loop
 - [feedback_tdd_red_must_be_discriminating.md](feedback_tdd_red_must_be_discriminating.md) - RED must fail on the BEHAVIOUR, never on a missing symbol or a happy case
 - [feedback_mtime_not_valid_isolation_proof.md](feedback_mtime_not_valid_isolation_proof.md) - mtime/md5 is not proof a test never touched the DB — use open-tracing
+- [feedback_scratch_test_copies_bypass_isolation.md](feedback_scratch_test_copies_bypass_isolation.md) - a test copied outside tests/ with its own --rootdir skips the home isolation; point CIDX_* dirs at scratch
 - [feedback_git_worktree_isolation_invalid_dual_import_path.md](feedback_git_worktree_isolation_invalid_dual_import_path.md) - never use git worktree here — editable-install dual import path mixes trees
 
 ## Workflow Preferences

@@ -177,9 +177,13 @@ class UserManager:
             if users_file_path:
                 self.users_file_path = users_file_path
             else:
-                home_dir = Path.home()
-                server_dir = home_dir / ".cidx-server"
-                server_dir.mkdir(exist_ok=True)
+                # Bug #1996: honour CIDX_SERVER_DATA_DIR (Bug #1778 pattern).
+                server_dir = Path(
+                    os.environ.get(
+                        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                    )
+                )
+                server_dir.mkdir(parents=True, exist_ok=True)
                 self.users_file_path = str(server_dir / "users.json")
 
             self._ensure_users_file_exists()

@@ -172,11 +172,15 @@ wait_for_secops_sidecar() {
 start_siem_server() {
     require_loopback_siem_host || return 1
     _yellow "  Starting SIEM server on ${E2E_SIEM_SERVER_HOST}:${E2E_SIEM_SERVER_PORT}..."
+    # Bug #1996: its own stub unit (write_stub_systemd_unit, e2e-automation.sh)
+    # -- never the host's real unit, and no absent-launch-key warning.
+    write_stub_systemd_unit "$E2E_SIEM_SERVER_DATA_DIR/systemd-units" \
+        "$E2E_SIEM_SERVER_PORT" || return 1
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_TEST_FAST_SQLITE=1 \
     CIDX_SERVER_DATA_DIR="$E2E_SIEM_SERVER_DATA_DIR" \
     CIDX_DATA_DIR="$E2E_SIEM_SERVER_DATA_DIR" \
-    SYSTEMD_UNIT_DIR="$E2E_SIEM_SERVER_DATA_DIR/no-systemd-units" \
+    SYSTEMD_UNIT_DIR="$E2E_SIEM_SERVER_DATA_DIR/systemd-units" \
         python3 -m uvicorn code_indexer.server.app:app \
             --host "$E2E_SIEM_SERVER_HOST" \
             --port "$E2E_SIEM_SERVER_PORT" \

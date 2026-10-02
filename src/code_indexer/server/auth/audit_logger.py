@@ -13,6 +13,7 @@ from code_indexer.server.logging_utils import format_error_log, get_log_extra
 import logging
 import json
 from datetime import datetime, timezone
+from io import TextIOWrapper
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -21,6 +22,25 @@ if TYPE_CHECKING:
 
 # Module-level logger for authentication events
 logger = logging.getLogger(__name__)
+
+
+class _LazyAuditFileHandler(logging.FileHandler):
+    """Flat-file audit handler that touches the disk only on the first record.
+
+    Bug #1996: the module-level ``password_audit_logger`` is built at import,
+    so opening the file (and creating its directory) at construction made
+    every process importing the server package -- the CLI included -- create
+    ``~/.cidx-server/password_audit.log``.  ``delay=True`` defers the open;
+    ``_open`` creates missing parent directories (Bug #1778: the data dir may
+    be a nested path whose intermediate directories do not exist yet).
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path, delay=True)
+
+    def _open(self) -> TextIOWrapper:
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+        return super()._open()
 
 
 class PasswordChangeAuditLogger:
@@ -84,10 +104,8 @@ class PasswordChangeAuditLogger:
                     "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
                 )
             )
-            # parents=True: CIDX_SERVER_DATA_DIR may point at a nested path
-            # with missing intermediate directories, unlike Path.home()
-            # which always exists.
-            server_dir.mkdir(parents=True, exist_ok=True)
+            # Bug #1996: the directory is created by _LazyAuditFileHandler on
+            # the first record, never at construction / import time.
             path = str(server_dir / "password_audit.log")
         self.log_file_path = path
 
@@ -103,8 +121,8 @@ class PasswordChangeAuditLogger:
             handler.close()
             self.audit_logger.removeHandler(handler)
 
-        # Create file handler for audit log
-        file_handler = logging.FileHandler(path)
+        # Create file handler for audit log (opened on the first record)
+        file_handler = _LazyAuditFileHandler(path)
         file_handler.setLevel(logging.INFO)
 
         # Create formatter for structured logging

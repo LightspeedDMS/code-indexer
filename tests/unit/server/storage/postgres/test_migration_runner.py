@@ -316,8 +316,12 @@ class TestMigrationRunnerInit:
         """
         Given a PostgreSQL connection string
         When MigrationRunner is instantiated
-        Then it establishes a connection via psycopg.
+        Then it establishes a connection via psycopg, with dead-peer
+        detection applied to the DSN (Bug #2005).
         """
+        from code_indexer.server.storage.postgres.dead_peer_detection import (
+            apply_dead_peer_detection,
+        )
         from code_indexer.server.storage.postgres.migrations.runner import (
             MigrationRunner,
         )
@@ -331,7 +335,9 @@ class TestMigrationRunnerInit:
             mock_psycopg.connect.return_value = mock_conn
             _runner = MigrationRunner(conn_str)  # noqa: F841
 
-        mock_psycopg.connect.assert_called_once_with(conn_str)
+        mock_psycopg.connect.assert_called_once_with(
+            apply_dead_peer_detection(conn_str)
+        )
 
     def test_sql_dir_points_to_sql_subdirectory(self) -> None:
         """

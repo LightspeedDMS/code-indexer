@@ -98,9 +98,15 @@ import importlib
 import logging
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any, Callable, Generator, List, Set, Type
 
 import pytest
+
+# Bug #1996: MUST precede every server import -- isolates the server data-dir
+# env vars before any module fixes its directory at import time.
+from tests import _isolated_server_home  # noqa: F401 - side effect
+from tests.fixtures import real_server_home_guard as _real_home_guard
 
 import code_indexer.server.app as _server_app_module
 import code_indexer.server.auth.dependencies as _auth_dependencies_module
@@ -115,6 +121,29 @@ from tests.unit.server._fast_sqlite import connect_without_fsync, fast_sqlite_en
 from tests.unit.server._fast_startup_lock import acquire_without_startup_wait
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_server_home() -> Generator[None, None, None]:
+    """Bug #1996: fail any server unit test whose thread touches the real
+    ~/.cidx-server (see tests/fixtures/real_server_home_guard.py)."""
+    _real_home_guard.start()
+    try:
+        yield
+    finally:
+        hits = _real_home_guard.stop()
+    assert not hits, _real_home_guard.failure_message(hits)
+
+
+@pytest.fixture
+def home_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Bug #1996: opt-in for tests that build production objects whose default
+    directory is ``Path.home() / ".cidx-server"`` (or that verify that home
+    default): HOME -- hence ``Path.home()`` -- points at a temp dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
 
 
 @pytest.fixture(scope="session", autouse=True)
