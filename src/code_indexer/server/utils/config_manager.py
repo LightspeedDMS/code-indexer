@@ -1030,24 +1030,50 @@ class BackgroundJobsConfig:
     Note: Job history retention period moved to DataRetentionConfig (Story #400).
     """
 
-    # Maximum number of concurrent background jobs (default: 5)
-    # Jobs exceeding this limit stay in PENDING until a slot is available
+    # Maximum number of concurrent background jobs on this NODE (default: 5).
+    # Jobs exceeding this limit stay in PENDING until a slot is available.
+    #
+    # R4 (docs/background-work-distribution.md): this is a node budget. The value
+    # stored here is what an admin sets and what the Web UI shows; each uvicorn
+    # worker process takes max(1, value // workers) of it when it sizes its pool
+    # (BackgroundJobManager.__init__). Do NOT divide it here -- an admin who sets
+    # 5 must keep reading back 5.
     max_concurrent_background_jobs: int = 5
 
     # Story #27: Maximum concurrent workers for SubprocessExecutor
     # Controls parallelism of subprocess-based operations like regex search
     # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
+    #
+    # R4 exemption (docs/background-work-distribution.md): NOT divided by the
+    # uvicorn worker count. These are short, read-only ripgrep spawns answering a
+    # live request, so the pool is request burst capacity, not a standing
+    # resource reservation -- dividing it would halve search latency headroom on
+    # a 2-worker pod to fix an over-count that never materialises, because the
+    # two processes are not both bursting on the same query.
     subprocess_max_workers: int = 8
 
-    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Bug #1063 Part 1: per-cycle refresh submission budget, per NODE.
     # Default -1 means "derive from max_concurrent_background_jobs // 2" in
     # __post_init__. Set explicitly to override the derived default.
+    #
+    # R4: divided by the worker count at the point of use
+    # (RefreshScheduler._get_refresh_budget), for the same reason as
+    # max_concurrent_background_jobs above -- stored as the node target, spent as
+    # this process's share.
     max_concurrent_refresh_jobs: int = -1
 
     # Bug #1070: dedicated xray executor pool size.
     # xray_search and xray_explore are read-only and must NOT share the 5-worker
     # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
     # compute and allows up to 20 concurrent xray jobs without starvation.
+    #
+    # R4 exemption (docs/background-work-distribution.md): NOT divided by the
+    # uvicorn worker count, because the resource that actually needs bounding
+    # here is already bounded per-process elsewhere. An xray job's cost is the
+    # rustc compile, and xray/rust_backend.py divides _XRAY_COMPILE_BUDGET_PER_NODE
+    # by the worker count behind its own semaphore. This number is a job-slot
+    # ceiling in front of that gate; halving it would only make queries queue
+    # earlier for a compile slot they would wait for anyway.
     xray_max_concurrent_jobs: int = 20
 
     # Story #1400 (CRITICAL 1, FINAL LOCKED DESIGN): dedicated temporal-lane

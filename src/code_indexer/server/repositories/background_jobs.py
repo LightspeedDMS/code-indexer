@@ -40,6 +40,11 @@ from code_indexer.server.services.job_tracker import (
     is_restart_interruption_error,
 )
 
+from code_indexer.utils.worker_budget import (
+    detect_worker_count,
+    per_process_budget,
+)
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -400,8 +405,20 @@ class BackgroundJobManager:
         # Workers pull (job_id, func, args, kwargs) tuples from
         # _pending_job_queue.  N submits → only pool_size threads alive,
         # not N per-submit threads each blocking on a semaphore.
-        pool_size = self._background_jobs_config.max_concurrent_background_jobs
-        for _ in range(pool_size):
+        # R4 (docs/background-work-distribution.md): max_concurrent_background_jobs
+        # is a NODE budget -- "how many background jobs this server runs at once".
+        # It was applied per uvicorn worker PROCESS, so the default of 5 meant 10
+        # threads on a 2-worker pod and 60 across the tools-* StatefulSet, all
+        # pulling on one Postgres and one NFS mount. Take this process's share.
+        #
+        # Stored, not recomputed: shutdown() drains the pool by sending one
+        # sentinel per worker, and if the two sides ever disagree about the count
+        # the surplus threads block on get() forever and the process never exits.
+        self._pool_size = per_process_budget(
+            self._background_jobs_config.max_concurrent_background_jobs,
+            detect_worker_count(),
+        )
+        for _ in range(self._pool_size):
             t = threading.Thread(
                 target=self._pool_worker,
                 args=(self._pending_job_queue, "ordinary"),
@@ -416,6 +433,13 @@ class BackgroundJobManager:
         # reading ONLY _temporal_pending_job_queue -- real isolation, so a
         # saturated ordinary lane can never starve a temporal job and vice
         # versa. Sized by temporal_lane_concurrency (restart-required).
+        #
+        # R4 exemption: deliberately NOT divided by the worker count. It
+        # defaults to 2, so halving it on a 2-worker node leaves 1 -- and the
+        # entire point of the separate lane is that temporal queries are not
+        # queued behind the ordinary pool. The lane is latency isolation, not a
+        # resource budget. A test pins this so a later divide-by-workers pass
+        # cannot absorb it without a decision.
         self._temporal_pool_size = (
             self._background_jobs_config.temporal_lane_concurrency
         )
@@ -546,8 +570,13 @@ class BackgroundJobManager:
 
     @property
     def max_concurrent_jobs(self) -> int:
-        """Get the maximum number of concurrent background jobs (Story #26)."""
-        return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+        """Concurrent background jobs THIS PROCESS runs (Story #26).
+
+        R4: the config value is the node budget; this is this process's share of
+        it, i.e. the real pool size. Reporting the undivided number here would
+        make the queue-depth stats say "2/5 running" while the pool is full.
+        """
+        return self._pool_size
 
     def register_cancel_handler(
         self, operation_type: str, handler: Callable[[], Any]
@@ -2293,16 +2322,19 @@ class BackgroundJobManager:
         """
         # Bug #1063 Part 3: Signal pool workers to stop accepting new work.
         self._pool_shutdown.set()
-        pool_size = self._background_jobs_config.max_concurrent_background_jobs
-        # Send one sentinel per worker so each blocked worker.get() wakes up.
-        for _ in range(pool_size):
+        # The size the pool was actually BUILT with, not a fresh read of config:
+        # a live config reload or a changed worker count would otherwise leave
+        # some pool threads without a sentinel, blocked on get() forever.
+        for _ in range(self._pool_size):
             self._pending_job_queue.put(None)
         # Story #1400 CRITICAL 1: separate sentinels for the separate
-        # temporal-lane queue/pool (exact per-worker count, mirroring the
-        # ordinary pool above; same config source used to size the pool at
-        # construction).
-        temporal_pool_size = self._background_jobs_config.temporal_lane_concurrency
-        for _ in range(temporal_pool_size):
+        # temporal-lane queue/pool, mirroring the ordinary pool above --
+        # including reading the size the lane was BUILT with rather than
+        # re-deriving it from config. Harmless today (the lane is not divided,
+        # so both reads agree) but it is the same drift hazard: any future
+        # change to how the lane is sized, or a live config reload, would leave
+        # some lane threads without a sentinel, blocked on get() forever.
+        for _ in range(self._temporal_pool_size):
             self._temporal_pending_job_queue.put(None)
 
         with self._lock:
