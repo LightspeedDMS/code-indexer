@@ -272,9 +272,17 @@ class TestSavePreservesGenerationSQLite:
             )
             conn.commit()
 
-        # svc saves its config (stale in-memory generation=0)
-        config = svc.get_config()
-        svc.save_config(config)
+        # Bug #2017: a whole-config save of the copy loaded BEFORE the other
+        # process's commit is refused (nothing written) ...
+        from code_indexer.server.services.config_service import ConfigChangeConflict
+
+        with pytest.raises(ConfigChangeConflict):
+            svc.save_config(svc.get_config())
+        assert _read_runtime_row(db_path)["data"].get("launch_restart_generation") == 1
+
+        # ... and once reloaded, the save keeps the row's CURRENT generation.
+        svc.load_config()
+        svc.save_config(svc.get_config())
 
         row = _read_runtime_row(db_path)
         assert row["data"].get("launch_restart_generation") == 1, (
@@ -351,7 +359,7 @@ class TestSaveRuntimeToPgSqlText:
         # Patch materialize_launch_config to avoid filesystem side effects
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         # Collect all SQL strings passed to cur.execute
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
@@ -380,7 +388,7 @@ class TestSaveRuntimeToPgSqlText:
         config = svc.get_config()
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
         update_calls = [sql for sql in all_sql_calls if "UPDATE server_config" in sql]
@@ -412,7 +420,7 @@ class TestSaveRuntimeToPgSqlText:
         config = svc.get_config()
         svc.materialize_launch_config = MagicMock(return_value=True)  # type: ignore[method-assign]
 
-        svc._save_runtime_to_pg(config)
+        svc.save_config(config)  # Bug #2017: the PG compare-and-set save
 
         all_sql_calls = [str(c.args[0]) for c in cur.execute.call_args_list]
         select_calls = [

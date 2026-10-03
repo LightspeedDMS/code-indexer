@@ -136,6 +136,11 @@ class _FakeCursor:
             self._cur.execute(sql)
         return self
 
+    @property
+    def rowcount(self) -> int:
+        """psycopg3 cursors expose the affected-row count (insert-only seed)."""
+        return int(self._cur.rowcount)
+
     def fetchone(self):  # type: ignore[no-untyped-def]
         row = self._cur.fetchone()
         if row is None:

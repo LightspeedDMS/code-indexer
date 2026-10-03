@@ -203,9 +203,16 @@ def _increment(service: ConfigService) -> Callable[[Any], None]:
 def test_concurrent_saves_from_two_processes_lose_nothing(
     two_processes: Tuple[ConfigService, ConfigService],
 ) -> None:
+    from code_indexer.server.services.config_service import _CHANGE_ATTEMPTS
+
     a, b = two_processes
     a.update_settings_atomic([("siem_delivery", "max_batch_events", 100)])
-    rounds = 15
+    # Bounded, never flaky: one save of a writer retries only when the OTHER
+    # writer commits in between, and the other writer commits at most
+    # `rounds` times in total -- fewer than the attempt budget.  Discriminating
+    # all the same: a write of a process's stale copy loses deterministically
+    # (each process would increment its own cached value).
+    rounds = _CHANGE_ATTEMPTS - 1
     errors: List[BaseException] = []
     start = threading.Barrier(2)
 
