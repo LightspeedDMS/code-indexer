@@ -424,17 +424,17 @@ def open_batches_page(
     return _slice_page(rows, limit, lambda r: f"{r['created_at']}|{r['batch_id']}")
 
 
-# Per known key, on the (status, destination_key, id) index: the pending count
-# capped at COUNT_CAP + 1 (the exact COUNT runs only when the (cap+1)th row
-# does not exist, so it is bounded too) and whether batched / quarantined
-# rows exist.  CASE evaluates its ELSE branch only when needed on both backends.
+# Per known key: the pending count capped at COUNT_CAP + 1 (exact at or under
+# the cap) and whether batched / quarantined rows exist.  The count reads at
+# most cap + 1 queue rows and never sorts (no ORDER BY): on the covering
+# (status, destination_key, id) index for SQLite and a vacuumed PostgreSQL
+# table; before autovacuum PostgreSQL may use a bitmap scan, whose INDEX side
+# still collects all of the key's TIDs while its heap reads stop at cap + 1.
 _STRANDED_PAGE_SQL = (
     "SELECT k.destination_key, k.region, k.project_id, k.instance_id, "
-    "CASE WHEN (SELECT q.id FROM siem_delivery_queue q WHERE q.status = 'pending' "
-    "AND q.destination_key = k.destination_key ORDER BY q.id LIMIT 1 OFFSET ?) "
-    "IS NOT NULL THEN ? ELSE (SELECT COUNT(*) FROM siem_delivery_queue q "
-    "WHERE q.status = 'pending' AND q.destination_key = k.destination_key) "
-    "END AS pending, "
+    "(SELECT COUNT(*) FROM (SELECT 1 FROM siem_delivery_queue q "
+    "WHERE q.status = 'pending' AND q.destination_key = k.destination_key "
+    "LIMIT ?) c) AS pending, "
     "EXISTS (SELECT 1 FROM siem_delivery_queue q WHERE q.status = 'batched' "
     "AND q.destination_key = k.destination_key) AS has_batched, "
     "EXISTS (SELECT 1 FROM siem_delivery_queue q WHERE q.status = 'quarantined' "
@@ -458,7 +458,7 @@ def stranded_page(
         params.append(configured_key)
     keys = tx.query(
         _STRANDED_PAGE_SQL.format(where=where),
-        [COUNT_CAP, COUNT_CAP + 1, *params, limit + 1],
+        [COUNT_CAP + 1, *params, limit + 1],
     )
     page = _slice_page(keys, limit, lambda r: str(r["destination_key"]))
     rows = []

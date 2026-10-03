@@ -8,7 +8,9 @@ import json
 import re
 import uuid
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+
+import pytest
 
 from code_indexer.server.services.siem_delivery import stats
 from code_indexer.server.services.siem_delivery.db import SiemTx
@@ -195,7 +197,14 @@ def test_destination_summary_caps_counts_and_names_the_coordinates(
     assert summary["pending"] == stats.COUNT_CAP + 1 and summary["pending_capped"]
     assert (summary["batched"], summary["quarantined"]) == (2, 3)
     assert not summary["batched_capped"] and not summary["quarantined_capped"]
-    [stranded] = b.db.read(lambda tx: stats.stranded_page(tx, CONFIGURED, ""))["rows"]
+    at_cap = "harness:0000000000000776"  # pages before the over-cap key
+    _destination(b, at_cap)
+    _seed_queue(b, stats.COUNT_CAP, dest=at_cap)
+    exact, stranded = b.db.read(lambda tx: stats.stranded_page(tx, CONFIGURED, ""))[
+        "rows"
+    ]
+    assert exact["destination_key"] == at_cap
+    assert exact["pending"] == stats.COUNT_CAP  # exact AT the cap
     assert stranded["pending"] == stats.COUNT_CAP + 1
     assert stranded["has_batched"] is True and stranded["has_quarantined"] is True
     unknown = b.db.read(lambda tx: stats.destination_summary(tx, "harness:none"))
@@ -239,10 +248,22 @@ def _plan(tx: SiemTx, sql: str, params: Any) -> str:
 
 
 # a full queue scan: SQLite (old and new detail formats, table or alias q)
-# or PostgreSQL
+# or PostgreSQL.  NOT the scan of the capped count's derived table
+# ("SCAN SUBQUERY 1 AS c" / "SCAN c"): that reads the LIMITed result only.
 _QUEUE_SCAN = re.compile(
     r"\bSCAN (?:TABLE )?(?:siem_delivery_queue|q)\b|Seq Scan on siem_delivery_queue\b"
 )
+
+
+def test_queue_scan_pattern_matches_only_real_queue_scans() -> None:
+    for real in (
+        "SCAN TABLE siem_delivery_queue",
+        "SCAN q",
+        "Seq Scan on siem_delivery_queue",
+    ):
+        assert _QUEUE_SCAN.search(real), real
+    for derived in ("SCAN SUBQUERY 1 AS c", "SCAN c"):
+        assert not _QUEUE_SCAN.search(derived), derived
 
 
 def _settle_statistics(b: SiemBackendHarness) -> None:
@@ -260,18 +281,46 @@ def _settle_statistics(b: SiemBackendHarness) -> None:
             conn.autocommit = False
 
 
-def _pg_plan_nodes(tx: SiemTx, sql: str, params: Any) -> List[Dict[str, Any]]:
-    """Every node of the PRODUCTION planner's plan (no overrides)."""
-    row = SiemTx.query(tx, f"EXPLAIN (FORMAT JSON) {sql}", params)[0]
+def _pg_plan_root(
+    tx: SiemTx, sql: str, params: Any, options: str = "FORMAT JSON"
+) -> Dict[str, Any]:
+    """The PRODUCTION planner's plan tree (no overrides)."""
+    row = SiemTx.query(tx, f"EXPLAIN ({options}) {sql}", params)[0]
     explained = parse_json_column(next(iter(row.values())), list, "plan")
     assert explained, "EXPLAIN returned no plan"
-    stack = [explained[0]["Plan"]]
+    root: Dict[str, Any] = explained[0]["Plan"]
+    return root
+
+
+def _flatten(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    stack = [node]
     nodes: List[Dict[str, Any]] = []
     while stack:  # a finite tree: each node is visited once
-        node = stack.pop()
-        nodes.append(node)
-        stack.extend(node.get("Plans", []))
+        current = stack.pop()
+        nodes.append(current)
+        stack.extend(current.get("Plans", []))
     return nodes
+
+
+def _pg_plan_nodes(tx: SiemTx, sql: str, params: Any) -> List[Dict[str, Any]]:
+    """Every node of the PRODUCTION planner's plan (no overrides)."""
+    return _flatten(_pg_plan_root(tx, sql, params))
+
+
+def _capped_probes(root: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The Limit node(s) of the per-key subplans (the capped pending count),
+    at any depth under the subplan root."""
+    return [
+        node
+        for sub in _flatten(root)
+        if sub.get("Subplan Name")
+        for node in _flatten(sub)
+        if node["Node Type"] == "Limit"
+    ]
+
+
+# the nodes that read queue rows (the bitmap INDEX scan only collects TIDs)
+_HEAP_SIDE = ("Bitmap Heap Scan", "Index Scan", "Index Only Scan", "Seq Scan")
 
 
 def _node_label(node: Dict[str, Any]) -> str:
@@ -313,11 +362,88 @@ def test_stranded_page_reads_the_queue_in_one_bounded_statement(
         return
     nodes = b.db.read(lambda tx: _pg_plan_nodes(tx, *statement))  # no overrides
     assert not [n for n in nodes if _QUEUE_SCAN.search(_node_label(n))], nodes
-    probes = [n for n in nodes if n.get("Subplan Name") and n["Node Type"] == "Limit"]
-    assert len(probes) == 1, nodes  # the capped OFFSET probe
+    probes = b.db.read(lambda tx: _capped_probes(_pg_plan_root(tx, *statement)))
+    assert len(probes) == 1, nodes  # the capped per-key probe
     (under,) = probes[0]["Plans"]
     assert under["Node Type"] in ("Index Scan", "Index Only Scan"), probes[0]
     assert under["Index Name"] == "idx_siem_queue_status_dest_id", probes[0]
+
+
+@pytest.fixture()
+def unvacuumed_pg(siem_backend: SiemBackendHarness) -> Iterator[SiemBackendHarness]:
+    """PostgreSQL only: the queue as it is before autovacuum (fresh inserts,
+    no visibility map).  The setting is restored for the shared schema."""
+    if siem_backend.name != "postgres":
+        pytest.skip("PostgreSQL planner behaviour before autovacuum")
+    siem_backend.raw("ALTER TABLE siem_delivery_queue SET (autovacuum_enabled = false)")
+    try:
+        yield siem_backend
+    finally:
+        siem_backend.raw("ALTER TABLE siem_delivery_queue RESET (autovacuum_enabled)")
+
+
+def _seed_pg_backlogs(b: SiemBackendHarness, big: int = 30_000) -> None:
+    """60 known keys: the first 3 hold *big* pending rows each, the rest 5."""
+    b.raw(
+        "INSERT INTO siem_destinations (destination_key, region, project_id, "
+        "location, instance_id, first_seen_at) SELECT 'harness:' || "
+        "lpad(i::text, 16, '0'), 'us', 'p', 'us', 'i', now() "
+        "FROM generate_series(1, 60) i"
+    )
+    for first, last, rows in ((1, 3, big), (4, 60, 5)):
+        b.raw(
+            "INSERT INTO siem_delivery_queue (event_uuid, destination_key, "
+            "occurred_at, action_type, status, next_attempt_at, mapping_version, "
+            "created_at) SELECT k || '-' || g, 'harness:' || lpad(k::text, 16, '0'), "
+            "'2026-01-01T00:00:00Z', 'authentication_failure', 'pending', now(), 2, "
+            f"now() FROM generate_series({first}, {last}) k, "
+            f"generate_series(1, {rows}) g"
+        )
+    b.raw("ANALYZE siem_delivery_queue")  # statistics only: NO vacuum
+    b.raw("ANALYZE siem_destinations")
+
+
+def test_stranded_count_reads_at_most_cap_plus_one_rows_per_key_before_vacuum(
+    unvacuumed_pg: SiemBackendHarness,
+) -> None:
+    """Before autovacuum the planner reaches each key's rows through a bitmap
+    scan.  The per-key count must still never sort, and its heap side must
+    read at most COUNT_CAP + 1 rows per key (the default planner, no enable_*
+    overrides).
+
+    Known residual: before vacuum the bitmap INDEX scan still collects all of
+    a key's index entries (TIDs only); the heap reads are capped.  Once the
+    visibility map is set, the count is a capped Index Only Scan (see
+    test_stranded_page_reads_the_queue_in_one_bounded_statement)."""
+    b = unvacuumed_pg
+    _seed_pg_backlogs(b)
+    with b.pool.connection() as conn:
+        (allvisible,) = conn.execute(
+            "SELECT relallvisible FROM pg_class "
+            "WHERE oid = 'siem_delivery_queue'::regclass"
+        ).fetchone()
+    assert allvisible == 0, "the queue must be unvacuumed for this test"
+
+    def _statement(tx: SiemTx) -> Any:
+        rec = _Recording(tx)
+        page = stats.stranded_page(rec, CONFIGURED, "", limit=2)  # 3 big keys
+        assert [r["pending"] for r in page["rows"]] == [stats.COUNT_CAP + 1] * 2
+        return rec.seen[0]
+
+    sql, params = b.db.read(_statement)
+    root = b.db.read(
+        lambda tx: _pg_plan_root(
+            tx, sql, params, options="ANALYZE, BUFFERS, FORMAT JSON"
+        )
+    )
+    nodes = _flatten(root)
+    assert not [n for n in nodes if n["Node Type"] == "Sort"], nodes
+    probes = _capped_probes(root)
+    assert probes, nodes
+    for probe in probes:
+        heap = [n for n in _flatten(probe) if n["Node Type"] in _HEAP_SIDE]
+        assert heap, probe
+        assert all(n["Actual Rows"] <= stats.COUNT_CAP + 1 for n in heap), probe
 
 
 def test_page_queries_use_the_named_indexes(siem_backend: SiemBackendHarness) -> None:

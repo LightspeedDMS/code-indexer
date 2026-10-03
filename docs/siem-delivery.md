@@ -204,7 +204,9 @@ removal they are NOT counted.
 
 A configuration saved before the epoch existed has the empty epoch, so an
 already armed destination stays armed across the upgrade until its next
-lifetime-ending change.
+lifetime-ending change. During a mixed-version cluster upgrade, re-run the
+canary once all nodes are upgraded: older nodes do not take a canary run
+number, so run ordering holds only when every node runs this release.
 
 ### Arming from the Web UI
 
