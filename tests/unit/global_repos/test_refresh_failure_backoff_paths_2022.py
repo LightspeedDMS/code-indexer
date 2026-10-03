@@ -11,6 +11,7 @@ never treated as corruption). Only the submission boundary is recorded
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from code_indexer.global_repos import refresh_failure_recovery as recovery
 from code_indexer.server.services.langfuse_trace_sync_service import (
     LangfuseTraceSyncService,
 )
@@ -44,6 +46,7 @@ from tests.utils.refresh_fatal_store_harness import (
 MIN_EXPECTED_BACKOFF_SECONDS = 60
 #: The ordinary schedule advance is interval +/- 10% jitter.
 _ORDINARY_ADVANCE_FLOOR = 0.9
+ONE_HOUR_SECONDS = 3600
 
 
 @pytest.fixture(params=STORE_KINDS)
@@ -171,3 +174,19 @@ def test_trace_sync_trigger_skips_backed_off_alias(
 
     _sync_once(service)
     assert jobs.submitted == [ALIAS], "trace sync re-submitted a backed-off alias"
+
+
+def test_no_changes_success_clears_the_backoff(tmp_path: Path, metadata: Any) -> None:
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    assert harness.snapshot is not None
+    # A newer published snapshot than every source file: nothing to index.
+    newer = harness.snapshot.parent / f"v_{int(time.time()) + ONE_HOUR_SECONDS}"
+    shutil.copytree(harness.snapshot, newer, symlinks=True)
+    harness.scheduler.alias_manager.swap_alias(ALIAS, str(newer), str(harness.snapshot))
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    assert recovery.active_backoff_until(metadata, ALIAS) is not None
+
+    result = harness.scheduler._execute_refresh(ALIAS)
+
+    assert result.get("message") == "No changes detected", result
+    assert recovery.active_backoff_until(metadata, ALIAS) is None

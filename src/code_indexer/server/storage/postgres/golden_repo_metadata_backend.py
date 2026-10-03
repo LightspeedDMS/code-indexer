@@ -25,7 +25,10 @@ from typing import Any, Dict, List, Optional
 
 from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
-from ._refresh_failure_backoff_mixin import _RefreshFailureBackoffPostgresMixin
+from ._refresh_failure_backoff_mixin import (
+    _RefreshFailureBackoffPostgresMixin,
+    delete_refresh_failure_backoff_for_repo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,7 @@ class GoldenRepoMetadataPostgresBackend(_RefreshFailureBackoffPostgresMixin):
                     (alias,),
                 )
                 deleted: bool = cur.rowcount > 0
+                delete_refresh_failure_backoff_for_repo(cur, alias)
             conn.commit()
 
         if deleted:

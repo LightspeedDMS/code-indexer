@@ -1031,7 +1031,11 @@ class DependencyMapService:
             # Must be inside finally so it runs after lock is released, but gated on success
             # to satisfy AC5 (no trigger on exception).
             if _analysis_succeeded and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+                from code_indexer.global_repos.meta_description_hook import (
+                    request_cidx_meta_refresh,
+                )
+
+                request_cidx_meta_refresh(self._refresh_scheduler)
 
     def _setup_analysis(self) -> Dict[str, Any]:
         """
@@ -4087,7 +4091,11 @@ class DependencyMapService:
             # Must be inside finally so it runs after lock is released, but gated on success
             # to satisfy AC5 (no trigger on exception).
             if _delta_succeeded and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+                from code_indexer.global_repos.meta_description_hook import (
+                    request_cidx_meta_refresh,
+                )
+
+                request_cidx_meta_refresh(self._refresh_scheduler)
 
     # ---------------------------------------------------------------------------
     # Story #359: Domain Document Refinement
@@ -4495,7 +4503,11 @@ class DependencyMapService:
                     "cidx-meta", owner_name="dependency_map_service"
                 )
             if any_changed and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+                from code_indexer.global_repos.meta_description_hook import (
+                    request_cidx_meta_refresh,
+                )
+
+                request_cidx_meta_refresh(self._refresh_scheduler)
 
         return None
 

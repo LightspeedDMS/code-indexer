@@ -41,10 +41,8 @@ from .snapshot_retention import (
     discover_and_enforce_temporal_retention,
     enforce_snapshot_retention,
 )
-from .refresh_integrity_gate import (
-    RefreshIntegrityGateResult,
-    run_refresh_integrity_gate,
-)
+from .refresh_integrity_gate import RefreshIntegrityGateResult
+from . import refresh_failure_recovery as failure_recovery
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.utils.subprocess_diagnostics import (
@@ -72,8 +70,9 @@ from code_indexer.server.storage.shared.nfs_visibility import (
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from functools import partial
+
 from code_indexer.services.index_failure_exit_codes import (
-    ChunkStoreFailureKind,
     FatalChunkStoreIndexError,
     chunk_store_failure_kind_for_exit_code,
 )
@@ -128,12 +127,11 @@ def _record_refresh_duration_metric(
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 
-# Bug #1506: N consecutive ordinary-refresh integrity-gate failures for the
-# same golden_alias are QUARANTINED (loudly logged for operator attention)
-# -- mirrors description_refresh_scheduler.py's
-# PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
-# FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
-_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+# Bug #1506: consecutive integrity-gate failures that QUARANTINE an alias
+# (single definition, shared with the strike recorder).
+_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = (
+    failure_recovery.REFRESH_INTEGRITY_QUARANTINE_THRESHOLD
+)
 
 # Bug #1769: N consecutive local-repo `cidx init` repair failures for the
 # same golden_alias are QUARANTINED (loudly logged for operator
@@ -1893,8 +1891,8 @@ class RefreshScheduler:
                     try:
                         # Bug #2022: a due alias inside its persisted failure
                         # backoff is deferred via next_refresh, not submitted.
-                        _backoff_until = self._active_refresh_failure_backoff_until(
-                            alias_name
+                        _backoff_until = failure_recovery.active_backoff_until(
+                            self.golden_repo_metadata, alias_name
                         )
                         if _backoff_until is not None:
                             self.registry.update_next_refresh(
@@ -2006,17 +2004,10 @@ class RefreshScheduler:
         ):
             return None
 
-        # Bug #2022: system triggers (the git schedule, trace sync, other
-        # writers) honour the persisted failure backoff before any job is
-        # created. A user-initiated or force-reset refresh is never deferred.
+        # Bug #2022: system triggers honour the persisted failure backoff
+        # (raises RefreshDeferredError, a retryable DuplicateJobError).
         if submitter_username == "system" and not force_reset:
-            backoff_until = self._active_refresh_failure_backoff_until(alias_name)
-            if backoff_until is not None:
-                logger.info(
-                    f"Refresh for {alias_name} deferred until {backoff_until:.0f}: "
-                    f"persisted failure backoff active"
-                )
-                return None
+            failure_recovery.defer_if_backed_off(self.golden_repo_metadata, alias_name)
 
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
@@ -2131,6 +2122,9 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
             )
             _status = "success" if result.get("success") else "error"
+            failure_recovery.clear_backoff_after_verified_success(
+                self.golden_repo_metadata, alias_name, result
+            )
             return result
         finally:
             _record_refresh_duration_metric(
@@ -2860,14 +2854,19 @@ class RefreshScheduler:
                                 force_reconcile=force_reconcile,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
-                            # Bug #2022 Gap 4: self-heal (still under the
-                            # write lock), then fail this cycle unpublished.
-                            self._self_heal_after_fatal_chunk_store_failure(
-                                alias_name,
-                                repo_name,
-                                source_path,
-                                current_target,
-                                fatal_exc,
+                            # Bug #2022: self-heal under the lock; stay failed.
+                            failure_recovery.self_heal_after_fatal_chunk_store_failure(
+                                metadata=self.golden_repo_metadata,
+                                snapshot_manager=self._snapshot_manager,
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                current_target=current_target,
+                                error=fatal_exc,
+                                verify_ownership=partial(
+                                    self.raise_if_write_lock_ownership_lost,
+                                    repo_name,
+                                    owner_name="refresh_scheduler",
+                                ),
                             )
                             raise
 
@@ -2987,8 +2986,6 @@ class RefreshScheduler:
 
                     # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
-                    # Bug #2022: a verified, published refresh ends any backoff.
-                    self._clear_refresh_failure_backoff(alias_name)
 
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
@@ -3222,60 +3219,6 @@ class RefreshScheduler:
             "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
         }
 
-    def _record_integrity_gate_failure(
-        self, alias_name: str, gate_result: RefreshIntegrityGateResult
-    ) -> None:
-        """Log + persist a Bug #1506 integrity-gate failure (quarantine
-        bookkeeping), extracted from ``_run_and_publish_integrity_gate``
-        purely to keep that method short."""
-        detail_summary = "; ".join(
-            f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
-        )
-        logger.error(
-            f"Bug #1506: refusing to publish refresh for "
-            f"{alias_name} -- integrity gate failed for "
-            f"{len(gate_result.failures)} collection(s): "
-            f"{detail_summary}. The already-published alias "
-            f"continues serving the last verified-good snapshot."
-        )
-        try:
-            failure_count = self.golden_repo_metadata.record_refresh_integrity_failure(
-                alias_name, detail_summary
-            )
-            if failure_count >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD:
-                logger.error(
-                    f"Bug #1506: {alias_name} has failed the refresh "
-                    f"integrity gate {failure_count} consecutive times -- "
-                    f"QUARANTINED. Operator attention is required to "
-                    f"investigate the underlying corruption source."
-                )
-        except Exception as quarantine_exc:
-            logger.error(
-                f"Bug #1506: failed to record refresh-integrity "
-                f"quarantine state for {alias_name} (non-fatal): "
-                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
-            )
-
-    def _reset_integrity_gate_quarantine(self, alias_name: str) -> None:
-        """Clear any prior Bug #1506 quarantine state on a gate pass,
-        extracted from ``_run_and_publish_integrity_gate`` purely to keep
-        that method short."""
-        try:
-            self.golden_repo_metadata.reset_refresh_integrity_failure(alias_name)
-        except Exception as reset_exc:
-            # Bug #1506 4th-pass review Item 3: bumped from WARNING to
-            # ERROR -- if this bookkeeping write repeatedly fails, the
-            # consecutive-failure-count circuit breaker never gets reset
-            # either, silently confusing future quarantine decisions. This
-            # does not fail the current cycle (already correct: the gate
-            # itself already decided to publish), it only ensures the
-            # swallowed failure is loudly visible for operator diagnosis.
-            logger.error(
-                f"Bug #1506: failed to reset refresh-integrity quarantine "
-                f"state for {alias_name} (non-fatal): "
-                f"{type(reset_exc).__name__}: {reset_exc}"
-            )
-
     def _run_and_publish_integrity_gate(
         self,
         alias_name: str,
@@ -3298,129 +3241,17 @@ class RefreshScheduler:
         convention (an early-return dict for ``_execute_refresh``, a
         raised ``RuntimeError`` for ``_create_new_index``).
         """
-        gate_result = self._run_integrity_gate_against_published(
-            source_path, current_target
+        gate_result = failure_recovery.run_integrity_gate_against_published(
+            self._snapshot_manager, source_path, current_target
         )
         if not gate_result.passed:
-            self._record_integrity_gate_failure(alias_name, gate_result)
+            failure_recovery.record_integrity_strike(
+                self.golden_repo_metadata, alias_name, gate_result
+            )
             return gate_result
 
-        self._reset_integrity_gate_quarantine(alias_name)
+        failure_recovery.reset_integrity_strikes(self.golden_repo_metadata, alias_name)
         return gate_result
-
-    def _self_heal_after_fatal_chunk_store_failure(
-        self,
-        alias_name: str,
-        repo_name: str,
-        source_path: str,
-        current_target: Optional[str],
-        error: FatalChunkStoreIndexError,
-    ) -> None:
-        """Bug #2022 Gap 4: ``cidx index`` failed on a fatal chunk-store
-        error, so the publish-time integrity gate never ran. Run it now --
-        still under the publish write lock -- so a corrupt source store is
-        restored from the published snapshot and a strike is persisted.
-
-        Never publishes: the caller re-raises *error* and this cycle stays
-        failed; the next cycle reconciles against the restored store. An
-        ENVIRONMENT failure (disk full, read-only, permission) is not
-        corruption and is never restored over. Every outcome that did not
-        repair the store also records a persisted per-alias backoff.
-        """
-        self.raise_if_write_lock_ownership_lost(
-            repo_name, owner_name="refresh_scheduler"
-        )
-        if error.kind is not ChunkStoreFailureKind.CORRUPTION:
-            logger.error(
-                f"Bug #2022: refresh of {alias_name} failed with a chunk-store "
-                f"{error.kind.value} failure (disk full, read-only or "
-                f"permission) -- not corruption, nothing restored: {error}"
-            )
-            self._record_refresh_failure_backoff(alias_name, str(error))
-            return
-        gate_result = self._run_integrity_gate_against_published(
-            source_path, current_target
-        )
-        if gate_result.passed:
-            logger.error(
-                f"Bug #2022: cidx index reported chunk-store corruption for "
-                f"{alias_name} but every collection passes integrity_check -- "
-                f"nothing restored: {error}"
-            )
-            self._record_refresh_failure_backoff(alias_name, str(error))
-            return
-        self._record_integrity_gate_failure(alias_name, gate_result)
-        repaired = all(
-            f.self_heal_succeeded and f.metadata_restore_error is None
-            for f in gate_result.failures
-        )
-        if not repaired:
-            self._record_refresh_failure_backoff(alias_name, str(error))
-
-    def _record_refresh_failure_backoff(self, alias_name: str, detail: str) -> None:
-        """Bug #2022: persist one non-repairable refresh failure so system
-        submissions of *alias_name* back off (exponential, capped)."""
-        try:
-            count = self.golden_repo_metadata.record_refresh_failure_backoff(
-                alias_name, detail
-            )
-        except Exception as exc:
-            logger.error(
-                f"Bug #2022: failed to persist refresh failure backoff for "
-                f"{alias_name}: {type(exc).__name__}: {exc}"
-            )
-            return
-        logger.error(
-            f"Bug #2022: {alias_name} refresh failed {count} consecutive time(s) "
-            f"without repair -- system refreshes back off "
-            f"{self._compute_backoff_seconds('permanent', count)}s"
-        )
-
-    def _active_refresh_failure_backoff_until(self, alias_name: str) -> Optional[float]:
-        """Bug #2022: epoch time until which system submissions of
-        *alias_name* are deferred, or None when no backoff is active. A read
-        failure propagates (fail closed: the caller skips this submission)."""
-        state = self.golden_repo_metadata.get_refresh_failure_backoff_state(alias_name)
-        if state is None:
-            return None
-        backoff = self._compute_backoff_seconds(
-            "permanent", int(state["consecutive_failure_count"])
-        )
-        until = float(state["last_failed_at"]) + float(backoff or 0)
-        return until if until > time.time() else None
-
-    def _clear_refresh_failure_backoff(self, alias_name: str) -> None:
-        """Bug #2022: a verified refresh succeeded -- clear the backoff."""
-        try:
-            self.golden_repo_metadata.reset_refresh_failure_backoff(alias_name)
-        except Exception as exc:
-            logger.error(
-                f"Bug #2022: failed to clear refresh failure backoff for "
-                f"{alias_name}: {type(exc).__name__}: {exc}"
-            )
-
-    def _run_integrity_gate_against_published(
-        self, source_path: str, current_target: Optional[str]
-    ) -> RefreshIntegrityGateResult:
-        """Run the Bug #1506 gate on *source_path*'s index, self-healing a
-        corrupt collection from the published snapshot at *current_target*
-        (read only). No published snapshot yet (first refresh: the alias
-        still points at the source itself) means nothing to restore from."""
-        healthy_index_dir = (
-            Path(current_target) / ".code-indexer" / "index"
-            if current_target and current_target != source_path
-            else None
-        )
-        clone_backend = (
-            getattr(self._snapshot_manager, "_clone_backend", None)
-            if self._snapshot_manager is not None
-            else None
-        )
-        return run_refresh_integrity_gate(
-            source_index_dir=Path(source_path) / ".code-indexer" / "index",
-            healthy_index_dir=healthy_index_dir,
-            clone_backend=clone_backend,
-        )
 
     def _index_source(
         self,

@@ -170,6 +170,34 @@ def corrupt_btree_pages(chunks_db: Path) -> None:
     assert not quick_check_ok(chunks_db), "corruption did not take"
 
 
+def diverge_store(chunks_db: Path) -> None:
+    """Append one real record so this store's bytes differ from a snapshot
+    copy taken earlier -- a restore from that snapshot is then detectable."""
+    from code_indexer.storage.sqlite_chunk_store import ChunkStore
+
+    with ChunkStore(chunks_db) as store:
+        store.write_batch(
+            [
+                {
+                    "id": "diverged-point",
+                    "vector": [0.5] * VECTOR_DIM,
+                    "payload": {"path": "module_1.py"},
+                    "chunk_text": "def diverged(): pass",
+                }
+            ]
+        )
+    assert quick_check_ok(chunks_db)
+
+
+def make_journal_path_a_directory(chunks_db: Path) -> Path:
+    """A directory where SQLite expects its rollback journal makes every open
+    of ``chunks_db`` fail with a real SQLITE_IOERR ("disk I/O error") while
+    the database file itself stays intact."""
+    journal = chunks_db.with_name(chunks_db.name + "-journal")
+    journal.mkdir()
+    return journal
+
+
 def run_server_index_child(repo_dir: Path) -> subprocess.CompletedProcess:
     """Run the exact server-context ``cidx index`` command line
     (``refresh_scheduler._index_source`` builds the same arguments)."""

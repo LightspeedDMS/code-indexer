@@ -17,6 +17,15 @@ if TYPE_CHECKING:
     from .connection_pool import ConnectionPool
 
 
+def delete_refresh_failure_backoff_for_repo(cur: Any, alias: str) -> None:
+    """Bug #2022: drop the backoff of a removed golden repo on the caller's
+    cursor (same transaction), under both its bare and ``-global`` alias."""
+    cur.execute(
+        "DELETE FROM refresh_failure_backoff_state WHERE golden_alias IN (%s, %s)",
+        (alias, f"{alias}-global"),
+    )
+
+
 class _RefreshFailureBackoffPostgresMixin:
     """Refresh failure backoff methods (see module docstring)."""
 

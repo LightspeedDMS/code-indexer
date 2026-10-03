@@ -12,11 +12,14 @@ The child now exits with a reserved code per failure KIND, and the parent
 maps the code back to the kind. Two kinds, because they demand opposite
 reactions:
 
-- ``CORRUPTION``: SQLite reports the store itself as damaged. The parent may
-  restore it from the published snapshot (after verifying both ends).
-- ``ENVIRONMENT``: disk full, read-only filesystem, permission denied, any
-  OS-level error. The store is not known to be damaged; restoring over it
-  could destroy good data, so the parent only backs off.
+- ``CORRUPTION``: SQLite reports the store itself as damaged
+  (SQLITE_CORRUPT / SQLITE_NOTADB). The parent may restore it from the
+  published snapshot, but only after its own integrity check completes and
+  confirms the damage.
+- ``ENVIRONMENT``: every other fatal store failure -- I/O error, lock or
+  busy, disk full, read-only, permission, any OS error. The store is not
+  known to be damaged; restoring over it could destroy good data, so the
+  parent only backs off.
 
 Deliberately dependency-light: imported by the CLI's failure path and by the
 refresh scheduler.
@@ -28,7 +31,11 @@ import sqlite3
 from enum import Enum
 from typing import Iterator, Optional
 
-from code_indexer.storage.sqlite_chunk_store import ChunkStoreUnavailableError
+from code_indexer.storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    message_reports_sqlite_corruption,
+    sqlite_error_reports_corruption,
+)
 
 
 class ChunkStoreFailureKind(str, Enum):
@@ -50,15 +57,6 @@ _EXIT_CODE_BY_KIND = {
 }
 _KIND_BY_EXIT_CODE = {code: kind for kind, code in _EXIT_CODE_BY_KIND.items()}
 
-#: SQLite messages for conditions of the environment, not of the file:
-#: SQLITE_FULL, SQLITE_READONLY, SQLITE_CANTOPEN, SQLITE_PERM.
-_ENVIRONMENT_SQLITE_MESSAGES = (
-    "database or disk is full",
-    "readonly database",
-    "unable to open database file",
-    "access permission denied",
-)
-
 #: Bound on how far an exception's cause/context chain is followed.
 _MAX_CHAIN_DEPTH = 32
 
@@ -74,39 +72,39 @@ def _iter_chain(exc: BaseException) -> Iterator[BaseException]:
         current = current.__cause__ or current.__context__
 
 
-def _kind_of_cause(cause: BaseException) -> Optional[ChunkStoreFailureKind]:
-    if isinstance(cause, OSError):
-        return ChunkStoreFailureKind.ENVIRONMENT
-    if isinstance(cause, sqlite3.DatabaseError):
-        message = str(cause).lower()
-        if any(text in message for text in _ENVIRONMENT_SQLITE_MESSAGES):
-            return ChunkStoreFailureKind.ENVIRONMENT
-        return ChunkStoreFailureKind.CORRUPTION
-    return None
-
-
 def classify_fatal_chunk_store_failure(
     exc: BaseException,
 ) -> Optional[ChunkStoreFailureKind]:
     """Return the kind of fatal chunk-store failure behind ``exc``, or None
-    when ``exc`` is not a fatal chunk-store failure at all."""
+    when ``exc`` is not one.
+
+    CORRUPTION only by allow-list: SQLite itself reported the store damaged
+    (``sqlite_error_reports_corruption``). A typed failure for any other
+    reason (I/O, locked, busy, full, read-only, permission, unknown) is
+    ENVIRONMENT. Without a typed error in the chain, a bare SQLite
+    corruption report raised on a read path is still CORRUPTION; nothing
+    else is classified."""
     chain = list(_iter_chain(exc))
     typed_at = next(
         (i for i, e in enumerate(chain) if isinstance(e, ChunkStoreUnavailableError)),
         None,
     )
     if typed_at is None:
+        if any(sqlite_error_reports_corruption(e) for e in chain):
+            return ChunkStoreFailureKind.CORRUPTION
         return None
     for cause in chain[typed_at + 1 :]:
-        kind = _kind_of_cause(cause)
-        if kind is not None:
-            return kind
-    # No underlying cause recorded: classify from the typed error's own
-    # message, which always embeds the underlying SQLite/OS text.
-    message = str(chain[typed_at]).lower()
-    if any(text in message for text in _ENVIRONMENT_SQLITE_MESSAGES):
-        return ChunkStoreFailureKind.ENVIRONMENT
-    return ChunkStoreFailureKind.CORRUPTION
+        if isinstance(cause, (OSError, sqlite3.Error)):
+            return _kind(sqlite_error_reports_corruption(cause))
+    # No underlying cause recorded: the typed error's own message embeds the
+    # underlying SQLite/OS text.
+    return _kind(message_reports_sqlite_corruption(str(chain[typed_at])))
+
+
+def _kind(reports_corruption: bool) -> ChunkStoreFailureKind:
+    if reports_corruption:
+        return ChunkStoreFailureKind.CORRUPTION
+    return ChunkStoreFailureKind.ENVIRONMENT
 
 
 def index_failure_exit_code(exc: BaseException) -> int:

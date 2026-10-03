@@ -272,6 +272,23 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
     _debouncer = debouncer
 
 
+def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
+    """Trigger a cidx-meta refresh for a writer. A DuplicateJobError -- a
+    refresh already running, or one deferred by the Bug #2022 failure
+    backoff -- is handed to the debouncer, which retries later; it is never
+    dropped and never escapes into the writer."""
+    from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+    try:
+        refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+    except DuplicateJobError as exc:
+        if _debouncer is None:
+            logger.warning(f"cidx-meta refresh not retried (no debouncer): {exc}")
+            return
+        logger.info(f"cidx-meta refresh debounced for retry: {exc}")
+        _debouncer.signal_dirty()
+
+
 def atomic_write_description(
     target_path: Path,
     content: str,

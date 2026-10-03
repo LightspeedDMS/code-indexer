@@ -29,6 +29,7 @@ from tests.utils.golden_repo_metadata_stores import (
     STORE_KINDS,
     golden_repo_metadata_store,
 )
+from code_indexer.global_repos.refresh_failure_recovery import RefreshDeferredError
 from tests.utils.refresh_fatal_store_harness import (
     ALIAS,
     Harness,
@@ -165,7 +166,8 @@ class TestEnvironmentFailureIsNotCorruption:
 
         jobs = RecordingJobManager()
         harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
-        harness.scheduler.trigger_refresh_for_repo(ALIAS)
+        with pytest.raises(RefreshDeferredError):
+            harness.scheduler.trigger_refresh_for_repo(ALIAS)
         assert jobs.submitted == [], "a backed-off alias was re-submitted"
 
     def test_verified_success_clears_the_backoff(
@@ -179,7 +181,8 @@ class TestEnvironmentFailureIsNotCorruption:
             harness.source_db.chmod(0o644)
         jobs = RecordingJobManager()
         harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
-        harness.scheduler.trigger_refresh_for_repo(ALIAS)
+        with pytest.raises(RefreshDeferredError):
+            harness.scheduler.trigger_refresh_for_repo(ALIAS)
         assert jobs.submitted == []
 
         harness.scheduler.background_job_manager = None

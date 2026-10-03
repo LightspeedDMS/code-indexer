@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from code_indexer.global_repos import refresh_failure_recovery as recovery
 from code_indexer.server.services.alias_lock_store.base import (
     AliasLockOwnershipLostError,
 )
@@ -20,7 +21,11 @@ from code_indexer.services.index_failure_exit_codes import (
     ChunkStoreFailureKind,
     FatalChunkStoreIndexError,
 )
-from tests.utils.fatal_chunk_store_fixtures import corrupt_btree_pages
+from tests.utils.fatal_chunk_store_fixtures import (
+    corrupt_btree_pages,
+    diverge_store,
+    make_journal_path_a_directory,
+)
 from tests.utils.golden_repo_metadata_stores import (
     STORE_KINDS,
     golden_repo_metadata_store,
@@ -43,13 +48,30 @@ def metadata(request, tmp_path: Path) -> Iterator[Any]:
         yield backend
 
 
-def _self_heal_under_lock(harness: Harness, error: FatalChunkStoreIndexError) -> None:
+def _self_heal(harness: Harness, error: FatalChunkStoreIndexError) -> None:
+    """Exactly the callbacks _execute_refresh passes."""
     scheduler = harness.scheduler
-    with scheduler._held_write_lock_for_publish(REPO) as acquired:
+    recovery.self_heal_after_fatal_chunk_store_failure(
+        metadata=harness.metadata,
+        snapshot_manager=scheduler._snapshot_manager,
+        alias_name=ALIAS,
+        source_path=str(harness.source),
+        current_target=str(harness.snapshot),
+        error=error,
+        verify_ownership=lambda: scheduler.raise_if_write_lock_ownership_lost(
+            REPO, owner_name="refresh_scheduler"
+        ),
+    )
+
+
+def _self_heal_under_lock(harness: Harness, error: FatalChunkStoreIndexError) -> None:
+    with harness.scheduler._held_write_lock_for_publish(REPO) as acquired:
         assert acquired
-        scheduler._self_heal_after_fatal_chunk_store_failure(
-            ALIAS, REPO, str(harness.source), str(harness.snapshot), error
-        )
+        _self_heal(harness, error)
+
+
+def _backoff_active(harness: Harness) -> bool:
+    return recovery.active_backoff_until(harness.metadata, ALIAS) is not None
 
 
 def test_reported_corruption_with_healthy_store_backs_off_without_strike(
@@ -62,7 +84,22 @@ def test_reported_corruption_with_healthy_store_backs_off_without_strike(
 
     assert harness.strikes() == 0
     assert sha256_of(harness.source_db) == sha_before
-    assert harness.scheduler._active_refresh_failure_backoff_until(ALIAS) is not None
+    assert _backoff_active(harness)
+
+
+def test_reported_corruption_with_unverifiable_store_restores_nothing(
+    tmp_path: Path, metadata: Any
+) -> None:
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    diverge_store(harness.source_db)
+    sha_before = sha256_of(harness.source_db)
+    make_journal_path_a_directory(harness.source_db)
+
+    _self_heal_under_lock(harness, CORRUPTION)
+
+    assert sha256_of(harness.source_db) == sha_before
+    assert harness.strikes() == 0, "an unverifiable store is not a strike"
+    assert _backoff_active(harness)
 
 
 def test_lost_write_lock_restores_nothing(tmp_path: Path, metadata: Any) -> None:
@@ -71,9 +108,7 @@ def test_lost_write_lock_restores_nothing(tmp_path: Path, metadata: Any) -> None
     corrupt_sha = sha256_of(harness.source_db)
 
     with pytest.raises(AliasLockOwnershipLostError):
-        harness.scheduler._self_heal_after_fatal_chunk_store_failure(
-            ALIAS, REPO, str(harness.source), str(harness.snapshot), CORRUPTION
-        )
+        _self_heal(harness, CORRUPTION)
 
     assert sha256_of(harness.source_db) == corrupt_sha
     assert harness.strikes() == 0
@@ -89,7 +124,7 @@ def test_failed_restore_strikes_and_backs_off(tmp_path: Path, metadata: Any) -> 
 
     assert harness.strikes() == 1
     assert sha256_of(harness.source_db) == corrupt_sha
-    assert harness.scheduler._active_refresh_failure_backoff_until(ALIAS) is not None
+    assert _backoff_active(harness)
 
 
 def test_expired_backoff_is_not_active(
@@ -100,27 +135,25 @@ def test_expired_backoff_is_not_active(
     state = metadata.get_refresh_failure_backoff_state(ALIAS)
     assert state["consecutive_failure_count"] == 1
     assert state["last_failed_at"] <= time.time()
-    assert harness.scheduler._active_refresh_failure_backoff_until(ALIAS) is not None
+    assert _backoff_active(harness)
 
     # One failure backs off for minutes, not forever: viewed from a day
     # later the same persisted state is no longer active.
     real_time = time.time
     monkeypatch.setattr(time, "time", lambda: real_time() + ONE_DAY_SECONDS)
-    assert harness.scheduler._active_refresh_failure_backoff_until(ALIAS) is None
+    assert not _backoff_active(harness)
 
 
 def test_backoff_store_failures_are_logged_never_raised(
-    tmp_path: Path, metadata: Any, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
     failing = Mock()
     failing.record_refresh_failure_backoff.side_effect = OSError("store down")
     failing.reset_refresh_failure_backoff.side_effect = OSError("store down")
-    harness.scheduler.golden_repo_metadata = failing
 
     with caplog.at_level(logging.ERROR):
-        harness.scheduler._record_refresh_failure_backoff(ALIAS, "disk full")
-        harness.scheduler._clear_refresh_failure_backoff(ALIAS)
+        recovery.record_failure_backoff(failing, ALIAS, "disk full")
+        recovery.clear_failure_backoff(failing, ALIAS)
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any("failed to persist refresh failure backoff" in m for m in messages)

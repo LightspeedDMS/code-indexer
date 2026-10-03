@@ -21,6 +21,7 @@ from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffSqliteMixin,
     create_refresh_failure_backoff_table,
+    delete_refresh_failure_backoff_for_repo,
 )
 
 logger = logging.getLogger(__name__)
@@ -432,7 +433,9 @@ class GoldenRepoMetadataSqliteBackend(
                 "DELETE FROM golden_repos_metadata WHERE alias = ?",
                 (alias,),
             )
-            return cursor.rowcount > 0
+            deleted_row = cursor.rowcount > 0
+            delete_refresh_failure_backoff_for_repo(conn, alias)
+            return deleted_row
 
         deleted: bool = self._conn_manager.execute_atomic(operation)
         if deleted:

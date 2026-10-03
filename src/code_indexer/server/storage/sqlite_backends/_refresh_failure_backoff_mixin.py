@@ -37,6 +37,18 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def delete_refresh_failure_backoff_for_repo(
+    conn: sqlite3.Connection, alias: str
+) -> None:
+    """Bug #2022: drop the backoff of a removed golden repo inside the
+    caller's transaction, under both its bare and its ``-global`` alias, so
+    a repo later registered under the same name starts clean."""
+    conn.execute(
+        "DELETE FROM refresh_failure_backoff_state WHERE golden_alias IN (?, ?)",
+        (alias, f"{alias}-global"),
+    )
+
+
 class _RefreshFailureBackoffSqliteMixin:
     """Refresh failure backoff methods (see module docstring)."""
 

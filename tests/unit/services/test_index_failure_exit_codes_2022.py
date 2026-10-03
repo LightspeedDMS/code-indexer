@@ -122,6 +122,78 @@ def test_other_exit_codes_carry_no_kind(returncode) -> None:
     assert chunk_store_failure_kind_for_exit_code(returncode) is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "disk I/O error",
+        "database is locked",
+        "database table is locked",
+        "no such table: chunks",
+    ],
+)
+def test_io_lock_and_unknown_sqlite_errors_are_never_corruption(message: str) -> None:
+    typed = _typed_from(sqlite3.OperationalError(message))
+    assert index_failure_exit_code(typed) == EXIT_CODE_CHUNK_STORE_ENVIRONMENT
+
+
+def _named(message: str, error_name: str) -> sqlite3.OperationalError:
+    """An error carrying SQLite's result-code name (Python 3.11+ sets it)."""
+    error = sqlite3.OperationalError(message)
+    setattr(error, "sqlite_errorname", error_name)
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error_name", "expected"),
+    [
+        ("SQLITE_IOERR_SHORT_READ", ChunkStoreFailureKind.ENVIRONMENT),
+        ("SQLITE_IOERR", ChunkStoreFailureKind.ENVIRONMENT),
+        ("SQLITE_BUSY", ChunkStoreFailureKind.ENVIRONMENT),
+        ("SQLITE_CORRUPT_INDEX", ChunkStoreFailureKind.CORRUPTION),
+        ("SQLITE_NOTADB", ChunkStoreFailureKind.CORRUPTION),
+    ],
+)
+def test_result_code_name_wins_over_message(
+    error_name: str, expected: ChunkStoreFailureKind
+) -> None:
+    typed = _typed_from(_named("some driver text", error_name))
+    assert classify_fatal_chunk_store_failure(typed) is expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database disk image is malformed",
+        "file is not a database",
+        "malformed database schema (idx_chunks_path)",
+    ],
+)
+def test_read_path_corruption_without_typed_error_exits_corruption(
+    message: str,
+) -> None:
+    try:
+        try:
+            raise sqlite3.DatabaseError(message)
+        except sqlite3.DatabaseError as inner:
+            raise RuntimeError("HNSW finalize failed") from inner
+    except RuntimeError as wrapper:
+        assert index_failure_exit_code(wrapper) == EXIT_CODE_CHUNK_STORE_CORRUPTION
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        sqlite3.OperationalError("disk I/O error"),
+        sqlite3.OperationalError("database is locked"),
+        _named("busy", "SQLITE_BUSY"),
+    ],
+    ids=["ioerr", "locked", "busy"],
+)
+def test_read_path_io_lock_and_busy_keep_generic_exit_code(error: Exception) -> None:
+    assert classify_fatal_chunk_store_failure(error) is None
+    assert index_failure_exit_code(error) == GENERIC_INDEX_FAILURE_EXIT_CODE
+
+
 def test_fatal_error_carries_kind_and_is_a_runtime_error() -> None:
     error = FatalChunkStoreIndexError("boom", ChunkStoreFailureKind.ENVIRONMENT)
     assert isinstance(error, RuntimeError)

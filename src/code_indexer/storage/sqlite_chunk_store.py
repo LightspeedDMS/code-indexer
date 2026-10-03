@@ -56,7 +56,18 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import numpy as np
 import zstandard
@@ -174,6 +185,38 @@ def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError):
         return True
     return False
+
+
+#: SQLite result codes (and their extended codes) that report the database
+#: file itself as damaged.
+_CORRUPTION_RESULT_CODE_PREFIXES = ("SQLITE_CORRUPT", "SQLITE_NOTADB")
+
+#: SQLite's own messages for those codes, for interpreters (< 3.11) whose
+#: sqlite3 errors carry no ``sqlite_errorname``.
+_CORRUPTION_MESSAGES = (
+    "disk image is malformed",
+    "malformed database schema",
+    "not a database",
+)
+
+
+def sqlite_error_reports_corruption(exc: BaseException) -> bool:
+    """Bug #2022: True only when SQLite itself reports the database as
+    damaged (SQLITE_CORRUPT / SQLITE_NOTADB). I/O errors, lock contention,
+    busy, full, read-only and every other error are NOT corruption: a store
+    is never restored over on their account."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    error_name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(error_name, str):
+        return error_name.startswith(_CORRUPTION_RESULT_CODE_PREFIXES)
+    return message_reports_sqlite_corruption(str(exc))
+
+
+def message_reports_sqlite_corruption(message: str) -> bool:
+    """True when *message* contains one of SQLite's corruption messages."""
+    lowered = message.lower()
+    return any(text in lowered for text in _CORRUPTION_MESSAGES)
 
 
 class CorruptChunkDataError(ChunkStoreError):
@@ -608,7 +651,7 @@ class ChunkStore:
             self._expected_dim = int(f32.shape[0])
             self._persist_dim(self._expected_dim)
 
-        return f32.tobytes()
+        return cast(bytes, f32.tobytes())
 
     @staticmethod
     def _decode_vector(blob: bytes) -> np.ndarray:
@@ -621,7 +664,7 @@ class ChunkStore:
     def _encode_data(self, record: Dict[str, Any]) -> bytes:
         passthrough = {k: v for k, v in record.items() if k not in _RESERVED_KEYS}
         raw = json.dumps(passthrough).encode("utf-8")
-        return self._compressor.compress(raw)
+        return cast(bytes, self._compressor.compress(raw))
 
     def _decode_data(self, blob: bytes) -> Dict[str, Any]:
         raw = self._decompressor.decompress(blob)
