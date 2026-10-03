@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from code_indexer.server.services.audit_events import SystemComponent
 from code_indexer.server.services.audit_outcome import record_outcome
@@ -47,6 +47,27 @@ class SiemAdminError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def find_scheduler(app_state: Any) -> Tuple[Optional[Any], Optional[str]]:
+    """``(scheduler, None)``, or ``(None, startup_error)`` when SIEM delivery
+    is not running in this process.  Never raises: each front door maps an
+    absent scheduler to its own 503."""
+    scheduler = getattr(app_state, "siem_delivery_scheduler", None)
+    if scheduler is not None:
+        return scheduler, None
+    return None, getattr(app_state, "siem_delivery_startup_error", None)
+
+
+ABANDON_CONFIRM_WORD = "ABANDON"
+
+
+def require_abandon_confirmation(value: Any) -> None:
+    """The Web abandon is confirmed only by the exact word (case-sensitive,
+    never trimmed or normalised); anything else is refused BEFORE
+    :func:`abandon_destination` runs."""
+    if not (isinstance(value, str) and value == ABANDON_CONFIRM_WORD):
+        raise SiemAdminError(400, f"type {ABANDON_CONFIRM_WORD} to confirm")
 
 
 def _dest_target(scheduler: Any) -> Optional[SiemTarget]:

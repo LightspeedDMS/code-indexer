@@ -9523,37 +9523,20 @@ async def _read_siem_form(
 ) -> Tuple[Any, Any]:
     """(form, None), or (None, error page): the body is read under a hard
     cap BEFORE parsing (413 over it), counts are bounded, CSRF is checked."""
-    from .siem_forms import FormTooLarge, read_capped_form
-
-    def _error(message: str, code: int) -> Any:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=message,
-            validation_errors={"siem_delivery": message},
-            status_code=code,
-        )
+    from .siem_forms import FormRefused, read_checked_form
 
     try:
-        form = await read_capped_form(
+        form = await read_checked_form(
             request, max_files=max_files, max_fields=max_fields
         )
-    except FormTooLarge:
-        return None, _error(
-            "SIEM Delivery: the upload is larger than 512 KiB",
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-        )
-    except ValueError:
-        return None, _error(
-            "SIEM Delivery: the form is malformed", status.HTTP_400_BAD_REQUEST
-        )
-    csrf = form.get("csrf_token")
-    if not validate_login_csrf_token(request, csrf if isinstance(csrf, str) else None):
+    except FormRefused as refused:
+        errors = None if refused.status == 403 else {"siem_delivery": refused.message}
         return None, _create_config_page_response(
             request,
             session,
-            error_message="Invalid CSRF token",
-            status_code=status.HTTP_403_FORBIDDEN,
+            error_message=refused.message,
+            validation_errors=errors,
+            status_code=refused.status,
         )
     return form, None
 

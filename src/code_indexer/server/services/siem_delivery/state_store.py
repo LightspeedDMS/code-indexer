@@ -40,6 +40,7 @@ from code_indexer.server.services.siem_delivery.db import SiemDb, SiemTx
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
 
 NODE_ACTIVE_THRESHOLD_SECONDS = 30  # NodeHeartbeatService default rule
+MISSING_NODES_SHOWN = 50  # node ids listed by the readiness checklist
 
 
 def read_state(db: SiemDb) -> Dict[str, Any]:
@@ -204,6 +205,22 @@ def _fence(
     )
 
 
+# The readiness predicates, defined ONCE and shared by the arming statement
+# and the operator checklist (``readiness_view``).  Over ``siem_process_status
+# p``: LIVE_PROCESS takes (now); NOT_READY_FOR_DESTINATION takes
+# (destination_key, probe-fresh cutoff).  Over ``cluster_nodes n`` (PostgreSQL
+# only): NODE_WITHOUT_LIVE_PROCESS takes (heartbeat cutoff, now).
+LIVE_PROCESS = "p.expires_at > ?"
+NOT_READY_FOR_DESTINATION = (
+    "NOT (p.probe_result = 'ok' AND p.destination_key IS NOT NULL "
+    "AND p.destination_key = ? AND p.probed_at IS NOT NULL AND p.probed_at >= ?)"
+)
+NODE_WITHOUT_LIVE_PROCESS = (
+    "n.status = 'online' AND n.last_heartbeat >= ? AND NOT EXISTS (SELECT 1 FROM "
+    "siem_process_status p WHERE p.node_id = n.node_id AND p.expires_at > ?)"
+)
+
+
 def _arm(
     tx: SiemTx,
     version: int,
@@ -224,10 +241,9 @@ def _arm(
         "AND canary_destination_key = ? AND canary_result = 'accepted' "
         "AND canary_mapping_version = ? "
         "AND canary_visible_confirmed_at IS NOT NULL "
-        "AND EXISTS (SELECT 1 FROM siem_process_status p WHERE p.expires_at > ?) "
-        "AND NOT EXISTS (SELECT 1 FROM siem_process_status p WHERE p.expires_at > ? "
-        "AND NOT (p.probe_result = 'ok' AND p.destination_key IS NOT NULL "
-        "AND p.destination_key = ? AND p.probed_at IS NOT NULL AND p.probed_at >= ?))"
+        f"AND EXISTS (SELECT 1 FROM siem_process_status p WHERE {LIVE_PROCESS}) "
+        f"AND NOT EXISTS (SELECT 1 FROM siem_process_status p WHERE {LIVE_PROCESS} "
+        f"AND {NOT_READY_FOR_DESTINATION})"
     )
     params: List[Any] = [
         destination_key,
@@ -244,12 +260,124 @@ def _arm(
     if tx.dialect.name == "postgres":
         # Node quorum: every active heartbeat node has a live process row.
         sql += (
-            " AND NOT EXISTS (SELECT 1 FROM cluster_nodes n WHERE n.status = 'online' "
-            "AND n.last_heartbeat >= ? AND NOT EXISTS (SELECT 1 FROM "
-            "siem_process_status p WHERE p.node_id = n.node_id AND p.expires_at > ?))"
+            " AND NOT EXISTS (SELECT 1 FROM cluster_nodes n "
+            f"WHERE {NODE_WITHOUT_LIVE_PROCESS})"
         )
         params += [now - timedelta(seconds=NODE_ACTIVE_THRESHOLD_SECONDS), now_p]
     return tx.execute(sql, params)
+
+
+def readiness_view(
+    db: SiemDb,
+    destination_key: str,
+    probe_fresh_seconds: float,
+    detail_limit: int = 200,
+) -> Dict[str, Any]:
+    """Why the fleet is (not) ready for *destination_key*.
+
+    The aggregates are ONE statement over the FULL live set with the same
+    predicates as :func:`_arm`; only the displayed process rows are capped
+    (failing first), flagged by ``details_truncated``."""
+    if not destination_key:
+        raise ValueError("readiness needs a configured destination")
+    if detail_limit < 1 or probe_fresh_seconds <= 0:
+        raise ValueError("detail_limit and probe_fresh_seconds must be positive")
+
+    def _q(tx: SiemTx) -> Dict[str, Any]:
+        now = tx.now()
+        cut = _Cutoffs(
+            tx.ts(now),
+            tx.ts(now - timedelta(seconds=probe_fresh_seconds)),
+            tx.ts(now - timedelta(seconds=NODE_ACTIVE_THRESHOLD_SECONDS)),
+        )
+        rows = _readiness_rows(tx, destination_key, cut, detail_limit + 1)
+        return {
+            **_readiness_aggregates(tx, destination_key, cut),
+            "processes": [_process_detail(r) for r in rows[:detail_limit]],
+            "details_truncated": len(rows) > detail_limit,
+            "missing_nodes": _readiness_missing_nodes(tx, cut),
+        }
+
+    return db.read(_q)
+
+
+@dataclass(frozen=True)
+class _Cutoffs:
+    """The instants one readiness read compares against, derived once from
+    the database clock.  ``Any``: ``SiemTx.ts`` yields an ISO string on
+    SQLite and a datetime on PostgreSQL."""
+
+    now: Any
+    fresh: Any
+    heartbeat: Any
+
+
+def _readiness_aggregates(
+    tx: SiemTx, destination_key: str, cut: _Cutoffs
+) -> Dict[str, Any]:
+    sql = (
+        "SELECT (SELECT COUNT(*) FROM siem_process_status p "
+        f"WHERE {LIVE_PROCESS}) AS total_live, "
+        "(SELECT COUNT(*) FROM siem_process_status p "
+        f"WHERE {LIVE_PROCESS} AND {NOT_READY_FOR_DESTINATION}) AS failing"
+    )
+    params: List[Any] = [cut.now, cut.now, destination_key, cut.fresh]
+    if tx.dialect.name == "postgres":
+        sql += (
+            ", (SELECT COUNT(*) FROM cluster_nodes n "
+            f"WHERE {NODE_WITHOUT_LIVE_PROCESS}) AS nodes_without_process"
+        )
+        params += [cut.heartbeat, cut.now]
+    agg = tx.one(sql, params)
+    if agg is None:
+        raise RuntimeError("readiness aggregate returned no row")
+    total, failing = int(agg["total_live"]), int(agg["failing"])
+    nodes_without = int(agg.get("nodes_without_process") or 0)
+    return {
+        "total_live": total,
+        "failing": failing,
+        "nodes_without_process": nodes_without,
+        "all_ready": total > 0 and failing == 0 and nodes_without == 0,
+    }
+
+
+def _readiness_rows(
+    tx: SiemTx, destination_key: str, cut: "_Cutoffs", limit: int
+) -> List[Dict[str, Any]]:
+    """Live process rows, failing first, then by process id (capped)."""
+    return tx.query(
+        "SELECT process_id, node_id, destination_key, probe_result, probed_at, "
+        f"CASE WHEN {NOT_READY_FOR_DESTINATION} THEN 1 ELSE 0 END AS failing "
+        f"FROM siem_process_status p WHERE {LIVE_PROCESS} "
+        "ORDER BY failing DESC, process_id LIMIT ?",
+        (destination_key, cut.fresh, cut.now, limit),
+    )
+
+
+def _readiness_missing_nodes(tx: SiemTx, cut: "_Cutoffs") -> List[str]:
+    """PostgreSQL: online nodes without a live process (none on SQLite)."""
+    if tx.dialect.name != "postgres":
+        return []
+    rows = tx.query(
+        "SELECT n.node_id FROM cluster_nodes n "
+        f"WHERE {NODE_WITHOUT_LIVE_PROCESS} ORDER BY n.node_id LIMIT ?",
+        (cut.heartbeat, cut.now, MISSING_NODES_SHOWN),
+    )
+    return [str(r["node_id"]) for r in rows]
+
+
+def _process_detail(row: Dict[str, Any]) -> Dict[str, Any]:
+    from code_indexer.server.services.siem_delivery.db import Dialect
+
+    probed = Dialect.parse_ts(row["probed_at"])
+    return {
+        "process_id": row["process_id"],
+        "node_id": row["node_id"],
+        "destination_key": row["destination_key"],
+        "probe_result": row["probe_result"],
+        "probed_at": probed.isoformat() if probed else None,
+        "ready": int(row["failing"]) == 0,
+    }
 
 
 def fence_and_arm(

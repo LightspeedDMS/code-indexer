@@ -1,0 +1,24 @@
+<!-- SIEM Delivery operator action result (one fragment for every action and refusal) -->
+<div class="siem-ops-result {{ 'success-message' if status == 200 else 'error-message' }}" data-status="{{ status }}" data-action="{{ action or '' }}">
+    <strong>HTTP {{ status }}</strong>
+    {% if message %}
+    <span class="siem-ops-message">{{ message }}</span>
+    {% elif action == "canary" %}
+    <span>Canary run {{ result.canary_run_id }}: {{ result.result }}, {{ result.event_count }} events sent once (mapping v{{ result.mapping_version }}){% if result.result_signature %}; signature {{ result.result_signature }}{% endif %}.</span>
+    {% elif action == "confirm_visible" %}
+    <span>Confirmed {{ result.confirmed_count }} of {{ result.expected_count }}.
+        {% if result.confirmed %}Visibility confirmed; capture arms when every process is ready.{% else %}Not visible: {{ result.missing_action_types | join(", ") }}.{% endif %}</span>
+    {% elif action == "resume" %}
+    <span>resumed: {{ 'true' if result.resumed else 'false' }}{% if result.resumed %} (cleared {{ result.halted_class }}){% else %} (nothing was halted){% endif %}</span>
+    {% elif action == "requeue" %}
+    <span>Requeued {{ result.requeued }} events.</span>
+    {% elif action == "acknowledge" %}
+    <span>Acknowledged batch {{ result.batch_id }} ({{ result.event_count }} events marked delivered).</span>
+    {% elif action == "rebatch" %}
+    <span>Re-batched batch {{ result.batch_id }} ({{ result.event_count }} events will be re-sent).</span>
+    {% elif action == "retarget" %}
+    <span>Retargeted {{ "{:,}".format(result.retargeted) }} events to {{ result.to_destination_key }}.</span>
+    {% elif action == "abandon" %}
+    <span>Abandoned {{ "{:,}".format(result.abandoned) }} events.</span>
+    {% endif %}
+</div>

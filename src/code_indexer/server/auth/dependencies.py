@@ -1187,8 +1187,11 @@ def require_elevation(required_scope: str = "full"):
       - elevation_required  (403): no active elevation window or scope insufficient
       - elevation_failed    (401): reserved for /auth/elevate endpoint (not raised here)
 
-    Kill switch: returns 503 (per Codex M4/M12) when elevation_enforcement_enabled
-    is False or config service is unavailable.
+    Kill switch: passes through (enforcement disabled) when
+    elevation_enforcement_enabled is False, the config service is unavailable, or
+    no elevated_session_manager is wired: the protected route runs with no
+    elevation check (pinned by test_require_elevation_kill_switch_passthrough.py).
+    Only ``POST /auth/elevate`` answers 503 ``elevation_enforcement_disabled``.
 
     Args:
         required_scope: One of "full" or "totp_repair". ValueError on unknown value

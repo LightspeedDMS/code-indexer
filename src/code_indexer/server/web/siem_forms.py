@@ -62,3 +62,45 @@ async def read_capped_form(
     except MultiPartException as exc:
         raise ValueError(str(exc)) from None
     raise ValueError("unsupported form content type")
+
+
+SIEM_ACTION_FORM_BODY = 64 * 1024  # the operator action forms carry ids only
+
+
+class FormRefused(Exception):
+    """A SIEM form refused before any service call (HTTP status + message)."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+async def read_checked_form(
+    request: Request,
+    *,
+    max_files: int,
+    max_fields: int,
+    max_body: int = MAX_SIEM_FORM_BODY,
+) -> FormData:
+    """The parsed form, read under the hard cap (413) with bounded counts
+    (400) and a valid CSRF token (403); raises :class:`FormRefused`."""
+    try:
+        form = await read_capped_form(
+            request, max_files=max_files, max_fields=max_fields, max_body=max_body
+        )
+    except FormTooLarge:
+        raise FormRefused(
+            413, f"SIEM Delivery: the upload is larger than {max_body // 1024} KiB"
+        ) from None
+    except ValueError:
+        raise FormRefused(400, "SIEM Delivery: the form is malformed") from None
+    # Resolved at call time: the CSRF check is whatever web.routes provides.
+    from . import routes as _web_routes
+
+    csrf = form.get("csrf_token")
+    if not _web_routes.validate_login_csrf_token(
+        request, csrf if isinstance(csrf, str) else None
+    ):
+        raise FormRefused(403, "Invalid CSRF token")
+    return form

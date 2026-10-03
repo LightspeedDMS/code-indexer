@@ -146,15 +146,52 @@ every certificate).
 Capture starts only after one atomic arming statement succeeds. That statement requires:
 
 1. a synthetic canary (one event per UDM mapping entry plus one unmapped
-   event), sent once and ACCEPTED: `POST /api/admin/siem-delivery/canary`;
-2. every canary `productLogId` confirmed visible in SecOps search:
-   `POST /api/admin/siem-delivery/canary/confirm-visible` with
-   `{"canary_run_id": ..., "visible_product_log_ids": [...]}`;
+   event), sent once and ACCEPTED;
+2. every canary `productLogId` confirmed visible in SecOps search;
 3. at least one live server process, every live process able to mint a token
    for the destination, and (cluster) every active node represented.
 
 A destination change disarms. A new mapping version does not disarm, but it
 shows a DEGRADED reason until the canary is re-run.
+
+### Arming from the Web UI
+
+Config page, "SIEM Delivery (Google SecOps)" section, "Operations":
+
+1. The arming checklist explains the state, row by row: enabled and the
+   committed destination (with its config version), the stored credential,
+   the canary for this destination and mapping, confirmed ids of expected,
+   processes ready (aggregated over every live process, failing ones listed),
+   nodes without a process (cluster), and ARMED. ARMED is authoritative; the
+   other rows explain it. The checklist reads the COMMITTED configuration and
+   the database, so a save made through any node shows immediately; the
+   "this process" line below it is a per-process diagnostic only.
+2. "Run canary" sends the synthetic events once and lists each
+   `product_log_id` with its action and event type, plus the run-wide SecOps
+   search: `metadata.vendor_name = "CIDX" AND
+   additional.fields["correlation_id"] = "canary-<run_id>"`.
+3. The analyst finds the ids in SecOps; tick them, or paste them (separated
+   by spaces, new lines or commas), and press "Confirm visible".
+4. Watch the ARMED row (the panel refreshes after every action; "Refresh"
+   reloads it).
+
+REST alternative: `POST /api/admin/siem-delivery/canary`, then
+`POST /api/admin/siem-delivery/canary/confirm-visible` with
+`{"canary_run_id": ..., "visible_product_log_ids": [...]}`.
+
+### Who can do what
+
+- Reading the panels (and REST `GET /stats`, `GET /quarantine`) needs an
+  admin; no elevation.
+- Every action (canary, confirm visible, resume, requeue, acknowledge,
+  re-batch, retarget, abandon) needs an admin with TOTP elevation while
+  `elevation_enforcement_enabled` is ON, on both the Web and REST doors
+  (the Web opens the TOTP modal and replays the action). With enforcement
+  OFF, actions pass through exactly like every other elevated route.
+- Abandon through the Web requires typing `ABANDON` exactly; REST abandon
+  takes no body.
+- Each action writes the same audit row on both doors; a refused action
+  writes none.
 
 ## Operation and visibility
 
@@ -184,7 +221,20 @@ Request-wide failures halt delivery without quarantining anything. These are
 request-level 400s, 401/403, 404/413/415/501, a duplicate response, and
 unclassified responses. A probe retries each halt class on its own schedule
 and clears the halt by itself once the cause is fixed. The one exception is
-the duplicate-response halt, which needs an admin decision:
+the duplicate-response halt, which needs an admin decision.
+
+Recovery from the Web UI (Config page, SIEM section, "Operations", "Halts and
+recovery"): the halt (class, signature, since, next probe) with Resume; the
+halted batch, always shown even when it is beyond the first page, with
+Acknowledge and Re-batch; open batches, quarantined rows (select and Requeue)
+and stranded destinations, each paged with "More"; and "Open destination by
+key" for any key. Retarget and Abandon open a dialog with the destination's
+region, project and instance and its pending, batched and quarantined counts,
+labelled "currently queued; may grow until the action runs" (shown as
+10,000+ beyond the cap). Abandon is irreversible and requires typing
+`ABANDON`; the result shows the exact number of events abandoned.
+
+REST alternative:
 
 - `POST /api/admin/siem-delivery/batches/{batch_id}/acknowledge`: the events
   are confirmed present in SecOps; mark them delivered.
@@ -253,12 +303,14 @@ compressed.
 
 Before enabling against a real tenant:
 
-1. Grant a dedicated identity only the events-import permission.
-2. Configure the region, project, location and instance, and upload the
+1. Turn TOTP elevation enforcement ON (`elevation_enforcement_enabled`) and
+   confirm that a SIEM action asks for elevation.
+2. Grant a dedicated identity only the events-import permission.
+3. Configure the region, project, location and instance, and upload the
    service-account key in the Web UI.
-3. Run the canary.
-4. Search each canary `productLogId` in SecOps and submit the confirmation.
-5. Record the real 400 body shape and any duplicate response.
-6. Confirm that the IAM permission name is correct.
-7. Verify that `principal.ip` is the client address.
-8. Re-verify the region list against Google's documentation.
+4. Run the canary.
+5. Search each canary `productLogId` in SecOps and submit the confirmation.
+6. Record the real 400 body shape and any duplicate response.
+7. Confirm that the IAM permission name is correct.
+8. Verify that `principal.ip` is the client address.
+9. Re-verify the region list against Google's documentation.

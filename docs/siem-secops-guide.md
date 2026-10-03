@@ -423,6 +423,28 @@ A cidx admin and a SecOps analyst do this together.
    and upload the key. The status table shows **Capture state**
    `awaiting canary`. Check that **This process** shows `probe=ok`
    (this process can get a token).
+2. **cidx admin:** in the same SIEM Delivery section, under **Operations**,
+   press **Run canary** and confirm. While TOTP elevation enforcement is on,
+   cidx asks for a TOTP code first (the action is then replayed). The arming
+   panel lists every expected `product_log_id` with its action and event
+   type, and the run-wide search for this run (see 4.2). If the canary is
+   rejected, the checklist shows its signature.
+3. **SecOps analyst:** find each ID (see 4.2) and tell the cidx admin which
+   ones are visible.
+4. **cidx admin:** tick the visible IDs, or paste them into the box
+   (separated by spaces, new lines or commas), and press **Confirm
+   visible**. The result shows "Confirmed N of M"; arming needs every
+   expected ID, including the unmapped one. If some are missing, the
+   checklist names their action types; wait and confirm again.
+5. Watch the **ARMED** row of the checklist. cidx arms on a later loop cycle,
+   once every live process also has a fresh `probe=ok` (the "Processes
+   ready" row lists any that do not).
+
+#### 4.1a Without the Web UI (REST)
+
+The same steps over REST:
+
+1. **cidx admin:** fill all fields as in step 1 above.
 2. **cidx admin:** send the canary. This REST call needs an admin token and
    TOTP elevation (`POST /auth/elevate` with `{"totp_code": "123456"}` on the
    same token first; see [TOTP elevation](totp-elevation.md)):

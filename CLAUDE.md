@@ -289,7 +289,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 ### Auth: TOTP Elevation / JWT Logout / Maintenance Mode
 
-- **TOTP step-up (Epic #922/#980)**: three error codes exactly -- `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401); kill switch returns 503 NOT 403. `with_elevation_retry` wraps all `cidx admin users`/`groups` (single retry on `elevation_required`).
+- **TOTP step-up (Epic #922/#980)**: three error codes exactly -- `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401). Kill switch (enforcement OFF): `require_elevation()` passes through (protected routes run with no elevation check); only `POST /auth/elevate` answers 503 `elevation_enforcement_disabled`. `with_elevation_retry` wraps all `cidx admin users`/`groups` (single retry on `elevation_required`).
 - **JWT logout (Story #1163)**: both logout routes blacklist the `jti` via `get_token_blacklist().add(jti)` (DB-backed, cross-node); try/except-wrapped, never blocks the redirect; `blacklisted_at` is a NUMERIC unix timestamp.
 - **Maintenance mode (Epic #922/#924)**: write endpoints (`POST .../maintenance/enter|exit`) are loopback-only via `require_localhost`; reverse-proxy must NOT forward them; MCP enter/exit tools removed.
 

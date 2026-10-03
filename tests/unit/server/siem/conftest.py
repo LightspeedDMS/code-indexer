@@ -29,6 +29,7 @@ from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
 from tests.fixtures.secops_sidecar.harness import SidecarHandle, start_sidecar
 
 from .backends import _pg_session_pool, pg_pool, siem_backend  # noqa: F401
+from .web_ops_harness import ops  # noqa: F401  (the Web SIEM operator app)
 
 # The real-~/.cidx-server guard and the server data-dir isolation for these
 # tests live in tests/unit/server/conftest.py (Bug #1996).

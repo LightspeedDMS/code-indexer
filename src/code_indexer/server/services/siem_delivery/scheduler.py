@@ -358,13 +358,18 @@ class SiemDeliveryScheduler:
 
     # --- tick ----------------------------------------------------------------
 
+    def committed_view(self) -> CycleView:
+        """The committed configuration read NOW (one committed read), never
+        this process's last cycle.  Raises on an unreadable/invalid config."""
+        version, section = self._committed_view_parts()
+        destination = resolve_destination(section, harness_active=self.harness_active)
+        return CycleView(version, section, destination)
+
     def committed_context(self) -> Optional[EngineContext]:
         """An engine context from the committed configuration read NOW
         (admin actions must see a destination saved a moment ago, not wait
         for the loop's next cycle).  Raises on an unreadable/invalid config."""
-        version, section = self._committed_view_parts()
-        destination = resolve_destination(section, harness_active=self.harness_active)
-        return self.engine_context(CycleView(version, section, destination))
+        return self.engine_context(self.committed_view())
 
     def engine_context(
         self, view: Optional[CycleView] = None
