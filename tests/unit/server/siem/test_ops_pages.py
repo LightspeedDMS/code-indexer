@@ -436,12 +436,19 @@ def test_stranded_count_reads_at_most_cap_plus_one_rows_per_key_before_vacuum(
             tx, sql, params, options="ANALYZE, BUFFERS, FORMAT JSON"
         )
     )
-    nodes = _flatten(root)
-    assert not [n for n in nodes if n["Node Type"] == "Sort"], nodes
-    probes = _capped_probes(root)
-    assert probes, nodes
+    # Only the capped per-key count (a Limit inside a subplan over the queue)
+    # is judged: a Sort serving the outer ORDER BY of the small key page is
+    # legitimate, a Sort beneath the per-key cap reads the whole backlog.
+    probes = [
+        probe
+        for probe in _capped_probes(root)
+        if any(n.get("Relation Name") == "siem_delivery_queue" for n in _flatten(probe))
+    ]
+    assert probes, _flatten(root)
     for probe in probes:
-        heap = [n for n in _flatten(probe) if n["Node Type"] in _HEAP_SIDE]
+        under = _flatten(probe)
+        assert not [n for n in under if n["Node Type"] == "Sort"], probe
+        heap = [n for n in under if n["Node Type"] in _HEAP_SIDE]
         assert heap, probe
         assert all(n["Actual Rows"] <= stats.COUNT_CAP + 1 for n in heap), probe
 
