@@ -1050,7 +1050,27 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 # fires even on an early credential-missing exit — matching the pre-existing
 # "runs on EXIT" guarantee (see cleanup_all_servers_and_reset definition
 # above) for every exit path of a direct execution, not just the phase loop.
-trap cleanup_all_servers_and_reset EXIT
+#
+# Real-server-home guard (Bug #1996 follow-up): snapshot the developer's real
+# ~/.cidx-server launch.json / config.json now (nothing has started yet) and
+# verify AFTER server cleanup on every exit path, so shutdown writes count
+# too; any change fails the run.  Only names, mtimes and hashes are shown.
+# shellcheck source=scripts/real-server-home-guard.sh
+source "$SCRIPT_DIR/scripts/real-server-home-guard.sh"
+mkdir -p "$HOME/.tmp"
+E2E_REAL_HOME_STATE="$(mktemp "$HOME/.tmp/cidx-e2e-real-home-XXXXXX")"
+real_home_guard_snapshot "$E2E_REAL_HOME_STATE"
+_e2e_exit_with_real_home_guard() {
+    local rc=$?
+    cleanup_all_servers_and_reset
+    if ! real_home_guard_verify "$E2E_REAL_HOME_STATE"; then
+        _red "This run changed the developer's real ~/.cidx-server (see above)"
+        rc=1
+    fi
+    rm -f "$E2E_REAL_HOME_STATE"
+    exit "$rc"
+}
+trap _e2e_exit_with_real_home_guard EXIT
 
 # Bug #1996: refuse an empty HOME and any caller-chosen root inside the real
 # server home BEFORE a single directory is created, cloned into or copied.
