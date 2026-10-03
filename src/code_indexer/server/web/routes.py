@@ -12847,63 +12847,62 @@ def restart_server(request: Request) -> JSONResponse:
             )
         _restart_in_progress = True
 
-    # Log restart request with username
-    username = session.username
-    logger.info(f"Server restart requested by {username}")
+    # This request OWNS the claim from here on: any failure before a restart
+    # is under way releases it (_restart_request_failed), or every later
+    # restart would be refused.  Solo success hands the claim to the delayed
+    # restart worker.
+    try:
+        username = session.username
+        logger.info(f"Server restart requested by {username}")
 
-    # Story #1200 AC7: branch on cluster vs solo mode.
-    #
-    # Cluster (PG pool present): bump launch_restart_generation only.
-    # The bumping node does NOT synchronously write restart.signal here — its
-    # own check_pending_launch_restart() poll (running every interval) detects
-    # target > applied and signals itself (MAJOR-M3 / FIX-2).  All other nodes
-    # are signalled by their own poll loops independently.
-    #
-    # Solo: retain the existing single-node restart path (materialize + signal /
-    # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
-    from code_indexer.server.services.server_restart_audited import (
-        request_server_restart,
-    )
+        # Story #1200 AC7: branch on cluster vs solo mode.
+        #
+        # Cluster (PG pool present): bump launch_restart_generation only.
+        # The bumping node does NOT synchronously write restart.signal here —
+        # its own check_pending_launch_restart() poll (running every interval)
+        # detects target > applied and signals itself (MAJOR-M3 / FIX-2).  All
+        # other nodes are signalled by their own poll loops independently.
+        #
+        # Solo: retain the existing single-node restart path (materialize +
+        # signal / os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+        from code_indexer.server.services.server_restart_audited import (
+            request_server_restart,
+        )
 
-    config_svc = get_config_service()
-    if config_svc._pool is not None:
-        # Cluster mode: bump generation, let per-poll check handle restart.signal.
-        # The audit row is written durably BEFORE the bump.
-        try:
+        config_svc = get_config_service()
+        if config_svc._pool is not None:
+            # Cluster mode: bump generation, let per-poll check handle
+            # restart.signal.  The audit row is written durably BEFORE the bump.
             request_server_restart(
                 config_svc.bump_launch_restart_generation,
                 actor=username,
                 scope="cluster",
             )
-        except Exception as exc:  # releases the flag (_restart_request_failed)
-            return _restart_request_failed(exc)
-        with _restart_lock:
-            _restart_in_progress = False
-        return JSONResponse(
-            status_code=202,
-            content={
-                "message": (
-                    "Cluster restart requested: generation bumped. "
-                    "All nodes will restart via the auto-updater."
-                )
-            },
-        )
+            with _restart_lock:
+                _restart_in_progress = False
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "message": (
+                        "Cluster restart requested: generation bumped. "
+                        "All nodes will restart via the auto-updater."
+                    )
+                },
+            )
 
-    # Solo mode: materialize launch config then schedule single-node restart.
-    # The audit row is written durably BEFORE the restart is scheduled.
-    def _restart_this_node() -> None:
-        config_svc.materialize_launch_config()
-        _schedule_delayed_restart(delay=2)
+        # Solo mode: materialize launch config then schedule single-node
+        # restart.  The audit row is written durably BEFORE it is scheduled.
+        def _restart_this_node() -> None:
+            config_svc.materialize_launch_config()
+            _schedule_delayed_restart(delay=2)
 
-    try:
         request_server_restart(_restart_this_node, actor=username, scope="node")
+        # Return 202 Accepted immediately
+        return JSONResponse(
+            status_code=202, content={"message": "Server is restarting in 2 seconds..."}
+        )
     except Exception as exc:
         return _restart_request_failed(exc)
-
-    # Return 202 Accepted immediately
-    return JSONResponse(
-        status_code=202, content={"message": "Server is restarting in 2 seconds..."}
-    )
 
 
 @api_router.get("/server-time")
