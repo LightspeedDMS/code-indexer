@@ -24,13 +24,20 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.unit.server._collection_time_server_app import (
+    build_server_app_at_collection,
+)
+
+# Keep at MODULE level: the real app is a lazy singleton (Bug #1638) whose
+# first build (~3.5 s) must happen at collection, not inside some test's 15 s
+# pytest-timeout budget (server-fast chunk 5).  See the helper's docstring.
+_SERVER_APP = build_server_app_at_collection()
+
 
 @pytest.fixture(scope="module")
 def client():
     """In-process FastAPI TestClient -- no external server required."""
-    from code_indexer.server.app import app
-
-    return TestClient(app)
+    return TestClient(_SERVER_APP)
 
 
 def _call_authenticate_via_public_mcp_endpoint(client: TestClient):
