@@ -169,6 +169,7 @@ class ScheduledCatchupService:
         Registers a scheduled_catchup job in JobTracker for dashboard visibility (Story #314).
         """
         from ..middleware.correlation import get_correlation_id
+        from .job_tracker import DuplicateJobError
 
         manager = get_claude_cli_manager()
         if manager is None:
@@ -182,19 +183,40 @@ class ScheduledCatchupService:
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Story #314: Register scheduled_catchup job for dashboard visibility
+        # Story #314 registered this job for dashboard visibility. It is now
+        # also the single-flight CLAIM, because this sweep is fleet-wide and
+        # must run once per cluster rather than once per process.
+        #
+        # `register_job` has no conflict check, and the old `except Exception`
+        # merely nulled tracked_job_id -- the work below then ran regardless.
+        # In the tools-* deployment that is 12 concurrent runs: 6 replicas x
+        # uvicorn --workers 2, since the lifespan runs once per worker process.
+        # `register_job_if_no_conflict` loses the race against the
+        # idx_active_job_per_repo partial unique index on
+        # (operation_type, repo_alias), which is how every other fleet-wide
+        # sweep here guards itself.
         tracked_job_id = None
         if self._job_tracker is not None:
             try:
                 tracked_job_id = f"scheduled-catchup-{uuid.uuid4().hex[:8]}"
-                self._job_tracker.register_job(
+                self._job_tracker.register_job_if_no_conflict(
                     tracked_job_id,
                     "scheduled_catchup",
                     username="system",
                     repo_alias="server",
                 )
                 self._job_tracker.update_status(tracked_job_id, status="running")
+            except DuplicateJobError:
+                # Another process holds the claim. Nothing to do and nothing
+                # wrong -- this is the mechanism working.
+                logger.debug(
+                    "scheduled_catchup already active on another node; skipping"
+                )
+                return
             except Exception as e:
+                # Fail OPEN on anything else. A tracker outage must not mean
+                # catch-up never runs anywhere; that trades a load problem for
+                # a correctness one.
                 logger.debug(f"Failed to register scheduled_catchup job: {e}")
                 tracked_job_id = None
 
