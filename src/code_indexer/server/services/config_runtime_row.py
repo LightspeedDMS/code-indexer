@@ -1,11 +1,14 @@
-"""The committed runtime-configuration row (``server_config``, key
-``runtime``) on SQLite and PostgreSQL: reads, compare-and-set commits and
-insert-only seeding (Bug #2017).
+"""Every WRITE of the committed runtime-configuration row (``server_config``,
+key ``runtime``) on SQLite and PostgreSQL, plus the reads the writers use
+(Bug #2017).  Other read-only queries of the row still live in
+``config_service.py``.
 
-No function here can overwrite a row it did not read: a commit names the
-version its change was applied to and writes only while the row is still at
-that version; a seed only inserts an absent row.  ``launch_restart_generation``
-is not a dataclass field, so every commit carries it over from the row.
+No function here can overwrite a row it did not read: a commit (and the
+launch-restart-generation bump) names the version it was applied to and
+writes only while the row is still at that version; a seed only inserts an
+absent row.  ``launch_restart_generation`` is not a dataclass field, so a
+settings commit carries it over from the row.  ``updated_by`` records the
+writer.
 """
 
 from __future__ import annotations
@@ -17,6 +20,9 @@ from typing import Any, Dict, List, Optional, Tuple
 CONFIG_KEY_RUNTIME = "runtime"
 UPDATER_WEB_UI = "web-ui"
 UPDATER_SEED = "config-seed"
+UPDATER_SYSTEM = "system"
+UPDATER_MIGRATION = "startup-migration"
+UPDATER_RESTART = "launch-restart"
 # Bug #1758 convention (DatabaseConnectionManager: busy_timeout 30000): a
 # brief lock held by another worker is waited out, not raised after Python's
 # 5 s sqlite3.connect() default.
@@ -81,7 +87,7 @@ def read_runtime_sqlite(db_path: str) -> Optional[Tuple[int, Dict[str, Any]]]:
 
 
 def commit_runtime_pg(
-    pool: Any, runtime_dict: Dict[str, Any], expected_version: int
+    pool: Any, runtime_dict: Dict[str, Any], expected_version: int, updated_by: str
 ) -> Optional[int]:
     """ONE atomic ``UPDATE ... AND version = %s RETURNING version``: the new
     version, or None when another process committed since that version."""
@@ -89,7 +95,7 @@ def commit_runtime_pg(
 
     params: List[Any] = [
         json.dumps(runtime_dict),
-        UPDATER_WEB_UI,
+        updated_by,
         CONFIG_KEY_RUNTIME,
         expected_version,
     ]
@@ -117,7 +123,7 @@ def commit_runtime_pg(
 
 
 def commit_runtime_sqlite(
-    db_path: str, runtime_dict: Dict[str, Any], expected_version: int
+    db_path: str, runtime_dict: Dict[str, Any], expected_version: int, updated_by: str
 ) -> Optional[int]:
     """Inside ONE ``BEGIN IMMEDIATE`` (the cross-process write guard):
     re-read the row and write only while it is at *expected_version*.  The
@@ -137,7 +143,63 @@ def commit_runtime_sqlite(
         conn.execute(
             "UPDATE server_config SET config_json = ?, version = version + 1, "
             "updated_at = datetime('now'), updated_by = ? WHERE config_key = ?",
-            (json.dumps(preserved), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
+            (json.dumps(preserved), updated_by, CONFIG_KEY_RUNTIME),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return expected_version + 1
+
+
+def bump_generation_pg(pool: Any, expected_version: int) -> Optional[int]:
+    """``launch_restart_generation += 1`` as ONE compare-and-set UPDATE: the
+    new version, or None when another process committed since."""
+    from psycopg.rows import dict_row
+
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            row = cur.execute(
+                "UPDATE server_config"
+                " SET config_json = jsonb_set("
+                "         config_json,"
+                "         '{launch_restart_generation}',"
+                "         to_jsonb(COALESCE("
+                "             (config_json->>'launch_restart_generation')::int,"
+                "             0"
+                "         ) + 1)"
+                "     ),"
+                "     version = version + 1,"
+                "     updated_at = CURRENT_TIMESTAMP,"
+                "     updated_by = %s"
+                " WHERE config_key = %s AND version = %s"
+                " RETURNING version",
+                (UPDATER_RESTART, CONFIG_KEY_RUNTIME, expected_version),
+            ).fetchone()
+        conn.commit()
+    return int(row["version"]) if row is not None else None
+
+
+def bump_generation_sqlite(db_path: str, expected_version: int) -> Optional[int]:
+    """``launch_restart_generation += 1`` inside ONE ``BEGIN IMMEDIATE``,
+    only while the row is at *expected_version*: the new version, or None."""
+    conn = _connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT config_json, version FROM server_config WHERE config_key = ?",
+            (CONFIG_KEY_RUNTIME,),
+        ).fetchone()
+        if existing is None or int(existing[1]) != expected_version:
+            conn.rollback()
+            return None
+        data = _parsed(existing[0])
+        data["launch_restart_generation"] = (
+            int(data.get("launch_restart_generation") or 0) + 1
+        )
+        conn.execute(
+            "UPDATE server_config SET config_json = ?, version = version + 1, "
+            "updated_at = datetime('now'), updated_by = ? WHERE config_key = ?",
+            (json.dumps(data), UPDATER_RESTART, CONFIG_KEY_RUNTIME),
         )
         conn.commit()
     finally:

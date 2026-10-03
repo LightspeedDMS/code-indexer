@@ -14,6 +14,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import pytest
+
 from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import ServerConfig
 from tests.unit.server.services.test_config_service_lost_update_2017 import (
@@ -100,6 +102,182 @@ def test_startup_backfills_keep_a_save_committed_meanwhile(
     assert siem["project_id"] == "example-x", "a startup backfill reverted a save"
     _v, lifecycle = a.read_committed_section("lifecycle_analysis_config")
     assert lifecycle, "the lifecycle backfill must still be persisted"
+
+
+def _restart_with_interleaving(
+    a: ConfigService, b: SiemBackendHarness, tmp_path: Path
+) -> ConfigService:
+    """Worker R restarts: it reads the row, then -- before R decides on its
+    startup migrations -- worker W boots (running them itself) and another
+    process commits SIEM project X."""
+    restarting = ConfigService(server_dir_path=str(tmp_path / "node-a"))
+    original_merge = restarting._merge_runtime_config
+    injected: List[bool] = []
+
+    def _merge_after_others(
+        runtime_dict: dict, base_config: Optional[ServerConfig] = None
+    ) -> None:
+        if not injected:
+            injected.append(True)
+            w_dir = tmp_path / "node-w"
+            w_dir.mkdir()
+            worker_w = ConfigService(
+                server_dir_path=str(
+                    tmp_path / "node-a" if b.name == "sqlite" else w_dir
+                )
+            )
+            _attach(worker_w, b, tmp_path / "node-a" / "cidx_server.db")
+            a.update_settings_atomic([("siem_delivery", "project_id", "example-x")])
+        original_merge(runtime_dict, base_config=base_config)
+
+    restarting._merge_runtime_config = _merge_after_others  # type: ignore[method-assign]
+    _attach(restarting, b, tmp_path / "node-a" / "cidx_server.db")
+    assert injected, "the interleaving was not exercised"
+    return restarting
+
+
+def _cached(service: ConfigService) -> ServerConfig:
+    return service.get_config()
+
+
+def test_rewrite_noop_publishes_the_committed_row_alias_promotion(
+    two_processes: Tuple[ConfigService, ConfigService],
+    siem_backend: SiemBackendHarness,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    a, _b = two_processes
+
+    def _pre_promotion(runtime: Dict[str, Any]) -> None:
+        runtime["alias_lock_config"] = {"db_backed_enabled": False}
+
+    _edit_committed_row(a, _pre_promotion)
+    r = _restart_with_interleaving(a, siem_backend, tmp_path)
+
+    _v, committed = a.read_committed_section("alias_lock_config")
+    assert committed["db_backed_enabled"] is True  # W promoted the row
+    lock = _cached(r).alias_lock_config
+    assert lock is not None and lock.db_backed_enabled is True, "R kept a stale row"
+    siem = _cached(r).siem_delivery_config
+    assert siem is not None and siem.project_id == "example-x"
+
+
+def test_rewrite_noop_publishes_the_committed_row_lifecycle(
+    two_processes: Tuple[ConfigService, ConfigService],
+    siem_backend: SiemBackendHarness,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    if siem_backend.name != "sqlite":
+        pytest.skip("the lifecycle backfill runs on the SQLite startup path only")
+    a, _b = two_processes
+    _edit_committed_row(a, lambda runtime: runtime.pop("lifecycle_analysis_config"))
+    r = _restart_with_interleaving(a, siem_backend, tmp_path)
+
+    siem = _cached(r).siem_delivery_config
+    assert siem is not None and siem.project_id == "example-x", "R kept a stale row"
+
+
+def test_pg_first_boot_seed_loser_adopts_the_winning_row(
+    pg_pool: Any,  # noqa: F811  (the imported fixture; server_config emptied)
+    tmp_path: Path,
+) -> None:
+    """Two nodes boot on an empty table; A wins the seed (and commits X)
+    just before B's insert, which therefore inserts nothing."""
+    dir_a, dir_b = tmp_path / "node-a", tmp_path / "node-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    node_b = ConfigService(server_dir_path=str(dir_b))
+    node_b.load_config()
+    original_seed = node_b._seed_runtime_row_pg
+    node_a = ConfigService(server_dir_path=str(dir_a))
+
+    def _seed_after_a_won(runtime_dict: dict) -> bool:
+        node_a.load_config()
+        node_a.set_connection_pool(pg_pool)  # A seeds first
+        node_a.update_settings_atomic([("siem_delivery", "project_id", "example-x")])
+        return original_seed(runtime_dict)
+
+    node_b._seed_runtime_row_pg = _seed_after_a_won  # type: ignore[method-assign]
+    node_b.set_connection_pool(pg_pool)
+
+    version, _runtime = node_a._read_committed_runtime()
+    siem = node_b.get_config().siem_delivery_config
+    assert siem is not None and siem.project_id == "example-x", "B kept its own seed"
+    assert node_b._db_config_version == version
+
+
+def test_runtime_row_write_sql_lives_only_in_config_runtime_row() -> None:
+    """Every write of server_config goes through the compare-and-set module."""
+    import re
+
+    import code_indexer
+
+    package = Path(code_indexer.__file__).parent
+    writes = re.compile(r"(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+server_config\b")
+    offenders = sorted(
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if path.name != "config_runtime_row.py" and writes.search(path.read_text())
+    )
+    assert offenders == []
+
+
+def test_launch_restart_bump_during_a_settings_save_loses_nothing(
+    two_processes: Tuple[ConfigService, ConfigService],
+) -> None:
+    a, b = two_processes
+    version_before = a._db_config_version
+    bumped: List[bool] = []
+
+    def _bump_elsewhere(_candidate: Any) -> None:  # after B's read, before commit
+        if not bumped:  # once: B's retry then starts from the bumped row
+            bumped.append(True)
+            a.bump_launch_restart_generation()
+
+    b.apply_audited_change(
+        lambda c: setattr(c.siem_delivery_config, "project_id", "example-x"),
+        actor="admin",
+        target_id="siem_delivery",
+        before_publish=_bump_elsewhere,
+    )
+    _version, runtime = a._read_committed_runtime()
+    assert runtime["launch_restart_generation"] == 1, "the bump was lost"
+    assert runtime["siem_delivery_config"]["project_id"] == "example-x"
+    assert a._db_config_version == version_before  # the restart poll still sees it
+
+
+def _updated_by(service: ConfigService) -> str:
+    """The committed row's updated_by column (read-only)."""
+    if service._pool is not None:
+        with service._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT updated_by FROM server_config WHERE config_key = 'runtime'"
+            ).fetchone()
+        return str(row[0])
+    assert service._sqlite_db_path is not None
+    conn = sqlite3.connect(service._sqlite_db_path)
+    try:
+        found = conn.execute(
+            "SELECT updated_by FROM server_config WHERE config_key = 'runtime'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return str(found[0])
+
+
+def test_writers_record_who_wrote_the_row(
+    two_processes: Tuple[ConfigService, ConfigService],
+) -> None:
+    a, _b = two_processes
+    a.update_settings_atomic([("siem_delivery", "project_id", "example-x")])
+    assert _updated_by(a) == "web-ui"
+    a.apply_system_change(
+        lambda c: setattr(c.siem_delivery_config, "project_id", "example-y")
+    )
+    assert _updated_by(a) == "system"
+    a.bump_launch_restart_generation()
+    assert _updated_by(a) == "launch-restart"
+    a._rewrite_committed_row(lambda _candidate, _raw: True)
+    assert _updated_by(a) == "startup-migration"
 
 
 class _CredentialManager:

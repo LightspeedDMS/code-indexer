@@ -86,6 +86,7 @@ class _ChangeAttempt:
     before: Optional[ServerConfig] = None
     after: Optional[ServerConfig] = None
     published: bool = False
+    updated_by: str = _runtime_row.UPDATER_WEB_UI  # recorded on the runtime row
 
 
 @dataclass
@@ -1318,10 +1319,17 @@ class ConfigService:
 
     def register_on_commit_callback(
         self, callback: Callable[[ServerConfig, ServerConfig], None]
-    ) -> None:
+    ) -> Callable[[], None]:
         """Run *callback(before, after)* after THIS process commits a change
-        (before = the committed pre-image, after = what was committed)."""
+        (before = the committed pre-image, after = what was committed).
+        Returns the handle that unregisters it."""
         self._on_commit_callbacks.append(callback)
+
+        def _unregister() -> None:
+            if callback in self._on_commit_callbacks:
+                self._on_commit_callbacks.remove(callback)
+
+        return _unregister
 
     def _notify_committed(
         self, before: Optional[ServerConfig], after: Optional[ServerConfig]
@@ -1380,7 +1388,7 @@ class ConfigService:
             attempt.published = True
             return True
         runtime = self._extract_runtime_dict(candidate)
-        if self._commit_runtime_row(runtime, expected) is None:
+        if self._commit_runtime_row(runtime, expected, attempt.updated_by) is None:
             return False
         attempt.published = True
         self._config = candidate
@@ -1427,7 +1435,9 @@ class ConfigService:
         so it changes only what *mutate* touches.  Human front doors use
         :meth:`apply_audited_change`.
         """
-        self._change_config(mutate, None, _ChangeAttempt())
+        self._change_config(
+            mutate, None, _ChangeAttempt(updated_by=_runtime_row.UPDATER_SYSTEM)
+        )
         return self.get_config()
 
     def apply_audited_change(
@@ -3742,61 +3752,36 @@ class ConfigService:
         }
 
     def bump_launch_restart_generation(self) -> None:
-        """Atomically increment launch_restart_generation in the DB row (+ version).
+        """Increment launch_restart_generation in the DB row (+ version).
 
-        Story #1200 AC1: single SQL statement — no asdict() round-trip.
-        MAJOR-M3: does NOT advance self._db_config_version so the bumping node's
-        next poll detects the new version and self-signals via
-        check_pending_launch_restart().
+        Story #1200 AC1: no asdict() round-trip.  Bug #2017: a compare-and-set
+        on the version just read (config_runtime_row.bump_generation_*),
+        retried on a concurrent commit.  MAJOR-M3: does NOT advance
+        self._db_config_version, so the bumping node's next poll detects the
+        new version and self-signals via check_pending_launch_restart().
 
         SQLite path exists for unit-test modeling only (real solo route never bumps;
-        see AC7/FIX-5).
+        see AC7/FIX-5).  No DB, no DB file or no row is a no-op.
         """
-        import sqlite3 as _sqlite3
-
-        if self._pool is not None:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    "UPDATE server_config SET "
-                    "config_json = jsonb_set("
-                    "  config_json,"
-                    "  '{launch_restart_generation}',"
-                    "  (COALESCE((config_json->>'launch_restart_generation')::int, 0)"
-                    "   + 1)::text::jsonb"
-                    "),"
-                    "version = version + 1 "
-                    "WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
+        for _ in range(_CHANGE_ATTEMPTS):
+            if self._pool is not None:
+                version = _runtime_row.read_runtime_version_pg(self._pool)
+                if version is None:
+                    return
+                bumped = _runtime_row.bump_generation_pg(self._pool, version)
+            elif self._sqlite_db_path and Path(self._sqlite_db_path).exists():
+                found = _runtime_row.read_runtime_sqlite(self._sqlite_db_path)
+                if found is None:
+                    return
+                bumped = _runtime_row.bump_generation_sqlite(
+                    self._sqlite_db_path, found[0]
                 )
-                conn.commit()
-            # MAJOR-M3: do NOT read back and update self._db_config_version here.
-            logger.info(
-                "ConfigService: bumped launch_restart_generation in PG "
-                "(cluster-wide restart requested)"
-            )
-            return
-
-        if self._sqlite_db_path and Path(self._sqlite_db_path).exists():
-            with _sqlite3.connect(self._sqlite_db_path) as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT config_json FROM server_config WHERE config_key = ?",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-                if row is not None:
-                    data = json.loads(row[0])
-                    data["launch_restart_generation"] = (
-                        int(data.get("launch_restart_generation") or 0) + 1
-                    )
-                    conn.execute(
-                        "UPDATE server_config "
-                        "SET config_json = ?, version = version + 1 "
-                        "WHERE config_key = ?",
-                        (json.dumps(data), CONFIG_KEY_RUNTIME),
-                    )
-                conn.commit()
-            # MAJOR-M3: do NOT update self._db_config_version.
-            logger.info("ConfigService: bumped launch_restart_generation in SQLite")
+            else:
+                return
+            if bumped is not None:
+                logger.info("ConfigService: bumped launch_restart_generation")
+                return
+        raise ConfigChangeConflict()
 
     def check_pending_launch_restart(self) -> None:
         """Per-poll check: if target generation > applied, materialize then signal.
@@ -3911,12 +3896,17 @@ class ConfigService:
     # --- the committed runtime row (Bug #2017; SQL in config_runtime_row) ---
 
     def _commit_runtime_row_pg(
-        self, runtime_dict: dict, expected_version: int
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
     ) -> Optional[int]:
         """Compare-and-set commit (PG); the new version, None on a conflict."""
         assert self._pool is not None
         return self._record_version(
-            _runtime_row.commit_runtime_pg(self._pool, runtime_dict, expected_version)
+            _runtime_row.commit_runtime_pg(
+                self._pool, runtime_dict, expected_version, updated_by
+            )
         )
 
     def _record_version(self, version: Optional[int]) -> Optional[int]:
@@ -3925,23 +3915,33 @@ class ConfigService:
         return version
 
     def _commit_runtime_row_sqlite(
-        self, runtime_dict: dict, expected_version: int
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
     ) -> Optional[int]:
         """Compare-and-set commit (SQLite, ``BEGIN IMMEDIATE``); the new
         version, None on a conflict."""
         assert self._sqlite_db_path is not None
         return self._record_version(
             _runtime_row.commit_runtime_sqlite(
-                self._sqlite_db_path, runtime_dict, expected_version
+                self._sqlite_db_path, runtime_dict, expected_version, updated_by
             )
         )
 
     def _commit_runtime_row(
-        self, runtime_dict: dict, expected_version: int
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
     ) -> Optional[int]:
         if self._pool is not None:
-            return self._commit_runtime_row_pg(runtime_dict, expected_version)
-        return self._commit_runtime_row_sqlite(runtime_dict, expected_version)
+            return self._commit_runtime_row_pg(
+                runtime_dict, expected_version, updated_by
+            )
+        return self._commit_runtime_row_sqlite(
+            runtime_dict, expected_version, updated_by
+        )
 
     def _seed_runtime_row_pg(self, runtime_dict: dict) -> bool:
         """First boot only: insert the absent PG row (never overwrites)."""
@@ -3970,22 +3970,28 @@ class ConfigService:
                 version, runtime = self._read_committed_runtime()
                 candidate = self._compose_config(runtime, self.get_config())
                 if not decide(candidate, runtime):
+                    # nothing to write: still adopt the row just read (a peer
+                    # may have migrated it after this process's earlier read)
+                    self._config, self._db_config_version = candidate, version
                     return
                 if self._commit_runtime_row(
-                    self._extract_runtime_dict(candidate), version
+                    self._extract_runtime_dict(candidate),
+                    version,
+                    _runtime_row.UPDATER_MIGRATION,
                 ):
                     self._config = candidate
                     self.materialize_launch_config()
                     return
         raise ConfigChangeConflict()
 
-    def _seed_runtime_to_pg(self) -> None:
-        """Seed PG server_config table from current config (first boot)."""
+    def _seed_runtime_to_pg(self) -> bool:
+        """Seed PG server_config table from current config (first boot);
+        True when THIS process's insert-only seed inserted the row."""
         assert self._pool is not None
         config = self.get_config()
         self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
-        self._seed_runtime_row_pg(runtime_dict)
+        inserted = self._seed_runtime_row_pg(runtime_dict)
         # Finding 4 fix: read the actual version -- the insert is a no-op
         # when another node seeded first, so the version can be > 1.
         version = _runtime_row.read_runtime_version_pg(self._pool)
@@ -3995,6 +4001,7 @@ class ConfigService:
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
             len(runtime_dict),
         )
+        return inserted
 
     def _load_runtime_from_pg(self, base_config: Optional[ServerConfig] = None) -> None:
         """Load runtime config from PostgreSQL and merge with bootstrap.
@@ -4004,26 +4011,16 @@ class ConfigService:
                 is not published until after the merge completes (Bug #998).
         """
         assert self._pool is not None
-        from psycopg.rows import dict_row
-
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    "SELECT config_json, version FROM server_config WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-
-        if row is None:
-            self._seed_runtime_to_pg()
-            if base_config is not None:
-                self._config = base_config
-            return
-
-        config_json = row["config_json"]
-        runtime_dict = (
-            json.loads(config_json) if isinstance(config_json, str) else config_json
-        )
-        self._db_config_version = int(row["version"])
+        found = _runtime_row.read_runtime_pg(self._pool)
+        if found is None:
+            if self._seed_runtime_to_pg():
+                if base_config is not None:
+                    self._config = base_config
+                return
+            # another node seeded first: adopt ITS row (and its version)
+            found = _runtime_row.read_runtime_pg(self._pool)
+            assert found is not None, "seeded runtime row vanished"
+        self._db_config_version, runtime_dict = found
         self._merge_runtime_config(runtime_dict, base_config=base_config)
 
     def _strip_config_file_to_bootstrap(self) -> None:

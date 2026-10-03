@@ -438,8 +438,13 @@ class TestBumpLaunchRestartGenerationPgSqlText:
     """Defect 3: bump_launch_restart_generation PG path SQL-text assertions."""
 
     def test_bump_pg_uses_jsonb_set_in_single_statement(self, tmp_path: Path) -> None:
-        """PG bump must use jsonb_set in a single UPDATE (no read-modify-write)."""
-        pool, conn, cur = _make_pg_pool(fetchone_side_effect=[])
+        """PG bump must use jsonb_set in a single UPDATE (no read-modify-write).
+
+        Bug #2017: the UPDATE is a compare-and-set on the version read first
+        (the version read, then ``UPDATE ... AND version = %s RETURNING``)."""
+        pool, conn, cur = _make_pg_pool(
+            fetchone_side_effect=[{"version": 7}, {"version": 8}]
+        )
         svc = _make_pg_config_service(tmp_path, pool)
 
         svc.bump_launch_restart_generation()
@@ -463,3 +468,6 @@ class TestBumpLaunchRestartGenerationPgSqlText:
         assert "version" in update_sql and (
             "version + 1" in update_sql or "version+1" in update_sql
         ), "Defect 3: PG bump must increment version in the same statement"
+        assert "AND version = %s" in update_sql, (
+            "Bug #2017: the PG bump must be a compare-and-set on the version read"
+        )
