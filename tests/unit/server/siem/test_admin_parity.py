@@ -7,7 +7,7 @@ import dataclasses
 import json
 import logging
 import threading
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
 
@@ -49,8 +49,10 @@ class _CommittedConfig:
         assert name == "siem_delivery_config"
         return self.version, dict(self.section)
 
-    def register_on_commit_callback(self, callback: Any) -> None:
-        """Commits happen by assigning section/version here: no callback."""
+    def register_on_commit_callback(self, callback: Any) -> Callable[[], None]:
+        """Commits happen by assigning section/version here: no callback;
+        the returned unregister handle has nothing to release."""
+        return lambda: None
 
 
 class _NoJobs:

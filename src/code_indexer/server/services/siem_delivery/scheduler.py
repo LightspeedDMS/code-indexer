@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from code_indexer.server.services.siem_delivery import capture, state_store, stats
 from code_indexer.server.services.siem_delivery.capture import CaptureSnapshot
@@ -152,7 +152,8 @@ class SiemDeliveryScheduler:
         self._registration_lock = threading.Lock()
         self._deregistered = False
         self.registered = False
-        self._commit_subscribed = False
+        # releases the config-commit subscription (deregister_process)
+        self._commit_unsubscribe: Optional[Callable[[], None]] = None
         from code_indexer.server.services.siem_delivery.health import AlertSignals
 
         self.alerts = AlertSignals(self.timings)
@@ -170,12 +171,13 @@ class SiemDeliveryScheduler:
             )
             self._deregistered = False
             self.registered = True
-            if not self._commit_subscribed:
+            if self._commit_unsubscribe is None:
                 # a SIEM change committed by THIS process applies at once
-                self._config_service.register_on_commit_callback(
-                    self._on_config_committed
+                self._commit_unsubscribe = (
+                    self._config_service.register_on_commit_callback(
+                        self._on_config_committed
+                    )
                 )
-                self._commit_subscribed = True
 
     def _on_config_committed(self, before: Any, after: Any) -> None:
         if self._deregistered:
@@ -206,6 +208,9 @@ class SiemDeliveryScheduler:
         bounded join can no longer refresh (re-insert) it."""
         with self._registration_lock:
             self._deregistered = True
+            if self._commit_unsubscribe is not None:
+                self._commit_unsubscribe()
+                self._commit_unsubscribe = None
             state_store.deregister_process(self.db, self.process_id)
 
     def _refresh_registration(self) -> None:

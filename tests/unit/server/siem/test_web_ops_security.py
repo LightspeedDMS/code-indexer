@@ -224,6 +224,7 @@ def test_db_derived_strings_are_escaped(ops: OpsEnv) -> None:
     refused = state_store.record_canary(
         ops.backend.db,
         run_id="run-escape",
+        run_seq=state_store.issue_canary_run(ops.backend.db),
         destination_key=view.destination.key,
         mapping_version=ops.scheduler.mapping_version,
         expected=[],

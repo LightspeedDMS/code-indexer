@@ -294,6 +294,22 @@ def _canary_and_confirm_run(
     assert outcome["confirmed"]
 
 
+def test_replaced_scheduler_is_unsubscribed_from_config_commits(
+    lifetime: Lifetime, siem_backend: SiemBackendHarness
+) -> None:
+    svc, old, sidecar = lifetime
+    old.deregister_process()
+    new = _scheduler(siem_backend, svc)  # type: ignore[arg-type]
+    calls: Dict[str, int] = {"old": 0, "new": 0}
+    old.apply_committed_change = lambda: calls.__setitem__("old", calls["old"] + 1)  # type: ignore[method-assign]
+    new.apply_committed_change = lambda: calls.__setitem__("new", calls["new"] + 1)  # type: ignore[method-assign]
+    new.register_process()
+
+    assert [getattr(cb, "__self__", None) for cb in svc._on_commit_callbacks] == [new]
+    _save(svc, {**_destination(sidecar), "enabled": "false"})  # a SIEM change
+    assert calls == {"old": 0, "new": 1}
+
+
 def test_a_change_outside_the_lifetime_keeps_arming(lifetime: Lifetime) -> None:
     svc, scheduler, sidecar = lifetime
     _arm_first_time(svc, scheduler, sidecar)
@@ -335,6 +351,7 @@ def test_canary_recorded_after_a_credential_change_is_refused(
     refused = state_store.record_canary(
         scheduler.db,
         run_id="run-stale",
+        run_seq=state_store.issue_canary_run(scheduler.db),
         destination_key="harness:0000000000000000",
         mapping_version=scheduler.mapping_version,
         expected=[],
@@ -353,8 +370,9 @@ def test_canary_recorded_after_a_credential_change_is_refused(
 def test_sqlite_schema_adds_the_epoch_column_to_an_existing_state_table(
     tmp_path: Path,
 ) -> None:
-    """An upgraded groups.db: the pre-#2018 state table gains the column
-    (empty lifetime), keeping an armed row armed; re-running is a no-op."""
+    """An upgraded groups.db: the pre-#2018 state table gains the lifetime
+    column (empty) and the canary run ordinals (0; PostgreSQL migration
+    057), keeping an armed row armed; re-running is a no-op."""
     import sqlite3
 
     from code_indexer.server.services.siem_delivery.db import ensure_sqlite_schema
@@ -374,9 +392,10 @@ def test_sqlite_schema_adds_the_epoch_column_to_an_existing_state_table(
         ensure_sqlite_schema(conn)
         conn.commit()
         row = conn.execute(
-            "SELECT armed_destination_key, canary_config_epoch "
+            "SELECT armed_destination_key, canary_config_epoch, "
+            "canary_issued_seq, canary_run_seq "
             "FROM siem_delivery_state WHERE id = 1"
         ).fetchone()
     finally:
         conn.close()
-    assert row == ("harness:00aa", "")
+    assert row == ("harness:00aa", "", 0, 0)

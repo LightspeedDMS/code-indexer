@@ -169,9 +169,10 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
     if invalid:
         raise SiemAdminError(422, f"canary failed local validation: {sorted(invalid)}")
     # Bug #2018: read BEFORE minting, so a key replaced from here on makes
-    # the record refuse this canary (it would prove the old key); the start
-    # time (database clock) orders this run against any other one.
+    # the record refuse this canary (it would prove the old key); the run
+    # ordinal, issued before the send, orders this run against any other.
     credential_id = scheduler.credential_store.credential_id()
+    run_seq = state_store.issue_canary_run(ctx.db)
     started_at = ctx.db.read(lambda tx: tx.ts(tx.now()))
     try:
         token = ctx.credentials.token(ctx.destination)
@@ -191,6 +192,7 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
     refused = state_store.record_canary(
         ctx.db,
         run_id=run_id,
+        run_seq=run_seq,
         destination_key=ctx.destination.key,
         mapping_version=ctx.mapping_version,
         expected=expected,

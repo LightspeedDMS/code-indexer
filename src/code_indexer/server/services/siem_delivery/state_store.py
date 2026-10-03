@@ -478,10 +478,29 @@ CANARY_STALE_LIFETIME = "stale_lifetime"
 CANARY_SUPERSEDED = "superseded"
 
 
+def issue_canary_run(db: SiemDb) -> int:
+    """The next canary run ordinal (Bug #2018): durable and strictly
+    increasing, taken under the state-row lock BEFORE the run's send."""
+
+    def _do(tx: SiemTx) -> int:
+        state_in(tx, lock=True)
+        tx.execute(
+            "UPDATE siem_delivery_state "
+            "SET canary_issued_seq = canary_issued_seq + 1 WHERE id = 1"
+        )
+        row = tx.one("SELECT canary_issued_seq FROM siem_delivery_state WHERE id = 1")
+        assert row is not None, "SIEM state row missing"
+        return int(row["canary_issued_seq"])
+
+    issued: int = db.write(_do, phase="canary")
+    return issued
+
+
 def record_canary(
     db: SiemDb,
     *,
     run_id: str,
+    run_seq: int,
     destination_key: str,
     mapping_version: int,
     expected: Sequence[Dict[str, str]],
@@ -494,17 +513,18 @@ def record_canary(
     committed_epoch: Callable[[], str],
 ) -> Optional[str]:
     """Record a canary run for the configuration lifetime *config_epoch*,
-    sent with the credential *credential_id* (read BEFORE the send), whose
-    send started at the database time *started_at* (stored as the run's
+    sent with the credential *credential_id* (read BEFORE the send), issued
+    the ordinal *run_seq* (issue_canary_run, BEFORE the send), whose send
+    started at the database time *started_at* (stored as the run's
     ``canary_sent_at``).
 
     None when recorded.  Otherwise the refusal reason, with NOTHING changed
     (checked under the state-row lock): the stored credential changed
     meanwhile (CANARY_CREDENTIAL_CHANGED: the canary proves the old key),
     the committed configuration lifetime is no longer *config_epoch*
-    (CANARY_STALE_LIFETIME), or a run that started later was already
-    recorded (CANARY_SUPERSEDED).  A canary of another lifetime also ends an
-    arming made in the old one."""
+    (CANARY_STALE_LIFETIME), or a run issued later was already recorded
+    (CANARY_SUPERSEDED: ordinals, never clocks, order the runs).  A canary
+    of another lifetime also ends an arming made in the old one."""
 
     def _do(tx: SiemTx) -> Optional[str]:
         state_in(tx, lock=True)  # serialise with credential changes
@@ -517,12 +537,13 @@ def record_canary(
             return CANARY_STALE_LIFETIME
         if tx.one(
             "SELECT 1 AS newer FROM siem_delivery_state "
-            "WHERE id = 1 AND canary_sent_at > ?",
-            (started_at,),
+            "WHERE id = 1 AND canary_run_seq > ?",
+            (run_seq,),
         ):
             return CANARY_SUPERSEDED
         tx.execute(
             "UPDATE siem_delivery_state SET canary_run_id = ?, "
+            "canary_run_seq = ?, "
             "canary_destination_key = ?, canary_mapping_version = ?, "
             "canary_expected = ?, canary_sent_at = ?, canary_result = ?, "
             "canary_result_signature = ?, canary_actor = ?, "
@@ -533,6 +554,7 @@ def record_canary(
             "WHERE id = 1",
             (
                 run_id,
+                run_seq,
                 destination_key,
                 mapping_version,
                 json.dumps(list(expected)),

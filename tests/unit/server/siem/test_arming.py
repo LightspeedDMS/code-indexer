@@ -35,6 +35,7 @@ def _confirmed_canary(b: SiemBackendHarness, dest: str = DEST) -> None:
     ss.record_canary(
         b.db,
         run_id="run-1",
+        run_seq=ss.issue_canary_run(b.db),
         destination_key=dest,
         mapping_version=MAPPING_VERSION,
         expected=[_EXPECTED_U1],
@@ -198,6 +199,7 @@ def test_canary_of_a_new_lifetime_ends_the_old_arming(
     refused = ss.record_canary(
         siem_backend.db,
         run_id="run-new",
+        run_seq=ss.issue_canary_run(siem_backend.db),
         destination_key=DEST,
         mapping_version=MAPPING_VERSION,
         expected=[_EXPECTED_U1],
@@ -217,6 +219,7 @@ def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> 
     ss.record_canary(
         siem_backend.db,
         run_id="run-2",
+        run_seq=ss.issue_canary_run(siem_backend.db),
         destination_key=DEST,
         mapping_version=MAPPING_VERSION,
         expected=[_EXPECTED_U1, _EXPECTED_U2],

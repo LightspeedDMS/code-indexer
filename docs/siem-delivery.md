@@ -178,8 +178,12 @@ another lifetime disarms and a stale confirmation is refused. Replacing or
 removing the service-account key clears the canary and disarms in its own
 transaction. A canary is recorded only if, under the state-row lock, the key
 it was sent with is still the stored one, its lifetime is still the
-committed one, and no run that started later was recorded; otherwise
-nothing changes and the action answers 409. Enabling, and every other change
+committed one, and no run issued later was recorded; otherwise nothing
+changes and the action answers 409. Runs are ordered by a durable,
+strictly increasing ordinal taken under the state-row lock before the send
+(`canary_issued_seq` issues it, `canary_run_seq` keeps the recorded run's;
+PostgreSQL migration 057), never by clocks, so two runs started in the same
+clock tick are still ordered. Enabling, and every other change
 of the section, keeps a confirmed canary valid.
 
 Fail closed at once: `state_store.capture_active` also requires the state's
@@ -190,8 +194,13 @@ process re-applies the fence, the capture snapshot and the status view in
 that process immediately (`scheduler.apply_committed_change`); the snapshot
 publish is monotonic in the config version, so a slower cycle that read an
 older version cannot re-arm it. Other processes and nodes follow at their
-next cycle (`cycle_idle_seconds`, 30 s; events they capture in that window
-are bounded and counted like captures after a disable, see Capture above).
+next cycle (`cycle_idle_seconds`, 30 s). Events they capture in that window
+are bounded by that cycle and by the 90 s capture-snapshot age
+(`CAPTURE_SNAPSHOT_MAX_AGE`). They are counted as captures after the
+boundary (`capture_after_boundary`, see Capture above) only when the change
+is a disable, a clear, a destination change or a reset (the boundary kinds
+`stats.py` counts); after a trusted-CA change or a credential replacement or
+removal they are NOT counted.
 
 A configuration saved before the epoch existed has the empty epoch, so an
 already armed destination stays armed across the upgrade until its next
