@@ -88,9 +88,19 @@ class TestPodPullSubmit:
         job_id = self._submit(m, "add_golden_repo", metadata={"alias": "repoA"})
         assert any(item[0] == job_id for item in self.enqueued)
 
-    def test_all_heavy_ops_plus_fts_backfill_are_pod_pull(self):
+    def test_the_exact_pod_pull_op_set(self):
         # The memory-heavy index builds (incl. semantic_backfill_reindex — a re-embed is
-        # as heavy as add), PLUS fts_backfill_build (EVO-66445): pod-pull work-stealable.
+        # as heavy as add), PLUS two that are pod-pull WITHOUT being memory-heavy:
+        # fts_backfill_build (EVO-66445, a cheap local tantivy rebuild) and
+        # global_repo_refresh (background-work audit — _MEMORY_HEAVY_OPS gates the LOCAL
+        # pool worker, which a pod-pull row never reaches, and adding refresh there would
+        # newly throttle a solo/sqlite server that has always run them ungated; the
+        # cluster backpressure arrives anyway because DistributedJobClaimer memory-gates
+        # EVERY claim).
+        #
+        # Spelled out in full on purpose: every entry must also have a lifespan dispatch
+        # executor (validate_dispatch_covers enforces that pairing at startup) and a
+        # submit call that passes metadata=, so adding one is never a one-line change.
         assert POD_PULL_OPS == frozenset(
             {
                 "add_golden_repo",
@@ -100,6 +110,7 @@ class TestPodPullSubmit:
                 "change_branch",
                 "semantic_backfill_reindex",
                 "fts_backfill_build",
+                "global_repo_refresh",
             }
         )
 

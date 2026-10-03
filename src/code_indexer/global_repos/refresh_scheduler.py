@@ -97,6 +97,55 @@ from code_indexer.utils.worker_budget import (
 
 logger = logging.getLogger(__name__)
 
+#: POD_PULL operation type for a scheduled golden-repo refresh. Must equal the
+#: literal in ``background_jobs.POD_PULL_OPS`` and the key in lifespan's pod-pull
+#: dispatch -- ``validate_dispatch_covers`` fails startup when the dispatch and
+#: the op set drift, which is why the set carries the literal and everything else
+#: carries this.
+GLOBAL_REPO_REFRESH_OP = "global_repo_refresh"
+
+
+def global_repo_refresh_executor(
+    refresh_scheduler: Any,
+    metadata: Dict[str, Any],
+    progress_callback: Optional[Callable[..., Any]] = None,
+) -> Any:
+    """Run ONE claimed ``global_repo_refresh`` row on whichever pod claimed it.
+
+    Goes through :meth:`RefreshScheduler.execute_refresh_for_claimed_job` rather
+    than the submission path: the claim itself already occupies this job's
+    ``idx_active_job_per_repo`` slot, so re-submitting would collide with the
+    caller's own row and fail the refresh with a DuplicateJobError naming its own
+    job id (Bug #1839).
+
+    Raises on a result dict reporting ``success: False``. This is the whole
+    reason the executor exists rather than the method being wired directly:
+    ``IndexJobClaimLoop`` calls ``complete_job(result)`` for ANY non-raising
+    return, and ``_execute_refresh`` can report a real failure -- an
+    integrity-gate refusal, for one -- as ``{"success": False}`` WITHOUT raising.
+    Returned as-is, that row is recorded as a success and the repo quietly stops
+    being refreshed. ``DistributedJobWorkerService`` has guarded this since Story
+    #1586 Finding 2; moving the op to the pod-pull queue must not lose the guard.
+    """
+    alias = metadata["alias_name"]
+    result = refresh_scheduler.execute_refresh_for_claimed_job(
+        alias,
+        force_reset=bool(metadata.get("force_reset", False)),
+        progress_callback=progress_callback,
+        # EVO-66105: IndexJobClaimLoop injects metadata["job_id"] precisely so
+        # executors can thread it through -- the (metadata, callback) signature
+        # leaves no other channel. _execute_refresh carries it into
+        # build_embedding_stats_child_env, which tags each EmbeddingCallRecord.
+        # Dropping it fails nothing and breaks nothing visible: refreshes still
+        # run, and every VoyageAI record for a cluster refresh just gets a NULL
+        # job id, so per-job cost attribution stops silently.
+        job_id=metadata.get("job_id"),
+    )
+    if isinstance(result, dict) and result.get("success") is False:
+        detail = result.get("message") or result.get("error")
+        raise RuntimeError(detail or f"Refresh failed for {alias}")
+    return result
+
 
 def _record_refresh_duration_metric(
     repository: str, duration_seconds: float, status: str
@@ -1676,6 +1725,8 @@ class RefreshScheduler:
         self,
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
+        force_reset: bool = False,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Perform the refresh WORK for a job that has ALREADY been claimed and
@@ -1707,6 +1758,22 @@ class RefreshScheduler:
                 detail=None) forwarded into _execute_refresh() so progress is
                 visible the same way a normally-submitted refresh job's
                 progress is.
+            force_reset: Forwarded to _execute_refresh. Was hardcoded False
+                here, which was invisible while the only caller was the leader
+                re-executing a reclaimed row. Once a refresh is claimed by an
+                arbitrary pod it is also how an ADMIN force-reset arrives, and a
+                force-reset degraded to an ordinary refresh does nothing at all:
+                change detection sees an unchanged repo and skips. It travels in
+                the row metadata because the executing pod cannot see the
+                submitting call's arguments.
+            job_id: The claimed row's id, for EVO-66113 per-job VoyageAI cost
+                correlation. The local-pool worker closure in
+                _submit_refresh_job already passes one; this path did not, which
+                was invisible while it only ran reclaimed rows on the leader.
+                Once it is the main path for every cluster refresh, omitting it
+                NULLs the job id on every embedding call record the fleet
+                produces. Supplied from metadata["job_id"], which
+                IndexJobClaimLoop injects for exactly this purpose.
 
         Returns:
             The same result dict _execute_refresh() returns
@@ -1718,9 +1785,10 @@ class RefreshScheduler:
         global_alias = self._resolve_global_alias(alias_name)
         return self._execute_refresh(
             global_alias,
-            force_reset=False,
+            force_reset=force_reset,
             progress_callback=progress_callback,
             tracked_by_caller=True,
+            job_id=job_id,
         )
 
     def get_refresh_interval(self) -> int:
@@ -2058,12 +2126,22 @@ class RefreshScheduler:
                 job_id=job_id,
             )
 
+        # metadata= is what makes the row POD_PULL work-stealable: submit_job
+        # leaves it PENDING with executing_node NULL for any pod with memory
+        # headroom to claim, instead of pinning it to this pod's local pool.
+        # Without it the pod-pull branch falls through SILENTLY -- the op would
+        # be in POD_PULL_OPS, the dispatch entry would exist, and every refresh
+        # would still run wherever it was submitted.
+        #
+        # `func` stays as the local-pool fallback for solo/sqlite mode, which has
+        # no cluster to steal work across. Both routes run the same refresh.
         job_id: str = self.background_job_manager.submit_job(
-            operation_type="global_repo_refresh",
+            operation_type=GLOBAL_REPO_REFRESH_OP,
             func=_refresh_worker,
             submitter_username=submitter_username,
             is_admin=True,
             repo_alias=alias_name,
+            metadata={"alias_name": alias_name, "force_reset": bool(force_reset)},
         )
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id

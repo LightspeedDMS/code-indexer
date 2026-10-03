@@ -147,6 +147,47 @@ A constant that is not divided carries a comment saying why. Today:
   ripgrep spawns, not a standing reservation. Two worker processes are not both
   bursting on the same query.
 
+## Moving an op onto the pod-pull queue (M2)
+
+Four edits, and three ways it can look done without being done.
+
+1. Add the op to `POD_PULL_OPS` (`repositories/background_jobs.py`).
+2. Add one executor to the dispatch table in `lifespan.py`. `validate_dispatch_covers`
+   turns drift between the two into a startup `RuntimeError`, so these are a pair.
+3. Pass `metadata=` on `submit_job` with everything the executing pod needs to
+   reconstruct the work. **Without it the pod-pull branch falls through silently**
+   to the submitting pod's local pool -- op in the set, executor present, and every
+   job still runs where it was submitted.
+4. Keep `func=` as the local-pool fallback. Solo/sqlite has no cluster to steal
+   work across, and both routes run the same work.
+
+### The executor must raise on a non-raising failure
+
+`IndexJobClaimLoop` calls `complete_job(result)` for **any** return that does not
+raise. An op whose worker reports failure as `{"success": False}` -- `_execute_refresh`
+does, for an integrity-gate refusal -- is then recorded as a success, and the repo
+quietly stops being processed. Test it with `result.get("success") is False`, not
+`not result.get("success")`: an early-return shape that omits the key would
+otherwise fail a job that succeeded, and then retry it every cycle.
+
+### Every argument the submitter had must travel in the row
+
+The executing pod cannot see the submitting call. `execute_refresh_for_claimed_job`
+hardcoded `force_reset=False`, which was invisible while its only caller was the
+leader re-executing a reclaimed row. Once an arbitrary pod claims the row, that is
+also how an admin's force-reset arrives -- and a force-reset degraded to an ordinary
+refresh does nothing at all, because change detection then skips an unchanged repo.
+
+### What M2 does and does not give you
+
+It gives the memory gate (`DistributedJobClaimer` gates **every** claim, not just
+memory-heavy ops, so a pressured pod leaves rows for one with headroom) and
+`FOR UPDATE SKIP LOCKED` fairness.
+
+It does **not** currently give a cluster-wide concurrency ceiling. `DistributedJobClaimer`
+has one (Bug #541, `max_concurrent_jobs`) but it is constructed without it, so it
+defaults to 0 = disabled. Enabling it is a separate decision with its own blast radius.
+
 ## Gating is not the same as acting on the gate
 
 `ScheduledCatchupService` registered a job with `register_job` (no conflict

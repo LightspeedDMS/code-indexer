@@ -139,12 +139,18 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
 
         scheduler._submit_refresh_job("test-repo-global")
 
+        # metadata= is what makes the row pod-pull work-stealable; `func` stays
+        # as the local-pool fallback for solo/sqlite. Asserted with the exact
+        # kwargs (not ANY for metadata) because submit_job's pod-pull branch
+        # falls through SILENTLY when metadata is None -- the migration would
+        # then be a no-op with nothing to notice it by.
         mock_background_job_manager.submit_job.assert_called_once_with(
             operation_type="global_repo_refresh",
             func=ANY,
             submitter_username="system",
             is_admin=True,
             repo_alias="test-repo-global",
+            metadata={"alias_name": "test-repo-global", "force_reset": False},
         )
 
     def test_submit_refresh_job_lambda_executes_correctly(
