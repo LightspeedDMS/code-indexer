@@ -81,6 +81,7 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.server.telemetry.manager import peek_telemetry_manager
 from code_indexer.server.telemetry.job_metrics import get_job_metrics
 from code_indexer.utils.subprocess_diagnostics import redact_url_credentials
+from code_indexer.server.services.query_admission_gate import check_query_admission
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -1879,6 +1880,18 @@ class RefreshScheduler:
                 # Repos still unscheduled (NULL next_refresh) are excluded here —
                 # they were just given future timestamps by _assign_initial_spread.
                 due_repos = self.registry.list_due_repos(limit=refresh_budget, now=now)
+
+                # Yield to serving traffic. Checked once per batch rather than
+                # per repo: the decision is pod-wide, and re-checking mid-batch
+                # would abandon a partially-submitted cycle for no benefit.
+                if due_repos and not self._refresh_admission_allowed():
+                    logger.info(
+                        "Refresh cycle deferred: pod is shedding load "
+                        "(%d repo(s) due). next_refresh left unadvanced so they "
+                        "are retried on a later poll.",
+                        len(due_repos),
+                    )
+                    due_repos = []
 
                 for repo in due_repos:
                     if not self._running:
@@ -3992,7 +4005,9 @@ class RefreshScheduler:
                         str(versioned_path), ".", timeout=git_restore_timeout
                     )
                 except subprocess.CalledProcessError as restore_exc:
-                    logger.debug(f"git restore output: {redact_url_credentials(restore_exc.stderr)}")
+                    logger.debug(
+                        f"git restore output: {redact_url_credentials(restore_exc.stderr)}"
+                    )
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git restore timed out after {git_restore_timeout} seconds"
@@ -4444,6 +4459,39 @@ class RefreshScheduler:
                 e,
             )
         return False
+
+    def _refresh_admission_allowed(self) -> bool:
+        """Should background refresh work start right now?
+
+        Consults the SAME gate user requests use (`check_query_admission`,
+        called by handlers/git_read.py, repos.py and files.py). Without this
+        the pod has a priority inversion: maintenance keeps spawning
+        `cidx index` subprocesses while the traffic it starves is rejected
+        with `memory_pressure`. Observed on a freshly rolled tools-test pod
+        sitting at 2004m of a 2000m CPU limit, answering xray_search with
+        "retry shortly" and immediately starting another re-index.
+
+        Deferring costs nothing: `next_refresh` is left unadvanced, so the
+        repo is simply picked up on a later poll once the pod is healthy.
+
+        Fails OPEN. This is a courtesy to serving traffic, not a correctness
+        barrier -- a raising governor must not be able to stop every repo in
+        the fleet from ever refreshing again.
+
+        `record_denial=False`: the governor's `query_admissions_denied` counter
+        is published in get_snapshot() and means "live callers we turned away".
+        A deferred refresh poll is not a turned-away query, and under sustained
+        pressure this loop would bump it every cycle -- making the metric report
+        a rejection storm no user ever experienced.
+        """
+        try:
+            return bool(check_query_admission(record_denial=False).allowed)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "Refresh admission check failed (%s); proceeding with refresh",
+                exc,
+            )
+            return True
 
     def _check_stale_index_metadata(self, source_path: str, alias_name: str) -> bool:
         """Detect an interrupted/stale index that has_changes() cannot see.
