@@ -176,6 +176,28 @@ def test_two_processes_over_one_store(ops: OpsEnv) -> None:
     assert other.view.destination.key == old_key  # B has not cycled
 
 
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "²",  # superscript two: str.isdigit() is True, int() refuses it
+        "٣٤",  # Arabic-Indic digits
+        "9" * 5000,  # beyond the int() conversion limit
+        str(2**63),  # past the signed 64-bit id range
+        "+5",
+        "-5",
+        " 5",
+        "5 ",
+    ],
+)
+def test_recovery_partial_refuses_every_malformed_quarantine_cursor(
+    ops: OpsEnv, cursor: str
+) -> None:
+    client, _ = ops.web(ops.users[ADMIN])
+    response = client.get(RECOVERY, params={"q_after": cursor})
+    assert response.status_code == 400, response.text[:200]
+    assert "invalid quarantine cursor" in response.text
+
+
 def test_checklist_counts_only_unlisted_failing_processes(ops: OpsEnv) -> None:
     from code_indexer.server.services.siem_delivery import state_store as ss
 

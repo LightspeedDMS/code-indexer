@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator
 
 import pytest
 
@@ -30,13 +30,12 @@ from tests.e2e.siem_delivery.siem_api import (
     wait_delivered,
 )
 from tests.e2e.siem_delivery.web_ops import (
+    DestinationRestore,
     WebSession,
     configured_key,
     halted_batch_id,
     localhost_endpoint,
-    original_state,
     quarantined_uuids,
-    restore_destination,
     strand_one_login,
     stranded_keys,
     switch_destination,
@@ -150,37 +149,38 @@ def test_requeue_and_resume_through_the_web(
 
 
 def test_abandon_a_stranded_destination_through_the_web(
-    delivery: SiemDelivery, door: FrontDoor, sidecar: AttachedSidecar, web: WebSession
+    delivery: SiemDelivery,
+    door: FrontDoor,
+    sidecar: AttachedSidecar,
+    web: WebSession,
+    destination_restore: DestinationRestore,  # inherited state, recorded first
 ) -> None:
     delivery.arm()
-    original = original_state(delivery)  # recorded BEFORE any mutation
     previous = configured_key(delivery)
-    new_key: Optional[str] = None
-    try:
-        strand_one_login(delivery, door, sidecar)
-        new_key = switch_destination(delivery, localhost_endpoint(sidecar.coords))
-        delivery.acknowledge_halted_batch()
-        dialog = text_of(web.dialog(previous))
-        assert "IRREVERSIBLE" in dialog
-        # the stranded login, plus the switch's own Web login (captured for
-        # the destination configured at that moment)
-        found = re.search(r"pending (\d+), batched 0, quarantined 0", dialog)
-        assert found and int(found.group(1)) >= 1, dialog
-        pending = int(found.group(1))
-        assert "currently queued; may grow until the action runs" in dialog.lower()
-        path = f"destinations/{previous}/abandon"
-        refused = web.act(path, {"confirm_word": "abandon"})
-        assert refused.status_code == 400
-        assert "type ABANDON to confirm" in text_of(refused.text)
-        assert previous in stranded_keys(web.recovery())
-        before = door.max_audit_id()
-        done = web.act(path, {"confirm_word": "ABANDON"})
-        assert done.status_code == 200, done.text[:300]
-        assert f"Abandoned {pending} events" in text_of(done.text)
-        assert previous not in stranded_keys(web.recovery())
-        _web_audit_row(door, "siem_destination_abandoned", before)
-        own = web.act(f"destinations/{new_key}/abandon", {"confirm_word": "ABANDON"})
-        assert own.status_code == 409
-        assert "rows already target the configured destination" in text_of(own.text)
-    finally:
-        restore_destination(delivery, original, new_key)
+    destination_restore.created.append(previous)
+    strand_one_login(delivery, door, sidecar)
+    new_key = switch_destination(delivery, localhost_endpoint(sidecar.coords))
+    destination_restore.created.append(new_key)
+    delivery.acknowledge_halted_batch()
+    dialog = text_of(web.dialog(previous))
+    assert "IRREVERSIBLE" in dialog
+    # the stranded login, plus the switch's own Web login (captured for the
+    # destination configured at that moment)
+    found = re.search(r"pending (\d+), batched 0, quarantined 0", dialog)
+    assert found and int(found.group(1)) >= 1, dialog
+    pending = int(found.group(1))
+    assert "currently queued; may grow until the action runs" in dialog.lower()
+    path = f"destinations/{previous}/abandon"
+    refused = web.act(path, {"confirm_word": "abandon"})
+    assert refused.status_code == 400
+    assert "type ABANDON to confirm" in text_of(refused.text)
+    assert previous in stranded_keys(web.recovery())
+    before = door.max_audit_id()
+    done = web.act(path, {"confirm_word": "ABANDON"})
+    assert done.status_code == 200, done.text[:300]
+    assert f"Abandoned {pending} events" in text_of(done.text)
+    assert previous not in stranded_keys(web.recovery())
+    _web_audit_row(door, "siem_destination_abandoned", before)
+    own = web.act(f"destinations/{new_key}/abandon", {"confirm_word": "ABANDON"})
+    assert own.status_code == 409
+    assert "rows already target the configured destination" in text_of(own.text)

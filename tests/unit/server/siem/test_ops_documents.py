@@ -191,7 +191,8 @@ def test_recovery_document_refuses_malformed_cursors(
     b, config, _sidecar = wired
     with pytest.raises(SiemAdminError) as exc:
         ops_documents.recovery_document(_scheduler(b, config), *cursors)
-    assert exc.value.status == 400
+    which = "quarantine" if cursors[0] else "open-batch"
+    assert (exc.value.status, exc.value.message) == (400, f"invalid {which} cursor")
 
 
 def test_destination_document_names_the_key_and_the_configured_destination(

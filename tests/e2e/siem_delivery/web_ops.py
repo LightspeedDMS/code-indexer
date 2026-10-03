@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -98,31 +100,99 @@ def switch_destination(delivery: "SiemDelivery", endpoint: str) -> str:
     return str(stats["capture"]["configured_destination_key"])
 
 
-def original_state(delivery: "SiemDelivery") -> Tuple[str, str]:
-    """(configured destination key, stored credential key id), recorded
-    BEFORE a scenario mutates either."""
+@dataclass
+class DestinationRestore:
+    """The destination state a scenario INHERITED (recorded before it runs,
+    so before its first ``arm()``) and the destination keys it created
+    (abandoned afterwards).  ``None`` means nothing was configured/stored."""
+
+    destination_key: Optional[str]
+    credential_key_id: Optional[str]
+    armed: bool
+    created: List[str] = field(default_factory=list)
+
+    def snapshot(self) -> Tuple[Optional[str], Optional[str], bool]:
+        return self.destination_key, self.credential_key_id, self.armed
+
+
+def inherited_state(delivery: "SiemDelivery") -> DestinationRestore:
+    from tests.e2e.siem_delivery.siem_api import capture_state
+
     stats = delivery.stats()
-    return (
-        str(stats["capture"]["configured_destination_key"]),
-        str((stats.get("credential") or {}).get("private_key_id")),
+    key = stats["capture"]["configured_destination_key"]
+    key_id = (stats.get("credential") or {}).get("private_key_id")
+    return DestinationRestore(
+        destination_key=None if key is None else str(key),
+        credential_key_id=None if key_id is None else str(key_id),
+        armed=capture_state(stats) == "armed",
     )
 
 
-def restore_destination(
-    delivery: "SiemDelivery",
-    original: Tuple[str, str],
-    temporary_key: Optional[str],
-) -> None:
-    """Back to the recorded destination and key (works after a half-done
-    switch), verified; then the temporary destination's rows are abandoned."""
-    _clear_destination(delivery)
-    stored = delivery.upload_credential(delivery.sidecar.key_file_path.read_bytes())
+def _restore_credential(delivery: "SiemDelivery", key_id: Optional[str]) -> None:
+    """The inherited credential: none (removed; 404 = none stored) or the
+    sidecar key FILE (its own token URI), never a pasted variant."""
+    if key_id is None:
+        removed = delivery.remove_credential()
+        assert removed.status_code in (200, 404), f"remove: {removed.status_code}"
+        return
+    key_bytes = delivery.sidecar.key_file_path.read_bytes()
+    found = json.loads(key_bytes)["private_key_id"]
+    assert found == key_id, "the inherited credential is not the sidecar key"
+    stored = delivery.upload_credential(key_bytes)
     assert stored.status_code == 200, f"credential refused: {stored.status_code}"
-    delivery.arm()
-    assert original_state(delivery) == original, "the original state was not restored"
-    if temporary_key is not None:
-        leftover = delivery.abandon(temporary_key)
-        assert leftover.status_code == 200, leftover.text
+
+
+def _restore_configured(
+    delivery: "SiemDelivery", inherited: DestinationRestore
+) -> None:
+    """The inherited destination: none (left cleared), or the sidecar's
+    default destination, armed or merely configured as it was."""
+    if inherited.destination_key is None:
+        return
+    if inherited.armed:
+        delivery.arm()
+    else:
+        delivery.configure_harness_destination()
+
+
+def _abandoned(delivery: "SiemDelivery", key: str) -> None:
+    resp = delivery.abandon(key)
+    assert resp.status_code == 200, f"abandon {key}: {resp.text[:200]}"
+
+
+def _verified(delivery: "SiemDelivery", inherited: DestinationRestore) -> None:
+    now = inherited_state(delivery).snapshot()
+    assert now == inherited.snapshot(), f"restored {now}, inherited {inherited}"
+
+
+def restore_destination(
+    delivery: "SiemDelivery", inherited: DestinationRestore
+) -> None:
+    """Back to the INHERITED destination and credential (also after a
+    half-done switch), then the scenario's own destinations are abandoned.
+
+    Every step runs in its own try (one failure never skips the others);
+    all failures are raised together at the end."""
+    steps: List[Tuple[str, Callable[[], None]]] = [
+        ("resolve the halt", delivery.resolve_halt),
+        ("clear the destination", lambda: _clear_destination(delivery)),
+        (
+            "restore the credential",
+            lambda: _restore_credential(delivery, inherited.credential_key_id),
+        ),
+        ("restore the destination", lambda: _restore_configured(delivery, inherited)),
+    ]
+    for key in dict.fromkeys(inherited.created):  # distinct, in creation order
+        if key != inherited.destination_key:
+            steps.append((f"abandon {key}", partial(_abandoned, delivery, key)))
+    steps.append(("verify", lambda: _verified(delivery, inherited)))
+    failures: List[str] = []
+    for name, step in steps:  # a fixed, finite list
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - every step runs; all reported
+            failures.append(f"{name}: {exc!r}")
+    assert not failures, "destination restore failed: " + "; ".join(failures)
 
 
 def strand_one_login(

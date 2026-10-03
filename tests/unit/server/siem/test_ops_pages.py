@@ -5,12 +5,14 @@ exactly once, and no page ever selects a batch body."""
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from code_indexer.server.services.siem_delivery import stats
 from code_indexer.server.services.siem_delivery.db import SiemTx
+from code_indexer.server.storage.json_column import parse_json_column
 
 from .backends import SiemBackendHarness
 
@@ -225,12 +227,55 @@ class _Recording(SiemTx):
 
 
 def _plan(tx: SiemTx, sql: str, params: Any) -> str:
+    """The query plan as text.  PostgreSQL runs with sequential scans
+    disabled, so this proves an index is USABLE, not that the production
+    planner picks it (that is :func:`_pg_plan_nodes`)."""
     if tx.dialect.name == "postgres":
         tx.execute("SET LOCAL enable_seqscan = off")
         rows = SiemTx.query(tx, f"EXPLAIN {sql}", params)
         return " ".join(str(v) for r in rows for v in r.values())
     rows = SiemTx.query(tx, f"EXPLAIN QUERY PLAN {sql}", params)
     return " ".join(str(r.get("detail")) for r in rows)
+
+
+# a full queue scan: SQLite (old and new detail formats, table or alias q)
+# or PostgreSQL
+_QUEUE_SCAN = re.compile(
+    r"\bSCAN (?:TABLE )?(?:siem_delivery_queue|q)\b|Seq Scan on siem_delivery_queue\b"
+)
+
+
+def _settle_statistics(b: SiemBackendHarness) -> None:
+    """Fresh statistics.  PostgreSQL also VACUUMs: autovacuum keeps a live
+    queue's visibility map set, which is what makes the planner prefer
+    index-only scans; a never-vacuumed table is not representative."""
+    if b.name == "sqlite":
+        b.raw("ANALYZE siem_delivery_queue")
+        return
+    with b.pool.connection() as conn:
+        conn.autocommit = True  # VACUUM cannot run in a transaction
+        try:
+            conn.execute("VACUUM ANALYZE siem_delivery_queue")
+        finally:
+            conn.autocommit = False
+
+
+def _pg_plan_nodes(tx: SiemTx, sql: str, params: Any) -> List[Dict[str, Any]]:
+    """Every node of the PRODUCTION planner's plan (no overrides)."""
+    row = SiemTx.query(tx, f"EXPLAIN (FORMAT JSON) {sql}", params)[0]
+    explained = parse_json_column(next(iter(row.values())), list, "plan")
+    assert explained, "EXPLAIN returned no plan"
+    stack = [explained[0]["Plan"]]
+    nodes: List[Dict[str, Any]] = []
+    while stack:  # a finite tree: each node is visited once
+        node = stack.pop()
+        nodes.append(node)
+        stack.extend(node.get("Plans", []))
+    return nodes
+
+
+def _node_label(node: Dict[str, Any]) -> str:
+    return f"{node['Node Type']} on {node.get('Relation Name')}"
 
 
 def test_stranded_page_reads_the_queue_in_one_bounded_statement(
@@ -243,24 +288,36 @@ def test_stranded_page_reads_the_queue_in_one_bounded_statement(
         _seed_queue(b, 400, dest=key)  # realistic backlog per key
     _seed_queue(b, 2, dest=keys[1], status="batched", batch_id="batch-s")
     _seed_queue(b, 1, dest=keys[2], status="quarantined")
-    b.raw("ANALYZE siem_delivery_queue")
+    _settle_statistics(b)
 
     def _page(tx: SiemTx) -> Any:
         rec = _Recording(tx)
         page = stats.stranded_page(rec, CONFIGURED, "")
         assert len(rec.seen) == 1, f"{len(rec.seen)} queue statements for one page"
-        return page, _plan(tx, *rec.seen[0])
+        return page, rec.seen[0]
 
-    page, plan = b.db.write(_page)
+    page, statement = b.db.read(_page)
     rows = {r["destination_key"]: r for r in page["rows"]}
     assert [r["pending"] for r in page["rows"]] == [400] * 5
     assert (
         rows[keys[1]]["has_batched"] is True and rows[keys[0]]["has_batched"] is False
     )
     assert rows[keys[2]]["has_quarantined"] is True
-    assert "Seq Scan on siem_delivery_queue" not in plan
+    # Per key the work is bounded by the cap: the capped probe reads the
+    # (status, destination_key, id) index IN id ORDER, so LIMIT 1 OFFSET cap
+    # stops after cap + 1 entries.  A sort would read the whole backlog first.
     if b.name == "sqlite":
-        assert "idx_siem_queue_status_dest_id" in plan, plan
+        plan = b.db.read(lambda tx: _plan(tx, *statement))
+        assert "COVERING INDEX idx_siem_queue_status_dest_id" in plan, plan
+        assert not _QUEUE_SCAN.search(plan) and "TEMP B-TREE" not in plan, plan
+        return
+    nodes = b.db.read(lambda tx: _pg_plan_nodes(tx, *statement))  # no overrides
+    assert not [n for n in nodes if _QUEUE_SCAN.search(_node_label(n))], nodes
+    probes = [n for n in nodes if n.get("Subplan Name") and n["Node Type"] == "Limit"]
+    assert len(probes) == 1, nodes  # the capped OFFSET probe
+    (under,) = probes[0]["Plans"]
+    assert under["Node Type"] in ("Index Scan", "Index Only Scan"), probes[0]
+    assert under["Index Name"] == "idx_siem_queue_status_dest_id", probes[0]
 
 
 def test_page_queries_use_the_named_indexes(siem_backend: SiemBackendHarness) -> None:
@@ -296,4 +353,4 @@ def test_page_queries_use_the_named_indexes(siem_backend: SiemBackendHarness) ->
     for indexes, plan in siem_backend.db.write(_check).items():
         accepted = indexes[:1] if sqlite else indexes  # SQLite: the exact index
         assert any(i in plan for i in accepted), (indexes, plan)
-        assert "Seq Scan" not in plan and "SCAN siem_delivery_queue " not in plan
+        assert "Seq Scan" not in plan and not _QUEUE_SCAN.search(plan), plan

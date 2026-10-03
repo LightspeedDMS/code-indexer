@@ -8,6 +8,7 @@ The actions themselves live in :mod:`admin` (shared with REST).
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from code_indexer.server.services.siem_delivery import state_store, stats
@@ -20,6 +21,17 @@ from code_indexer.server.services.siem_delivery.db import SiemTx
 from code_indexer.server.services.siem_delivery.udm import UDM_MAPPING
 
 MAX_QUEUE_ID = 2**63 - 1  # queue ids are signed 64-bit on both backends
+_CURSOR_DIGITS = re.compile(r"[0-9]{1,19}")  # ASCII only: str.isdigit() is not
+
+
+def _quarantine_cursor(q_after: str) -> int:
+    """The quarantine page cursor: '' is the first page; otherwise 1-19 ASCII
+    digits within the queue id range.  Anything else is a 400, never a 500."""
+    if not q_after:
+        return 0
+    if _CURSOR_DIGITS.fullmatch(q_after) is None or int(q_after) > MAX_QUEUE_ID:
+        raise SiemAdminError(400, "invalid quarantine cursor")
+    return int(q_after)
 
 
 def _json_list(raw: Any, field_name: str) -> List[Any]:
@@ -135,9 +147,7 @@ def recovery_document(
 ) -> Dict[str, Any]:
     """Halt, the halted batch (by primary key, never paged away), and one
     keyset page each of open batches, quarantined rows and stranded keys."""
-    if q_after and (not q_after.isdigit() or int(q_after) > MAX_QUEUE_ID):
-        raise SiemAdminError(400, "invalid quarantine cursor")
-    after_id = int(q_after or 0)
+    after_id = _quarantine_cursor(q_after)
     configured_key, config_error = _committed_key(scheduler)
     state = state_store.read_state(scheduler.db)
     halted_id = state.get("halted_batch_id")
