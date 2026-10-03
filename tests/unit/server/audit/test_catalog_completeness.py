@@ -400,6 +400,23 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /api/admin/siem-delivery/destinations/{destination_key}/abandon": (
         "siem_destination_abandoned",
     ),
+    # The same SIEM actions through the Web UI (same shared service, same types)
+    "POST /admin/siem-delivery/canary": ("siem_canary_sent",),
+    "POST /admin/siem-delivery/canary/confirm-visible": (
+        "siem_canary_visibility_confirmed",
+    ),
+    "POST /admin/siem-delivery/resume": ("siem_delivery_resumed",),
+    "POST /admin/siem-delivery/quarantine/requeue": ("siem_quarantine_requeued",),
+    "POST /admin/siem-delivery/batches/{batch_id}/acknowledge": (
+        "siem_batch_acknowledged",
+    ),
+    "POST /admin/siem-delivery/batches/{batch_id}/rebatch": ("siem_batch_rebatched",),
+    "POST /admin/siem-delivery/destinations/{destination_key}/retarget": (
+        "siem_destination_retargeted",
+    ),
+    "POST /admin/siem-delivery/destinations/{destination_key}/abandon": (
+        "siem_destination_abandoned",
+    ),
     # Server operations
     "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
     "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),

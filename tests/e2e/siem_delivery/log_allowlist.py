@@ -28,4 +28,9 @@ PHASE7_LOG_ALLOWLIST: Tuple[str, ...] = (
     "signature=401|UNAUTHENTICATED|credential|unindexed",
     "SIEM delivery quarantined 1 event(s): reason=row_rejection "
     "signature=400|INVALID_ARGUMENT|row_rejection|unindexed",
+    # test_14 submits exactly one wrong TOTP code to /auth/elevate-ajax (the
+    # Web modal's endpoint) to prove a wrong code does not elevate; the Web
+    # elevation route logs that attempt at WARNING.  A recovery-code failure,
+    # a lockout or any other elevation warning uses different text.
+    "rejected — invalid TOTP code",
 )
