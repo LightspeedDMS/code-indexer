@@ -119,18 +119,90 @@ def test_shutdown_does_not_re_derive_the_pool_size() -> None:
     )
 
 
-def test_temporal_lane_is_deliberately_not_divided() -> None:
+@pytest.mark.parametrize("workers", [1, 2, 12])
+def test_temporal_lane_is_deliberately_not_divided(tmp_path, monkeypatch, workers):
     """The isolation lane keeps its full size per process, on purpose.
 
     It defaults to 2; halving it on a 2-worker node leaves 1, and the whole
     point of the separate lane is that a saturated ordinary pool cannot starve
     temporal queries. If this ever should divide, it needs its own decision --
     not absorption into a pass about a different budget.
+
+    The first version of this asserted on ``inspect.getsource`` text:
+    ``"per_process_budget(\\n" not in src.split("temporal_lane_concurrency")[-1]``.
+    Review showed it could not fail. Written the natural multi-line way --
+    exactly like the ordinary pool directly above it --
+
+        self._temporal_pool_size = per_process_budget(
+            self._background_jobs_config.temporal_lane_concurrency,
+            detect_worker_count(),
+        )
+
+    the ``per_process_budget(`` opener sits BEFORE the last occurrence of the
+    token, so ``split(...)[-1]`` excludes it and the assertion stayed green
+    while the lane was halved. A one-line call form passed too. The MR
+    description claimed this was pinned; it was not.
     """
-    src = inspect.getsource(BackgroundJobManager.__init__)
-    assert "per_process_budget(\n" not in src.split("temporal_lane_concurrency")[-1], (
-        "temporal_lane_concurrency was divided; see this test's docstring"
+    m = _manager(
+        tmp_path,
+        workers,
+        monkeypatch,
+        max_concurrent_background_jobs=5,
+        temporal_lane_concurrency=2,
     )
+    try:
+        assert m._temporal_pool_size == 2
+    finally:
+        m.shutdown()
+
+
+def test_the_temporal_lane_really_has_its_undivided_threads(tmp_path, monkeypatch):
+    """Against the live threads, not the attribute.
+
+    Counted by thread NAME so the ordinary pool cannot stand in for the lane --
+    both register under the same ``_pool_`` key in ``_running_jobs``, which is
+    why the sibling thread-count test could not tell them apart either.
+    """
+    import threading
+
+    before = {t.name for t in threading.enumerate()}
+    m = _manager(
+        tmp_path,
+        2,
+        monkeypatch,
+        max_concurrent_background_jobs=5,
+        temporal_lane_concurrency=2,
+    )
+    try:
+        new_threads = [t for t in threading.enumerate() if t.name not in before]
+        temporal = [t for t in new_threads if t.name.startswith("bgm-temporal-worker-")]
+        ordinary = [t for t in new_threads if t.name.startswith("bgm-worker-")]
+        assert len(temporal) == 2, "the temporal lane was divided"
+        assert len(ordinary) == 2, "the ordinary pool was not divided"
+    finally:
+        m.shutdown()
+
+
+def test_shutdown_drains_the_temporal_lane_it_built(tmp_path, monkeypatch):
+    """Same sentinel symmetry as the ordinary pool, for the same reason."""
+    m = _manager(
+        tmp_path,
+        2,
+        monkeypatch,
+        max_concurrent_background_jobs=5,
+        temporal_lane_concurrency=2,
+    )
+    sentinels = []
+    real_put = m._temporal_pending_job_queue.put
+
+    def _spy(item, *a, **kw):
+        if item is None:
+            sentinels.append(item)
+        return real_put(item, *a, **kw)
+
+    monkeypatch.setattr(m._temporal_pending_job_queue, "put", _spy)
+    m.shutdown()
+    assert len(sentinels) == m._temporal_pool_size == 2
 
 
 @pytest.mark.parametrize("workers,expected", [(1, 5), (2, 2), (3, 1), (12, 1)])

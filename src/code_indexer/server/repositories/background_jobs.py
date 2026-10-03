@@ -2328,11 +2328,13 @@ class BackgroundJobManager:
         for _ in range(self._pool_size):
             self._pending_job_queue.put(None)
         # Story #1400 CRITICAL 1: separate sentinels for the separate
-        # temporal-lane queue/pool (exact per-worker count, mirroring the
-        # ordinary pool above; same config source used to size the pool at
-        # construction).
-        temporal_pool_size = self._background_jobs_config.temporal_lane_concurrency
-        for _ in range(temporal_pool_size):
+        # temporal-lane queue/pool, mirroring the ordinary pool above --
+        # including reading the size the lane was BUILT with rather than
+        # re-deriving it from config. Harmless today (the lane is not divided,
+        # so both reads agree) but it is the same drift hazard: any future
+        # change to how the lane is sized, or a live config reload, would leave
+        # some lane threads without a sentinel, blocked on get() forever.
+        for _ in range(self._temporal_pool_size):
             self._temporal_pending_job_queue.put(None)
 
         with self._lock:
