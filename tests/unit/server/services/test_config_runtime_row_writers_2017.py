@@ -205,6 +205,74 @@ def test_pg_first_boot_seed_loser_adopts_the_winning_row(
     assert node_b._db_config_version == version
 
 
+def _assert_adopted_committed_row(service: ConfigService) -> None:
+    """The cached config and version are the committed row's (one read)."""
+    version, runtime = service._read_committed_runtime()
+    assert service._db_config_version == version
+    siem = service.get_config().siem_delivery_config
+    assert siem is not None and siem.project_id == "example-x", "kept its own seed"
+    # launch_restart_generation lives only on the row (not a ServerConfig field)
+    runtime.pop("launch_restart_generation", None)
+    assert service._extract_runtime_dict(service.get_config()) == runtime
+
+
+def test_sqlite_first_boot_seed_winner_adopts_a_save_committed_meanwhile(
+    tmp_path: Path,
+) -> None:
+    """The winner inserts the seed row; a peer worker saves a setting before
+    the winner's final read.  The winner must hold the committed row, not
+    its pre-save seed with the newer version."""
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+
+    db = tmp_path / "cidx_server.db"
+    DatabaseSchema(str(db)).initialize_database()
+    winner = ConfigService(server_dir_path=str(tmp_path))
+    winner.load_config()
+    real_seed = winner._seed_runtime_row_sqlite
+
+    def _seed_then_peer_saves(runtime_dict: dict) -> bool:
+        inserted = real_seed(runtime_dict)
+        assert inserted, "the winner inserts the seed row"
+        peer = ConfigService(server_dir_path=str(tmp_path))
+        peer.load_config()
+        peer.initialize_runtime_db(str(db))
+        peer.update_settings_atomic([("siem_delivery", "project_id", "example-x")])
+        return inserted
+
+    winner._seed_runtime_row_sqlite = _seed_then_peer_saves  # type: ignore[method-assign]
+    winner.initialize_runtime_db(str(db))
+
+    _assert_adopted_committed_row(winner)
+
+
+def test_pg_first_boot_seed_winner_adopts_a_save_committed_meanwhile(
+    pg_pool: Any,  # noqa: F811  (the imported fixture; server_config emptied)
+    tmp_path: Path,
+) -> None:
+    """Node A inserts the seed row; node B boots and saves a setting before
+    A's final read.  A must hold the committed row, not its pre-save seed."""
+    dir_a, dir_b = tmp_path / "node-a", tmp_path / "node-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    node_a = ConfigService(server_dir_path=str(dir_a))
+    node_a.load_config()
+    real_seed = node_a._seed_runtime_row_pg
+
+    def _seed_then_peer_saves(runtime_dict: dict) -> bool:
+        inserted = real_seed(runtime_dict)
+        assert inserted, "node A inserts the seed row"
+        node_b = ConfigService(server_dir_path=str(dir_b))
+        node_b.load_config()
+        node_b.set_connection_pool(pg_pool)
+        node_b.update_settings_atomic([("siem_delivery", "project_id", "example-x")])
+        return inserted
+
+    node_a._seed_runtime_row_pg = _seed_then_peer_saves  # type: ignore[method-assign]
+    node_a.set_connection_pool(pg_pool)
+
+    _assert_adopted_committed_row(node_a)
+
+
 def test_runtime_row_write_sql_lives_only_in_config_runtime_row() -> None:
     """Every write of server_config goes through the compare-and-set module."""
     import re

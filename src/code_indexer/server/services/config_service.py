@@ -443,12 +443,10 @@ class ConfigService:
             self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
             runtime_dict = self._extract_runtime_dict(config)
             if runtime_dict:
-                if not self._seed_runtime_row_sqlite(runtime_dict):
-                    # another worker seeded first: use ITS committed row
-                    seeded = self._load_runtime_from_sqlite()
-                    assert seeded is not None, "seeded runtime row vanished"
-                    self._merge_runtime_config(seeded)
-                self._db_config_version, _seeded = self._read_committed_runtime()
+                # insert-only: this worker seeded, or another one did first;
+                # either way adopt the COMMITTED row (a peer may have saved)
+                self._seed_runtime_row_sqlite(runtime_dict)
+                self._adopt_committed_row()
                 self.materialize_launch_config()
                 self._strip_config_file_to_bootstrap()
                 logger.info(
@@ -3485,6 +3483,14 @@ class ConfigService:
             raise RuntimeError("no committed runtime configuration row")
         return found
 
+    def _adopt_committed_row(self, base_config: Optional[ServerConfig] = None) -> None:
+        """After a first-boot seed, won or lost (SQLite and PostgreSQL): merge
+        the committed row into this process's config and record the version
+        of that SAME read -- a peer may have saved since the insert."""
+        version, runtime = self._read_committed_runtime()
+        self._merge_runtime_config(runtime, base_config=base_config)
+        self._db_config_version = version
+
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).
 
@@ -3984,24 +3990,23 @@ class ConfigService:
                     return
         raise ConfigChangeConflict()
 
-    def _seed_runtime_to_pg(self) -> bool:
-        """Seed PG server_config table from current config (first boot);
-        True when THIS process's insert-only seed inserted the row."""
+    def _seed_runtime_to_pg(self, base_config: Optional[ServerConfig] = None) -> None:
+        """Seed PG server_config table from current config (first boot).
+
+        The seed is insert-only: this node inserted the row, or another one
+        did first.  Either way adopt the COMMITTED row and its version (one
+        read) -- another node may have saved since the insert (Bug #2017)."""
         assert self._pool is not None
         config = self.get_config()
         self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
         inserted = self._seed_runtime_row_pg(runtime_dict)
-        # Finding 4 fix: read the actual version -- the insert is a no-op
-        # when another node seeded first, so the version can be > 1.
-        version = _runtime_row.read_runtime_version_pg(self._pool)
-        assert version is not None, "server_config row must exist after seeding"
-        self._db_config_version = version
+        self._adopt_committed_row(base_config)
         logger.info(
-            "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
+            "ConfigService: runtime config seeded to PostgreSQL by %s (%d keys)",
+            "this node" if inserted else "another node",
             len(runtime_dict),
         )
-        return inserted
 
     def _load_runtime_from_pg(self, base_config: Optional[ServerConfig] = None) -> None:
         """Load runtime config from PostgreSQL and merge with bootstrap.
@@ -4013,13 +4018,8 @@ class ConfigService:
         assert self._pool is not None
         found = _runtime_row.read_runtime_pg(self._pool)
         if found is None:
-            if self._seed_runtime_to_pg():
-                if base_config is not None:
-                    self._config = base_config
-                return
-            # another node seeded first: adopt ITS row (and its version)
-            found = _runtime_row.read_runtime_pg(self._pool)
-            assert found is not None, "seeded runtime row vanished"
+            self._seed_runtime_to_pg(base_config)  # seeds, then adopts the row
+            return
         self._db_config_version, runtime_dict = found
         self._merge_runtime_config(runtime_dict, base_config=base_config)
 

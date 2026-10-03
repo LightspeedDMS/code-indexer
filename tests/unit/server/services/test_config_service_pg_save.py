@@ -17,8 +17,9 @@ from unittest.mock import MagicMock, patch
 
 
 def _make_dict_row_result(version: int) -> dict:
-    """Simulate a psycopg3 dict_row result for version column."""
-    return {"version": version}
+    """Simulate a psycopg3 dict_row result of the committed runtime row (the
+    seed adopts the whole row in one read, Bug #2017; JSONB is a dict)."""
+    return {"version": version, "config_json": {}}
 
 
 def _make_tuple_row_result(version: int) -> tuple:
