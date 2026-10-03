@@ -18,6 +18,9 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 from code_indexer.server.startup.bootstrap import _detect_repo_root
+from code_indexer.server.startup.leader_gate import (
+    await_sweep_leadership as _await_sweep_leadership,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
@@ -2706,6 +2709,20 @@ def make_lifespan(
 
             async def _run_orphan_sweep() -> None:
                 try:
+                    # Fleet-wide, not per-node: this sweep deletes activated-repo trash directories on the shared NFS
+                    # mount, cap 100 per startup. Twelve processes racing the same cap
+                    # means twelve concurrent unlink storms over a `hard` NFSv3 mount,
+                    # and each one re-reads a directory another is deleting from.
+                    #
+                    # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                    # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                    # Gate it to the elected leader; see startup/leader_gate.py for why
+                    # the gate waits rather than checking once, and why it fails open.
+                    if not await _await_sweep_leadership(
+                        app.state,
+                        sweep_name="Story #1032 AC8 orphan trash sweep",
+                    ):
+                        return
                     import anyio.to_thread as _to_thread
 
                     _swept = await _to_thread.run_sync(
@@ -3193,6 +3210,19 @@ def make_lifespan(
 
                 async def _run_golden_repo_reconcile_sweep() -> None:
                     try:
+                        # Fleet-wide, not per-node: this sweep submits removal jobs and triggers stale-index refreshes. Run
+                        # twelve times it submits each removal twelve times and can kick
+                        # off twelve refreshes of the same ~900-repo set.
+                        #
+                        # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                        # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                        # Gate it to the elected leader; see startup/leader_gate.py for why
+                        # the gate waits rather than checking once, and why it fails open.
+                        if not await _await_sweep_leadership(
+                            app.state,
+                            sweep_name="Bug #1317/GAP-4 golden-repo registry reconcile",
+                        ):
+                            return
                         import anyio.to_thread as _to_thread
                         from code_indexer.server.services.golden_repo_reconciler import (
                             reconcile_golden_repo_registry,
@@ -3281,6 +3311,21 @@ def make_lifespan(
                 # _vsr_result -- same rationale as that sibling.
                 async def _run_vsr_sweep() -> None:
                     try:
+                        # Fleet-wide, not per-node: this sweep deletes `.versioned` snapshots -- 229 of them for a single repo,
+                        # ~120GB, confirmed live. Its safety checks (age floor, keep-last-N,
+                        # pointer protection) all read the filesystem and then act on it, so
+                        # twelve concurrent sweeps is a TOCTOU race over which snapshots are
+                        # keepers. This one is why the gate exists.
+                        #
+                        # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                        # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                        # Gate it to the elected leader; see startup/leader_gate.py for why
+                        # the gate waits rather than checking once, and why it fails open.
+                        if not await _await_sweep_leadership(
+                            app.state,
+                            sweep_name="Bug #1567 versioned-snapshot orphan sweep",
+                        ):
+                            return
                         import anyio.to_thread as _to_thread
                         from code_indexer.server.services.versioned_snapshot_reconciler import (
                             reconcile_versioned_snapshots,
@@ -3333,6 +3378,19 @@ def make_lifespan(
             # only ever logged.
             async def _run_legacy_lease_sweep() -> None:
                 try:
+                    # Fleet-wide, not per-node: this sweep deletes expired lease files. Twelve sweepers racing over the same
+                    # lease directory means stat-then-unlink on entries another has
+                    # already removed, which is the error path, not the happy one.
+                    #
+                    # The lifespan runs once per uvicorn WORKER PROCESS, so on the
+                    # tools-* cluster this closure is created 12x (6 pods x 2 workers).
+                    # Gate it to the elected leader; see startup/leader_gate.py for why
+                    # the gate waits rather than checking once, and why it fails open.
+                    if not await _await_sweep_leadership(
+                        app.state,
+                        sweep_name="Bug #1871 legacy snapshot-reader-lease sweep",
+                    ):
+                        return
                     import anyio.to_thread as _to_thread
                     from code_indexer.global_repos.snapshot_reader_lease import (
                         _legacy_lease_directory,

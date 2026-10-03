@@ -24,31 +24,21 @@ from typing import Any, Callable, Dict, Optional
 import os
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.startup.leader_gate import (
+    resolve_sweep_leader as _resolve_sweep_leader,
+)
 
 from .sweep import run_fts_backfill_cycle
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_sweep_leader(app_state: Any) -> bool:
-    """Whether THIS node should run the FTS backfill sweep, from ``app.state``.
-
-    The composition root wires ``leader_check=lambda: resolve_sweep_leader(app.state)``.
-    Extracted as a pure, duck-typed function (reads only two attributes) so the exact
-    production wiring — not just an injected fake — is unit-tested:
-
-    * hold (``False``) until leader-election wiring is ready — reuses the EVO-66188
-      ``scip_reconcile_leader_gate_ready`` startup gate the SCIP reconcile also waits on
-      (it is set to its final value before this scheduler starts and flips ``True`` once
-      ``leader_election`` is populated, so there is no startup race);
-    * once ready, defer to the elected leader (``leader_election.is_leader``);
-    * single-node / sqlite has no election (``leader_election`` stays ``None``) -> always
-      leader, so the sweep runs exactly as before.
-    """
-    if not getattr(app_state, "scip_reconcile_leader_gate_ready", True):
-        return False
-    leader_election = getattr(app_state, "leader_election", None)
-    return leader_election is None or leader_election.is_leader
+# EVO-66188 / background-work audit: the leader predicate moved to
+# ``server/startup/leader_gate.py`` so the startup sweeps could share it instead
+# of growing a fifth copy. Re-exported here unchanged -- this is still the module
+# that wires ``leader_check=lambda: resolve_sweep_leader(app.state)``, and its
+# existing importers (and their tests) should not have to care that it moved.
+resolve_sweep_leader = _resolve_sweep_leader
 
 
 # Granularity of the sleep loop: check the stop event this often (seconds) so

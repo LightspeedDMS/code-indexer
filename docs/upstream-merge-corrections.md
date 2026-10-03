@@ -66,6 +66,19 @@ ways to build a string", enumerate those, in a test.
 **Rule:** state what a check *proves*, not what it is named after. If the proof is
 "X equals X", there is no check.
 
+- **A mutation harness that restored nothing.** The harness applied each mutation,
+  ran the tests, then "reverted" with `git checkout -- src/`. The module under
+  test was **new and untracked**, so that command silently did nothing for it --
+  `git checkout` has no opinion about files git has never seen, and exits 0. Three
+  mutations stacked up in the file, later runs were scored against a tree that was
+  already broken, and the final *unmutated* baseline printed `12 failed` while
+  being reported as the clean reference. Rewritten to snapshot by `shutil.copy2`
+  and restore from that copy, with the baseline re-run and printed at the end so a
+  contaminated tree cannot pass unnoticed.
+
+**Rule:** a harness that cleans up after itself must prove it did. Re-run the
+baseline *last* and assert it still passes -- restoring is a step that can fail.
+
 ### Testing something adjacent to what ships
 
 Three errors in one hour, one family. Each time the thing under test differed
@@ -128,6 +141,21 @@ must stay quiet.
   ~30 xray-binary-gated tests had **never executed in CI**, because both test jobs
   run an image with neither Postgres nor cargo. They skipped silently through the
   release that shipped xray with no binary at all.
+- **`git checkout <branch> -- .` was used to "get the fix back".** It overwrote the
+  working tree from another branch, silently reverting the source change that was
+  the entire point of the commit. The commit that followed bundled a file belonging
+  to a different MR, included two tests, and **omitted the one source file it was
+  named after** -- a commit that claimed a fix it did not contain, pushed to a
+  shared remote. Recovered from a scratchpad copy; the branch was force-pushed
+  with the correct two-file commit and the overwrite disclosed rather than quietly
+  replaced. `git checkout <tree-ish> -- .` with a bare `.` is never the right
+  recovery: name the paths.
+- **Ran `black` on a repo whose pre-commit runs `ruff-format`.** It reformatted
+  **1,889 files** before being killed, burying a 2-file change. The formatter a
+  repo uses is in `.pre-commit-config.yaml`; `black` merely being installed (it is
+  a transitive dev dependency here) is not evidence that it is the one. Also: never
+  point a whole-tree formatter at a tree mid-change -- scope it to the files
+  touched, where a stray reformat is visible in the diff.
 
 ## 7. The one thing that worked, and why
 
