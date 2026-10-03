@@ -130,19 +130,30 @@ _FAKE_POSTGRES_DSN = (
 
 @contextlib.contextmanager
 def _app_state_storage_mode(value):
-    from code_indexer.server import app as app_module
+    """A running server app with ``state.storage_mode == value``, placed in
+    ``sys.modules['code_indexer.server.app'].__dict__['app']`` (where the
+    real probe reads it), restored afterwards.
 
+    A lightweight real FastAPI app with a real starlette ``State`` -- NOT the
+    module's lazy ``app`` singleton: touching ``app_module.app`` runs the
+    whole ``create_app()`` (DB schema, migrations, admin seeding: ~6 s, a
+    15 s gate timeout risk under load), which these tests do not need."""
+    from fastapi import FastAPI
+
+    from code_indexer.server import app as app_module  # never builds the app
+
+    server_app = FastAPI()
+    server_app.state.storage_mode = value
     _unset = object()
-    saved = getattr(app_module.app.state, "storage_mode", _unset)
+    saved = app_module.__dict__.get("app", _unset)
+    app_module.__dict__["app"] = server_app
     try:
-        app_module.app.state.storage_mode = value
         yield
     finally:
         if saved is _unset:
-            if hasattr(app_module.app.state, "storage_mode"):
-                delattr(app_module.app.state, "storage_mode")
+            del app_module.__dict__["app"]
         else:
-            app_module.app.state.storage_mode = saved
+            app_module.__dict__["app"] = saved
 
 
 class TestUndeterminedStorageModeFailsLoud:
