@@ -50,6 +50,13 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tu
 
 from code_indexer.utils.path_confinement import is_resolved_within_root
 
+from code_indexer.utils.worker_budget import (
+    detect_worker_count,
+    per_process_budget,
+    read_applied_worker_count,
+    read_config_json_workers,
+)
+
 logger = logging.getLogger(__name__)
 
 # Sanitize server-internal paths out of error messages so they are never
@@ -115,116 +122,39 @@ _XRAY_COMPILE_BUDGET_PER_NODE = 4
 # process list.
 _MAX_CONCURRENT_COMPILES_ENV = "CIDX_XRAY_MAX_CONCURRENT_COMPILES"
 
-# Candidate locations of the server config file, in priority order. The
-# cluster's initContainer seeds $CIDX_SERVER_DATA_DIR/config.json from the
-# ConfigMap; the VM deployment uses ~/.cidx-server/config.json.
-_CONFIG_JSON_DIR_ENVS = ("CIDX_SERVER_DATA_DIR", _XRAY_CACHE_DIR_ENV)
-_CONFIG_JSON_NAME = "config.json"
-
-
-def _coerce_worker_count(value: Any) -> Optional[int]:
-    """Return `value` as a worker count, or None if it is not usable.
-
-    `bool` is rejected explicitly: it is an `int` subclass, and True would
-    otherwise silently resolve to "1 worker".
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if value >= 1 else None
+# Extra config.json location to search, on top of the shared helper's
+# $CIDX_SERVER_DATA_DIR and ~/.cidx-server: xray's own cache dir, which the
+# solo/CLI path sets when the server data dir is not in the environment.
+_CONFIG_JSON_EXTRA_DIR_ENVS = (_XRAY_CACHE_DIR_ENV,)
 
 
 def _read_config_json_workers() -> Optional[int]:
-    """Read `workers` from the server config file, or None.
-
-    This is the rung that works inside a Kubernetes pod. The repo's existing
-    resolver (`get_applied_worker_count`, read below) reads the live systemd
-    ExecStart and then applied_launch.json -- a pod has neither, so on the
-    cluster it always answers 1 and divides nothing. The pod does have the
-    ConfigMap-seeded config.json, whose "workers" the overlay requires to
-    stay in lockstep with the `--workers` it passes in the container args,
-    which makes it an accurate reading of the running process there.
-
-    Never raises: a missing, unreadable or malformed file is "unknown", and
-    this runs at module import.
-    """
-    import os  # noqa: PLC0415 - stdlib, lazy import to keep startup clean
-
-    candidates = []
-    for env_name in _CONFIG_JSON_DIR_ENVS:
-        raw = os.environ.get(env_name, "").strip()
-        if raw:
-            candidates.append(Path(raw).expanduser())
-    candidates.append(Path.home() / _CIDX_SERVER_DIR_NAME)
-
-    for directory in candidates:
-        path = directory / _CONFIG_JSON_NAME
-        try:
-            if not path.is_file():
-                continue
-            workers = _coerce_worker_count(json.loads(path.read_text()).get("workers"))
-        except Exception as exc:  # unreadable/malformed -> unknown, not fatal
-            logger.debug("RustNativeBackend: could not read %s: %s", path, exc)
-            continue
-        if workers is not None:
-            return workers
-    return None
+    """xray's view of ``workers`` in config.json (adds the xray cache dir)."""
+    return read_config_json_workers(extra_dir_envs=_CONFIG_JSON_EXTRA_DIR_ENVS)
 
 
 def _read_applied_worker_count() -> Optional[int]:
-    """Read the APPLIED worker count via the repo's existing resolver.
-
-    Lazily imported: this module is used by the CLI/solo xray path too and
-    must never eagerly pull in server-layer modules.
-
-    Returns None only when the resolver is unavailable or raises. It cannot
-    distinguish "no source found" from "this node really runs one worker" --
-    the resolver collapses both to 1 -- which is why `_detect_worker_count`
-    takes the MAX across sources rather than the first answer: a 1 from here
-    must never out-vote a config.json that says 2.
-    """
-    try:
-        from code_indexer.server.services.applied_worker_count import (  # noqa: PLC0415,E501
-            get_applied_worker_count,
-        )
-
-        return _coerce_worker_count(int(get_applied_worker_count()))
-    except Exception as exc:
-        logger.debug("RustNativeBackend: applied worker count unavailable: %s", exc)
-        return None
+    """The applied (systemd/launch-json) worker count, or None."""
+    return read_applied_worker_count()
 
 
 def _detect_worker_count() -> int:
-    """Number of uvicorn worker processes sharing this node's compile budget.
+    """Worker processes sharing this node's compile budget.
 
-    Takes the LARGER of the two sources when they disagree. They can:
-    config.json is the TARGET an admin saved, the applied resolver is what
-    the running unit was launched with, and a restart may not have happened
-    yet. The larger count yields the smaller per-process bound, which is the
-    only direction that cannot exceed the node's CPU and memory -- the cost
-    of guessing high is a queued compile, the cost of guessing low is the
-    oversubscription this fix exists to remove.
-
-    Defaults to 1 (no division, unchanged behaviour) and never raises.
+    Passes the two module-level readers above as the sources rather than letting
+    the shared helper use its defaults, so the lookup happens through THIS
+    module's globals -- which is what keeps the xray-specific config.json
+    location in play, and what keeps these two substitutable in tests.
     """
-    counts = []
-    for source in (_read_applied_worker_count, _read_config_json_workers):
-        try:
-            value = source()
-        except Exception as exc:  # a worker-count lookup must never break import
-            logger.debug("RustNativeBackend: worker-count source failed: %s", exc)
-            continue
-        if value is not None:
-            counts.append(value)
-    return max(counts) if counts else 1
+    return detect_worker_count(
+        sources=(_read_applied_worker_count, _read_config_json_workers)
+    )
 
 
-def _per_process_compile_limit(budget: int, workers: int) -> int:
-    """Split a node-wide compile budget across `workers` processes.
-
-    Floored at 1: a bound of 0 would make every xray query on the node wait
-    out its deadline for a slot that can never free.
-    """
-    return max(1, budget // max(1, workers))
+# Node budget / worker count, floored at 1. Named for its original caller; the
+# implementation is shared with the background-job pools now (see
+# code_indexer/utils/worker_budget.py and docs/background-work-distribution.md).
+_per_process_compile_limit = per_process_budget
 
 
 def _resolve_max_concurrent_compiles() -> int:
@@ -1664,9 +1594,9 @@ class RustNativeBackend:
 
         Early-returns when BOTH .so and .meta already exist for the identity.
         """
-        assert (
-            self._xray_cache is not None
-        ), "_try_pre_fill requires non-None _xray_cache"
+        assert self._xray_cache is not None, (
+            "_try_pre_fill requires non-None _xray_cache"
+        )
         try:
             info = self._get_cache_identity_info(
                 rust_code, deadline_seconds=deadline_seconds, graph_mode=graph_mode

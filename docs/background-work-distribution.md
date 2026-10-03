@@ -93,6 +93,60 @@ fail-closed would invent a new way for a fleet to quietly stop healing itself.
 `leader_election is None` means "leader" and `await_sweep_leadership` returns on
 the first check without sleeping.
 
+## R4: a node budget divides by the worker count
+
+A limit written once in config is applied once **per worker process**. `5`
+concurrent background jobs is 10 threads on a 2-worker pod and 60 across the
+StatefulSet. `code_indexer/utils/worker_budget.py` does the arithmetic:
+
+```python
+from code_indexer.utils.worker_budget import detect_worker_count, per_process_budget
+
+self._pool_size = per_process_budget(config.max_concurrent_background_jobs,
+                                     detect_worker_count())
+```
+
+Three rules that are easy to get wrong:
+
+- **Divide at the point of use, never in config.** The stored value is the node
+  target an admin set and the Web UI reads back. Dividing it in `__post_init__`
+  would show them 2 after they typed 5.
+- **Store the result if two places need it.** `BackgroundJobManager` sizes its
+  pool in `__init__` and drains it in `shutdown()` by sending one sentinel per
+  worker. If those two ever disagree about the count, the surplus threads block
+  on `get()` forever and the process does not exit. A test asserts `shutdown()`
+  reads `self._pool_size` rather than recomputing.
+- **Divide the limit, not the remainder.** `budget - active` divided by workers
+  hands a process whose share is already full a budget of 1, leaking a slot every
+  cycle.
+
+Worker count is detected from two sources, larger wins: `get_applied_worker_count()`
+(systemd/launch-json -- answers 1 in a pod, where it matters most) and `workers`
+in the ConfigMap-seeded `config.json`. Unknown means **1**, i.e. no division and
+today's behaviour. Nothing in that module raises; it runs at import in xray.
+
+### Divided today
+
+| Budget | Where |
+|---|---|
+| `_XRAY_COMPILE_BUDGET_PER_NODE` | `xray/rust_backend.py` (the original) |
+| `max_concurrent_background_jobs` | `BackgroundJobManager.__init__` |
+| `max_concurrent_refresh_jobs` | `RefreshScheduler._get_refresh_budget` |
+
+### Not divided, on purpose
+
+A constant that is not divided carries a comment saying why. Today:
+
+- **`temporal_lane_concurrency`** (2) -- latency isolation, not a resource
+  budget. Halving it on a 2-worker node leaves 1, defeating the separate lane's
+  entire purpose. Pinned by a test.
+- **`xray_max_concurrent_jobs`** (20) -- a job-slot ceiling in front of a gate
+  that already divides. An xray job's real cost is the rustc compile, bounded
+  per-process by `_MAX_CONCURRENT_COMPILES`.
+- **`subprocess_max_workers`** (8) -- request burst capacity for short read-only
+  ripgrep spawns, not a standing reservation. Two worker processes are not both
+  bursting on the same query.
+
 ## Gating is not the same as acting on the gate
 
 `ScheduledCatchupService` registered a job with `register_job` (no conflict

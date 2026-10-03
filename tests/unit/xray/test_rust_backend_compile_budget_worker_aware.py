@@ -94,6 +94,39 @@ def test_worker_count_is_read_from_the_cluster_config_json(
     assert rust_backend._read_config_json_workers() == 2
 
 
+def test_the_xray_cache_dir_is_searched_when_the_server_dir_is_absent(
+    tmp_path, monkeypatch
+) -> None:
+    """$CIDX_DATA_DIR is xray's OWN config.json location, not the shared one.
+
+    Every other test here deletes CIDX_DATA_DIR to isolate the cluster path, so
+    this rung was never positively exercised -- and when the resolver moved to
+    the shared code_indexer/utils/worker_budget.py it became a parameter xray
+    passes rather than a constant the function owns. Dropping that argument is a
+    silent one-line regression on the solo/CLI path, so it gets a test: a
+    mutation removing it survived every other test in the suite.
+    """
+    monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
+    (tmp_path / "config.json").write_text(json.dumps({"workers": 3}))
+    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path))
+
+    assert rust_backend._read_config_json_workers() == 3
+
+
+def test_the_server_data_dir_outranks_the_xray_cache_dir(tmp_path, monkeypatch) -> None:
+    """Order matters: the ConfigMap-seeded file is the authority in a pod."""
+    server_dir = tmp_path / "server"
+    xray_dir = tmp_path / "xray"
+    server_dir.mkdir()
+    xray_dir.mkdir()
+    (server_dir / "config.json").write_text(json.dumps({"workers": 2}))
+    (xray_dir / "config.json").write_text(json.dumps({"workers": 8}))
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(server_dir))
+    monkeypatch.setenv("CIDX_DATA_DIR", str(xray_dir))
+
+    assert rust_backend._read_config_json_workers() == 2
+
+
 def test_worker_count_falls_back_to_one_when_nothing_declares_it(
     tmp_path, monkeypatch
 ) -> None:

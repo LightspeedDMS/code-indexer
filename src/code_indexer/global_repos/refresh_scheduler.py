@@ -90,6 +90,11 @@ if TYPE_CHECKING:
         VersionedSnapshotManager,
     )
 
+from code_indexer.utils.worker_budget import (
+    detect_worker_count,
+    per_process_budget,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -908,6 +913,16 @@ class RefreshScheduler:
             "max_concurrent_refresh_jobs",
             max(1, self.background_job_manager.max_concurrent_jobs // 2),
         )
+        # R4 (docs/background-work-distribution.md): this loop runs once per
+        # uvicorn worker PROCESS, so the configured limit was submitted that many
+        # times over -- 2x per pod, 12x across the tools-* StatefulSet. Refreshes
+        # are the heaviest thing the server does on the NFS mount, which is what
+        # made the oversubscription visible as memory pressure.
+        #
+        # The LIMIT is divided, not the remainder: subtracting active jobs first
+        # would leave a process with its share already full holding a budget of
+        # 1, leaking one slot per cycle forever.
+        refresh_limit = per_process_budget(int(refresh_limit), detect_worker_count())
         active = self._count_active_refresh_jobs()
         return int(max(0, refresh_limit - active))
 
