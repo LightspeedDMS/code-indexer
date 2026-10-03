@@ -170,3 +170,43 @@ def test_ownership_lost_before_restore_restores_nothing(
     ), repr(raised.value)
     assert sha256_of(harness.source_db) == corrupt_sha
     assert not quick_check_ok(harness.source_db)
+
+
+class _AllowFirstRestoreOnly:
+    """A ``before_restore`` check that allows the chunks.db copy and refuses
+    the next one (the sibling metadata copy), as when the write lock is
+    lost between the two copies."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError("write lock lost between the two restore copies")
+
+
+def test_veto_at_metadata_copy_propagates_and_keeps_source_metadata(
+    tmp_path: Path, metadata: Any
+) -> None:
+    from code_indexer.global_repos.refresh_integrity_gate import RestoreVetoedError
+    from tests.utils.fatal_chunk_store_fixtures import read_metadata_marker
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    assert harness.snapshot is not None
+    corrupt_btree_pages(harness.source_db)
+    veto = _AllowFirstRestoreOnly()
+
+    with pytest.raises(RestoreVetoedError):
+        run_refresh_integrity_gate(
+            source_index_dir=_index_dir(harness.source),
+            healthy_index_dir=_index_dir(harness.snapshot),
+            clone_backend=LocalCloneBackend(),
+            before_restore=veto,
+        )
+
+    assert veto.calls == 2, "metadata copy not re-checked"
+    assert quick_check_ok(harness.source_db), "the allowed chunks.db copy ran"
+    assert read_metadata_marker(harness.source) == "source-new", (
+        "metadata restored after the veto"
+    )

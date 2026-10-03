@@ -807,6 +807,13 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SSH_KEYS_TABLE)
             conn.execute(self.CREATE_SSH_KEY_HOSTS_TABLE)
             conn.execute(self.CREATE_GOLDEN_REPOS_METADATA_TABLE)
+            # Bug #2022: GoldenRepoMetadataSqliteBackend.remove_repo also
+            # deletes from this table; same DDL as ensure_table_exists().
+            from code_indexer.server.storage.sqlite_backends._refresh_failure_backoff_mixin import (
+                create_refresh_failure_backoff_table,
+            )
+
+            create_refresh_failure_backoff_table(conn)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)

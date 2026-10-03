@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from .connection_pool import ConnectionPool
@@ -72,19 +72,26 @@ class _RefreshFailureBackoffPostgresMixin:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT golden_alias, consecutive_failure_count, last_detail, "
-                    "last_failed_at FROM refresh_failure_backoff_state "
+                    f"SELECT {self._STATE_COLUMNS} FROM refresh_failure_backoff_state "
                     "WHERE golden_alias = %s",
                     (golden_alias,),
                 )
                 row = cur.fetchone()
-        if row is None:
-            return None
+        return None if row is None else self._state_from_row(row)
+
+    _STATE_COLUMNS = (
+        "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
+        "pending_trigger"
+    )
+
+    @staticmethod
+    def _state_from_row(row: Any) -> Dict[str, Any]:
         return {
             "golden_alias": row[0],
             "consecutive_failure_count": int(row[1]),
             "last_detail": row[2],
             "last_failed_at": float(row[3]),
+            "pending_trigger": bool(row[4]),
         }
 
     def reset_refresh_failure_backoff(self, golden_alias: str) -> None:
@@ -99,3 +106,46 @@ class _RefreshFailureBackoffPostgresMixin:
                     (golden_alias,),
                 )
             conn.commit()
+
+    def mark_refresh_trigger_pending(self, golden_alias: str) -> None:
+        """Remember a system refresh trigger deferred by the backoff, so it
+        fires once the backoff ends (migration 059). A no-op when no backoff
+        is recorded."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE refresh_failure_backoff_state SET pending_trigger = TRUE "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+            conn.commit()
+
+    def list_pending_refresh_triggers(self) -> List[Dict[str, Any]]:
+        """Backoff states that carry a deferred trigger (only failing
+        aliases, never the whole fleet)."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._STATE_COLUMNS} FROM refresh_failure_backoff_state "
+                    "WHERE pending_trigger ORDER BY golden_alias"
+                )
+                rows = cur.fetchall()
+        return [self._state_from_row(row) for row in rows]
+
+    def claim_pending_refresh_trigger(self, golden_alias: str) -> bool:
+        """Atomically take the deferred trigger; True for exactly one caller
+        across the cluster (single conditional UPDATE)."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE refresh_failure_backoff_state SET pending_trigger = FALSE "
+                    "WHERE golden_alias = %s AND pending_trigger",
+                    (golden_alias,),
+                )
+                claimed = bool(cur.rowcount == 1)
+            conn.commit()
+        return claimed

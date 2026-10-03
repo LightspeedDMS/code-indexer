@@ -167,6 +167,9 @@ class CidxMetaRefreshDebouncer:
         after another debounce interval.  Any other exception is logged and
         swallowed (non-blocking).
         """
+        from code_indexer.global_repos.refresh_failure_recovery import (
+            RefreshDeferredError,
+        )
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
         with self._lock:
@@ -180,6 +183,16 @@ class CidxMetaRefreshDebouncer:
             self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
             logger.info("Debounced cidx-meta refresh triggered successfully")
             # Success — NOW clear dirty
+            with self._lock:
+                self._dirty = False
+        except RefreshDeferredError as exc:
+            # Bug #2022: the trigger was persisted as pending; the refresh
+            # scheduler fires it once the backoff ends -- no retry spin here.
+            logger.info(
+                f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
+                f"persisted failure backoff; the refresh scheduler fires it "
+                f"once the backoff ends"
+            )
             with self._lock:
                 self._dirty = False
         except DuplicateJobError:
@@ -273,14 +286,23 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
 
 
 def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
-    """Trigger a cidx-meta refresh for a writer. A DuplicateJobError -- a
-    refresh already running, or one deferred by the Bug #2022 failure
-    backoff -- is handed to the debouncer, which retries later; it is never
-    dropped and never escapes into the writer."""
+    """Trigger a cidx-meta refresh for a writer; never drops it and never
+    raises into the writer. A refresh already running is handed to the
+    debouncer, which retries later. A refresh deferred by the Bug #2022
+    failure backoff was persisted as a pending trigger, which the refresh
+    scheduler fires once the backoff ends."""
+    from code_indexer.global_repos.refresh_failure_recovery import (
+        RefreshDeferredError,
+    )
     from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
     try:
         refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+    except RefreshDeferredError as exc:
+        logger.info(
+            f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
+            f"persisted failure backoff; the refresh scheduler fires it then"
+        )
     except DuplicateJobError as exc:
         if _debouncer is None:
             logger.warning(f"cidx-meta refresh not retried (no debouncer): {exc}")

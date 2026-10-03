@@ -130,6 +130,14 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Durable marker for a system trigger deferred by that backoff; the
+    # scheduler claims it atomically once the backoff ends.
+    def mark_refresh_trigger_pending(self, golden_alias: str) -> None: ...
+
+    def list_pending_refresh_triggers(self) -> List[Dict[str, Any]]: ...
+
+    def claim_pending_refresh_trigger(self, golden_alias: str) -> bool: ...
+
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's
     # _repair_uninitialized_local_repo()).

@@ -838,8 +838,8 @@ class RefreshScheduler:
     # _handle_fetch_error): re-cloning an inaccessible/nonexistent repo
     # cannot possibly succeed and would only waste a subprocess + network
     # round trip.
-    PERMANENT_BACKOFF_BASE_SECONDS: int = 300  # 5 minutes
-    PERMANENT_BACKOFF_CAP_SECONDS: int = 21600  # 6 hours
+    PERMANENT_BACKOFF_BASE_SECONDS = failure_recovery.FAILURE_BACKOFF_BASE_SECONDS
+    PERMANENT_BACKOFF_CAP_SECONDS = failure_recovery.FAILURE_BACKOFF_CAP_SECONDS
 
     # ------------------------------------------------------------------
     # Story #284: Back-propagating jitter for staggered refresh scheduling
@@ -982,16 +982,7 @@ class RefreshScheduler:
         (returns None) -- out of scope for #1341.
         """
         if category == "permanent":
-            exponent = max(0, consecutive_failures - 1)
-            # int ** int is typed Any in typeshed (negative exponents yield
-            # float) -- exponent is always >= 0 here, so int(...) is safe
-            # and satisfies the declared Optional[int] return type.
-            return int(
-                min(
-                    self.PERMANENT_BACKOFF_BASE_SECONDS * (2**exponent),
-                    self.PERMANENT_BACKOFF_CAP_SECONDS,
-                )
-            )
+            return failure_recovery.failure_backoff_seconds(consecutive_failures)
 
         if (
             category == "transient"
@@ -1889,15 +1880,10 @@ class RefreshScheduler:
                     # retry on the very next poll.
                     _submit_failed = False
                     try:
-                        # Bug #2022: a due alias inside its persisted failure
-                        # backoff is deferred via next_refresh, not submitted.
-                        _backoff_until = failure_recovery.active_backoff_until(
-                            self.golden_repo_metadata, alias_name
-                        )
-                        if _backoff_until is not None:
-                            self.registry.update_next_refresh(
-                                alias_name, _backoff_until
-                            )
+                        # Bug #2022: a backed-off alias is deferred via next_refresh.
+                        if failure_recovery.defer_due_alias(
+                            self.golden_repo_metadata, self.registry, alias_name
+                        ):
                             continue
                         self._submit_refresh_job(alias_name)
                         self._db_throttle.on_db_success(logger)
@@ -1938,6 +1924,9 @@ class RefreshScheduler:
                                 f"Failed to persist next_refresh for {alias_name}: {e}"
                             )
 
+                failure_recovery.fire_expired_deferred_triggers(
+                    self.golden_repo_metadata, self._submit_refresh_job
+                )
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0
 
@@ -2283,6 +2272,10 @@ class RefreshScheduler:
                     # Initialized here so _check_extension_drift can set it before
                     # any early-return exit in the local/git branching below.
                     force_reconcile = False
+                    # Bug #2022: an unresolved failure re-gates, never "no changes".
+                    regate = failure_recovery.has_unresolved_outcome(
+                        self.golden_repo_metadata, alias_name
+                    )
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -2475,7 +2468,7 @@ class RefreshScheduler:
                                     master_path, _branch
                                 ).sync()
 
-                                if _sync_result.skipped and not force_reset:
+                                if _sync_result.skipped and not (force_reset or regate):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
                                         "skipping refresh",
@@ -2504,7 +2497,7 @@ class RefreshScheduler:
                                 force_reconcile = self._check_extension_drift(
                                     source_path, alias_name
                                 )
-                                if not force_reconcile:
+                                if not (force_reconcile or regate):
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
@@ -2591,7 +2584,7 @@ class RefreshScheduler:
                             # state left to check. Mirrors the post-migration
                             # block's identical call above.
                             sync_result = CidxMetaBackupSync(master_path, branch).sync()
-                            if sync_result.skipped and not force_reset:
+                            if sync_result.skipped and not (force_reset or regate):
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
                                     alias_name,
@@ -2769,7 +2762,7 @@ class RefreshScheduler:
                                                     source_path, alias_name
                                                 )
                                             )
-                                        if not force_reconcile:
+                                        if not (force_reconcile or regate):
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
@@ -2862,11 +2855,7 @@ class RefreshScheduler:
                                 source_path=source_path,
                                 current_target=current_target,
                                 error=fatal_exc,
-                                verify_ownership=partial(
-                                    self.raise_if_write_lock_ownership_lost,
-                                    repo_name,
-                                    owner_name="refresh_scheduler",
-                                ),
+                                verify_ownership=self._ownership_check(repo_name),
                             )
                             raise
 
@@ -3219,6 +3208,14 @@ class RefreshScheduler:
             "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
         }
 
+    def _ownership_check(self, repo_name: str) -> Callable[[], None]:
+        """Raises when this refresh no longer owns *repo_name*'s write lock."""
+        return partial(
+            self.raise_if_write_lock_ownership_lost,
+            repo_name,
+            owner_name="refresh_scheduler",
+        )
+
     def _run_and_publish_integrity_gate(
         self,
         alias_name: str,
@@ -3242,10 +3239,13 @@ class RefreshScheduler:
         raised ``RuntimeError`` for ``_create_new_index``).
         """
         gate_result = failure_recovery.run_integrity_gate_against_published(
-            self._snapshot_manager, source_path, current_target
+            self._snapshot_manager,
+            source_path,
+            current_target,
+            before_restore=self._ownership_check(alias_name.removesuffix("-global")),
         )
         if not gate_result.passed:
-            failure_recovery.record_integrity_strike(
+            failure_recovery.record_publish_gate_failure(
                 self.golden_repo_metadata, alias_name, gate_result
             )
             return gate_result

@@ -56,12 +56,18 @@ def unreadable_repo(tmp_path: Path) -> Iterator[Path]:
         chunks_db.chmod(0o644)
 
 
+def _normalised(text: str) -> str:
+    """Collapse whitespace: Rich wraps long stderr lines, possibly inside the
+    phrase a test looks for."""
+    return " ".join(text.split())
+
+
 def test_corrupt_store_child_exit_code_is_not_the_generic_failure_code(
     corrupt_repo: Path,
 ) -> None:
     proc = run_server_index_child(corrupt_repo)
 
-    assert "malformed" in proc.stderr, proc.stderr
+    assert "malformed" in _normalised(proc.stderr), proc.stderr
     assert proc.returncode not in (0, GENERIC_FAILURE_EXIT_CODE), (
         "a corrupt chunks.db must be reported with a machine-readable exit "
         f"code, got {proc.returncode}"
@@ -76,7 +82,7 @@ def test_unreadable_store_exit_code_differs_from_corruption_code(
     corrupt_proc = run_server_index_child(corrupt_repo)
     unreadable_proc = run_server_index_child(unreadable_repo)
 
-    assert "unable to open database file" in unreadable_proc.stderr, (
+    assert "unable to open database file" in _normalised(unreadable_proc.stderr), (
         unreadable_proc.stderr
     )
     assert unreadable_proc.returncode not in (0, GENERIC_FAILURE_EXIT_CODE)

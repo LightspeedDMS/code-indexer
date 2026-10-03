@@ -105,6 +105,24 @@ def typed_kinds(exc: BaseException) -> List[str]:
     return [str(getattr(k, "value", k)) for k in kinds if k is not None]
 
 
+def run_one_scheduler_iteration(harness: "Harness") -> None:
+    """Run the real scheduler loop for exactly one pass (it stops at its
+    first poll wait)."""
+    from unittest.mock import patch
+
+    scheduler = harness.scheduler
+
+    def _stop_after_first_wait(timeout: float) -> bool:
+        scheduler._running = False
+        return False
+
+    scheduler._running = True
+    with patch.object(
+        scheduler._stop_event, "wait", side_effect=_stop_after_first_wait
+    ):
+        scheduler._scheduler_loop()
+
+
 def _attach_local_origin(source: Path, tmp_path: Path) -> None:
     """Give ``source`` a real, offline ``origin`` it tracks."""
     # Named like a real remote (<repo>.git): cidx derives the project id

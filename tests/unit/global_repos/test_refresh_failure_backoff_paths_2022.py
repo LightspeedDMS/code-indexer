@@ -40,6 +40,7 @@ from tests.utils.refresh_fatal_store_harness import (
     Harness,
     RecordingJobManager,
     build_harness,
+    run_one_scheduler_iteration,
 )
 
 #: Smallest persisted backoff the scheduler may apply after one failure.
@@ -47,6 +48,7 @@ MIN_EXPECTED_BACKOFF_SECONDS = 60
 #: The ordinary schedule advance is interval +/- 10% jitter.
 _ORDINARY_ADVANCE_FLOOR = 0.9
 ONE_HOUR_SECONDS = 3600
+ONE_DAY_SECONDS = 24 * ONE_HOUR_SECONDS
 
 
 @pytest.fixture(params=STORE_KINDS)
@@ -75,20 +77,6 @@ def _fail_refresh_on_unreadable_store(
         harness.source_db.chmod(0o644)
 
 
-def _run_one_scheduler_iteration(harness: Harness) -> None:
-    scheduler = harness.scheduler
-
-    def _stop_after_first_wait(timeout: float) -> bool:
-        scheduler._running = False
-        return False
-
-    scheduler._running = True
-    with patch.object(
-        scheduler._stop_event, "wait", side_effect=_stop_after_first_wait
-    ):
-        scheduler._scheduler_loop()
-
-
 def _next_refresh(harness: Harness) -> float:
     repo = harness.registry.get_global_repo(ALIAS)
     assert repo is not None
@@ -111,7 +99,7 @@ def test_git_schedule_defers_backed_off_alias_via_next_refresh(
     # scheduler must consult it for a due alias and defer via next_refresh.
     harness.registry.update_next_refresh(ALIAS, time.time() - 5)
     loop_started = time.time()
-    _run_one_scheduler_iteration(harness)
+    run_one_scheduler_iteration(harness)
 
     assert jobs.submitted == [], "due but backed-off alias was submitted"
     # next_refresh is the backoff end, not the ordinary jittered interval
@@ -176,17 +164,52 @@ def test_trace_sync_trigger_skips_backed_off_alias(
     assert jobs.submitted == [ALIAS], "trace sync re-submitted a backed-off alias"
 
 
-def test_no_changes_success_clears_the_backoff(tmp_path: Path, metadata: Any) -> None:
+def test_trace_write_during_backoff_is_refreshed_once_backoff_ends(
+    tmp_path: Path,
+    metadata: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    _fail_refresh_on_unreadable_store(harness)
+    jobs = RecordingJobManager()
+    harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
+    service = _make_trace_sync_service(tmp_path, harness)
+
+    _sync_once(service)  # the only trace write; its trigger is deferred
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [], "fired inside the backoff"
+    churn = [r.getMessage() for r in caplog.records if ALIAS in r.getMessage()]
+    assert churn == [], f"pending trigger churned inside the backoff: {churn}"
+
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + ONE_DAY_SECONDS)
+    run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [ALIAS], "deferred trace refresh never fired"
+
+    run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [ALIAS], "deferred trigger fired more than once"
+
+
+def test_backed_off_alias_without_changes_regates_publishes_and_clears(
+    tmp_path: Path, metadata: Any
+) -> None:
     harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
     assert harness.snapshot is not None
-    # A newer published snapshot than every source file: nothing to index.
+    # A newer published snapshot than every source file: nothing new to index.
     newer = harness.snapshot.parent / f"v_{int(time.time()) + ONE_HOUR_SECONDS}"
     shutil.copytree(harness.snapshot, newer, symlinks=True)
     harness.scheduler.alias_manager.swap_alias(ALIAS, str(newer), str(harness.snapshot))
     metadata.record_refresh_failure_backoff(ALIAS, "disk full")
-    assert recovery.active_backoff_until(metadata, ALIAS) is not None
 
-    result = harness.scheduler._execute_refresh(ALIAS)
+    # The unresolved failure re-gates and publishes instead of "No changes".
+    with patch.object(harness.scheduler, "_index_source"):
+        result = harness.scheduler._execute_refresh(ALIAS)
 
-    assert result.get("message") == "No changes detected", result
+    assert result.get("message") == "Refresh complete", result
+    assert harness.scheduler.alias_manager.read_alias(ALIAS) != str(newer)
     assert recovery.active_backoff_until(metadata, ALIAS) is None

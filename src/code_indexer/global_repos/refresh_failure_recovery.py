@@ -42,9 +42,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Backoff after the first unrepaired failure, doubling per further failure
-#: up to the cap (same policy as Bug #1341's permanent fetch failures).
-REFRESH_FAILURE_BACKOFF_BASE_SECONDS = 300
-REFRESH_FAILURE_BACKOFF_CAP_SECONDS = 21600
+#: up to the cap. The single definition: RefreshScheduler.PERMANENT_BACKOFF_*
+#: (Bug #1341 permanent fetch failures) derive from these.
+FAILURE_BACKOFF_BASE_SECONDS = 300
+FAILURE_BACKOFF_CAP_SECONDS = 21600
 
 #: Bug #1506: this many consecutive integrity-gate failures (strikes) for
 #: one alias QUARANTINE it -- mirrors PROMPT_FAILURE_QUARANTINE_THRESHOLD and
@@ -59,8 +60,8 @@ def failure_backoff_seconds(consecutive_failures: int) -> int:
     exponent = max(0, consecutive_failures - 1)
     return int(
         min(
-            REFRESH_FAILURE_BACKOFF_BASE_SECONDS * (2**exponent),
-            REFRESH_FAILURE_BACKOFF_CAP_SECONDS,
+            FAILURE_BACKOFF_BASE_SECONDS * (2**exponent),
+            FAILURE_BACKOFF_CAP_SECONDS,
         )
     )
 
@@ -71,10 +72,14 @@ def active_backoff_until(metadata: Any, alias_name: str) -> Optional[float]:
     state = metadata.get_refresh_failure_backoff_state(alias_name)
     if state is None:
         return None
-    until = float(state["last_failed_at"]) + failure_backoff_seconds(
+    until = _backoff_end(state)
+    return until if until > time.time() else None
+
+
+def _backoff_end(state: Dict[str, Any]) -> float:
+    return float(state["last_failed_at"]) + failure_backoff_seconds(
         int(state["consecutive_failure_count"])
     )
-    return until if until > time.time() else None
 
 
 class RefreshDeferredError(DuplicateJobError):
@@ -95,11 +100,50 @@ class RefreshDeferredError(DuplicateJobError):
 
 
 def defer_if_backed_off(metadata: Any, alias_name: str) -> None:
-    """Raise RefreshDeferredError when *alias_name* is inside its backoff."""
+    """Raise RefreshDeferredError when *alias_name* is inside its backoff,
+    after persisting a pending trigger that fire_expired_deferred_triggers
+    submits once the backoff ends (the trigger is deferred, never dropped)."""
     backoff_until = active_backoff_until(metadata, alias_name)
     if backoff_until is not None:
-        logger.info(f"Refresh for {alias_name} deferred until {backoff_until:.0f}")
+        metadata.mark_refresh_trigger_pending(alias_name)
+        logger.info(
+            f"Refresh for {alias_name} deferred until {backoff_until:.0f} "
+            f"(persisted failure backoff); it fires once the backoff ends"
+        )
         raise RefreshDeferredError(alias_name, backoff_until)
+
+
+def defer_due_alias(metadata: Any, registry: Any, alias_name: str) -> bool:
+    """Git schedule: a due alias inside its backoff is deferred by moving its
+    ``next_refresh`` to the backoff end. True when it was deferred."""
+    backoff_until = active_backoff_until(metadata, alias_name)
+    if backoff_until is None:
+        return False
+    registry.update_next_refresh(alias_name, backoff_until)
+    return True
+
+
+def fire_expired_deferred_triggers(metadata: Any, submit: Callable[[str], Any]) -> None:
+    """Scheduler loop: submit each deferred system trigger whose backoff has
+    ended. The claim is an atomic store update, so one node fires it once.
+    Bounded by the failing aliases that carry a trigger, never the fleet."""
+    for state in metadata.list_pending_refresh_triggers():
+        alias_name = state["golden_alias"]
+        if _backoff_end(state) > time.time():
+            continue
+        if not metadata.claim_pending_refresh_trigger(alias_name):
+            continue
+        try:
+            submit(alias_name)
+        except DuplicateJobError as exc:
+            # In flight already, or re-deferred (and re-marked) by a new backoff.
+            logger.info(f"Deferred refresh of {alias_name} not submitted: {exc}")
+        except Exception as exc:
+            metadata.mark_refresh_trigger_pending(alias_name)
+            logger.error(
+                f"Bug #2022: deferred refresh of {alias_name} failed to submit, "
+                f"retrying next cycle: {type(exc).__name__}: {exc}"
+            )
 
 
 def record_failure_backoff(metadata: Any, alias_name: str, detail: str) -> None:
@@ -188,6 +232,36 @@ def reset_integrity_strikes(
             f"Bug #1506: failed to reset refresh-integrity quarantine "
             f"state for {alias_name} (non-fatal): "
             f"{type(reset_exc).__name__}: {reset_exc}"
+        )
+
+
+def has_unresolved_outcome(
+    metadata: "GoldenRepoMetadataBackend", alias_name: str
+) -> bool:
+    """True while *alias_name* has a failure no verified publish has resolved
+    yet: a persisted backoff (unrepaired failure or inconclusive check) or
+    integrity strikes. Such a cycle must re-gate and publish, never take the
+    "No changes detected" shortcut. A store read failure propagates."""
+    return (
+        metadata.get_refresh_failure_backoff_state(alias_name) is not None
+        or metadata.get_refresh_integrity_failure_state(alias_name) is not None
+    )
+
+
+def record_publish_gate_failure(
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    gate_result: RefreshIntegrityGateResult,
+) -> None:
+    """Bookkeeping for a failed publish-time gate: a strike only for confirmed
+    corruption; an inconclusive check (it could not run) backs off instead,
+    so transient I/O never quarantines a healthy repo."""
+    confirmed = [f for f in gate_result.failures if not f.check_inconclusive]
+    if confirmed:
+        record_integrity_strike(metadata, alias_name, gate_result)
+    if len(confirmed) < len(gate_result.failures):
+        record_failure_backoff(
+            metadata, alias_name, "publish integrity check inconclusive"
         )
 
 

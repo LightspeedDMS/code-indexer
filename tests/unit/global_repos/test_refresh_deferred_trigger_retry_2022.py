@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, List
 
 import pytest
 
@@ -25,9 +25,11 @@ from tests.utils.refresh_fatal_store_harness import (
     Harness,
     RecordingJobManager,
     build_harness,
+    run_one_scheduler_iteration,
 )
 
 META_ALIAS = "cidx-meta-global"
+ONE_DAY_SECONDS = 24 * 3600
 DEBOUNCE_SECONDS = 0.05
 WAIT_LIMIT_SECONDS = 5.0
 POLL_SECONDS = 0.02
@@ -68,39 +70,67 @@ def _harness_with_backed_off_meta(
     return harness, jobs
 
 
-def test_debouncer_retries_a_deferred_trigger(tmp_path: Path, metadata: Any) -> None:
+def _pass_time_beyond_the_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + ONE_DAY_SECONDS)
+
+
+def _count_triggers(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> List[str]:
+    """Record every real trigger_refresh_for_repo call (pass-through)."""
+    real_trigger = harness.scheduler.trigger_refresh_for_repo
+    calls: List[str] = []
+
+    def _counting_trigger(alias_name: str, *args: Any, **kwargs: Any) -> Any:
+        calls.append(alias_name)
+        return real_trigger(alias_name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        harness.scheduler, "trigger_refresh_for_repo", _counting_trigger
+    )
+    return calls
+
+
+def test_debouncer_defers_without_spinning_and_the_scheduler_fires_it(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     harness, jobs = _harness_with_backed_off_meta(tmp_path, metadata)
+    trigger_calls = _count_triggers(harness, monkeypatch)
     debouncer = CidxMetaRefreshDebouncer(
         harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
     )
     try:
         debouncer.signal_dirty()
-        time.sleep(DEFERRED_OBSERVATION_SECONDS)
+        assert _wait_until(lambda: trigger_calls == [META_ALIAS])
+        time.sleep(DEFERRED_OBSERVATION_SECONDS)  # ~10 debounce intervals
+        assert trigger_calls == [META_ALIAS], "debouncer spins during the backoff"
         assert jobs.submitted == [], "submitted while backed off"
-
-        metadata.reset_refresh_failure_backoff(META_ALIAS)
-
-        assert _wait_until(lambda: jobs.submitted == [META_ALIAS]), (
-            "a deferred cidx-meta refresh was dropped instead of retried"
-        )
     finally:
         debouncer.shutdown()
 
+    _pass_time_beyond_the_backoff(monkeypatch)
+    run_one_scheduler_iteration(harness)
 
-def test_writer_helper_hands_a_deferred_trigger_to_the_debouncer(
+    assert jobs.submitted == [META_ALIAS], "the deferred cidx-meta refresh was dropped"
+
+
+def test_writer_helper_leaves_a_deferred_trigger_to_the_scheduler(
     tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness, jobs = _harness_with_backed_off_meta(tmp_path, metadata)
+    trigger_calls = _count_triggers(harness, monkeypatch)
     debouncer = CidxMetaRefreshDebouncer(
         harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
     )
     monkeypatch.setattr(meta_description_hook, "_debouncer", debouncer)
     try:
         meta_description_hook.request_cidx_meta_refresh(harness.scheduler)
+        time.sleep(DEFERRED_OBSERVATION_SECONDS)  # ~10 debounce intervals
+        assert trigger_calls == [META_ALIAS], "deferral re-tried by the debouncer"
         assert jobs.submitted == []
-
-        metadata.reset_refresh_failure_backoff(META_ALIAS)
-
-        assert _wait_until(lambda: jobs.submitted == [META_ALIAS])
     finally:
         debouncer.shutdown()
+
+    _pass_time_beyond_the_backoff(monkeypatch)
+    run_one_scheduler_iteration(harness)
+
+    assert jobs.submitted == [META_ALIAS], "the writer's deferred refresh was dropped"
