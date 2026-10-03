@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 import pytest
 
@@ -200,6 +200,100 @@ def test_destination_moved_away_and_back_needs_a_new_canary(
     assert _armed(scheduler)
 
 
+def _pilot_event_captured(b: SiemBackendHarness) -> bool:
+    """Write one pilot audit event through the real audit service; True when
+    the capture hook queued it for SIEM delivery."""
+    from .test_admin_parity import _login
+
+    event_uuid = _login(b)
+    queued = b.count(
+        "SELECT COUNT(*) AS n FROM siem_delivery_queue WHERE event_uuid = ?",
+        (event_uuid,),
+    )
+    return queued > 0
+
+
+_LIFETIME_ENDS = {
+    "trusted_ca_change": (
+        lambda svc, sch, car: set_trusted_ca(svc, "alice", make_ca("Example CA").pem),
+        "awaiting canary",
+    ),
+    "disable": (lambda svc, sch, car: _save(svc, {"enabled": "false"}), "inactive"),
+    "credential_replacement": (
+        lambda svc, sch, car: admin.set_credential(sch, "alice", _key_json(car)),
+        "awaiting canary",
+    ),
+}
+
+
+@pytest.mark.parametrize("end", sorted(_LIFETIME_ENDS))
+def test_lifetime_end_fails_closed_before_any_cycle(
+    lifetime: Lifetime, siem_backend: SiemBackendHarness, end: str
+) -> None:
+    from code_indexer.server.services.siem_delivery import ops_documents
+
+    svc, scheduler, sidecar = lifetime
+    _arm_first_time(svc, scheduler, sidecar)
+    assert _pilot_event_captured(siem_backend)  # baseline: armed captures
+    change, status = _LIFETIME_ENDS[end]
+    change(svc, scheduler, sidecar)
+    # immediately after the commit -- NO scheduler cycle in between
+    assert not capture.capture_state().active, "capture still armed after the save"
+    assert _status(scheduler) == status
+    assert ops_documents.arming_document(scheduler)["armed"] is False
+    assert not _pilot_event_captured(siem_backend), "captured after the save"
+
+
+def test_late_canary_of_an_old_lifetime_changes_nothing(lifetime: Lifetime) -> None:
+    """Canary A (lifetime E1) is still sending while the CA changes (E2) and
+    canary B runs and is confirmed under E2; A then completes."""
+    import threading
+    import time
+
+    svc, scheduler, sidecar = lifetime
+    _save(svc, {**_destination(sidecar), "enabled": "false"})
+    scheduler.run_cycle()
+    sidecar.control.post(
+        "/_control/faults", {"mode": "delay", "seconds": 6, "accept": True, "count": 1}
+    )
+    late: List[BaseException] = []
+
+    def _canary_a() -> None:
+        try:
+            admin.run_canary(scheduler, "alice")
+        except BaseException as exc:  # surfaced below
+            late.append(exc)
+
+    thread_a = threading.Thread(target=_canary_a)
+    thread_a.start()
+    deadline = time.monotonic() + 10  # bounded: A's request takes the delay
+    while sidecar.control.get("/_control/faults").json()["queued"]:
+        assert time.monotonic() < deadline, "canary A never reached the receiver"
+        time.sleep(0.05)
+
+    set_trusted_ca(svc, "alice", make_ca("Example CA Late").pem)  # E1 -> E2
+    canary_b = admin.run_canary(scheduler, "bob")
+    _canary_and_confirm_run(scheduler, canary_b)
+    thread_a.join(timeout=30)
+
+    assert late and isinstance(late[0], admin.SiemAdminError), late
+    assert late[0].status == 409
+    state = state_store.read_state(scheduler.db)
+    assert state["canary_run_id"] == canary_b["canary_run_id"]
+    assert state["canary_visible_confirmed_at"] is not None
+    _save(svc, {"enabled": "true"})
+    assert _armed(scheduler)
+
+
+def _canary_and_confirm_run(
+    scheduler: SiemDeliveryScheduler, canary: Dict[str, Any]
+) -> None:
+    outcome = admin.confirm_visible(
+        scheduler, "bob", canary["canary_run_id"], canary["expected_product_log_ids"]
+    )
+    assert outcome["confirmed"]
+
+
 def test_a_change_outside_the_lifetime_keeps_arming(lifetime: Lifetime) -> None:
     svc, scheduler, sidecar = lifetime
     _arm_first_time(svc, scheduler, sidecar)
@@ -238,7 +332,7 @@ def test_canary_recorded_after_a_credential_change_is_refused(
     scheduler.run_cycle()
     before = scheduler.credential_store.credential_id()
     scheduler.credential_store.set(dict(sidecar.read_key_file()), actor="bob")
-    recorded = state_store.record_canary(
+    refused = state_store.record_canary(
         scheduler.db,
         run_id="run-stale",
         destination_key="harness:0000000000000000",
@@ -247,10 +341,12 @@ def test_canary_recorded_after_a_credential_change_is_refused(
         result="accepted",
         signature=None,
         actor="alice",
-        config_epoch="",
+        config_epoch=scheduler.committed_epoch(),
         credential_id=before,
+        started_at=scheduler.db.read(lambda tx: tx.ts(tx.now())),
+        committed_epoch=scheduler.committed_epoch,
     )
-    assert recorded is False
+    assert refused == state_store.CANARY_CREDENTIAL_CHANGED
     assert state_store.read_state(scheduler.db)["canary_run_id"] is None
 
 

@@ -91,7 +91,11 @@ def arming_document(scheduler: Any) -> Dict[str, Any]:
     key = view.destination.key if view is not None and view.destination else None
     canary = _canary_view(state)
     armed = view is not None and state_store.capture_active(
-        state, version=view.version, enabled=view.section.enabled, destination_key=key
+        state,
+        version=view.version,
+        enabled=view.section.enabled,
+        destination_key=key,
+        config_epoch=view.section.arming_epoch,
     )
     committed = None
     if view is not None:

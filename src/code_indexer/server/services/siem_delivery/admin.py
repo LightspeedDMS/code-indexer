@@ -169,8 +169,10 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
     if invalid:
         raise SiemAdminError(422, f"canary failed local validation: {sorted(invalid)}")
     # Bug #2018: read BEFORE minting, so a key replaced from here on makes
-    # the record refuse this canary (it would prove the old key).
+    # the record refuse this canary (it would prove the old key); the start
+    # time (database clock) orders this run against any other one.
     credential_id = scheduler.credential_store.credential_id()
+    started_at = ctx.db.read(lambda tx: tx.ts(tx.now()))
     try:
         token = ctx.credentials.token(ctx.destination)
     except CredentialError as exc:
@@ -186,7 +188,7 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         timeout=ctx.timings.request_timeout_seconds,
     )
     result = "accepted" if cls.cls == "accepted" else "rejected"
-    recorded = state_store.record_canary(
+    refused = state_store.record_canary(
         ctx.db,
         run_id=run_id,
         destination_key=ctx.destination.key,
@@ -197,12 +199,23 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         actor=actor,
         config_epoch=ctx.config_epoch,
         credential_id=credential_id,
+        started_at=started_at,
+        committed_epoch=scheduler.committed_epoch,
     )
-    if not recorded:
-        raise SiemAdminError(
-            409,
-            "the service-account credential changed during the canary; run it again",
-        )
+    if refused is not None:  # nothing was recorded
+        messages = {
+            state_store.CANARY_CREDENTIAL_CHANGED: (
+                "the service-account credential changed during the canary; run it again"
+            ),
+            state_store.CANARY_STALE_LIFETIME: (
+                "canary run is stale: the configuration lifetime changed during "
+                "the canary; run it again"
+            ),
+            state_store.CANARY_SUPERSEDED: (
+                "canary run is stale: a newer canary run was already recorded"
+            ),
+        }
+        raise SiemAdminError(409, messages[refused])
     _audit(
         scheduler,
         actor,
@@ -646,6 +659,7 @@ def set_credential(scheduler: Any, actor: str, key_json: str) -> Dict[str, Any]:
     scheduler.credentials.invalidate_all()
     scheduler.note_credential_identity(identity)
     _audit_credential(scheduler, actor, change, identity, target)
+    scheduler.apply_committed_change()  # a replacement disarmed: capture stops now
     return {"change": change, "credential": identity}
 
 
@@ -657,6 +671,7 @@ def remove_credential(scheduler: Any, actor: str) -> Dict[str, Any]:
     scheduler.credentials.invalidate_all()
     scheduler.note_credential_identity(None)
     _audit_credential(scheduler, actor, "removed", removed, target)
+    scheduler.apply_committed_change()  # the removal disarmed: capture stops now
     return {"change": "removed", "credential": removed}
 
 

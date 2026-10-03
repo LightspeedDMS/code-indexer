@@ -47,8 +47,16 @@ python3 -c "import json;print('Authorization: Bearer '+json.load(open('$W/login.
 rm -f "$W/login.out" "$W/mfa.json"
 ```
 
-The token lives 10 minutes; repeat this step when calls start returning 401.
-Never retry a rejected login in a loop: repeated failures lock the account.
+The token lives for the `jwt_expiration_minutes` server setting (default 10
+minutes). The login response does not state it; the token's own `exp` claim
+does, and `POST /auth/refresh` answers `access_token_expires_in`:
+
+```bash
+python3 -c "import base64,json,time;p=open('$W/auth.hdr').read().split()[-1].split('.')[1];d=json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4)));print('expires in',int(d['exp']-time.time()),'s')"
+```
+
+Repeat this step when calls start returning 401. Never retry a rejected login
+in a loop: repeated failures lock the account.
 
 ## 2. Web session (the credential and CA uploads exist ONLY as Web UI forms)
 
@@ -224,8 +232,12 @@ or two loop cycles. Enabling does not invalidate the confirmed canary.
 A canary confirmation is valid only for the configuration lifetime that
 produced it. Disabling or clearing the destination, removing or replacing
 the service-account key, changing the trusted CA, or moving the destination
-to other coordinates ends that lifetime: delivery disarms (or cannot arm) and
-shows `awaiting canary` until steps 5 and 6 are repeated.
+to other coordinates ends that lifetime: delivery disarms at once (other
+processes and nodes follow within one loop cycle) and stays disarmed until
+steps 5 and 6 are repeated. The status reads `inactive` while delivery is
+disabled or has no destination, and `awaiting canary` once it is enabled
+again. A canary still being sent when the lifetime ends is refused when it
+completes (409 "canary run is stale"); run it again.
 
 ## 7. Operate
 

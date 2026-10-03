@@ -176,11 +176,26 @@ migration 056); the arming statement and the fence require it to equal the
 committed epoch (`state_store.CANARY_CONFIRMED_FOR`), so a newer version of
 another lifetime disarms and a stale confirmation is refused. Replacing or
 removing the service-account key clears the canary and disarms in its own
-transaction, and a canary is recorded only if the key it was sent with is
-still the stored one. Enabling, and every other change of the section,
-keeps a confirmed canary valid. A configuration saved before the epoch
-existed has the empty epoch, so an already armed destination stays armed
-across the upgrade.
+transaction. A canary is recorded only if, under the state-row lock, the key
+it was sent with is still the stored one, its lifetime is still the
+committed one, and no run that started later was recorded; otherwise
+nothing changes and the action answers 409. Enabling, and every other change
+of the section, keeps a confirmed canary valid.
+
+Fail closed at once: `state_store.capture_active` also requires the state's
+canary epoch to equal the committed one, and the scheduler subscribes to the
+config service's commits (`ConfigService.register_on_commit_callback`, at
+`register_process`). A SIEM-section commit, or a credential change, in a
+process re-applies the fence, the capture snapshot and the status view in
+that process immediately (`scheduler.apply_committed_change`); the snapshot
+publish is monotonic in the config version, so a slower cycle that read an
+older version cannot re-arm it. Other processes and nodes follow at their
+next cycle (`cycle_idle_seconds`, 30 s; events they capture in that window
+are bounded and counted like captures after a disable, see Capture above).
+
+A configuration saved before the epoch existed has the empty epoch, so an
+already armed destination stays armed across the upgrade until its next
+lifetime-ending change.
 
 ### Arming from the Web UI
 

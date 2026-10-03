@@ -26,6 +26,11 @@ _EXPECTED_U2 = {
 }
 
 
+def _db_now(b: SiemBackendHarness) -> Any:
+    """The SIEM database clock, as record_canary's started_at."""
+    return b.db.read(lambda tx: tx.ts(tx.now()))
+
+
 def _confirmed_canary(b: SiemBackendHarness, dest: str = DEST) -> None:
     ss.record_canary(
         b.db,
@@ -38,6 +43,8 @@ def _confirmed_canary(b: SiemBackendHarness, dest: str = DEST) -> None:
         actor="alice",
         config_epoch=EPOCH,
         credential_id=None,  # no credential stored in these tests
+        started_at=_db_now(b),
+        committed_epoch=lambda: EPOCH,
     )
     outcome = ss.confirm_canary(
         b.db,
@@ -139,7 +146,22 @@ def test_newer_disable_disarms_and_older_version_cannot_undo_it(
     stale = _cycle(siem_backend, 6, enabled=True)
     assert stale["armed_destination_key"] is None
     assert stale["seen_config_version"] == 7
-    assert not ss.capture_active(stale, version=6, enabled=True, destination_key=DEST)
+    assert not ss.capture_active(
+        stale, version=6, enabled=True, destination_key=DEST, config_epoch=EPOCH
+    )
+
+
+def test_armed_state_of_another_lifetime_is_not_active(
+    siem_backend: SiemBackendHarness,
+) -> None:
+    """Fail closed before any fence: the committed lifetime decides."""
+    _confirmed_canary(siem_backend)
+    _ready_process(siem_backend, "solo:1:a")
+    armed = _cycle(siem_backend, 1)
+    assert armed["armed_destination_key"] == DEST
+    kwargs: Dict[str, Any] = {"version": 2, "enabled": True, "destination_key": DEST}
+    assert ss.capture_active(armed, config_epoch=EPOCH, **kwargs)
+    assert not ss.capture_active(armed, config_epoch="example-new-lifetime", **kwargs)
 
 
 def test_destination_change_disarms(siem_backend: SiemBackendHarness) -> None:
@@ -173,7 +195,7 @@ def test_canary_of_a_new_lifetime_ends_the_old_arming(
     _confirmed_canary(siem_backend)
     _ready_process(siem_backend, "solo:1:a")
     assert _cycle(siem_backend, 1)["armed_destination_key"] == DEST
-    assert ss.record_canary(
+    refused = ss.record_canary(
         siem_backend.db,
         run_id="run-new",
         destination_key=DEST,
@@ -184,7 +206,10 @@ def test_canary_of_a_new_lifetime_ends_the_old_arming(
         actor="alice",
         config_epoch="example-later-epoch",
         credential_id=None,
+        started_at=_db_now(siem_backend),
+        committed_epoch=lambda: "example-later-epoch",
     )
+    assert refused is None  # recorded
     assert ss.read_state(siem_backend.db)["armed_destination_key"] is None
 
 
@@ -200,6 +225,8 @@ def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> 
         actor="alice",
         config_epoch=EPOCH,
         credential_id=None,
+        started_at=_db_now(siem_backend),
+        committed_epoch=lambda: EPOCH,
     )
     outcome = ss.confirm_canary(
         siem_backend.db,

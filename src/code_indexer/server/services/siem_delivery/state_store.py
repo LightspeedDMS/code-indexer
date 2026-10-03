@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from code_indexer.server.services.siem_delivery.db import SiemDb, SiemTx
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
@@ -453,16 +453,29 @@ def capture_active(
     version: int,
     enabled: bool,
     destination_key: Optional[str],
+    config_epoch: str,
 ) -> bool:
+    """Capture is armed for the committed configuration *version*.
+
+    Fail closed (Bug #2018): a committed change that ended the
+    configuration lifetime (a new *config_epoch*) reads as NOT active even
+    before the fence clears ``armed_destination_key``."""
     return bool(
         enabled
         and destination_key is not None
         and state.get("armed_destination_key") == destination_key
+        and state.get("canary_config_epoch") == config_epoch
         and int(state.get("seen_config_version") or 0) <= version
     )
 
 
 # --- canary --------------------------------------------------------------------
+
+
+# record_canary refusal reasons (nothing is changed when refused)
+CANARY_CREDENTIAL_CHANGED = "credential_changed"
+CANARY_STALE_LIFETIME = "stale_lifetime"
+CANARY_SUPERSEDED = "superseded"
 
 
 def record_canary(
@@ -477,21 +490,37 @@ def record_canary(
     actor: str,
     config_epoch: str,
     credential_id: Optional[str],
-) -> bool:
+    started_at: Any,  # a SiemTx.ts value: ISO text (SQLite) or datetime (PG)
+    committed_epoch: Callable[[], str],
+) -> Optional[str]:
     """Record a canary run for the configuration lifetime *config_epoch*,
-    sent with the credential *credential_id* (read BEFORE the send).
+    sent with the credential *credential_id* (read BEFORE the send), whose
+    send started at the database time *started_at* (stored as the run's
+    ``canary_sent_at``).
 
-    False, recording nothing, when the stored credential changed meanwhile
-    (its replacement invalidated canaries; this one proves the old key).  A
-    canary of another lifetime also ends an arming made in the old one."""
+    None when recorded.  Otherwise the refusal reason, with NOTHING changed
+    (checked under the state-row lock): the stored credential changed
+    meanwhile (CANARY_CREDENTIAL_CHANGED: the canary proves the old key),
+    the committed configuration lifetime is no longer *config_epoch*
+    (CANARY_STALE_LIFETIME), or a run that started later was already
+    recorded (CANARY_SUPERSEDED).  A canary of another lifetime also ends an
+    arming made in the old one."""
 
-    def _do(tx: SiemTx) -> bool:
+    def _do(tx: SiemTx) -> Optional[str]:
         state_in(tx, lock=True)  # serialise with credential changes
         stored = tx.one(
             "SELECT credential_id FROM siem_delivery_credential WHERE id = 1"
         )
         if (stored["credential_id"] if stored else None) != credential_id:
-            return False
+            return CANARY_CREDENTIAL_CHANGED
+        if committed_epoch() != config_epoch:
+            return CANARY_STALE_LIFETIME
+        if tx.one(
+            "SELECT 1 AS newer FROM siem_delivery_state "
+            "WHERE id = 1 AND canary_sent_at > ?",
+            (started_at,),
+        ):
+            return CANARY_SUPERSEDED
         tx.execute(
             "UPDATE siem_delivery_state SET canary_run_id = ?, "
             "canary_destination_key = ?, canary_mapping_version = ?, "
@@ -507,7 +536,7 @@ def record_canary(
                 destination_key,
                 mapping_version,
                 json.dumps(list(expected)),
-                tx.ts(tx.now()),
+                started_at,
                 result,
                 signature,
                 actor,
@@ -515,9 +544,10 @@ def record_canary(
                 config_epoch,
             ),
         )
-        return True
+        return None
 
-    return bool(db.write(_do, phase="canary"))
+    refused: Optional[str] = db.write(_do, phase="canary")
+    return refused
 
 
 def invalidate_canary(tx: SiemTx) -> None:

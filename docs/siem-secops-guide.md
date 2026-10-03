@@ -133,10 +133,18 @@ A canary confirmation is valid only for the configuration lifetime that
 produced it. Any of these ends the lifetime: disabling or clearing the
 destination, removing or replacing the service-account credential, changing
 the trusted CA, or moving the destination to other coordinates. Delivery
-then disarms (or cannot arm), the status shows `awaiting canary`, and
-re-enabling needs a fresh canary and confirmation. Enabling delivery, and
-any other change of the section (for example `max_batch_events` or the
-instance label), keeps a confirmed canary valid.
+disarms at once in the server process that made the change (other processes
+and nodes follow at their next loop cycle, within about 30 seconds), and a
+fresh canary and confirmation are needed before it arms again. While
+delivery is disabled or has no destination the status reads `inactive`;
+once it is enabled with a destination it reads `awaiting canary` until the
+new canary is confirmed. Enabling delivery, and any other change of the
+section (for example `max_batch_events` or the instance label), keeps a
+confirmed canary valid.
+
+Upgrade note: a destination that was already armed when this release was
+installed stays armed until its next lifetime-ending change, even if its
+canary predates the configuration it now runs with.
 
 ### 1.3 Delivery guarantees
 
@@ -464,8 +472,10 @@ The order is: configure, canary, confirm, then enable. The canary runs while
 
 If the configuration lifetime ends before or after arming (section 1.2:
 disable, clear, new destination, key replaced or removed, trusted CA
-changed), the status returns to `awaiting canary` and steps 2 to 4 must be
-repeated; a confirmation of an earlier lifetime is refused as stale.
+changed), delivery disarms and steps 2 to 4 must be repeated: the status
+reads `inactive` while delivery is disabled or has no destination, and
+`awaiting canary` once it is enabled again. A canary or confirmation of an
+earlier lifetime is refused as stale (HTTP 409).
 
 #### 4.1a Without the Web UI (REST)
 

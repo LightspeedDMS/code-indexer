@@ -152,6 +152,7 @@ class SiemDeliveryScheduler:
         self._registration_lock = threading.Lock()
         self._deregistered = False
         self.registered = False
+        self._commit_subscribed = False
         from code_indexer.server.services.siem_delivery.health import AlertSignals
 
         self.alerts = AlertSignals(self.timings)
@@ -169,6 +170,19 @@ class SiemDeliveryScheduler:
             )
             self._deregistered = False
             self.registered = True
+            if not self._commit_subscribed:
+                # a SIEM change committed by THIS process applies at once
+                self._config_service.register_on_commit_callback(
+                    self._on_config_committed
+                )
+                self._commit_subscribed = True
+
+    def _on_config_committed(self, before: Any, after: Any) -> None:
+        if self._deregistered:
+            return
+        if before.siem_delivery_config == after.siem_delivery_config:
+            return
+        self.apply_committed_change()
 
     def start(self) -> None:
         """Start the daemon thread only (no I/O here)."""
@@ -267,6 +281,61 @@ class SiemDeliveryScheduler:
         self._lkg = view
         return view
 
+    def _apply_arming(self, view: CycleView, started: float) -> None:
+        """Fence/arm for *view* and publish this process's capture snapshot.
+
+        The publish is monotonic in the config version: a slower cycle that
+        read an OLDER committed version never republishes over a newer one
+        (e.g. one applied at once by :meth:`refresh_arming`)."""
+        dest = view.destination
+        key = dest.key if dest else None
+        if dest is not None and dest.key != self._registered_dest:
+            state_store.upsert_destination(self.db, dest.key, view.section)
+            self._registered_dest = dest.key
+        state = state_store.fence_and_arm(
+            self.db,
+            version=view.version,
+            enabled=view.section.enabled,
+            destination_key=key,
+            mapping_version=self.mapping_version,
+            config_epoch=view.section.arming_epoch,
+            probe_fresh_seconds=self.timings.probe_fresh_seconds,
+        )
+        active = state_store.capture_active(
+            state,
+            version=view.version,
+            enabled=view.section.enabled,
+            destination_key=key,
+            config_epoch=view.section.arming_epoch,
+        )
+        with self._lock:
+            if self._view is not None and view.version < self._view.version:
+                return
+            self._view = view
+            capture.publish_capture_state(CaptureSnapshot(True, active, key, started))
+
+    def refresh_arming(self) -> None:
+        """Apply the committed configuration NOW in this process (the fence
+        and arming, the capture snapshot, the status view): what the next
+        cycle would do, without waiting for it."""
+        started = capture.monotonic_now()
+        view = self._read_cycle_config()
+        if view is None:
+            capture.publish_capture_state(capture.NOT_LOADED)
+            return
+        self._apply_arming(view, started)
+
+    def apply_committed_change(self) -> None:
+        """:meth:`refresh_arming` after a change this process committed; a
+        failure is logged and the next cycle applies the change."""
+        try:
+            self.refresh_arming()
+        except Exception:  # noqa: BLE001 - the change itself is committed
+            logger.exception(
+                "SIEM delivery: could not apply a committed change in this "
+                "process at once; the next cycle applies it"
+            )
+
     def run_cycle(self) -> bool:
         """One loop cycle; True when due work was found (busy cadence)."""
         started = capture.monotonic_now()
@@ -277,29 +346,8 @@ class SiemDeliveryScheduler:
         if view is None:
             capture.publish_capture_state(capture.NOT_LOADED)
             return False
-        self._view = view
+        self._apply_arming(view, started)
         dest = view.destination
-        if dest is not None and dest.key != self._registered_dest:
-            state_store.upsert_destination(self.db, dest.key, view.section)
-            self._registered_dest = dest.key
-        state = state_store.fence_and_arm(
-            self.db,
-            version=view.version,
-            enabled=view.section.enabled,
-            destination_key=dest.key if dest else None,
-            mapping_version=self.mapping_version,
-            config_epoch=view.section.arming_epoch,
-            probe_fresh_seconds=self.timings.probe_fresh_seconds,
-        )
-        active = state_store.capture_active(
-            state,
-            version=view.version,
-            enabled=view.section.enabled,
-            destination_key=dest.key if dest else None,
-        )
-        capture.publish_capture_state(
-            CaptureSnapshot(True, active, dest.key if dest else None, started)
-        )
         self._refresh_registration()
         self.note_credential_identity(self.credential_store.identity())
         self._maybe_probe_credentials(dest)
@@ -365,6 +413,11 @@ class SiemDeliveryScheduler:
         version, section = self._committed_view_parts()
         destination = resolve_destination(section, harness_active=self.harness_active)
         return CycleView(version, section, destination)
+
+    def committed_epoch(self) -> str:
+        """The committed configuration lifetime (``arming_epoch``), read NOW."""
+        _version, raw = self._config_service.read_committed_section(SECTION_ATTR)
+        return str(raw.get("arming_epoch") or "")
 
     def committed_context(self) -> Optional[EngineContext]:
         """An engine context from the committed configuration read NOW

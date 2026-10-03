@@ -49,6 +49,9 @@ class _CommittedConfig:
         assert name == "siem_delivery_config"
         return self.version, dict(self.section)
 
+    def register_on_commit_callback(self, callback: Any) -> None:
+        """Commits happen by assigning section/version here: no callback."""
+
 
 class _NoJobs:
     def submit_job(self, operation_type: str, func: Any, **kwargs: Any) -> str:
