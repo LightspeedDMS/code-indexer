@@ -195,17 +195,26 @@ class ScheduledCatchupService:
         # idx_active_job_per_repo partial unique index on
         # (operation_type, repo_alias), which is how every other fleet-wide
         # sweep here guards itself.
+        # Registration and the status update are deliberately NOT in one try.
+        # Fail-open applies to the CLAIM ATTEMPT only. Once the row exists we
+        # own it, and nulling tracked_job_id then is not "failing open" -- the
+        # complete_job/fail_job calls below are both guarded by
+        # `if tracked_job_id`, so the row is abandoned in 'pending' with nothing
+        # left to release it. idx_active_job_per_repo covers BOTH 'pending' and
+        # 'running', so that orphan holds the slot forever and every subsequent
+        # catch-up on every process takes DuplicateJobError and returns: the
+        # sweep stops cluster-wide until someone deletes the row by hand. That
+        # is strictly worse than the duplicate run fail-open exists to tolerate.
         tracked_job_id = None
         if self._job_tracker is not None:
+            candidate_job_id = f"scheduled-catchup-{uuid.uuid4().hex[:8]}"
             try:
-                tracked_job_id = f"scheduled-catchup-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job_if_no_conflict(
-                    tracked_job_id,
+                    candidate_job_id,
                     "scheduled_catchup",
                     username="system",
                     repo_alias="server",
                 )
-                self._job_tracker.update_status(tracked_job_id, status="running")
             except DuplicateJobError:
                 # Another process holds the claim. Nothing to do and nothing
                 # wrong -- this is the mechanism working.
@@ -214,11 +223,24 @@ class ScheduledCatchupService:
                 )
                 return
             except Exception as e:
-                # Fail OPEN on anything else. A tracker outage must not mean
-                # catch-up never runs anywhere; that trades a load problem for
-                # a correctness one.
+                # The claim attempt itself failed, so NO row was created and
+                # there is nothing to release. Fail OPEN: a tracker outage must
+                # not mean catch-up never runs anywhere.
                 logger.debug(f"Failed to register scheduled_catchup job: {e}")
-                tracked_job_id = None
+            else:
+                # Claimed. From here the row is ours and MUST be released, so
+                # tracked_job_id is retained no matter what happens next.
+                tracked_job_id = candidate_job_id
+                try:
+                    self._job_tracker.update_status(tracked_job_id, status="running")
+                except Exception as e:
+                    # Non-fatal and deliberately NOT a reason to drop the id:
+                    # the row stays 'pending' instead of 'running', which is
+                    # cosmetic, and it is still released below.
+                    logger.debug(
+                        f"Failed to mark scheduled_catchup job {tracked_job_id} "
+                        f"running (continuing; the claim is still released): {e}"
+                    )
 
         try:
             # Pass skip_tracking=True to avoid double-tracking inside process_all_fallbacks
