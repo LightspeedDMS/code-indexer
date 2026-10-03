@@ -4005,7 +4005,9 @@ class RefreshScheduler:
                         str(versioned_path), ".", timeout=git_restore_timeout
                     )
                 except subprocess.CalledProcessError as restore_exc:
-                    logger.debug(f"git restore output: {redact_url_credentials(restore_exc.stderr)}")
+                    logger.debug(
+                        f"git restore output: {redact_url_credentials(restore_exc.stderr)}"
+                    )
                 except subprocess.TimeoutExpired:
                     logger.warning(
                         f"git restore timed out after {git_restore_timeout} seconds"
@@ -4475,9 +4477,15 @@ class RefreshScheduler:
         Fails OPEN. This is a courtesy to serving traffic, not a correctness
         barrier -- a raising governor must not be able to stop every repo in
         the fleet from ever refreshing again.
+
+        `record_denial=False`: the governor's `query_admissions_denied` counter
+        is published in get_snapshot() and means "live callers we turned away".
+        A deferred refresh poll is not a turned-away query, and under sustained
+        pressure this loop would bump it every cycle -- making the metric report
+        a rejection storm no user ever experienced.
         """
         try:
-            return bool(check_query_admission().allowed)
+            return bool(check_query_admission(record_denial=False).allowed)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug(
                 "Refresh admission check failed (%s); proceeding with refresh",
