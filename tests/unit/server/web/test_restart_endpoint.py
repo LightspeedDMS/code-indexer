@@ -422,6 +422,50 @@ class TestRateLimiting:
         mock_schedule.assert_called_once()
 
 
+class TestFailedRestartRequestReleasesTheFlag:
+    """A restart request that fails restarts nothing: the flag is released
+    (a later restart is allowed) and the UI gets a clear error."""
+
+    def test_failed_cluster_bump_releases_the_flag_and_allows_a_retry(
+        self, test_client
+    ):
+        import code_indexer.server.web.routes as routes_module
+        from code_indexer.server.services.config_service import (
+            ConfigChangeConflict,
+        )
+
+        bumps = []
+
+        class _ClusterConfigService:
+            _pool = object()  # cluster mode
+
+            def bump_launch_restart_generation(self) -> None:
+                bumps.append(1)
+                if len(bumps) == 1:
+                    raise ConfigChangeConflict()
+
+        with patch(
+            "code_indexer.server.web.routes.validate_login_csrf_token",
+            return_value=True,
+        ):
+            with patch(
+                "code_indexer.server.web.routes.get_config_service",
+                return_value=_ClusterConfigService(),
+            ):
+                failed = test_client.post(
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
+                )
+                assert failed.status_code == 409
+                assert "no restart was requested" in failed.json()["message"]
+                assert routes_module._restart_in_progress is False
+
+                retried = test_client.post(
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
+                )
+        assert retried.status_code == 202
+        assert len(bumps) == 2
+
+
 class TestDelayedRestartScheduling:
     """Tests for delayed restart mechanism scheduling."""
 

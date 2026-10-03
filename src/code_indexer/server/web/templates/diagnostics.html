@@ -464,7 +464,11 @@ function restartServer() {
         } else if (response.status === 403) {
             throw new Error('Insufficient permissions. Admin access required.');
         } else {
-            throw new Error('Failed to restart server. Status: ' + response.status);
+            // the server says why (e.g. no restart was requested: try again)
+            const fallback = 'Failed to restart server. Status: ' + response.status;
+            return response.json().catch(() => ({})).then(body => {
+                throw new Error((body && body.message) || fallback);
+            });
         }
     })
     .then(data => {

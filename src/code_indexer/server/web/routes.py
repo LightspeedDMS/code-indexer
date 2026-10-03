@@ -55,7 +55,11 @@ from .auth import (
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
-from ..services.config_service import BootstrapFileNotWritten, get_config_service
+from ..services.config_service import (
+    BootstrapFileNotWritten,
+    ConfigChangeConflict,
+    get_config_service,
+)
 from ..services.golden_repo_audited_ops import request_golden_repo_refresh
 from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
@@ -12764,6 +12768,30 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
     restart_thread.start()
 
 
+def _restart_request_failed(exc: Exception) -> JSONResponse:
+    """The restart request raised, so nothing is restarting: release the
+    in-progress flag (a later restart stays possible) and tell the UI."""
+    global _restart_in_progress
+    with _restart_lock:
+        _restart_in_progress = False
+    logger.error("Server restart request failed: %s", exc, exc_info=True)
+    if isinstance(exc, ConfigChangeConflict):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "message": "The configuration kept changing concurrently; "
+                "no restart was requested. Try again."
+            },
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": "The restart request failed; no restart was requested. "
+            "See the server log."
+        },
+    )
+
+
 @web_router.post(
     "/restart",
     response_class=JSONResponse,
@@ -12841,9 +12869,14 @@ def restart_server(request: Request) -> JSONResponse:
     if config_svc._pool is not None:
         # Cluster mode: bump generation, let per-poll check handle restart.signal.
         # The audit row is written durably BEFORE the bump.
-        request_server_restart(
-            config_svc.bump_launch_restart_generation, actor=username, scope="cluster"
-        )
+        try:
+            request_server_restart(
+                config_svc.bump_launch_restart_generation,
+                actor=username,
+                scope="cluster",
+            )
+        except Exception as exc:  # releases the flag (_restart_request_failed)
+            return _restart_request_failed(exc)
         with _restart_lock:
             _restart_in_progress = False
         return JSONResponse(
@@ -12862,7 +12895,10 @@ def restart_server(request: Request) -> JSONResponse:
         config_svc.materialize_launch_config()
         _schedule_delayed_restart(delay=2)
 
-    request_server_restart(_restart_this_node, actor=username, scope="node")
+    try:
+        request_server_restart(_restart_this_node, actor=username, scope="node")
+    except Exception as exc:
+        return _restart_request_failed(exc)
 
     # Return 202 Accepted immediately
     return JSONResponse(
