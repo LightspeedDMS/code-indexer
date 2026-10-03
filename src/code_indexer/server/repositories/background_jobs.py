@@ -263,7 +263,19 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # sets distinct lets a light op be distributed without being throttled. The literal
 # must equal ``fts_backfill.policy.FTS_BACKFILL_BUILD_OP`` — a mismatch fails loudly at
 # startup via ``validate_dispatch_covers`` (dispatch keys must == POD_PULL_OPS).
-POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS | frozenset({"fts_backfill_build"})
+#
+# global_repo_refresh is POD_PULL but NOT in _MEMORY_HEAVY_OPS, for the same
+# reason as fts_backfill_build: that set gates the LOCAL pool worker, which a
+# pod-pull row never reaches, and adding it there would newly throttle refreshes
+# on a solo/sqlite server that has always run them ungated. The cluster
+# backpressure arrives anyway -- DistributedJobClaimer memory-gates EVERY claim,
+# not just memory-heavy ops -- so a pressured pod leaves the row for one with
+# headroom. Leader-gating refresh would be the wrong fix: ~922 repos funnelled
+# through one pod trades a load spike for a throughput collapse. The literal must
+# equal ``global_repos.refresh_scheduler.GLOBAL_REPO_REFRESH_OP``.
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS | frozenset(
+    {"fts_backfill_build", "global_repo_refresh"}
+)
 
 # Memory-aware admission: min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every

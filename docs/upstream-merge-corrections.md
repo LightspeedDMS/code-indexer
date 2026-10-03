@@ -99,6 +99,63 @@ loaded gun in CI, because the failure surfaces as a confusing error from the
 WRONG machine rather than as a syntax error. Feed scripts over a quoted heredoc
 (`sh -s <<'EOF'`) so apostrophes stay literal.
 
+### The source-text assertion, four times in one day
+
+A reviewer found the same defect in three of four MRs, and the fourth had it
+too. Every instance was a test asserting on `inspect.getsource` text instead of
+behaviour, and every instance passed on the exact change it claimed to forbid.
+
+| Claimed to pin | Why it could not fail |
+|---|---|
+| "deferring does not advance `next_refresh`" | `assert "next_refresh" not in between or "unadvanced" in between` — the deferral's own log message contains *"unadvanced"*, so the right side was always true |
+| "no refresh is submitted while denied" | the test called the helper and never ran the loop, so `assert_not_called()` held trivially |
+| "the temporal lane is not divided" | `"per_process_budget(\n" not in src.split("temporal_lane_concurrency")[-1]` — written multi-line, the call opener sits *before* the last token, so `split(...)[-1]` excludes it |
+| "the gate's result is acted on" | asserted only that *some* `ast.Return` existed anywhere in the function; `logger.info(...)` plus any unrelated early exit stayed green |
+
+Three of the four shipped with an MR description asserting the behaviour was
+pinned. The mutation tables were honest about what they ran and silent about
+what they did not: **no mutation in any of those runs targeted the claim the
+weak test was making.** A mutation suite only covers what you think to mutate,
+so "all mutations red" is evidence about the mutations, not about the tests.
+
+What actually distinguishes the four: a source-text assertion answers *"does the
+code look like this?"*, which is a question about an implementation that is free
+to change. The repair in each case was to ask the runtime instead — drive the
+loop, count the live threads by name, match the guard's AST shape rather than a
+substring.
+
+**Rules:**
+- A test that reads source text is a last resort, and it must be mutated against
+  the *natural* alternative spelling, not a strawman.
+- Before writing "pinned by a test" in a description, write the mutation that
+  would break the pin and watch it go red. If you cannot think of one, the pin
+  is a comment.
+
+### Fail-open that fails worse
+
+`ScheduledCatchupService` put a claim and its follow-up status write in one
+`try`, with a comment explaining that fail-open avoids a correctness problem.
+A successful claim followed by a failing `update_status` then took the fail-open
+branch, which nulled the job id — and the release calls below were guarded by
+that id, so the row was abandoned `pending` forever. `idx_active_job_per_repo`
+matches `pending`, so every later run on every process hit `DuplicateJobError`
+and returned: catch-up stopped cluster-wide. Before the change, the same failure
+cost one duplicate run.
+
+**Rule:** fail-open is a property of a *decision*, not of a block. Once a side
+effect has happened, the handler owns it. Group `try` blocks by what must be
+undone, not by what reads well.
+
+### Hid an error with `tail -1`
+
+Two pipelines failed CI lint on an unused import. `ruff check src tests` *was*
+run both times, piped through `tail -1`, which printed `[*] 1 fixable with the
+--fix option.` and dropped the `Found 1 error.` line above it. The hint looked
+like a suggestion rather than a failure.
+
+**Rule:** check the exit status, not the last line. `cmd || echo FAILED` beats
+any amount of `tail`.
+
 ## 4. Measurement errors
 
 | Claimed | Measured | Lesson |

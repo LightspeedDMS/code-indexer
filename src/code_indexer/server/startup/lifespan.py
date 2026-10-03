@@ -4737,7 +4737,29 @@ def make_lifespan(
                             golden_repo_manager, md, progress_callback
                         )
 
+                    # The scheduled golden-repo refresh is POD_PULL too: every
+                    # pod's scheduler submits rows, every pod claims DISTINCT
+                    # repos under the memory gate. _refresh_sched is the same
+                    # scheduler the leader-only DistributedJobWorkerService was
+                    # handed above; the leader now excludes this op via
+                    # exclude_types=POD_PULL_OPS, so the two loops stay disjoint.
+                    from code_indexer.global_repos.refresh_scheduler import (
+                        GLOBAL_REPO_REFRESH_OP,
+                        global_repo_refresh_executor,
+                    )
+
+                    def _pp_global_repo_refresh(md, progress_callback):
+                        if _refresh_sched is None:
+                            raise RuntimeError(
+                                "global_repo_refresh claimed on a pod with no "
+                                "refresh scheduler wired"
+                            )
+                        return global_repo_refresh_executor(
+                            _refresh_sched, md, progress_callback
+                        )
+
                     _index_dispatch = {
+                        GLOBAL_REPO_REFRESH_OP: _pp_global_repo_refresh,
                         "add_golden_repo": _pp_add_golden_repo,
                         "change_branch": _pp_change_branch,
                         "sync_repository": _pp_sync_repository,
