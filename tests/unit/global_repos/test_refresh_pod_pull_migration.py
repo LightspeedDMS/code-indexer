@@ -146,6 +146,33 @@ def test_executor_defaults_force_reset_off_for_an_old_row():
     assert sched.seen["force_reset"] is False
 
 
+def test_executor_forwards_the_claim_loop_s_job_id():
+    """EVO-66105/EVO-66113: per-job VoyageAI cost correlation.
+
+    IndexJobClaimLoop injects ``metadata["job_id"]`` for exactly this -- the
+    executor signature is (metadata, callback), so a key is how the id travels
+    without changing every dispatch target. _execute_refresh threads it into
+    _index_source -> build_embedding_stats_child_env, which is what tags each
+    EmbeddingCallRecord.
+
+    Dropping it does not fail anything: refreshes still run, and every VoyageAI
+    call record for a cluster refresh simply gets a NULL job id. Per-job cost
+    attribution stops silently.
+    """
+    sched = _Scheduler({"success": True})
+    global_repo_refresh_executor(
+        sched, {"alias_name": "alpha", "job_id": "job-77"}, None
+    )
+    assert sched.seen["job_id"] == "job-77"
+
+
+def test_executor_tolerates_a_row_without_a_job_id():
+    """Direct _run_tick callers and older rows have no job_id key."""
+    sched = _Scheduler({"success": True})
+    global_repo_refresh_executor(sched, {"alias_name": "alpha"}, None)
+    assert sched.seen["job_id"] is None
+
+
 def test_executor_returns_the_result_on_success():
     sched = _Scheduler({"success": True, "changes": 3})
     assert global_repo_refresh_executor(sched, {"alias_name": "a"}, None) == {
@@ -222,6 +249,16 @@ def test_claimed_job_path_forwards_force_reset(monkeypatch):
     assert seen["tracked_by_caller"] is True
 
 
+def test_claimed_job_path_forwards_job_id(monkeypatch):
+    seen: Dict[str, Any] = {}
+    s = RefreshScheduler.__new__(RefreshScheduler)
+    s._resolve_global_alias = lambda a: a
+    s._execute_refresh = lambda alias, **kw: seen.update({"alias": alias, **kw}) or {}
+
+    s.execute_refresh_for_claimed_job("alpha", job_id="job-77")
+    assert seen["job_id"] == "job-77"
+
+
 def test_claimed_job_path_still_defaults_to_no_force_reset():
     seen: Dict[str, Any] = {}
     s = RefreshScheduler.__new__(RefreshScheduler)
@@ -245,15 +282,21 @@ def test_lifespan_dispatch_has_a_refresh_executor() -> None:
     That protects the running server but not the test suite, which never builds
     the dispatch table. Assert the entry exists so adding the op to POD_PULL_OPS
     without an executor fails here rather than at the next deploy.
+
+    Matched as a dict KEY, not as a name appearing somewhere in the file: the
+    looser form passes on the import statement alone, with no dispatch entry at
+    all. (Reviewer observation on !93.)
     """
     tree = ast.parse(_LIFESPAN.read_text(encoding="utf-8"))
-    names = {
-        n.id
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Name) and n.id == "GLOBAL_REPO_REFRESH_OP"
-    }
-    assert names, (
-        "lifespan.py's pod-pull dispatch has no GLOBAL_REPO_REFRESH_OP entry; "
+    keys = [
+        k
+        for d in ast.walk(tree)
+        if isinstance(d, ast.Dict)
+        for k in d.keys
+        if isinstance(k, ast.Name) and k.id == "GLOBAL_REPO_REFRESH_OP"
+    ]
+    assert keys, (
+        "lifespan.py's pod-pull dispatch has no GLOBAL_REPO_REFRESH_OP KEY; "
         "validate_dispatch_covers will raise at startup"
     )
 

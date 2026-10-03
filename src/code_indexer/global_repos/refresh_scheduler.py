@@ -132,6 +132,14 @@ def global_repo_refresh_executor(
         alias,
         force_reset=bool(metadata.get("force_reset", False)),
         progress_callback=progress_callback,
+        # EVO-66105: IndexJobClaimLoop injects metadata["job_id"] precisely so
+        # executors can thread it through -- the (metadata, callback) signature
+        # leaves no other channel. _execute_refresh carries it into
+        # build_embedding_stats_child_env, which tags each EmbeddingCallRecord.
+        # Dropping it fails nothing and breaks nothing visible: refreshes still
+        # run, and every VoyageAI record for a cluster refresh just gets a NULL
+        # job id, so per-job cost attribution stops silently.
+        job_id=metadata.get("job_id"),
     )
     if isinstance(result, dict) and result.get("success") is False:
         detail = result.get("message") or result.get("error")
@@ -1718,6 +1726,7 @@ class RefreshScheduler:
         alias_name: str,
         progress_callback: Optional[Callable[..., None]] = None,
         force_reset: bool = False,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Perform the refresh WORK for a job that has ALREADY been claimed and
@@ -1757,6 +1766,14 @@ class RefreshScheduler:
                 change detection sees an unchanged repo and skips. It travels in
                 the row metadata because the executing pod cannot see the
                 submitting call's arguments.
+            job_id: The claimed row's id, for EVO-66113 per-job VoyageAI cost
+                correlation. The local-pool worker closure in
+                _submit_refresh_job already passes one; this path did not, which
+                was invisible while it only ran reclaimed rows on the leader.
+                Once it is the main path for every cluster refresh, omitting it
+                NULLs the job id on every embedding call record the fleet
+                produces. Supplied from metadata["job_id"], which
+                IndexJobClaimLoop injects for exactly this purpose.
 
         Returns:
             The same result dict _execute_refresh() returns
@@ -1771,6 +1788,7 @@ class RefreshScheduler:
             force_reset=force_reset,
             progress_callback=progress_callback,
             tracked_by_caller=True,
+            job_id=job_id,
         )
 
     def get_refresh_interval(self) -> int:
