@@ -148,8 +148,9 @@ def ensure_single_safe_directory(
     Exactly one entry: no-op.  None: added (unless *add_if_absent* is
     False).  Several: ONE ``--replace-all`` whose value pattern matches only
     *path* collapses them to one entry -- the entry is never absent, other
-    values and keys are untouched.  A failed listing counts as absent, as the
-    callers always did.  *sudo_user* runs git as that account.
+    values and keys are untouched.  The listing's exit 1 means "absent"; any
+    other failure to read is an error, never "absent" (nothing is written).
+    *sudo_user* runs git as that account.
 
     Returns None on success, else git's stderr: each caller keeps its own
     logging and fatal/non-fatal semantics.
@@ -159,8 +160,17 @@ def ensure_single_safe_directory(
     listed = subprocess.run(
         [*git, "--get-all", "safe.directory"], capture_output=True, text=True
     )
-    count = listed.stdout.splitlines().count(path) if listed.returncode == 0 else 0
+    if listed.returncode == 0:
+        count = listed.stdout.splitlines().count(path)
+    elif listed.returncode == 1:  # key absent
+        count = 0
+    else:
+        return listed.stderr or f"git config --get-all exited {listed.returncode}"
     if count == 1 or (count == 0 and not add_if_absent):
+        logger.debug(
+            f"Git safe.directory needs no change: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return None
     if count == 0:
         command = [*git, "--add", "safe.directory", path]
@@ -173,6 +183,11 @@ def ensure_single_safe_directory(
     if count > 1:
         logger.info(
             f"Collapsed {count} duplicate git safe.directory entries to one: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.info(
+            f"Added git safe.directory entry: {path}",
             extra={"correlation_id": get_correlation_id()},
         )
     return None
@@ -743,6 +758,11 @@ class DeploymentExecutor:
             )
             return False
 
+    def _hnswlib_submodule_dir(self) -> Path:
+        """The hnswlib submodule checkout whose safe.directory entry the
+        auto-updater manages (Bug #2028)."""
+        return self.repo_path / "third_party" / "hnswlib"
+
     def _ensure_submodule_safe_directory(self) -> bool:
         """Add submodule paths to git safe.directory config.
 
@@ -755,9 +775,7 @@ class DeploymentExecutor:
         """
         try:
             # Known submodule paths
-            submodule_paths = [
-                self.repo_path / "third_party" / "hnswlib",
-            ]
+            submodule_paths = [self._hnswlib_submodule_dir()]
 
             for submodule_path in submodule_paths:
                 # Skip if submodule directory doesn't exist yet
@@ -772,7 +790,7 @@ class DeploymentExecutor:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         f"Submodule git safe.directory configured: {submodule_path}",
                         extra={"correlation_id": get_correlation_id()},
                     )
@@ -3332,7 +3350,7 @@ class DeploymentExecutor:
         absent entry and never touches other values or keys.  Non-fatal: a git
         failure is logged loudly and the deploy continues.
         """
-        managed = (self.repo_path / "third_party" / "hnswlib", HNSWLIB_FALLBACK_PATH)
+        managed = (self._hnswlib_submodule_dir(), HNSWLIB_FALLBACK_PATH)
         for path in managed:
             try:
                 error = ensure_single_safe_directory(str(path), add_if_absent=False)
@@ -3398,7 +3416,7 @@ class DeploymentExecutor:
                 )
                 return False
 
-            logger.info(
+            logger.debug(
                 f"Git safe.directory configured for {service_user}: {repo_root}",
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -3457,7 +3475,6 @@ class DeploymentExecutor:
                 )
                 return True
 
-            # Check if the wildcard is already configured
             # Only when absent; duplicates collapsed (Bug #2028)
             error = ensure_single_safe_directory("*", sudo_user=service_user)
             if error is not None:
@@ -3469,7 +3486,7 @@ class DeploymentExecutor:
                 )
                 return False
 
-            logger.info(
+            logger.debug(
                 f"Git safe.directory wildcard configured for {service_user}",
                 extra={"correlation_id": get_correlation_id()},
             )

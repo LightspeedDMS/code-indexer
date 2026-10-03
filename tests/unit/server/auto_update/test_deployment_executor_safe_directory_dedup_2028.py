@@ -9,6 +9,8 @@ test double is the network ``git clone`` of the hnswlib fallback.
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 from contextlib import ExitStack
 from pathlib import Path
@@ -18,7 +20,12 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.auto_update import deployment_executor as de
-from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import (
+    DeploymentExecutor,
+    ensure_single_safe_directory,
+)
+
+READ_FAILURE_EXIT = 128
 
 _REAL_RUN = subprocess.run
 IDENTITY = "[user]\n\tname = Example Developer\n\temail = dev@example.com\n"
@@ -109,6 +116,46 @@ def _offline_clone(cmd: Sequence[str], *args: Any, **kwargs: Any) -> Any:
     return _REAL_RUN(cmd, *args, **kwargs)
 
 
+# Any: mirrors subprocess.run's overloaded signature, which it stands in for.
+def _listing_fails(cmd: Sequence[str], *args: Any, **kwargs: Any) -> Any:
+    """Only the safe.directory listing fails (writes stay real): a read
+    failure must never be mistaken for 'absent'."""
+    if "--get-all" in cmd:
+        return subprocess.CompletedProcess(
+            list(cmd), READ_FAILURE_EXIT, "", "injected read failure"
+        )
+    return _REAL_RUN(cmd, *args, **kwargs)
+
+
+def test_listing_exit_1_means_absent_and_adds(
+    tmp_path: Path, global_config: Path
+) -> None:
+    path = str(tmp_path / "repo")
+    assert ensure_single_safe_directory(path) is None
+    assert _safe_dirs(global_config) == [path]
+
+
+@pytest.mark.parametrize("add_if_absent", [True, False])
+def test_read_failure_is_an_error_never_absent(
+    tmp_path: Path, global_config: Path, add_if_absent: bool
+) -> None:
+    path = str(tmp_path / "repo")
+    with patch.object(de.subprocess, "run", side_effect=_listing_fails):
+        error = ensure_single_safe_directory(path, add_if_absent=add_if_absent)
+    assert error is not None and "injected read failure" in error
+    assert _safe_dirs(global_config) == []  # nothing added
+
+
+def test_self_heal_logs_226_when_the_config_cannot_be_read(
+    tmp_path: Path, global_config: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    global_config.write_text("[[[malformed\n")
+    executor = DeploymentExecutor(repo_path=tmp_path / "repo")
+    with caplog.at_level(logging.WARNING):
+        assert getattr(executor, SELF_HEAL)() is True
+    assert "DEPLOY-GENERAL-226" in caplog.text
+
+
 def test_submodule_safe_directory_is_added_once(
     tmp_path: Path, global_config: Path
 ) -> None:
@@ -142,11 +189,19 @@ def test_polluted_config_collapses_to_one_entry_and_keeps_the_rest(
     """The managed path holds a regex metacharacter ('.'); an unrelated
     entry that an unescaped pattern would also match must survive."""
     fallback = tmp_path / "cidx.hnswlib"
-    unrelated = (str(tmp_path / "cidxXhnswlib"), "/srv/example-repo")
+    # look-alike, prefix/suffix decoys (pin the ^...$ anchors), and unrelated
+    unrelated = (
+        str(tmp_path / "cidxXhnswlib"),
+        str(fallback) + "-old",
+        str(fallback) + "/",
+        "/prefix" + str(fallback),
+        "/srv/example-repo",
+    )
     monkeypatch.setattr(de, "HNSWLIB_FALLBACK_PATH", fallback)
     _add(global_config, unrelated[0])
     _add(global_config, str(fallback), times=POLLUTED_DUPLICATES)
-    _add(global_config, unrelated[1])
+    for value in unrelated[1:]:
+        _add(global_config, value)
     identity_before = _git_config(global_config, "--get-regexp", "^user\\.")
     assert len(identity_before) == IDENTITY_KEYS
 
@@ -186,7 +241,10 @@ def test_execute_runs_the_self_heal_so_a_deploy_converges(
     _add(global_config, str(fallback), times=DEPLOY_DUPLICATES)
     executor = DeploymentExecutor(repo_path=tmp_path / "repo")
 
+    tmpdir_before = os.environ.get("TMPDIR")
     with ExitStack() as stack:
+        # execute() sets os.environ["TMPDIR"]: restored on exit, never leaked
+        stack.enter_context(patch.dict(os.environ))
         for name in EXECUTE_STEPS:
             stack.enter_context(patch.object(executor, name, return_value=True))
         stack.enter_context(
@@ -201,3 +259,4 @@ def test_execute_runs_the_self_heal_so_a_deploy_converges(
         assert executor.execute() is True
 
     assert _safe_dirs(global_config).count(str(fallback)) == 1
+    assert os.environ.get("TMPDIR") == tmpdir_before
