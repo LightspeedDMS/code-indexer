@@ -219,15 +219,71 @@ def test_startup_sweep_is_leader_gated(sweep: str) -> None:
     )
 
 
+def _gate_guard(node: ast.AST) -> ast.If | None:
+    """The ``if not <gate>(...): return`` guard in this function, if any.
+
+    Matches the SHAPE rather than looking for a bare ``return`` anywhere in the
+    body: the weaker form passes on any function that happens to contain a
+    return for an unrelated reason, and on a gate whose negative branch only
+    logs while a later early-exit satisfies the assertion.
+    """
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.If):
+            continue
+        test = sub.test
+        if not (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)):
+            continue
+        inner = test.operand
+        if isinstance(inner, ast.Await):
+            inner = inner.value
+        if not (isinstance(inner, ast.Call) and _calls_gate(inner)):
+            continue
+        if any(isinstance(st, ast.Return) for st in sub.body):
+            return sub
+    return None
+
+
 @pytest.mark.parametrize("sweep", _GATED_SWEEPS)
 def test_gated_sweep_returns_early_when_not_leader(sweep: str) -> None:
-    """The gate's result must be ACTED ON, not merely computed and logged."""
+    """The gate's result must be ACTED ON, not merely computed and logged.
+
+    A gate whose False branch falls through to the work is decoration -- the
+    exact bug fixed elsewhere in ScheduledCatchupService, where registration
+    looked like a claim and the work ran regardless.
+
+    The first version of this asserted only that SOME `ast.Return` existed
+    anywhere in the function. Review called that out as meaningful only while
+    these closures have no other bare return. It also would not have caught the
+    failure it describes: replace `return` with `logger.info(...)` and add an
+    unrelated early exit further down, and it stayed green. Matched by shape now.
+    """
     body = _async_defs(sweep)[0]
-    returns = [n for n in ast.walk(body) if isinstance(n, ast.Return)]
-    assert returns, (
-        f"{sweep} calls the leader gate but never returns -- a gate whose "
-        f"False branch falls through to the work is decoration, which is the "
-        f"exact bug this change fixes elsewhere (ScheduledCatchupService)."
+    assert _gate_guard(body) is not None, (
+        f"{sweep} must guard with `if not await await_sweep_leadership(...): "
+        f"return`. Computing the gate and continuing anyway is worse than no "
+        f"gate, because it reads as handled."
+    )
+
+
+@pytest.mark.parametrize("sweep", _GATED_SWEEPS)
+def test_the_gate_guard_is_the_first_thing_the_sweep_does(sweep: str) -> None:
+    """Nothing may run before the decision to run.
+
+    A gate placed after the sweep's filesystem walk still prevents the
+    destructive half, but every process would pay the scan -- which on the
+    `.versioned` sweep is ~18 filesystem ops per namespace across ~900 repos,
+    over a `hard` NFSv3 mount, 12 times over. The gate exists to stop that too.
+    """
+    body = _async_defs(sweep)[0]
+    guard = _gate_guard(body)
+    assert guard is not None
+    try_block = next(
+        st for st in body.body if isinstance(st, (ast.Try, ast.AsyncWith, ast.If))
+    )
+    first = try_block.body[0] if isinstance(try_block, ast.Try) else None
+    assert first is guard, (
+        f"{sweep}'s leader gate is not the first statement in its try block; "
+        f"work ahead of it runs on all 12 processes regardless of the outcome."
     )
 
 
