@@ -43,7 +43,7 @@ def _app_state_storage_mode(value):
         yield
     finally:
         if saved is _unset:
-            del app_module.__dict__["app"]
+            app_module.__dict__.pop("app", None)
         else:
             app_module.__dict__["app"] = saved
 

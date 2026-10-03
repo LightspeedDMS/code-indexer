@@ -116,7 +116,7 @@ def _app_state_wiki_context(
         yield
     finally:
         if saved is _UNSET:
-            del app_module.__dict__["app"]
+            app_module.__dict__.pop("app", None)
         else:
             app_module.__dict__["app"] = saved
 
@@ -267,7 +267,7 @@ class TestSite3McpGuidesHandler:
             yield
         finally:
             if saved is _UNSET:
-                del app_module.__dict__["golden_repo_manager"]
+                app_module.__dict__.pop("golden_repo_manager", None)
             else:
                 app_module.__dict__["golden_repo_manager"] = saved
 

@@ -251,6 +251,7 @@ check_load_before_run
 # scratch -- and the lane fails if the real launch.json / config.json changed.
 # shellcheck source=scripts/real-server-home-guard.sh
 source "$PROJECT_DIR/scripts/real-server-home-guard.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
 # Under the real ~/.tmp, not /tmp: tests root their tmp dirs at ~/.tmp, and
 # config discovery walking up from /tmp can hit stray configs there.
 mkdir -p "$HOME/.tmp"
@@ -402,10 +403,8 @@ PYTEST_EXIT_CODE=${PIPESTATUS[0]}
 real_home_guard_verify "$REAL_HOME_STATE" && REAL_HOME_OK=0 || REAL_HOME_OK=$?
 if [ "$REAL_HOME_OK" -ne 0 ]; then
     print_error "This run changed the developer's real ~/.cidx-server (see above)"
-    if [ "$PYTEST_EXIT_CODE" -eq 0 ]; then
-        PYTEST_EXIT_CODE=1
-    fi
 fi
+PYTEST_EXIT_CODE=$(real_home_guard_exit_code "$PYTEST_EXIT_CODE" "$REAL_HOME_OK")
 
 # TELEMETRY: Extract duration data
 grep -E "^[0-9]+\.[0-9]+s (call|setup|teardown)" "$TELEMETRY_FILE" | sort -rn > "$DURATION_FILE"

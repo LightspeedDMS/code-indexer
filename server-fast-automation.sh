@@ -287,16 +287,18 @@ L6="$TELEMETRY_DIR/chunk6-rest2-${TIMESTAMP}.log"
 # scratch -- and the lane fails if the real launch.json / config.json changed.
 # shellcheck source=scripts/real-server-home-guard.sh
 source "$PROJECT_DIR/scripts/real-server-home-guard.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
 # Under the real ~/.tmp, not /tmp: tests root their tmp dirs at ~/.tmp, and
 # config discovery walking up from /tmp can hit stray configs there.
 mkdir -p "$HOME/.tmp"
 LANE_SCRATCH=$(mktemp -d "$HOME/.tmp/cidx-lane-home-XXXXXX")
+
+# Cleanup temp dirs on exit (armed before the snapshot and lane env)
+trap 'rm -rf "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$LANE_SCRATCH"' EXIT
+
 REAL_HOME_STATE="$LANE_SCRATCH/real-home-guard.state"
 real_home_guard_snapshot "$REAL_HOME_STATE"
 real_home_lane_env "$LANE_SCRATCH"
-
-# Cleanup temp dirs on exit
-trap 'rm -rf "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$LANE_SCRATCH"' EXIT
 
 WALL_START=$(date +%s)
 
@@ -363,8 +365,8 @@ TEST_EXIT_CODE=$(( C1 | C2 | C3 | C4 | C5 | C6 ))
 real_home_guard_verify "$REAL_HOME_STATE" && REAL_HOME_OK=0 || REAL_HOME_OK=$?
 if [ "$REAL_HOME_OK" -ne 0 ]; then
     print_error "This run changed the developer's real ~/.cidx-server (see above)"
-    TEST_EXIT_CODE=1
 fi
+TEST_EXIT_CODE=$(real_home_guard_exit_code "$TEST_EXIT_CODE" "$REAL_HOME_OK")
 
 # Report per-chunk results
 echo ""
