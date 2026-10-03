@@ -199,6 +199,38 @@ because it reads as handled. `tests/unit/server/startup/test_leader_gate.py`
 parses `lifespan.py` and asserts both halves: that each shared-state startup
 sweep calls the gate, **and** that it returns on the negative branch.
 
+## When M4's race is not enough
+
+M4 (everyone submits, the partial unique index picks a winner) is cheap and
+correct **when the work is idempotent**. It has a TOCTOU window, stated in-tree
+at `services/fts_backfill/scheduler.py`, and whether that window matters is
+entirely a property of the work:
+
+| Work | M4 verdict |
+|---|---|
+| retention / reaper deletes | fine — a duplicate DELETE is a no-op |
+| FTS backfill build | **promoted to M1** — rebuilds an index file |
+| HNSW orphan repair | **promoted to M1** — reads an on-disk index and rewrites it, on shared NFS. A duplicate is two writers on one index |
+
+Promoting keeps the M4 claim underneath. The gate removes the steady-state
+storm; the claim still covers the failover moment when two processes briefly
+both believe they are leader. They cost nothing together.
+
+Three details that are easy to get wrong when promoting a scheduler:
+
+- **Gate the loop, not the trigger.** `trigger_now()` is also the admin door.
+  An operator asking *this* pod to sweep should get a sweep, not a silent no-op
+  because another pod holds leadership.
+- **A follower still heartbeats.** `HNSWOrphanRepairSweepScheduler` records
+  `last_loop_cycle_at` and `last_cycle_skipped_reason` every cycle (Bug #1864)
+  precisely so "switched off" and "thread died" are distinguishable. A follower
+  is such a cycle: without its own `not_leader` reason, 11 of 12 pods report as
+  dead to the admin endpoint. Keep the reasons distinct — *disabled* is an
+  operator decision, *outside window* is a schedule, *not leader* is normal.
+- **Followers poll leadership on a short cadence**, not the tick interval. This
+  sweep's interval is in minutes *and* operating-window-gated, so a follower
+  that slept a full interval could leave the fleet unswept until tomorrow.
+
 ## Deliberately ungated
 
 `_run_primary_lease_directory_bootstrap` is a bare `mkdir` of a directory that

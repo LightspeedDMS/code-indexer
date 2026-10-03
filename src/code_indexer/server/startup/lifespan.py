@@ -461,6 +461,7 @@ def _construct_hnsw_orphan_repair_sweep_scheduler(
     golden_repo_manager: Any,  # Any: duck-typed, never imported here.
     backend_registry: Any,  # Any: may be None -- guarded below.
     background_job_manager: Any,  # Any: duck-typed, never imported here.
+    app_state: Any = None,  # Any: FastAPI app.state; None in solo/test wiring.
 ) -> Any:
     """Validate dependencies and build the sweep scheduler (Story #1360).
 
@@ -482,12 +483,27 @@ def _construct_hnsw_orphan_repair_sweep_scheduler(
             "golden_repo_manager.activated_repo_manager is not available"
         )
 
+    # Background-work audit: gate tick submission to the elected leader. A
+    # repair rewrites an on-disk HNSW index on the shared mount, so M4's
+    # race-to-claim is not enough on its own -- see the _loop gate's comment.
+    # app_state is None in solo wiring, where resolve_sweep_leader would answer
+    # True anyway (no election); defaulting the check to "leader" there keeps
+    # single-node behaviour identical without pretending there is an app.state.
+    if app_state is None:
+        _leader_check: Any = lambda: True  # noqa: E731 -- trivial default
+    else:
+        from code_indexer.server.startup.leader_gate import resolve_sweep_leader
+
+        def _leader_check() -> bool:  # type: ignore[misc]
+            return resolve_sweep_leader(app_state)
+
     return _HNSWOrphanRepairSweepScheduler(
         golden_repo_manager=golden_repo_manager,
         activated_repo_manager=golden_repo_manager.activated_repo_manager,
         state_backend=backend_registry.hnsw_orphan_sweep_state,
         background_job_manager=background_job_manager,
         config_service=get_config_service(),
+        leader_check=_leader_check,
     )
 
 
@@ -533,7 +549,10 @@ def _start_hnsw_orphan_repair_sweep_scheduler(
     )
     try:
         scheduler = _construct_hnsw_orphan_repair_sweep_scheduler(
-            golden_repo_manager, backend_registry, background_job_manager
+            golden_repo_manager,
+            backend_registry,
+            background_job_manager,
+            app_state=app.state,
         )
         scheduler.start()
     except Exception as e:
