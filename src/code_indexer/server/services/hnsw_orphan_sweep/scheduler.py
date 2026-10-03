@@ -48,6 +48,13 @@ _TICK_SECONDS = 60
 # promptly without a server restart.
 _DISABLED_POLL_SECONDS = 60
 
+# Re-check leadership on this short cadence instead of the full tick interval.
+# A follower that waited a whole interval would leave the fleet without a sweep
+# for minutes after a failover -- and this sweep's interval is in MINUTES and
+# gated by an operating-hours window, so one missed cycle can mean waiting until
+# tomorrow. Mirrors FtsBackfillSweepScheduler's _LEADER_POLL_SECONDS.
+_LEADER_POLL_SECONDS = 30
+
 # Safe fallback cadence when config cannot be read.
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
@@ -76,6 +83,12 @@ _LIVENESS_SCOPE = "local_process"
 # point: a sweep that is OFF by configuration is a decision, not a failure.
 CYCLE_SKIPPED_DISABLED = "disabled"
 CYCLE_SKIPPED_OUTSIDE_WINDOW = "outside_operating_window"
+# Background-work audit: a cycle skipped because another node is the elected
+# leader. Normal on 11 of 12 processes, and deliberately NOT folded into the two
+# above -- "disabled" is an operator decision, "outside window" is a schedule,
+# and this is ordinary cluster behaviour. An operator reading the admin endpoint
+# needs to tell them apart.
+CYCLE_SKIPPED_NOT_LEADER = "not_leader"
 
 
 def absent_local_scheduler_liveness() -> Dict[str, Any]:
@@ -148,6 +161,7 @@ class HNSWOrphanRepairSweepScheduler:
         config_service: Any,
         process_fn: Callable[[Any], SweepOutcome] = process_candidate,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        leader_check: Callable[[], bool] = lambda: True,
     ) -> None:
         """
         Args:
@@ -166,6 +180,11 @@ class HNSWOrphanRepairSweepScheduler:
             config_service: Object with ``get_config()`` returning a config
                 exposing ``hnsw_orphan_repair_sweep_config`` (enabled,
                 batch_size, tick_interval_minutes).
+            leader_check: Whether THIS node should submit ticks. The composition
+                root wires ``resolve_sweep_leader(app.state)``. Defaults to
+                "always leader" so solo/sqlite -- which has no election -- is
+                byte-for-byte unchanged. See the _loop gate for why this sweep
+                needs M1 rather than relying on M4 alone.
             process_fn: Injectable per-item processor for golden/activated
                 (in-repo) candidates (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
@@ -181,6 +200,7 @@ class HNSWOrphanRepairSweepScheduler:
         self._config_service = config_service
         self._process_fn = process_fn
         self._now_fn = now_fn
+        self._leader_check = leader_check
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -504,6 +524,46 @@ class HNSWOrphanRepairSweepScheduler:
                 "window_end": _DEFAULT_WINDOW_END_UTC,
             }
 
+    @staticmethod
+    def _wait_seconds_for(
+        *, enabled: bool, within_window: bool, is_leader: bool, interval_minutes: int
+    ) -> int:
+        """How long to wait before the next loop cycle.
+
+        Extracted so the cadence is directly assertable. Inlined in the loop it
+        could only be checked by counting calls to a mocked ``Event.wait``,
+        which is the kind of indirect assertion that passes while the thing it
+        describes is wrong.
+
+        A FOLLOWER waits the short leader poll, not the tick interval: this
+        sweep's interval is in minutes AND gated by an operating-hours window,
+        so a follower that slept a whole interval could leave the fleet without
+        a sweep until the window reopens tomorrow.
+        """
+        if not enabled or not within_window:
+            return _DISABLED_POLL_SECONDS
+        if not is_leader:
+            return _LEADER_POLL_SECONDS
+        return interval_minutes * 60
+
+    def _is_leader(self) -> bool:
+        """Whether this node should submit sweep ticks.
+
+        Fail-OPEN on a glitch: this sweep is the fleet's only mechanism for
+        repairing a corrupt on-disk index, and a transient election error must
+        not silently stop it everywhere. Before the gate existed every process
+        submitted, so fail-open can only ever be as bad as that.
+        """
+        try:
+            return bool(self._leader_check())
+        except Exception:  # noqa: BLE001 -- fail-open, see docstring
+            logger.debug(
+                "HNSWOrphanRepairSweepScheduler: leader check raised; "
+                "submitting anyway (fail-open)",
+                exc_info=True,
+            )
+            return True
+
     def _loop(self) -> None:
         """Main loop: submit a tick job (if enabled AND within the
         configured UTC operating-hours window), then wait for the
@@ -519,21 +579,44 @@ class HNSWOrphanRepairSweepScheduler:
                 current_hour, cycle_cfg["window_start"], cycle_cfg["window_end"]
             )
 
+            # Background-work audit: gate the submission to the elected leader.
+            # Every process ran this loop and leaned on DuplicateJobError against
+            # idx_active_job_per_repo (M4, "everyone submits, one wins"). That is
+            # right for idempotent work; a repair READS an on-disk HNSW index and
+            # REWRITES it on a shared NFS mount, so a duplicate slipping through
+            # M4's TOCTOU window -- the window acknowledged in
+            # fts_backfill/scheduler.py, and the reason that sweep was promoted
+            # M4 -> M1 -- is two processes rewriting the same index.
+            #
+            # The M4 claim in trigger_now() STAYS: the gate removes the
+            # steady-state storm, the claim still covers the failover moment when
+            # two processes briefly both believe they are leader.
+            #
+            # Evaluated AFTER enabled/window so a switched-off sweep reports
+            # "disabled" on every pod. Otherwise the leader says "disabled" while
+            # 11 pods say "not leader", and the operator who just turned it off
+            # sees a confusing fleet.
+            is_leader = self._is_leader() if (enabled and within_window) else True
+
             # Bug #1864: heartbeat every cycle, including the cycles that
             # deliberately submit nothing. Without it, a sweep switched off
             # in the Web UI and a sweep whose loop thread died look the same
-            # from outside -- both simply stop producing ticks.
-            if enabled and within_window:
-                skipped_reason = None
-            elif not enabled:
+            # from outside -- both simply stop producing ticks. A follower is
+            # exactly such a cycle, so it heartbeats too: without that, 11 of 12
+            # processes would report as dead to the admin endpoint.
+            if not enabled:
                 skipped_reason = CYCLE_SKIPPED_DISABLED
-            else:
+            elif not within_window:
                 skipped_reason = CYCLE_SKIPPED_OUTSIDE_WINDOW
+            elif not is_leader:
+                skipped_reason = CYCLE_SKIPPED_NOT_LEADER
+            else:
+                skipped_reason = None
             with self._liveness_lock:
                 self._last_loop_cycle_at = self._now_fn()
                 self._last_cycle_skipped_reason = skipped_reason
 
-            if enabled and within_window:
+            if enabled and within_window and is_leader:
                 try:
                     self.trigger_now()
                 except Exception as exc:
@@ -542,9 +625,13 @@ class HNSWOrphanRepairSweepScheduler:
                         exc,
                         exc_info=True,
                     )
-                wait_seconds = interval_minutes * 60
-            else:
-                wait_seconds = _DISABLED_POLL_SECONDS
+
+            wait_seconds = self._wait_seconds_for(
+                enabled=enabled,
+                within_window=within_window,
+                is_leader=is_leader,
+                interval_minutes=interval_minutes,
+            )
 
             elapsed = 0
             while elapsed < wait_seconds and not self._stop_event.is_set():
