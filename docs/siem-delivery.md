@@ -105,6 +105,10 @@ like every other admin secret change.
   made on any node applies at the next request everywhere. Without a usable
   credential a process probes `credential_missing` or `credential_invalid`
   and capture does not arm.
+- Replacing or removing a stored key disarms delivery in the same
+  transaction and clears the canary: re-arming needs a fresh canary and
+  confirmation (see Arming). A canary sent while the key was being replaced
+  is refused when recorded (HTTP 409; run it again).
 - A `service_account_key_path` value saved by 12.79.0 is IGNORED: each process
   logs one WARNING, never reads that file, and the destination counts as
   "credential missing" until a key is uploaded. The next save of the section
@@ -137,9 +141,11 @@ every certificate).
 - Setting, replacing and removing need TOTP elevation and are recorded as a
   `config_changed` row whose values carry the fingerprint before and after.
 - The UI shows each certificate's subject, issuer, SHA-256 fingerprint and
-  expiry. A change does not change the destination key (no disarm); the
-  combined trust is built once per bundle and picked up through the
-  committed-configuration read on the next cycle.
+  expiry. The combined trust is built once per bundle and picked up through
+  the committed-configuration read on the next cycle.
+- A change (set, replace or remove) does not change the destination key,
+  but it ends the configuration lifetime: delivery disarms and needs a fresh
+  canary (see Arming). Set the CA before running the canary.
 
 ## Arming
 
@@ -153,6 +159,28 @@ Capture starts only after one atomic arming statement succeeds. That statement r
 
 A destination change disarms. A new mapping version does not disarm, but it
 shows a DEGRADED reason until the canary is re-run.
+
+The order is: configure (key, optional CA, destination fields with
+`enabled` off), run the canary, confirm it, then enable; capture arms on a
+later cycle. The canary runs while delivery is disabled, as long as a
+destination is configured.
+
+A canary confirmation is valid only for the configuration lifetime that
+produced it (Bug #2018). The lifetime is the committed section's
+`arming_epoch`, a token no form can set: every configuration change carries
+it over from the committed pre-image and renews it when the destination is
+disabled, cleared or changed, or the trusted CA changes
+(`siem_delivery/boundary.py` `carry_arming_epoch`). The canary records the
+epoch it ran under (`siem_delivery_state.canary_config_epoch`, PostgreSQL
+migration 056); the arming statement and the fence require it to equal the
+committed epoch (`state_store.CANARY_CONFIRMED_FOR`), so a newer version of
+another lifetime disarms and a stale confirmation is refused. Replacing or
+removing the service-account key clears the canary and disarms in its own
+transaction, and a canary is recorded only if the key it was sent with is
+still the stored one. Enabling, and every other change of the section,
+keeps a confirmed canary valid. A configuration saved before the epoch
+existed has the empty epoch, so an already armed destination stays armed
+across the upgrade.
 
 ### Arming from the Web UI
 
@@ -200,8 +228,10 @@ REST alternative: `POST /api/admin/siem-delivery/canary`, then
   and this process's liveness.
 - `GET /api/admin/siem-delivery/quarantine?limit=N`: quarantined rows (event
   uuid, reason, sanitised signature).
-- `/health`: SIEM reasons are DEGRADED only. A SecOps outage never makes a
-  node unhealthy.
+- `GET /api/system/health` (authenticated): SIEM reasons appear in
+  `failure_reasons` and are DEGRADED only. A SecOps outage never makes a
+  node unhealthy. The public `/healthz` returns the resulting status only
+  (DEGRADED answers HTTP 200); `GET /health` does not include SIEM reasons.
 - OTEL: `cidx.siem.*` gauges (pending, quarantined, oldest pending age,
   backlog estimate, halted, capture active, unrecoverable, capture after
   boundary) and counters (delivered, capture failures, unmapped types, ...).
@@ -282,6 +312,8 @@ actions are audited.
 Decommissioning: disable delivery and clear the destination fields, then
 abandon the old key (the clearing save itself captures one row for the removed
 destination). Once those rows are abandoned, every SIEM health reason clears.
+Configuring the same destination again later starts a new configuration
+lifetime: it arms only after a fresh canary and confirmation.
 
 ## Retention
 
@@ -306,11 +338,20 @@ Before enabling against a real tenant:
 1. Turn TOTP elevation enforcement ON (`elevation_enforcement_enabled`) and
    confirm that a SIEM action asks for elevation.
 2. Grant a dedicated identity only the events-import permission.
-3. Configure the region, project, location and instance, and upload the
-   service-account key in the Web UI.
+3. Upload the service-account key (and, only if needed, the trusted CA) in
+   the Web UI, then configure the region, project, location and instance
+   with `enabled` off.
 4. Run the canary.
 5. Search each canary `productLogId` in SecOps and submit the confirmation.
-6. Record the real 400 body shape and any duplicate response.
-7. Confirm that the IAM permission name is correct.
-8. Verify that `principal.ip` is the client address.
-9. Re-verify the region list against Google's documentation.
+6. Enable delivery, and wait for the ARMED row.
+7. Record the real 400 body shape and any duplicate response.
+8. Confirm that the IAM permission name is correct.
+9. Verify that `principal.ip` is the client address.
+10. Re-verify the region list against Google's documentation.
+
+The same steps from a shell are in the
+[operator curl runbook](siem-secops-curl-runbook.md). The Web UI `session`
+cookie is `Secure` whenever the server is not bound to localhost, so a
+deployment served over plain `http` needs a TLS front door for browser and
+curl web-form use (the key and CA uploads exist only as Web forms; public
+issue #2004).

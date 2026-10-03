@@ -37,3 +37,10 @@ class SiemDeliveryConfig:
     # every certificate) is what the config-change audit records.
     trusted_ca_pem: str = ""
     trusted_ca_fingerprint: str = ""
+    # Bug #2018: the configuration lifetime a canary confirmation is bound
+    # to.  Never set by a form: every configuration change carries it over
+    # from the committed pre-image, and renews it when the destination is
+    # disabled, cleared or changed, or the trusted CA changes
+    # (services/siem_delivery/boundary.py carry_arming_epoch).  Arming
+    # requires the confirmed canary's epoch to equal the committed one.
+    arming_epoch: str = ""

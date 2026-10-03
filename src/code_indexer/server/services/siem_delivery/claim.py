@@ -59,6 +59,9 @@ class EngineContext:
     destination: Destination
     max_batch_events: int
     source_instance_label: str
+    # the committed section's arming_epoch (Bug #2018): canary and confirm
+    # bind to the lifetime of the SAME read that resolved the destination
+    config_epoch: str
     mapping: Mapping[str, str] = field(default_factory=lambda: UDM_MAPPING)
     mapping_version: int = MAPPING_VERSION
     jitter: Any = None  # callable() -> float in [0, 1); None = no jitter

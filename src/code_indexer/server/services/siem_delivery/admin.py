@@ -168,6 +168,9 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         )
     if invalid:
         raise SiemAdminError(422, f"canary failed local validation: {sorted(invalid)}")
+    # Bug #2018: read BEFORE minting, so a key replaced from here on makes
+    # the record refuse this canary (it would prove the old key).
+    credential_id = scheduler.credential_store.credential_id()
     try:
         token = ctx.credentials.token(ctx.destination)
     except CredentialError as exc:
@@ -183,7 +186,7 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         timeout=ctx.timings.request_timeout_seconds,
     )
     result = "accepted" if cls.cls == "accepted" else "rejected"
-    state_store.record_canary(
+    recorded = state_store.record_canary(
         ctx.db,
         run_id=run_id,
         destination_key=ctx.destination.key,
@@ -192,7 +195,14 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         result=result,
         signature=None if result == "accepted" else cls.signature,
         actor=actor,
+        config_epoch=ctx.config_epoch,
+        credential_id=credential_id,
     )
+    if not recorded:
+        raise SiemAdminError(
+            409,
+            "the service-account credential changed during the canary; run it again",
+        )
     _audit(
         scheduler,
         actor,
@@ -225,6 +235,7 @@ def confirm_visible(
         mapping_version=ctx.mapping_version,
         visible_ids=list(visible_ids),
         actor=actor,
+        config_epoch=ctx.config_epoch,
     )
     if outcome.stale:
         raise SiemAdminError(
@@ -667,10 +678,11 @@ def capture_status(scheduler: Any, state: Mapping[str, Any]) -> Dict[str, Any]:
         }
     if not view.section.enabled or dest is None:
         return {"state": "inactive", "status": "delivery disabled or no destination"}
-    if (
-        state.get("canary_destination_key") != dest.key
-        or state.get("canary_mapping_version") != scheduler.mapping_version
-        or not state.get("canary_result")
+    if not state.get("canary_result") or not state_store.canary_is_for(
+        state,
+        destination_key=dest.key,
+        mapping_version=scheduler.mapping_version,
+        config_epoch=view.section.arming_epoch,
     ):
         return {"state": "awaiting canary", "status": "awaiting canary"}
     if state.get("canary_result") != "accepted":

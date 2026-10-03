@@ -114,6 +114,32 @@ def test_arming_document_walks_to_armed(wired: Tuple[Any, ...]) -> None:
     assert doc["readiness"]["all_ready"] is True
 
 
+def test_canary_row_needs_the_committed_lifetime_and_agrees_with_status(
+    wired: Tuple[Any, ...],
+) -> None:
+    """Bug #2018: after a commit that ends the configuration lifetime (here
+    a trusted-CA change: same destination, new arming_epoch) the checklist's
+    canary row must stop matching, exactly like the status line."""
+    b, config, sidecar = wired
+    scheduler = _scheduler(b, config)
+    _parity._arm(scheduler)
+    doc = ops_documents.arming_document(scheduler)
+    assert doc["canary_matches"] is True and doc["armed"] is True
+
+    config.version = 2
+    config.section = {
+        **config.section,
+        "trusted_ca_fingerprint": "example-fingerprint",
+        "arming_epoch": "example-new-lifetime",
+    }
+    scheduler.run_cycle()
+    doc = ops_documents.arming_document(scheduler)
+    assert doc["committed"]["destination_key"] == harness_destination(sidecar).key
+    assert doc["armed"] is False
+    assert doc["local_process"]["status"]["state"] == "awaiting canary"
+    assert doc["canary_matches"] is False, "checklist disagrees with the status"
+
+
 def test_arming_document_reads_the_committed_config(wired: Tuple[Any, ...]) -> None:
     b, config, sidecar = wired
     scheduler = _scheduler(b, config)

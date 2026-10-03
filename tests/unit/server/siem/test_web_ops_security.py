@@ -221,7 +221,7 @@ def test_db_derived_strings_are_escaped(ops: OpsEnv) -> None:
     _seed_queue(ops.backend, 1, status="quarantined", signature=MARK)
     view = ops.scheduler.committed_view()
     assert view.destination is not None
-    state_store.record_canary(
+    assert state_store.record_canary(
         ops.backend.db,
         run_id="run-escape",
         destination_key=view.destination.key,
@@ -230,6 +230,8 @@ def test_db_derived_strings_are_escaped(ops: OpsEnv) -> None:
         result="accepted",
         signature=None,
         actor=MARK,
+        config_epoch=view.section.arming_epoch,
+        credential_id=ops.scheduler.credential_store.credential_id(),
     )
     ops.backend.raw(
         "INSERT INTO siem_destinations (destination_key, region, project_id, location, "

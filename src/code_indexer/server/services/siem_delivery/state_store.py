@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from code_indexer.server.services.siem_delivery.db import SiemDb, SiemTx
 from code_indexer.server.utils.siem_delivery_config import SiemDeliveryConfig
@@ -187,8 +187,14 @@ def upsert_destination(db: SiemDb, key: str, cfg: SiemDeliveryConfig) -> None:
 
 
 def _fence(
-    tx: SiemTx, version: int, enabled: bool, destination_key: Optional[str]
+    tx: SiemTx,
+    version: int,
+    enabled: bool,
+    destination_key: Optional[str],
+    config_epoch: str,
 ) -> None:
+    """A newer committed version keeps the arming only for the SAME
+    destination in the SAME configuration lifetime (Bug #2018)."""
     if not enabled or destination_key is None:
         tx.execute(
             "UPDATE siem_delivery_state SET seen_config_version = ?, "
@@ -199,9 +205,9 @@ def _fence(
     tx.execute(
         "UPDATE siem_delivery_state SET seen_config_version = ?, "
         "armed_destination_key = CASE WHEN armed_destination_key = ? "
-        "THEN armed_destination_key ELSE NULL END "
+        "AND canary_config_epoch = ? THEN armed_destination_key ELSE NULL END "
         "WHERE id = 1 AND seen_config_version < ?",
-        (version, destination_key, version),
+        (version, destination_key, config_epoch, version),
     )
 
 
@@ -219,6 +225,37 @@ NODE_WITHOUT_LIVE_PROCESS = (
     "n.status = 'online' AND n.last_heartbeat >= ? AND NOT EXISTS (SELECT 1 FROM "
     "siem_process_status p WHERE p.node_id = n.node_id AND p.expires_at > ?)"
 )
+# The canary half of the arming predicate, over the state row's own columns:
+# both take (destination_key, mapping_version, config_epoch).  A canary
+# belongs to one destination, mapping AND configuration lifetime (Bug #2018);
+# canary_is_for() is the same check over a state row read in Python.
+CANARY_FOR = (
+    "canary_destination_key = ? AND canary_mapping_version = ? "
+    "AND canary_config_epoch = ?"
+)
+CANARY_CONFIRMED_FOR = (
+    f"{CANARY_FOR} AND canary_result = 'accepted' "
+    "AND canary_visible_confirmed_at IS NOT NULL"
+)
+
+
+def canary_is_for(
+    state: Mapping[str, Any],
+    *,
+    destination_key: Optional[str],
+    mapping_version: int,
+    config_epoch: str,
+) -> bool:
+    """:data:`CANARY_FOR` over a state row: the recorded canary belongs to
+    this destination, mapping and configuration lifetime.  The one check the
+    status line (``admin.capture_status``) and the arming checklist
+    (``ops_documents.arming_document``) share."""
+    return (
+        destination_key is not None
+        and state.get("canary_destination_key") == destination_key
+        and state.get("canary_mapping_version") == mapping_version
+        and state.get("canary_config_epoch") == config_epoch
+    )
 
 
 def _arm(
@@ -226,6 +263,7 @@ def _arm(
     version: int,
     destination_key: str,
     mapping_version: int,
+    config_epoch: str,
     probe_fresh_seconds: float,
 ) -> int:
     """ONE conditional UPDATE: the whole readiness predicate is evaluated in
@@ -238,9 +276,7 @@ def _arm(
         "armed_config_version = ? "
         "WHERE id = 1 AND armed_destination_key IS NULL "
         "AND seen_config_version <= ? "
-        "AND canary_destination_key = ? AND canary_result = 'accepted' "
-        "AND canary_mapping_version = ? "
-        "AND canary_visible_confirmed_at IS NOT NULL "
+        f"AND {CANARY_CONFIRMED_FOR} "
         f"AND EXISTS (SELECT 1 FROM siem_process_status p WHERE {LIVE_PROCESS}) "
         f"AND NOT EXISTS (SELECT 1 FROM siem_process_status p WHERE {LIVE_PROCESS} "
         f"AND {NOT_READY_FOR_DESTINATION})"
@@ -252,6 +288,7 @@ def _arm(
         version,
         destination_key,
         mapping_version,
+        config_epoch,
         now_p,
         now_p,
         destination_key,
@@ -387,15 +424,24 @@ def fence_and_arm(
     enabled: bool,
     destination_key: Optional[str],
     mapping_version: int,
+    config_epoch: str,
     probe_fresh_seconds: float,
 ) -> Dict[str, Any]:
     """Apply the committed config version (monotonic), try to arm, and
-    return the resulting state row."""
+    return the resulting state row.  *config_epoch* is the committed
+    section's ``arming_epoch``."""
 
     def _do(tx: SiemTx) -> Dict[str, Any]:
-        _fence(tx, version, enabled, destination_key)
+        _fence(tx, version, enabled, destination_key, config_epoch)
         if enabled and destination_key is not None:
-            _arm(tx, version, destination_key, mapping_version, probe_fresh_seconds)
+            _arm(
+                tx,
+                version,
+                destination_key,
+                mapping_version,
+                config_epoch,
+                probe_fresh_seconds,
+            )
         return state_in(tx)
 
     return db.write(_do, phase="arming")
@@ -429,15 +475,32 @@ def record_canary(
     result: str,
     signature: Optional[str],
     actor: str,
-) -> None:
-    def _do(tx: SiemTx) -> None:
+    config_epoch: str,
+    credential_id: Optional[str],
+) -> bool:
+    """Record a canary run for the configuration lifetime *config_epoch*,
+    sent with the credential *credential_id* (read BEFORE the send).
+
+    False, recording nothing, when the stored credential changed meanwhile
+    (its replacement invalidated canaries; this one proves the old key).  A
+    canary of another lifetime also ends an arming made in the old one."""
+
+    def _do(tx: SiemTx) -> bool:
+        state_in(tx, lock=True)  # serialise with credential changes
+        stored = tx.one(
+            "SELECT credential_id FROM siem_delivery_credential WHERE id = 1"
+        )
+        if (stored["credential_id"] if stored else None) != credential_id:
+            return False
         tx.execute(
             "UPDATE siem_delivery_state SET canary_run_id = ?, "
             "canary_destination_key = ?, canary_mapping_version = ?, "
             "canary_expected = ?, canary_sent_at = ?, canary_result = ?, "
             "canary_result_signature = ?, canary_actor = ?, "
             "canary_confirmed_ids = NULL, canary_missing_action_types = NULL, "
-            "canary_visible_confirmed_by = NULL, canary_visible_confirmed_at = NULL "
+            "canary_visible_confirmed_by = NULL, canary_visible_confirmed_at = NULL, "
+            "armed_destination_key = CASE WHEN canary_config_epoch = ? "
+            "THEN armed_destination_key ELSE NULL END, canary_config_epoch = ? "
             "WHERE id = 1",
             (
                 run_id,
@@ -448,10 +511,33 @@ def record_canary(
                 result,
                 signature,
                 actor,
+                config_epoch,
+                config_epoch,
             ),
         )
+        return True
 
-    db.write(_do, phase="canary")
+    return bool(db.write(_do, phase="canary"))
+
+
+def invalidate_canary(tx: SiemTx) -> None:
+    """Forget the canary run and its confirmation, and disarm (Bug #2018):
+    the service-account credential was replaced or removed.  The caller
+    holds the state-row lock.
+
+    ``canary_config_epoch`` is left as is: it is NOT NULL and, with
+    ``canary_result`` cleared, no row can satisfy CANARY_CONFIRMED_FOR until
+    a new canary is recorded (which rewrites it)."""
+    tx.execute(
+        "UPDATE siem_delivery_state SET armed_destination_key = NULL, "
+        "canary_run_id = NULL, canary_destination_key = NULL, "
+        "canary_mapping_version = NULL, canary_expected = NULL, "
+        "canary_sent_at = NULL, canary_result = NULL, "
+        "canary_result_signature = NULL, canary_actor = NULL, "
+        "canary_confirmed_ids = NULL, canary_missing_action_types = NULL, "
+        "canary_visible_confirmed_by = NULL, canary_visible_confirmed_at = NULL "
+        "WHERE id = 1"
+    )
 
 
 @dataclass
@@ -471,6 +557,7 @@ def confirm_canary(
     mapping_version: int,
     visible_ids: Sequence[str],
     actor: str,
+    config_epoch: str,
 ) -> CanaryConfirmation:
     def _do(tx: SiemTx) -> CanaryConfirmation:
         from code_indexer.server.storage.json_column import parse_json_column
@@ -480,6 +567,7 @@ def confirm_canary(
             st.get("canary_run_id") != run_id
             or st.get("canary_destination_key") != destination_key
             or st.get("canary_mapping_version") != mapping_version
+            or st.get("canary_config_epoch") != config_epoch
             or st.get("canary_result") != "accepted"
         ):
             return CanaryConfirmation(stale=True)

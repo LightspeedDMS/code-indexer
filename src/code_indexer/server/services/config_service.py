@@ -42,6 +42,7 @@ from ..auto_update.deployment_executor import (
     read_execstart_flags,
 )
 from .db_outage_throttle import DbOutageThrottle
+from .siem_delivery.boundary import carry_arming_epoch as _carry_arming_epoch
 from .siem_delivery.config_view import apply_siem_setting as _apply_siem_setting
 from .siem_delivery.config_view import siem_settings as _siem_settings
 
@@ -1327,6 +1328,7 @@ class ConfigService:
         if replacement is not None:
             candidate = replacement
             attempt.after = candidate
+        _carry_arming_epoch(live, candidate)  # Bug #2018
         self.config_manager.validate_config(candidate, previous_host=live.host)
         if before_publish is not None:
             before_publish(candidate)

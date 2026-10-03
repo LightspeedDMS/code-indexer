@@ -113,9 +113,15 @@ def arming_document(scheduler: Any) -> Dict[str, Any]:
         "canary": canary,
         # one canary event per mapping entry, plus the unmapped one
         "canary_event_count": len(UDM_MAPPING) + 1,
-        "canary_matches": key is not None
-        and canary["destination_key"] == key
-        and canary["mapping_version"] == scheduler.mapping_version,
+        # destination, mapping AND configuration lifetime, from the same
+        # committed view (the status line uses the same predicate)
+        "canary_matches": view is not None
+        and state_store.canary_is_for(
+            state,
+            destination_key=key,
+            mapping_version=scheduler.mapping_version,
+            config_epoch=view.section.arming_epoch,
+        ),
         "readiness": readiness,
         # node coverage (checklist row 6) exists only in PostgreSQL mode
         "cluster": scheduler.db.dialect.name == "postgres",

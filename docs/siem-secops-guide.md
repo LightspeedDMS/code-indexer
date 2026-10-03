@@ -129,6 +129,15 @@ cidx captures pilot events only after it is **armed**. Arming needs all of:
 Section 4 walks through the canary. Nothing is captured while delivery is
 disabled or not yet armed.
 
+A canary confirmation is valid only for the configuration lifetime that
+produced it. Any of these ends the lifetime: disabling or clearing the
+destination, removing or replacing the service-account credential, changing
+the trusted CA, or moving the destination to other coordinates. Delivery
+then disarms (or cannot arm), the status shows `awaiting canary`, and
+re-enabling needs a fresh canary and confirmation. Enabling delivery, and
+any other change of the section (for example `max_batch_events` or the
+instance label), keeps a confirmed canary valid.
+
 ### 1.3 Delivery guarantees
 
 - **At least once.** An event can arrive more than once. To count unique
@@ -146,7 +155,7 @@ disabled or not yet armed.
   90 seconds. cidx counts those events and still delivers them. The
   bound is suspended while a process runs on its last-known-good config
   (its health says so), and captures later than 90 s are counted and shown
-  on `/health`.
+  in `GET /api/system/health` (`failure_reasons`).
 - **Ordering.** cidx builds batches from its queue in capture order, but it
   does not promise arrival order: it keeps up to three open batches per
   destination, retries failed batches later, and can requeue quarantined
@@ -247,7 +256,8 @@ again. Changing `api_version` does not change the destination.
 Below the settings is **Service Account Credential**. Paste the JSON key into
 the text box, or upload the key file, then click **Set / Replace
 Credential**. Section 3 covers how to create the key. **Remove Credential**
-deletes it. Both need TOTP elevation.
+deletes it. Both need TOTP elevation. Replacing or removing a stored key
+disarms delivery and needs a fresh canary (section 1.2).
 
 ### 2.6 Additional trusted CA (optional)
 
@@ -265,6 +275,8 @@ CA**.
   environment variables.
 - Changes need TOTP elevation and are audited as `config_changed` with the
   bundle's SHA-256 fingerprint before and after.
+- Setting, replacing or removing the bundle disarms delivery and needs a
+  fresh canary (section 1.2). Set it before the canary.
 
 ## 3. Create the Google service account
 
@@ -391,14 +403,19 @@ This follows Google's
 
 1. Create a new JSON key for the same service account (step 3.2.5).
 2. Paste it into cidx with **Set / Replace Credential**. cidx records
-   `siem_credential_changed` with `change` = `replaced`.
-3. In the Google Cloud console, disable the old key and watch cidx health
+   `siem_credential_changed` with `change` = `replaced`. Replacing the key
+   ends the configuration lifetime the canary was confirmed for: delivery
+   disarms at once. Events captured before keep being delivered with the new
+   key; new events are not captured until delivery is armed again.
+3. Run the canary and confirm it again (section 4.1, steps 2 to 4); cidx
+   re-arms on a later loop cycle.
+4. In the Google Cloud console, disable the old key and watch cidx health
    (section 7) and SecOps for new cidx events.
-4. When delivery works, delete the old key: **Service accounts**, the
+5. When delivery works, delete the old key: **Service accounts**, the
    account, **Keys** tab, delete the old key.
 
-A key rotation does not change the destination, so it does not disarm
-delivery.
+Plan the rotation for a quiet period: between step 2 and the confirmation in
+step 3, cidx does not capture new events for SecOps.
 
 ### 3.7 Security advice
 
@@ -419,10 +436,13 @@ From Google's
 
 A cidx admin and a SecOps analyst do this together.
 
-1. **cidx admin:** fill all fields (section 2), set `enabled` to Yes, save,
-   and upload the key. The status table shows **Capture state**
-   `awaiting canary`. Check that **This process** shows `probe=ok`
-   (this process can get a token).
+The order is: configure, canary, confirm, then enable. The canary runs while
+`enabled` is still No, as long as a destination is configured.
+
+1. **cidx admin:** upload the key (section 2.5) and, only if needed, the
+   additional trusted CA (section 2.6). Then fill all fields (section 2),
+   leave `enabled` at No, and save. Check that **This process** shows
+   `probe=ok` (this process can get a token).
 2. **cidx admin:** in the same SIEM Delivery section, under **Operations**,
    press **Run canary** and confirm. While TOTP elevation enforcement is on,
    cidx asks for a TOTP code first (the action is then replayed). The arming
@@ -436,15 +456,34 @@ A cidx admin and a SecOps analyst do this together.
    visible**. The result shows "Confirmed N of M"; arming needs every
    expected ID, including the unmapped one. If some are missing, the
    checklist names their action types; wait and confirm again.
-5. Watch the **ARMED** row of the checklist. cidx arms on a later loop cycle,
+5. **cidx admin:** set `enabled` to Yes and save. Enabling keeps the
+   confirmed canary valid.
+6. Watch the **ARMED** row of the checklist. cidx arms on a later loop cycle,
    once every live process also has a fresh `probe=ok` (the "Processes
    ready" row lists any that do not).
 
+If the configuration lifetime ends before or after arming (section 1.2:
+disable, clear, new destination, key replaced or removed, trusted CA
+changed), the status returns to `awaiting canary` and steps 2 to 4 must be
+repeated; a confirmation of an earlier lifetime is refused as stale.
+
 #### 4.1a Without the Web UI (REST)
 
-The same steps over REST:
+The same steps over REST. The complete operator walkthrough with curl --
+variables, REST login with MFA, the web session with CSRF (the key and CA
+uploads exist only as Web UI forms), TOTP elevation per session, configure,
+canary, the SecOps or emulator search, confirm, operate, recovery and
+decommission -- is the
+[SIEM Delivery curl runbook](siem-secops-curl-runbook.md).
 
-1. **cidx admin:** fill all fields as in step 1 above.
+The Web UI `session` cookie is `Secure` whenever the server is not bound to
+localhost, so browsers and curl send it back only over `https`. A deployment
+served over plain `http` needs a TLS front door for browser and curl
+web-form use (public issue #2004).
+
+1. **cidx admin:** upload the key and fill all fields with `enabled` at No,
+   as in step 1 above (Web UI forms; see the runbook for the curl form
+   posts).
 2. **cidx admin:** send the canary. This REST call needs an admin token and
    TOTP elevation (`POST /auth/elevate` with `{"totp_code": "123456"}` on the
    same token first; see [TOTP elevation](totp-elevation.md)):
@@ -486,10 +525,17 @@ The same steps over REST:
    The answer lists `confirmed`, `expected_count`, `confirmed_count` and
    `missing_action_types`. Arming needs every expected ID, including the
    unmapped one. If some are missing, wait and confirm again with the full
-   list.
-5. cidx arms on a later loop cycle, once every live process also has a
+   list. A `409` "canary run is stale" answer means the configuration
+   lifetime changed after the canary (section 1.2): run it again.
+5. **cidx admin:** set `enabled` to Yes (Web UI form).
+6. cidx arms on a later loop cycle, once every live process also has a
    fresh `probe=ok`. Until then **Capture state** may read
    `awaiting process readiness`. Then it becomes `armed`.
+
+TOTP codes are single-use per 30-second step for the account, and the web
+session and the Bearer token are elevated separately: elevate them with codes
+from two DIFFERENT 30-second steps, or the second elevation fails with
+`401 elevation_failed`.
 
 ### 4.2 What the canary events look like and how to find them
 
@@ -727,8 +773,12 @@ for an overview.
 
 ### 7.1 What the cidx operator sees
 
-**`/health`.** SIEM problems only ever make the node DEGRADED, never
-unhealthy. A SecOps outage does not take cidx down. Reasons include:
+**`GET /api/system/health`.** SIEM problems only ever make the node
+DEGRADED, never unhealthy. A SecOps outage does not take cidx down. The
+reasons appear in this authenticated endpoint's `failure_reasons`. The
+public load-balancer probe `/healthz` returns the resulting status only
+(DEGRADED still answers HTTP 200), and `GET /health` does not include SIEM
+reasons. Reasons include:
 
 - `SIEM delivery not running in this process: <error>`
 - `SIEM delivery config unreadable in this process; using last-known-good (the 90 s stale-capture bound is suspended here)`
@@ -763,7 +813,8 @@ duplicate halt is the exception: an admin must acknowledge or rebatch the
 batch (section 1.3). `POST /api/admin/siem-delivery/resume` clears any halt
 at once.
 
-Halt classes, as they appear in `/health` and in `siem_delivery_resumed`:
+Halt classes, as they appear in `GET /api/system/health` and in
+`siem_delivery_resumed`:
 
 - `request_rejection`: SecOps refused the whole request for a request-level
   reason (HTTP 400 whose error names a field outside the events, or 404,
@@ -821,8 +872,11 @@ built-in paging.
    page says events sent through its `udmevents` method get
    `metadata.log_type = "UDM"`; whether `events:import` does the same was
    not verified. Searching `metadata.vendor_name = "CIDX"` works regardless.
-7. **Silence.** If cidx events stop, ask the cidx operator for `/health` and
-   the stats document before changing anything on the Google side.
+7. **Silence.** If cidx events stop, ask the cidx operator for
+   `GET /api/system/health` and the stats document before changing anything
+   on the Google side. A recent key replacement, trusted-CA change or
+   disable also stops capture until a fresh canary is confirmed (section
+   1.2).
 
 ## 8. Known limitations
 

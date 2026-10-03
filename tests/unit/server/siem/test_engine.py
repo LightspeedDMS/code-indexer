@@ -55,6 +55,7 @@ def engine(
         destination=dest,
         max_batch_events=1000,
         source_instance_label="example-label",
+        config_epoch="",
     )
     capture.publish_capture_state(
         CaptureSnapshot(True, True, dest.key, capture.monotonic_now())

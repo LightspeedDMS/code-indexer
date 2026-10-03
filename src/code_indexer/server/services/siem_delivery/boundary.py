@@ -6,6 +6,7 @@ captured whatever the scheduler timing.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, List, Mapping, Optional, Tuple
 
 from code_indexer.server.services.audit_events import ALL_TARGETS_MARKER
@@ -71,3 +72,23 @@ def siem_boundary_target(
     else:
         kind = "other_siem_change"
     return True, (SiemTarget(dest, kind) if dest else None)
+
+
+def carry_arming_epoch(before: Any, after: Any) -> None:
+    """Stamp the candidate *after* with its configuration lifetime (Bug #2018).
+
+    *before* is the COMMITTED pre-image of the change.  The epoch is carried
+    over from it -- whatever the mutation or a reset-to-defaults replacement
+    put there -- and renewed when the change ends the lifetime a canary
+    confirmation was made for: the destination is disabled, cleared or
+    changed, or the trusted CA changes.
+    """
+    b = _section(before)
+    a = after.siem_delivery_config
+    assert isinstance(a, SiemDeliveryConfig), "ServerConfig always has the section"
+    ended = (
+        (b.enabled and not a.enabled)
+        or destination_key(b) != destination_key(a)
+        or b.trusted_ca_fingerprint != a.trusted_ca_fingerprint
+    )
+    a.arming_epoch = uuid.uuid4().hex if ended else b.arming_epoch

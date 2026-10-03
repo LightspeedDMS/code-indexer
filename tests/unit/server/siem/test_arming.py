@@ -13,6 +13,7 @@ DEST = "harness:00000000000000aa"
 OTHER = "harness:00000000000000bb"
 TTL = 180.0
 FRESH = 600.0
+EPOCH = "example-epoch"  # the committed configuration lifetime (Bug #2018)
 _EXPECTED_U1 = {
     "product_log_id": "u1",
     "action_type": "user_created",
@@ -35,6 +36,8 @@ def _confirmed_canary(b: SiemBackendHarness, dest: str = DEST) -> None:
         result="accepted",
         signature=None,
         actor="alice",
+        config_epoch=EPOCH,
+        credential_id=None,  # no credential stored in these tests
     )
     outcome = ss.confirm_canary(
         b.db,
@@ -43,6 +46,7 @@ def _confirmed_canary(b: SiemBackendHarness, dest: str = DEST) -> None:
         mapping_version=MAPPING_VERSION,
         visible_ids=["u1"],
         actor="alice",
+        config_epoch=EPOCH,
     )
     assert outcome.confirmed
 
@@ -63,6 +67,7 @@ def _cycle(
         enabled=enabled,
         destination_key=dest,
         mapping_version=MAPPING_VERSION,
+        config_epoch=EPOCH,
         probe_fresh_seconds=FRESH,
     )
 
@@ -144,6 +149,45 @@ def test_destination_change_disarms(siem_backend: SiemBackendHarness) -> None:
     assert _cycle(siem_backend, 2, dest=OTHER)["armed_destination_key"] is None
 
 
+def test_newer_version_of_another_lifetime_disarms(
+    siem_backend: SiemBackendHarness,
+) -> None:
+    _confirmed_canary(siem_backend)
+    _ready_process(siem_backend, "solo:1:a")
+    assert _cycle(siem_backend, 1)["armed_destination_key"] == DEST
+    later = ss.fence_and_arm(
+        siem_backend.db,
+        version=2,
+        enabled=True,
+        destination_key=DEST,
+        mapping_version=MAPPING_VERSION,
+        config_epoch="example-later-epoch",
+        probe_fresh_seconds=FRESH,
+    )
+    assert later["armed_destination_key"] is None  # and cannot re-arm
+
+
+def test_canary_of_a_new_lifetime_ends_the_old_arming(
+    siem_backend: SiemBackendHarness,
+) -> None:
+    _confirmed_canary(siem_backend)
+    _ready_process(siem_backend, "solo:1:a")
+    assert _cycle(siem_backend, 1)["armed_destination_key"] == DEST
+    assert ss.record_canary(
+        siem_backend.db,
+        run_id="run-new",
+        destination_key=DEST,
+        mapping_version=MAPPING_VERSION,
+        expected=[_EXPECTED_U1],
+        result="accepted",
+        signature=None,
+        actor="alice",
+        config_epoch="example-later-epoch",
+        credential_id=None,
+    )
+    assert ss.read_state(siem_backend.db)["armed_destination_key"] is None
+
+
 def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> None:
     ss.record_canary(
         siem_backend.db,
@@ -154,6 +198,8 @@ def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> 
         result="accepted",
         signature=None,
         actor="alice",
+        config_epoch=EPOCH,
+        credential_id=None,
     )
     outcome = ss.confirm_canary(
         siem_backend.db,
@@ -162,6 +208,7 @@ def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> 
         mapping_version=MAPPING_VERSION,
         visible_ids=["u1"],
         actor="alice",
+        config_epoch=EPOCH,
     )
     assert not outcome.confirmed
     assert outcome.missing_action_types == ["user_role_changed"]
@@ -174,5 +221,6 @@ def test_partial_visibility_never_confirms(siem_backend: SiemBackendHarness) -> 
         mapping_version=MAPPING_VERSION,
         visible_ids=["u1", "u2"],
         actor="alice",
+        config_epoch=EPOCH,
     )
     assert stale.stale

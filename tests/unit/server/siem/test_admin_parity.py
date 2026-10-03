@@ -170,6 +170,7 @@ def test_concurrent_arming_statements_arm_exactly_once(wired: Tuple[Any, ...]) -
         first, "alice", canary["canary_run_id"], canary["expected_product_log_ids"]
     )
     dest = harness_destination(sidecar)
+    epoch = first.committed_view().section.arming_epoch
     results: List[Dict[str, Any]] = []
     barrier = threading.Barrier(2)
 
@@ -182,6 +183,7 @@ def test_concurrent_arming_statements_arm_exactly_once(wired: Tuple[Any, ...]) -
                 enabled=True,
                 destination_key=dest.key,
                 mapping_version=first.mapping_version,
+                config_epoch=epoch,
                 probe_fresh_seconds=600,
             )
         )

@@ -288,6 +288,7 @@ class SiemDeliveryScheduler:
             enabled=view.section.enabled,
             destination_key=dest.key if dest else None,
             mapping_version=self.mapping_version,
+            config_epoch=view.section.arming_epoch,
             probe_fresh_seconds=self.timings.probe_fresh_seconds,
         )
         active = state_store.capture_active(
@@ -386,6 +387,7 @@ class SiemDeliveryScheduler:
             destination=view.destination,
             max_batch_events=view.section.max_batch_events,
             source_instance_label=view.section.source_instance_label,
+            config_epoch=view.section.arming_epoch,
             mapping=self.mapping,
             mapping_version=self.mapping_version,
         )
