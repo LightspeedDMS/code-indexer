@@ -120,6 +120,16 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Bug #2022: per-repo refresh failure backoff for repeated failures the
+    # self-heal cannot repair (refresh_scheduler.py).
+    def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int: ...
+
+    def reset_refresh_failure_backoff(self, golden_alias: str) -> None: ...
+
+    def get_refresh_failure_backoff_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's
     # _repair_uninitialized_local_repo()).

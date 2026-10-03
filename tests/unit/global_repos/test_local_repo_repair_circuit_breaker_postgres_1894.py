@@ -48,9 +48,23 @@ _UNUSED_MOCK_REFRESH_INTERVAL_SECONDS = 3600
 
 
 def _make_mock_pg_pool(fetchone_return=None):
-    """Same convention as test_local_repo_repair_quarantine_state_1769.py."""
+    """Same convention as test_local_repo_repair_quarantine_state_1769.py,
+    but query-aware like a real driver: the canned row answers only the
+    local-repair quarantine table; any other table (e.g. Bug #2022's
+    refresh_failure_backoff_state) has no row for this alias."""
     mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = fetchone_return
+    last_sql = {"text": ""}
+
+    def _execute(sql, *args, **kwargs):
+        last_sql["text"] = str(sql)
+
+    def _fetchone():
+        if "local_repo_repair_quarantine_state" in last_sql["text"]:
+            return fetchone_return
+        return None
+
+    mock_cursor.execute.side_effect = _execute
+    mock_cursor.fetchone.side_effect = _fetchone
 
     mock_conn = MagicMock()
     mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
