@@ -19,6 +19,7 @@ from code_indexer.global_repos.meta_description_hook import (
     CidxMetaRefreshDebouncer,
 )
 from code_indexer.global_repos.refresh_failure_recovery import RefreshDeferredError
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
 META_ALIAS = "cidx-meta-global"
 DEBOUNCE_SECONDS = 30.0  # never elapses during a test
@@ -194,3 +195,45 @@ def test_a_failed_retry_never_replaces_a_newer_writes_timer() -> None:
     finally:
         debouncer.shutdown()
     assert writes_timers[0].finished.is_set(), "shutdown could not cancel it"
+
+
+def _already_running() -> Exception:
+    return DuplicateJobError("refresh", META_ALIAS, "job-running")
+
+
+def test_an_already_running_retry_never_replaces_a_newer_writes_timer() -> None:
+    scheduler = _ScriptedScheduler([_already_running()])
+    debouncer = CidxMetaRefreshDebouncer(scheduler, debounce_seconds=DEBOUNCE_SECONDS)
+    writes_timers: List[threading.Timer] = []
+
+    def _write_meanwhile() -> None:
+        debouncer.signal_dirty()
+        writes_timers.append(_pending_timer(debouncer))
+
+    try:
+        debouncer.signal_dirty()
+        scheduler.before_outcome = _write_meanwhile
+        _expire_now(debouncer)  # still running, reported after that write
+
+        assert _pending_timer(debouncer) is writes_timers[0], (
+            "the already-running retry replaced the newer write's timer"
+        )
+        assert debouncer._dirty is True, "the newer write stopped being owed"
+    finally:
+        debouncer.shutdown()
+    assert writes_timers[0].finished.is_set(), "shutdown could not cancel it"
+
+
+def test_a_callback_run_after_shutdown_never_submits() -> None:
+    scheduler = _ScriptedScheduler(["job-1"])
+    debouncer = CidxMetaRefreshDebouncer(scheduler, debounce_seconds=DEBOUNCE_SECONDS)
+    debouncer.signal_dirty()
+    pending = _pending_timer(debouncer)
+
+    debouncer.shutdown()
+    # Shutdown cancelled it, but a timer already past Timer.run's
+    # cancellation check still runs its callback.
+    _run_callback(pending)
+
+    assert scheduler.calls == 0, "a refresh was submitted after shutdown"
+    assert debouncer._timer is None, "a timer was started after shutdown"
