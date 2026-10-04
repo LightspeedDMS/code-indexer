@@ -29,7 +29,6 @@ from typing import (
 
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
-    LifecycleAnalysisConfig,
     RerankConfig,
     ServerConfig,
     ServerConfigManager,
@@ -41,7 +40,9 @@ from ..auto_update.deployment_executor import (
     RESTART_SIGNAL_PATH,
     read_execstart_flags,
 )
+from . import config_runtime_row as _runtime_row
 from .db_outage_throttle import DbOutageThrottle
+from .siem_delivery.boundary import carry_arming_epoch as _carry_arming_epoch
 from .siem_delivery.config_view import apply_siem_setting as _apply_siem_setting
 from .siem_delivery.config_view import siem_settings as _siem_settings
 
@@ -61,6 +62,23 @@ class BootstrapFileNotWritten(RuntimeError):
         )
 
 
+# Bug #2017: a configuration change re-reads the committed runtime row and
+# commits with a compare-and-set on its version; a concurrent commit restarts
+# the attempt from the new row, at most this many times.
+_CHANGE_ATTEMPTS = 10
+
+
+class ConfigChangeConflict(RuntimeError):
+    """Every attempt of a configuration change lost its compare-and-set to a
+    concurrent commit; nothing was published."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "configuration change not saved: the configuration kept changing "
+            "concurrently; retry the change"
+        )
+
+
 @dataclass
 class _ChangeAttempt:
     """Pre-image and candidate of one configuration change (for its audit row)."""
@@ -68,6 +86,7 @@ class _ChangeAttempt:
     before: Optional[ServerConfig] = None
     after: Optional[ServerConfig] = None
     published: bool = False
+    updated_by: str = _runtime_row.UPDATER_WEB_UI  # recorded on the runtime row
 
 
 @dataclass
@@ -303,9 +322,9 @@ BOOTSTRAP_KEYS = frozenset(
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
-CONFIG_KEY_RUNTIME = "runtime"
-UPDATER_WEB_UI = "web-ui"
-UPDATER_SEED = "config-seed"
+CONFIG_KEY_RUNTIME = _runtime_row.CONFIG_KEY_RUNTIME
+UPDATER_WEB_UI = _runtime_row.UPDATER_WEB_UI
+UPDATER_SEED = _runtime_row.UPDATER_SEED
 
 # Story #1200 FIX-6: number of consecutive pending-restart polls before emitting
 # a rate-limited WARNING (approx 5 min at 30s poll interval).
@@ -365,6 +384,10 @@ class ConfigService:
         self._reload_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._on_change_callbacks: List[Any] = []
+        # run after THIS process commits a change (see register_on_commit_callback)
+        self._on_commit_callbacks: List[
+            Callable[[ServerConfig, ServerConfig], None]
+        ] = []
         # Story #1200 FIX-6: consecutive pending-restart poll counter + rate-limit flag
         self._pending_restart_poll_count: int = 0
         self._pending_restart_warned: bool = False
@@ -404,30 +427,27 @@ class ConfigService:
             # DB has runtime config -- merge with bootstrap
             self._merge_runtime_config(runtime)
             self._strip_config_file_to_bootstrap()
-            # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config defaults
-            # to SQLite on first boot after upgrade (key absent from legacy row).
-            #
-            # Issue #1546 Phase 3 promotion follow-up: this MUST save the
-            # CURRENT merged config (self.get_config(), which already
-            # reflects any in-place fix _merge_runtime_config just made and
-            # persisted -- e.g. the alias-lock promotion below), never the
-            # STALE pre-merge `runtime` dict captured above. Re-saving that
-            # stale dict here would silently clobber a write
-            # _merge_runtime_config already made to the DB row moments
-            # earlier.
+            # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config
+            # defaults on first boot after upgrade (key absent from the legacy
+            # row).  Bug #2017: a guarded rewrite of the RE-READ committed row
+            # (whose composition already carries the defaults), never a write
+            # of this process's earlier read -- another worker may have
+            # committed since.
             if "lifecycle_analysis_config" not in runtime:
-                current_runtime_dict = self._extract_runtime_dict(self.get_config())
-                current_runtime_dict["lifecycle_analysis_config"] = asdict(
-                    LifecycleAnalysisConfig()
+                self._rewrite_committed_row(
+                    lambda _candidate, raw: "lifecycle_analysis_config" not in raw
                 )
-                self._save_runtime_to_sqlite(current_runtime_dict)
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
             self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
             runtime_dict = self._extract_runtime_dict(config)
             if runtime_dict:
-                self._save_runtime_to_sqlite(runtime_dict)
+                # insert-only: this worker seeded, or another one did first;
+                # either way adopt the COMMITTED row (a peer may have saved)
+                self._seed_runtime_row_sqlite(runtime_dict)
+                self._adopt_committed_row()
+                self.materialize_launch_config()
                 self._strip_config_file_to_bootstrap()
                 logger.info(
                     "ConfigService: migrated %d runtime keys to SQLite",
@@ -1256,37 +1276,123 @@ class ConfigService:
         before_publish: Optional[Callable[[ServerConfig], None]],
         attempt: "_ChangeAttempt",
     ) -> None:
-        """The ONE publish path for a configuration change.
+        """The ONE publish path for a configuration change (Bug #2017).
 
-        Under the update lock: deep-copy the live config into a CANDIDATE,
-        let *mutate* change it (or return a replacement), validate the
-        candidate, run *before_publish* against the candidate, then publish
-        it.  Anything raising before the publish leaves the live config
-        untouched; a failed publish restores the previous live config.  Once
-        the runtime row is committed the change is published, even if the
-        bootstrap file write then fails (:class:`BootstrapFileNotWritten`).
-        *attempt* receives the pre-image and the candidate (for auditing).
+        With a runtime database (SQLite or PostgreSQL) each attempt starts
+        from the COMMITTED runtime row -- never this process's cached copy,
+        which another worker or node may have superseded -- composed over
+        this process's bootstrap keys.  It deep-copies that pre-image into a
+        CANDIDATE, lets *mutate* change it (or return a replacement),
+        validates it, runs *before_publish*, then commits with a
+        compare-and-set on the version it read (SQLite: inside ONE
+        ``BEGIN IMMEDIATE``; PostgreSQL: one ``UPDATE ... AND version =``).
+        A concurrent commit in between restarts the attempt from the new
+        committed row; :class:`ConfigChangeConflict` after _CHANGE_ATTEMPTS.
+        No database lock is held across mutate/validate/before_publish
+        (before_publish may use the same database and the event loop).
+        After the commit this process's cached config IS the candidate.
+
+        Without a runtime database (bootstrap file only) the live config is
+        the pre-image and the config file is written, as before.  Anything
+        raising before the commit publishes nothing.  Once the runtime row is
+        committed the change is published, even if the bootstrap file write
+        then fails (:class:`BootstrapFileNotWritten`).  *attempt* receives
+        the committed pre-image and the candidate (for auditing).
         """
-        with self._config_update_lock:
-            live = self.get_config()
-            candidate = copy.deepcopy(live)
-            attempt.before, attempt.after = live, candidate
-            replacement = mutate(candidate)
-            if replacement is not None:
-                candidate = replacement
-                attempt.after = candidate
-            self.config_manager.validate_config(candidate, previous_host=live.host)
-            if before_publish is not None:
-                before_publish(candidate)
+        try:
+            with self._config_update_lock:
+                for _ in range(_CHANGE_ATTEMPTS):
+                    expected, live = self._change_pre_image()
+                    candidate = self._change_candidate(
+                        live, mutate, before_publish, attempt
+                    )
+                    if self._publish_change(candidate, expected, live, attempt):
+                        return
+            raise ConfigChangeConflict()
+        finally:
+            # outside the update lock; also when the bootstrap file write
+            # raised after the commit (the change IS published)
+            if attempt.published:
+                self._notify_committed(attempt.before, attempt.after)
+
+    def register_on_commit_callback(
+        self, callback: Callable[[ServerConfig, ServerConfig], None]
+    ) -> Callable[[], None]:
+        """Run *callback(before, after)* after THIS process commits a change
+        (before = the committed pre-image, after = what was committed).
+        Returns the handle that unregisters it."""
+        self._on_commit_callbacks.append(callback)
+
+        def _unregister() -> None:
+            if callback in self._on_commit_callbacks:
+                self._on_commit_callbacks.remove(callback)
+
+        return _unregister
+
+    def _notify_committed(
+        self, before: Optional[ServerConfig], after: Optional[ServerConfig]
+    ) -> None:
+        assert before is not None and after is not None, "a published change"
+        for callback in list(self._on_commit_callbacks):
+            try:
+                callback(before, after)
+            except Exception:
+                # The change is committed either way; the consumer's own
+                # periodic read converges on it.
+                logger.exception("Config commit callback failed")
+
+    def _change_pre_image(self) -> Tuple[Optional[int], ServerConfig]:
+        """``(committed version, pre-image)``; ``(None, live config)`` when no
+        runtime database is attached (bootstrap file only)."""
+        if self._pool is None and self._sqlite_db_path is None:
+            return None, self.get_config()
+        version, runtime = self._read_committed_runtime()
+        return version, self._compose_config(runtime, self.get_config())
+
+    def _change_candidate(
+        self,
+        live: ServerConfig,
+        mutate: Callable[[ServerConfig], Optional[ServerConfig]],
+        before_publish: Optional[Callable[[ServerConfig], None]],
+        attempt: "_ChangeAttempt",
+    ) -> ServerConfig:
+        candidate = copy.deepcopy(live)
+        attempt.before, attempt.after = live, candidate
+        replacement = mutate(candidate)
+        if replacement is not None:
+            candidate = replacement
+            attempt.after = candidate
+        _carry_arming_epoch(live, candidate)  # Bug #2018
+        self.config_manager.validate_config(candidate, previous_host=live.host)
+        if before_publish is not None:
+            before_publish(candidate)
+        return candidate
+
+    def _publish_change(
+        self,
+        candidate: ServerConfig,
+        expected: Optional[int],
+        live: ServerConfig,
+        attempt: "_ChangeAttempt",
+    ) -> bool:
+        """Publish *candidate*; False when the compare-and-set lost to a
+        concurrent commit (nothing published)."""
+        if expected is None:  # bootstrap file only
             try:
                 self.save_config(candidate)
-            except BootstrapFileNotWritten:
-                attempt.published = True
-                raise
             except Exception:
                 self._config = live
                 raise
             attempt.published = True
+            return True
+        runtime = self._extract_runtime_dict(candidate)
+        if self._commit_runtime_row(runtime, expected, attempt.updated_by) is None:
+            return False
+        attempt.published = True
+        self._config = candidate
+        self.materialize_launch_config()
+        self._write_bootstrap_file(candidate)
+        return True
 
     def _updates_mutator(
         self, updates: Sequence[Tuple[str, str, Any]]
@@ -1315,6 +1421,21 @@ class ConfigService:
         if updates:
             self._change_config(self._updates_mutator(updates), None, _ChangeAttempt())
             self._log_applied_updates(updates)
+        return self.get_config()
+
+    def apply_system_change(
+        self, mutate: Callable[[ServerConfig], Optional[ServerConfig]]
+    ) -> ServerConfig:
+        """One configuration change made by a system component (no audit row).
+
+        Bug #2017: *mutate* runs on the latest COMMITTED configuration and
+        the result commits with a compare-and-set (see :meth:`_change_config`),
+        so it changes only what *mutate* touches.  Human front doors use
+        :meth:`apply_audited_change`.
+        """
+        self._change_config(
+            mutate, None, _ChangeAttempt(updated_by=_runtime_row.UPDATER_SYSTEM)
+        )
         return self.get_config()
 
     def apply_audited_change(
@@ -3022,27 +3143,26 @@ class ConfigService:
         Raises:
             ValueError: If any setting fails validation
         """
-        config = self.get_config()
-        previous_host = config.host
 
-        for category, category_settings in settings.items():
-            for key, value in category_settings.items():
-                if category == "server":
-                    self._update_server_setting(config, key, value)
-                elif category == "cache":
-                    self._update_cache_setting(config, key, value)
-                elif category == "timeouts":
-                    self._update_timeout_setting(config, key, value)
-                elif category == "password_security":
-                    self._update_password_security_setting(config, key, value)
-                elif category == "totp_elevation":
-                    self._update_totp_elevation_setting(config, key, value)
-                elif category == "claude_cli":
-                    self._update_claude_cli_setting(config, key, value)
+        def _mutate(config: ServerConfig) -> None:
+            for category, category_settings in settings.items():
+                for key, value in category_settings.items():
+                    if category == "server":
+                        self._update_server_setting(config, key, value)
+                    elif category == "cache":
+                        self._update_cache_setting(config, key, value)
+                    elif category == "timeouts":
+                        self._update_timeout_setting(config, key, value)
+                    elif category == "password_security":
+                        self._update_password_security_setting(config, key, value)
+                    elif category == "totp_elevation":
+                        self._update_totp_elevation_setting(config, key, value)
+                    elif category == "claude_cli":
+                        self._update_claude_cli_setting(config, key, value)
 
-        # Validate and save
-        self.config_manager.validate_config(config, previous_host=previous_host)
-        self.save_config(config)
+        # Bug #2017: applied to the COMMITTED configuration, validated, then
+        # published through the one guarded change path.
+        self._change_config(_mutate, None, _ChangeAttempt())
         logger.info(
             "Saved all settings", extra={"correlation_id": get_correlation_id()}
         )
@@ -3339,48 +3459,37 @@ class ConfigService:
         Raises:
             RuntimeError: no runtime database is attached, or no row exists.
         """
-        if self._pool is not None:
-            from psycopg.rows import dict_row
-
-            with self._pool.connection() as conn:
-                with conn.cursor(row_factory=dict_row) as cur:
-                    row = cur.execute(
-                        "SELECT config_json, version FROM server_config "
-                        "WHERE config_key = %s",
-                        (CONFIG_KEY_RUNTIME,),
-                    ).fetchone()
-            if row is None:
-                raise RuntimeError("no committed runtime configuration row")
-            raw, version = row["config_json"], row["version"]
-        elif self._sqlite_db_path is not None:
-            import sqlite3
-
-            conn = sqlite3.connect(self._sqlite_db_path)
-            try:
-                found = conn.execute(
-                    "SELECT config_json, version FROM server_config "
-                    "WHERE config_key = ?",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-            finally:
-                conn.close()
-            if found is None:
-                raise RuntimeError("no committed runtime configuration row")
-            raw, version = found
-        else:
-            raise RuntimeError("no runtime configuration database attached")
-        from code_indexer.server.storage.json_column import parse_json_column
-
-        # JSONB on PostgreSQL (already a dict), TEXT on SQLite
-        runtime = parse_json_column(raw, dict, "server_config.config_json")
-        if runtime is None:
-            raise RuntimeError("committed runtime configuration is not a JSON object")
+        version, runtime = self._read_committed_runtime()
         value = runtime.get(section)
         if value is None:
-            return int(version), {}
+            return version, {}
         if not isinstance(value, dict):
             raise RuntimeError(f"committed section {section!r} is not a JSON object")
-        return int(version), dict(value)
+        return version, dict(value)
+
+    def _read_committed_runtime(self) -> Tuple[int, Dict[str, Any]]:
+        """ONE read of the whole committed runtime row: ``(version, dict)``.
+
+        Raises:
+            RuntimeError: no runtime database is attached, or no row exists.
+        """
+        if self._pool is not None:
+            found = _runtime_row.read_runtime_pg(self._pool)
+        elif self._sqlite_db_path is not None:
+            found = _runtime_row.read_runtime_sqlite(self._sqlite_db_path)
+        else:
+            raise RuntimeError("no runtime configuration database attached")
+        if found is None:
+            raise RuntimeError("no committed runtime configuration row")
+        return found
+
+    def _adopt_committed_row(self, base_config: Optional[ServerConfig] = None) -> None:
+        """After a first-boot seed, won or lost (SQLite and PostgreSQL): merge
+        the committed row into this process's config and record the version
+        of that SAME read -- a peer may have saved since the insert."""
+        version, runtime = self._read_committed_runtime()
+        self._merge_runtime_config(runtime, base_config=base_config)
+        self._db_config_version = version
 
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).
@@ -3649,61 +3758,36 @@ class ConfigService:
         }
 
     def bump_launch_restart_generation(self) -> None:
-        """Atomically increment launch_restart_generation in the DB row (+ version).
+        """Increment launch_restart_generation in the DB row (+ version).
 
-        Story #1200 AC1: single SQL statement — no asdict() round-trip.
-        MAJOR-M3: does NOT advance self._db_config_version so the bumping node's
-        next poll detects the new version and self-signals via
-        check_pending_launch_restart().
+        Story #1200 AC1: no asdict() round-trip.  Bug #2017: a compare-and-set
+        on the version just read (config_runtime_row.bump_generation_*),
+        retried on a concurrent commit.  MAJOR-M3: does NOT advance
+        self._db_config_version, so the bumping node's next poll detects the
+        new version and self-signals via check_pending_launch_restart().
 
         SQLite path exists for unit-test modeling only (real solo route never bumps;
-        see AC7/FIX-5).
+        see AC7/FIX-5).  No DB, no DB file or no row is a no-op.
         """
-        import sqlite3 as _sqlite3
-
-        if self._pool is not None:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    "UPDATE server_config SET "
-                    "config_json = jsonb_set("
-                    "  config_json,"
-                    "  '{launch_restart_generation}',"
-                    "  (COALESCE((config_json->>'launch_restart_generation')::int, 0)"
-                    "   + 1)::text::jsonb"
-                    "),"
-                    "version = version + 1 "
-                    "WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
+        for _ in range(_CHANGE_ATTEMPTS):
+            if self._pool is not None:
+                version = _runtime_row.read_runtime_version_pg(self._pool)
+                if version is None:
+                    return
+                bumped = _runtime_row.bump_generation_pg(self._pool, version)
+            elif self._sqlite_db_path and Path(self._sqlite_db_path).exists():
+                found = _runtime_row.read_runtime_sqlite(self._sqlite_db_path)
+                if found is None:
+                    return
+                bumped = _runtime_row.bump_generation_sqlite(
+                    self._sqlite_db_path, found[0]
                 )
-                conn.commit()
-            # MAJOR-M3: do NOT read back and update self._db_config_version here.
-            logger.info(
-                "ConfigService: bumped launch_restart_generation in PG "
-                "(cluster-wide restart requested)"
-            )
-            return
-
-        if self._sqlite_db_path and Path(self._sqlite_db_path).exists():
-            with _sqlite3.connect(self._sqlite_db_path) as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT config_json FROM server_config WHERE config_key = ?",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-                if row is not None:
-                    data = json.loads(row[0])
-                    data["launch_restart_generation"] = (
-                        int(data.get("launch_restart_generation") or 0) + 1
-                    )
-                    conn.execute(
-                        "UPDATE server_config "
-                        "SET config_json = ?, version = version + 1 "
-                        "WHERE config_key = ?",
-                        (json.dumps(data), CONFIG_KEY_RUNTIME),
-                    )
-                conn.commit()
-            # MAJOR-M3: do NOT update self._db_config_version.
-            logger.info("ConfigService: bumped launch_restart_generation in SQLite")
+            else:
+                return
+            if bumped is not None:
+                logger.info("ConfigService: bumped launch_restart_generation")
+                return
+        raise ConfigChangeConflict()
 
     def check_pending_launch_restart(self) -> None:
         """Per-poll check: if target generation > applied, materialize then signal.
@@ -3815,82 +3899,112 @@ class ConfigService:
         full_dict = asdict(config)
         return {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
 
-    def _save_runtime_to_pg(self, config: "ServerConfig") -> None:
-        """Save runtime config to PG (AC2: preserves launch_restart_generation).
+    # --- the committed runtime row (Bug #2017; SQL in config_runtime_row) ---
 
-        AC2 race-safe: launch_restart_generation is preserved via a single atomic
-        UPDATE using jsonb_set(), which reads the CURRENT row's generation value
-        inside the same statement.  This eliminates the lost-update race that a
-        separate SELECT -> Python patch -> UPDATE sequence would have under
-        PostgreSQL READ COMMITTED isolation.
-
-        Only launch_restart_generation is re-injected from the current row — all
-        other keys come from the new runtime_dict derived from the dataclass, so
-        intentionally dropped keys are NOT resurrected.
-        """
+    def _commit_runtime_row_pg(
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
+    ) -> Optional[int]:
+        """Compare-and-set commit (PG); the new version, None on a conflict."""
         assert self._pool is not None
-        from psycopg.rows import dict_row
+        return self._record_version(
+            _runtime_row.commit_runtime_pg(
+                self._pool, runtime_dict, expected_version, updated_by
+            )
+        )
 
-        runtime_dict = self._extract_runtime_dict(config)
-        # runtime_dict intentionally excludes launch_restart_generation (not a
-        # dataclass field), so jsonb_set below re-injects it from the current row.
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    "UPDATE server_config"
-                    " SET config_json = jsonb_set("
-                    "         %s::jsonb,"
-                    "         '{launch_restart_generation}',"
-                    "         to_jsonb(COALESCE("
-                    "             (config_json->>'launch_restart_generation')::int,"
-                    "             0"
-                    "         ))"
-                    "     ),"
-                    "     version = version + 1,"
-                    "     updated_at = CURRENT_TIMESTAMP,"
-                    "     updated_by = %s"
-                    " WHERE config_key = %s",
-                    (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
-                )
-                conn.commit()
-                version_row = cur.execute(
-                    "SELECT version FROM server_config WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-            if version_row:
-                self._db_config_version = version_row["version"]
-        self.materialize_launch_config()  # AC3: re-materialize after PG save
+    def _record_version(self, version: Optional[int]) -> Optional[int]:
+        if version is not None:
+            self._db_config_version = version
+        return version
 
-    def _seed_runtime_to_pg(self) -> None:
-        """Seed PG server_config table from current config (first boot)."""
+    def _commit_runtime_row_sqlite(
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
+    ) -> Optional[int]:
+        """Compare-and-set commit (SQLite, ``BEGIN IMMEDIATE``); the new
+        version, None on a conflict."""
+        assert self._sqlite_db_path is not None
+        return self._record_version(
+            _runtime_row.commit_runtime_sqlite(
+                self._sqlite_db_path, runtime_dict, expected_version, updated_by
+            )
+        )
+
+    def _commit_runtime_row(
+        self,
+        runtime_dict: dict,
+        expected_version: int,
+        updated_by: str = UPDATER_WEB_UI,
+    ) -> Optional[int]:
+        if self._pool is not None:
+            return self._commit_runtime_row_pg(
+                runtime_dict, expected_version, updated_by
+            )
+        return self._commit_runtime_row_sqlite(
+            runtime_dict, expected_version, updated_by
+        )
+
+    def _seed_runtime_row_pg(self, runtime_dict: dict) -> bool:
+        """First boot only: insert the absent PG row (never overwrites)."""
+        assert self._pool is not None
+        return _runtime_row.seed_runtime_pg(self._pool, runtime_dict)
+
+    def _seed_runtime_row_sqlite(self, runtime_dict: dict) -> bool:
+        """First boot only: insert the absent SQLite row (never overwrites)."""
+        assert self._sqlite_db_path is not None
+        return _runtime_row.seed_runtime_sqlite(self._sqlite_db_path, runtime_dict)
+
+    def _rewrite_committed_row(
+        self, decide: Callable[[ServerConfig, Dict[str, Any]], bool]
+    ) -> None:
+        """A system migration of the committed row (no validation, no audit).
+
+        Each attempt re-reads the committed row, composes it over this
+        process's bootstrap keys, and lets *decide(candidate, raw_row)*
+        change the candidate; False means there is nothing to write.  The
+        commit is a compare-and-set on the version read, so a save another
+        process commits in between restarts the attempt from its row instead
+        of being overwritten.  Raises ConfigChangeConflict when exhausted.
+        """
+        with self._config_update_lock:
+            for _ in range(_CHANGE_ATTEMPTS):
+                version, runtime = self._read_committed_runtime()
+                candidate = self._compose_config(runtime, self.get_config())
+                if not decide(candidate, runtime):
+                    # nothing to write: still adopt the row just read (a peer
+                    # may have migrated it after this process's earlier read)
+                    self._config, self._db_config_version = candidate, version
+                    return
+                if self._commit_runtime_row(
+                    self._extract_runtime_dict(candidate),
+                    version,
+                    _runtime_row.UPDATER_MIGRATION,
+                ):
+                    self._config = candidate
+                    self.materialize_launch_config()
+                    return
+        raise ConfigChangeConflict()
+
+    def _seed_runtime_to_pg(self, base_config: Optional[ServerConfig] = None) -> None:
+        """Seed PG server_config table from current config (first boot).
+
+        The seed is insert-only: this node inserted the row, or another one
+        did first.  Either way adopt the COMMITTED row and its version (one
+        read) -- another node may have saved since the insert (Bug #2017)."""
         assert self._pool is not None
         config = self.get_config()
         self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
-
-        from psycopg.rows import dict_row
-
-        with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO server_config (config_key, config_json, version, updated_by) "
-                "VALUES (%s, %s, 1, %s) "
-                "ON CONFLICT (config_key) DO NOTHING",
-                (CONFIG_KEY_RUNTIME, json.dumps(runtime_dict), UPDATER_SEED),
-            )
-            conn.commit()
-            # Finding 4 fix: SELECT actual version -- INSERT may have been a
-            # no-op if another node already seeded, so version could be > 1.
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    "SELECT version FROM server_config WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-            assert row is not None, (
-                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
-            )
-            self._db_config_version = row["version"]
+        inserted = self._seed_runtime_row_pg(runtime_dict)
+        self._adopt_committed_row(base_config)
         logger.info(
-            "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
+            "ConfigService: runtime config seeded to PostgreSQL by %s (%d keys)",
+            "this node" if inserted else "another node",
             len(runtime_dict),
         )
 
@@ -3902,26 +4016,11 @@ class ConfigService:
                 is not published until after the merge completes (Bug #998).
         """
         assert self._pool is not None
-        from psycopg.rows import dict_row
-
-        with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    "SELECT config_json, version FROM server_config WHERE config_key = %s",
-                    (CONFIG_KEY_RUNTIME,),
-                ).fetchone()
-
-        if row is None:
-            self._seed_runtime_to_pg()
-            if base_config is not None:
-                self._config = base_config
+        found = _runtime_row.read_runtime_pg(self._pool)
+        if found is None:
+            self._seed_runtime_to_pg(base_config)  # seeds, then adopts the row
             return
-
-        config_json = row["config_json"]
-        runtime_dict = (
-            json.loads(config_json) if isinstance(config_json, str) else config_json
-        )
-        self._db_config_version = int(row["version"])
+        self._db_config_version, runtime_dict = found
         self._merge_runtime_config(runtime_dict, base_config=base_config)
 
     def _strip_config_file_to_bootstrap(self) -> None:
@@ -3960,50 +4059,6 @@ class ConfigService:
             len(kept_dict),
         )
 
-    def _save_runtime_to_sqlite(self, runtime_dict: dict) -> None:
-        """Save runtime config to SQLite (AC2: preserves launch_restart_generation).
-
-        SQLite uses BEGIN IMMEDIATE which serialises the transaction, so the
-        SELECT-then-UPDATE here is safe against concurrent writes on the same
-        node (SQLite is single-writer).  The PG path uses an atomic jsonb_set
-        UPDATE instead; see _save_runtime_to_pg.
-        """
-        import sqlite3
-
-        assert self._sqlite_db_path is not None
-        conn = sqlite3.connect(self._sqlite_db_path)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            existing_row = conn.execute(
-                "SELECT config_json FROM server_config WHERE config_key = ?",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
-            current_config = json.loads(existing_row[0]) if existing_row else {}
-            generation = int(current_config.get("launch_restart_generation") or 0)
-            preserved_dict = dict(runtime_dict)
-            preserved_dict["launch_restart_generation"] = generation
-            conn.execute(
-                "INSERT INTO server_config"
-                "    (config_key, config_json, version, updated_by)"
-                "    VALUES (?, ?, 1, ?)"
-                "    ON CONFLICT(config_key) DO UPDATE SET"
-                "        config_json = excluded.config_json,"
-                "        version = server_config.version + 1,"
-                "        updated_at = datetime('now'),"
-                "        updated_by = excluded.updated_by",
-                (CONFIG_KEY_RUNTIME, json.dumps(preserved_dict), UPDATER_WEB_UI),
-            )
-            conn.commit()
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key=?",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
-            if row:
-                self._db_config_version = row[0]
-        finally:
-            conn.close()
-        self.materialize_launch_config()
-
     def _load_runtime_from_sqlite(self) -> Optional[dict]:
         """Load runtime config from local SQLite server_config table."""
         import sqlite3
@@ -4041,29 +4096,19 @@ class ConfigService:
                 (Bug #998 atomicity fix).
         """
         config = base_config if base_config is not None else self.get_config()
-        full_dict = asdict(config)
-        # Overwrite runtime fields only
-        for k, v in runtime_dict.items():
-            if k not in BOOTSTRAP_KEYS:
-                full_dict[k] = v
         # Story #885 Phase 5b (A7d): log when lifecycle_analysis_config is absent
         # from the stored runtime dict so operators know defaults are being applied
         # on first boot after upgrade (no manual action required).
         if "lifecycle_analysis_config" not in runtime_dict:
+            defaults = asdict(config).get("lifecycle_analysis_config") or {}
             logger.info(
                 "ConfigService: lifecycle_analysis_config absent from runtime storage "
                 "-- applying defaults (shell=%ds, outer=%ds). "
                 "No operator action required.",
-                full_dict.get("lifecycle_analysis_config", {}).get(
-                    "shell_timeout_seconds", 360
-                ),
-                full_dict.get("lifecycle_analysis_config", {}).get(
-                    "outer_timeout_seconds", 420
-                ),
+                defaults.get("shell_timeout_seconds", 360),
+                defaults.get("outer_timeout_seconds", 420),
             )
-        # Reconstruct ServerConfig through the existing deserialization path
-        # which correctly converts nested dicts to dataclass instances
-        new_config = self.config_manager._dict_to_server_config(full_dict)
+        new_config = self._compose_config(runtime_dict, config)
         self._config = new_config  # Atomic reference swap
 
         # Issue #1546 Phase 3 promotion follow-up: must run AFTER self._config
@@ -4071,6 +4116,16 @@ class ConfigService:
         # call materialize_launch_config() / self.get_config(), which must
         # observe the freshly merged config, not a stale prior one.
         self._apply_alias_lock_db_backed_promotion(new_config, runtime_dict)
+
+    def _compose_config(self, runtime_dict: dict, base: ServerConfig) -> ServerConfig:
+        """*base* (this process's bootstrap keys) with *runtime_dict*'s
+        runtime keys overlaid, reconstructed through the deserialization path
+        (nested dicts become dataclasses).  Never publishes the result."""
+        full_dict = asdict(base)
+        for k, v in runtime_dict.items():
+            if k not in BOOTSTRAP_KEYS:
+                full_dict[k] = v
+        return self.config_manager._dict_to_server_config(full_dict)
 
     def _apply_alias_lock_db_backed_promotion(
         self, config: "ServerConfig", raw_runtime_dict: dict
@@ -4116,21 +4171,35 @@ class ConfigService:
         ):
             return
 
-        alc.db_backed_enabled = True
-        alc.db_backed_enabled_promoted = True
-
-        if self._pool is not None:
-            self._save_runtime_to_pg(config)
-        elif self._sqlite_db_path is not None:
-            self._save_runtime_to_sqlite(self._extract_runtime_dict(config))
-        else:
+        if self._pool is None and self._sqlite_db_path is None:
             # No runtime DB attached yet (bootstrap/file-only mode). The
             # in-memory promotion still applies for this process; a later
             # initialize_runtime_db()/set_connection_pool() call re-enters
             # this exact merge path once a DB is attached, and persists it
             # then.
+            alc.db_backed_enabled = True
+            alc.db_backed_enabled_promoted = True
             return
 
+        # Bug #2017: re-decide on the RE-READ committed row and write it with
+        # a compare-and-set, never this process's earlier read.
+        promoted = [False]
+
+        def _promote(candidate: ServerConfig, raw: Dict[str, Any]) -> bool:
+            stored = raw.get("alias_lock_config")
+            promoted[0] = (
+                isinstance(stored, dict) and "db_backed_enabled_promoted" not in stored
+            )
+            if promoted[0]:
+                lock = candidate.alias_lock_config
+                assert lock is not None  # Guaranteed by ServerConfig.__post_init__
+                lock.db_backed_enabled = True
+                lock.db_backed_enabled_promoted = True
+            return promoted[0]
+
+        self._rewrite_committed_row(_promote)
+        if not promoted[0]:
+            return
         logger.warning(
             "ConfigService: promoted alias_lock.db_backed_enabled to True "
             "(Issue #1546 Phase 3 one-time migration). The stored runtime "
@@ -4141,32 +4210,39 @@ class ConfigService:
         )
 
     def save_config(self, config: ServerConfig) -> None:
-        """Save config: runtime to DB (PG or SQLite), bootstrap to file.
+        """Save a WHOLE config: runtime to DB (PG or SQLite), bootstrap to file.
 
-        Priority: PG pool > SQLite > full file (legacy).
-
-        Story #1196 (next-release cleanup): the Story #1197 AC6 transition
-        write-path inclusion (_extract_bootstrap_dict_with_transition) has been
-        removed -- config.json writes use plain _extract_bootstrap_dict() again,
-        so the four launch keys (host/port/workers/log_level) are no longer
-        written to config.json on a settings-save.
+        Bug #2017: with a runtime DB the commit is a compare-and-set against
+        the version this process's cached config was loaded or committed at
+        (the commit records the new version).  When another process
+        committed since, nothing is written and :class:`ConfigChangeConflict`
+        is raised -- a stale whole-config write never overwrites the
+        committed row.  Changes belong in :meth:`update_settings_atomic` /
+        :meth:`apply_system_change`, which apply to the committed row and
+        retry.  Without a DB the full config.json is written (legacy).
         """
-        runtime_dict = self._extract_runtime_dict(config)
-
-        # Story #1198 CRITICAL-2 fix: update the cache BEFORE the save calls so
-        # that materialize_launch_config() (called inside _save_runtime_to_pg /
-        # _save_runtime_to_sqlite) reads the NEW config via get_config(), not the
-        # stale cached value from before this save.
-        self._config = config
-
         if self._pool is None and self._sqlite_db_path is None:
+            self._config = config
             self.config_manager.save_config(config)
             return
-        if self._pool is not None:
-            self._save_runtime_to_pg(config)
-        else:
-            self._save_runtime_to_sqlite(runtime_dict)
+        committed = self._commit_runtime_row(
+            self._extract_runtime_dict(config), self._db_config_version
+        )
+        if committed is None:
+            raise ConfigChangeConflict()
+        # Story #1198 CRITICAL-2: publish BEFORE materializing, so
+        # materialize_launch_config() reads the NEW config.
+        self._config = config
+        self.materialize_launch_config()
         # The runtime row is committed: the change is published from here on.
+        self._write_bootstrap_file(config)
+
+    def _write_bootstrap_file(self, config: ServerConfig) -> None:
+        """Write config.json's bootstrap keys AFTER the runtime row committed.
+
+        Raises:
+            BootstrapFileNotWritten: the write failed (the change is published).
+        """
         try:
             self.config_manager.save_config_dict(self._extract_bootstrap_dict(config))
         except Exception as exc:

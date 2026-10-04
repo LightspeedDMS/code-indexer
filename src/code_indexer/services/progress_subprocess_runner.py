@@ -122,7 +122,15 @@ class IndexingSubprocessError(Exception):
     RuntimeError) should catch this and re-raise.  Using a local error type
     avoids importing from consumer modules (golden_repo_manager, etc.) which
     would create circular dependencies.
+
+    ``returncode`` (Bug #2022) is the child's exit code when it exited
+    non-zero on its own, so callers can act on a machine-readable failure
+    code instead of parsing the message; ``None`` otherwise.
     """
+
+    def __init__(self, message: str, returncode: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 class IndexingWatchdogKillError(IndexingSubprocessError):
@@ -764,7 +772,10 @@ def _run_with_popen_progress_impl(
                 )
             # Heartbeat cleanup is the wrapper's `finally` (Issue #1530):
             # one owner, covering this raise and every other exit path.
-            raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
+            raise IndexingSubprocessError(
+                f"Failed to {error_label}: {error_details}",
+                returncode=process.returncode,
+            )
 
         return high_water
     # --- End fallback path ---------------------------------------------------
@@ -1062,7 +1073,10 @@ def _run_with_popen_progress_impl(
             error_details = (
                 stderr_output or stdout_output or f"Exit code {process.returncode}"
             )
-        raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
+        raise IndexingSubprocessError(
+            f"Failed to {error_label}: {error_details}",
+            returncode=process.returncode,
+        )
 
     # Bug #1774 round 2 (Codex finding): reached only after the
     # watchdog-kill and non-zero-exit checks above, so a process that

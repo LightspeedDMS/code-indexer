@@ -1,0 +1,75 @@
+<!-- SIEM Delivery arming region: fleet state from the COMMITTED config and the database -->
+{% set c = doc.committed %}
+{% set canary = doc.canary %}
+{% set r = doc.readiness %}
+{% macro mark(ok) %}<span class="siem-ops-mark" data-ok="{{ 'true' if ok else 'false' }}">[{{ 'x' if ok else ' ' }}]</span>{% endmacro %}
+<h4>Arming</h4>
+<table class="config-table" id="siem-ops-checklist">
+    <tr data-row="1">
+        <td>{{ mark(c and c.enabled and c.destination_key) }}</td>
+        <td>{% if doc.config_error %}Configuration invalid: {{ doc.config_error }}
+            {% elif c and c.destination_key %}Enabled: {{ 'yes' if c.enabled else 'no' }}; destination {{ c.destination_key }} (config v{{ c.config_version }})
+            {% else %}No SIEM destination configured{% endif %}</td>
+    </tr>
+    <tr data-row="2">
+        <td>{{ mark(doc.credential) }}</td>
+        <td>{% if doc.credential %}Credential {{ doc.credential.client_email }} (key id {{ doc.credential.private_key_id }}){% else %}No service-account credential stored{% endif %}</td>
+    </tr>
+    <tr data-row="3">
+        <td>{{ mark(doc.canary_matches and canary.result == 'accepted') }}</td>
+        <td>{% if doc.canary_matches %}Canary {{ canary.run_id }} {{ canary.result }}, {{ canary.expected | length }} events, by {{ canary.actor }} at {{ canary.sent_at }}, mapping v{{ canary.mapping_version }}{% if canary.result_signature %}; signature {{ canary.result_signature }}{% endif %}
+            {% else %}Awaiting canary for this destination and mapping{% endif %}</td>
+    </tr>
+    <tr data-row="4">
+        <td>{{ mark(doc.canary_matches and canary.visible_confirmed_at) }}</td>
+        <td>Confirmed {{ canary.confirmed_ids | length }} of {{ canary.expected | length }}{% if canary.missing_action_types %}; missing: {{ canary.missing_action_types | join(", ") }}{% endif %}{% if canary.visible_confirmed_at %} (by {{ canary.visible_confirmed_by }} at {{ canary.visible_confirmed_at }}){% endif %}</td>
+    </tr>
+    <tr data-row="5">
+        <td>{{ mark(r and r.total_live > 0 and r.failing == 0) }}</td>
+        <td>{% if r %}Processes ready {{ r.total_live - r.failing }} of {{ r.total_live }}
+            {% for p in r.processes if not p.ready %}<br>failing: {{ p.process_id }} (probe={{ p.probe_result }}, probed {{ p.probed_at or 'never' }}){% endfor %}
+            {% set unlisted_failing = r.failing - (r.processes | rejectattr("ready") | list | length) %}
+            {% if unlisted_failing > 0 %}<br>and {{ unlisted_failing }} more failing{% endif %}
+            {% else %}Processes: no destination configured{% endif %}</td>
+    </tr>
+    {% if doc.cluster and r and (r.nodes_without_process or r.missing_nodes) %}
+    <tr data-row="6">
+        <td>{{ mark(r.nodes_without_process == 0) }}</td>
+        <td>Nodes without a process: {{ r.nodes_without_process }}{% if r.missing_nodes %} ({{ r.missing_nodes | join(", ") }}){% endif %}</td>
+    </tr>
+    {% elif doc.cluster and r %}
+    <tr data-row="6"><td>{{ mark(true) }}</td><td>Every node has a process</td></tr>
+    {% endif %}
+    <tr data-row="7" id="siem-ops-armed" data-armed="{{ 'true' if doc.armed else 'false' }}">
+        <td>{{ mark(doc.armed) }}</td>
+        <td><strong>ARMED</strong>{% if doc.armed %} since {{ doc.armed_at }}{% else %}: not yet{% endif %}</td>
+    </tr>
+</table>
+<p class="section-description">This process (diagnostic): {{ doc.local_process.status.status }} (process {{ doc.local_process.liveness.process_id }})</p>
+<form id="siem-ops-canary-form" hx-post="/admin/siem-delivery/canary" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+      hx-confirm="Sends {{ doc.canary_event_count }} synthetic events once to the configured destination and clears any previous confirmation; capture already armed stays armed.">
+    <button type="submit" class="secondary">Run canary</button>
+</form>
+{% if canary.run_id %}
+<p>SecOps search for run {{ canary.run_id }}:</p>
+<pre class="siem-ops-search">metadata.vendor_name = "CIDX" AND additional.fields["correlation_id"] = "canary-{{ canary.run_id }}"</pre>
+<form id="siem-ops-confirm-form" hx-post="/admin/siem-delivery/canary/confirm-visible" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result">
+    <input type="hidden" name="canary_run_id" value="{{ canary.run_id }}">
+    <table class="config-table" id="siem-ops-canary-ids">
+        <tr><th></th><th>Action type</th><th>Event type</th><th>product_log_id</th><th></th></tr>
+        {% for e in canary.expected %}
+        <tr>
+            <td><input type="checkbox" name="visible_id" value="{{ e.product_log_id }}" data-product-log-id="{{ e.product_log_id }}" {{ 'checked' if e.confirmed else '' }}></td>
+            <td>{{ e.action_type }}</td>
+            <td>{{ e.event_type }}</td>
+            <td><code>{{ e.product_log_id }}</code></td>
+            <td>{{ 'confirmed' if e.confirmed else '' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <label>Paste the IDs found in SecOps (separated by spaces, new lines or commas)
+        <textarea name="visible_ids_text" rows="3" spellcheck="false"></textarea>
+    </label>
+    <button type="submit" class="primary">Confirm visible</button>
+</form>
+{% endif %}

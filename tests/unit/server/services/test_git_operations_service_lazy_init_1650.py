@@ -26,6 +26,11 @@ SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 60
 REENTRANT_PROBE_JOIN_TIMEOUT_SECONDS = 15
 
+# Fresh-interpreter server imports exceed the suite's default 15 s
+# pytest-timeout under parallel gate load; the ceiling must sit above the
+# subprocess's own budget.
+pytestmark = pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
+
 
 def _run_and_assert_ok(code: str) -> str:
     """Run `code` in a fresh subprocess, assert clean exit, return stdout."""

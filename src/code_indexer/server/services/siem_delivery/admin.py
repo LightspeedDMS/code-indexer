@@ -13,7 +13,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from code_indexer.server.services.audit_events import SystemComponent
 from code_indexer.server.services.audit_outcome import record_outcome
@@ -47,6 +47,27 @@ class SiemAdminError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def find_scheduler(app_state: Any) -> Tuple[Optional[Any], Optional[str]]:
+    """``(scheduler, None)``, or ``(None, startup_error)`` when SIEM delivery
+    is not running in this process.  Never raises: each front door maps an
+    absent scheduler to its own 503."""
+    scheduler = getattr(app_state, "siem_delivery_scheduler", None)
+    if scheduler is not None:
+        return scheduler, None
+    return None, getattr(app_state, "siem_delivery_startup_error", None)
+
+
+ABANDON_CONFIRM_WORD = "ABANDON"
+
+
+def require_abandon_confirmation(value: Any) -> None:
+    """The Web abandon is confirmed only by the exact word (case-sensitive,
+    never trimmed or normalised); anything else is refused BEFORE
+    :func:`abandon_destination` runs."""
+    if not (isinstance(value, str) and value == ABANDON_CONFIRM_WORD):
+        raise SiemAdminError(400, f"type {ABANDON_CONFIRM_WORD} to confirm")
 
 
 def _dest_target(scheduler: Any) -> Optional[SiemTarget]:
@@ -147,6 +168,12 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         )
     if invalid:
         raise SiemAdminError(422, f"canary failed local validation: {sorted(invalid)}")
+    # Bug #2018: read BEFORE minting, so a key replaced from here on makes
+    # the record refuse this canary (it would prove the old key); the run
+    # ordinal, issued before the send, orders this run against any other.
+    credential_id = scheduler.credential_store.credential_id()
+    run_seq = state_store.issue_canary_run(ctx.db)
+    started_at = ctx.db.read(lambda tx: tx.ts(tx.now()))
     try:
         token = ctx.credentials.token(ctx.destination)
     except CredentialError as exc:
@@ -162,16 +189,35 @@ def run_canary(scheduler: Any, actor: str) -> Dict[str, Any]:
         timeout=ctx.timings.request_timeout_seconds,
     )
     result = "accepted" if cls.cls == "accepted" else "rejected"
-    state_store.record_canary(
+    refused = state_store.record_canary(
         ctx.db,
         run_id=run_id,
+        run_seq=run_seq,
         destination_key=ctx.destination.key,
         mapping_version=ctx.mapping_version,
         expected=expected,
         result=result,
         signature=None if result == "accepted" else cls.signature,
         actor=actor,
+        config_epoch=ctx.config_epoch,
+        credential_id=credential_id,
+        started_at=started_at,
+        committed_epoch=scheduler.committed_epoch,
     )
+    if refused is not None:  # nothing was recorded
+        messages = {
+            state_store.CANARY_CREDENTIAL_CHANGED: (
+                "the service-account credential changed during the canary; run it again"
+            ),
+            state_store.CANARY_STALE_LIFETIME: (
+                "canary run is stale: the configuration lifetime changed during "
+                "the canary; run it again"
+            ),
+            state_store.CANARY_SUPERSEDED: (
+                "canary run is stale: a newer canary run was already recorded"
+            ),
+        }
+        raise SiemAdminError(409, messages[refused])
     _audit(
         scheduler,
         actor,
@@ -204,6 +250,7 @@ def confirm_visible(
         mapping_version=ctx.mapping_version,
         visible_ids=list(visible_ids),
         actor=actor,
+        config_epoch=ctx.config_epoch,
     )
     if outcome.stale:
         raise SiemAdminError(
@@ -614,6 +661,7 @@ def set_credential(scheduler: Any, actor: str, key_json: str) -> Dict[str, Any]:
     scheduler.credentials.invalidate_all()
     scheduler.note_credential_identity(identity)
     _audit_credential(scheduler, actor, change, identity, target)
+    scheduler.apply_committed_change()  # a replacement disarmed: capture stops now
     return {"change": change, "credential": identity}
 
 
@@ -625,6 +673,7 @@ def remove_credential(scheduler: Any, actor: str) -> Dict[str, Any]:
     scheduler.credentials.invalidate_all()
     scheduler.note_credential_identity(None)
     _audit_credential(scheduler, actor, "removed", removed, target)
+    scheduler.apply_committed_change()  # the removal disarmed: capture stops now
     return {"change": "removed", "credential": removed}
 
 
@@ -646,10 +695,11 @@ def capture_status(scheduler: Any, state: Mapping[str, Any]) -> Dict[str, Any]:
         }
     if not view.section.enabled or dest is None:
         return {"state": "inactive", "status": "delivery disabled or no destination"}
-    if (
-        state.get("canary_destination_key") != dest.key
-        or state.get("canary_mapping_version") != scheduler.mapping_version
-        or not state.get("canary_result")
+    if not state.get("canary_result") or not state_store.canary_is_for(
+        state,
+        destination_key=dest.key,
+        mapping_version=scheduler.mapping_version,
+        config_epoch=view.section.arming_epoch,
     ):
         return {"state": "awaiting canary", "status": "awaiting canary"}
     if state.get("canary_result") != "accepted":

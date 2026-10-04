@@ -13,7 +13,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Iterator, List, Tuple
+from typing import Iterator, List, Set, Tuple
 
 import pytest
 
@@ -172,6 +172,16 @@ def _query(dsn: str, sql: str, params: Tuple = ()) -> List[Tuple]:
         return conn.execute(sql, params).fetchall()
 
 
+def _applied_migrations(dsn: str) -> Set[str]:
+    return {r[0] for r in _query(dsn, "SELECT filename FROM schema_migrations")}
+
+
+# A legacy writer stores only the read-allowlisted fields: 'name' is in the
+# group allowlist, 'k' is not (audit_log_query.restrict_legacy_details).
+_GROUP_DETAILS_IN = '{"name": "g7", "k": 1}'
+_GROUP_DETAILS_STORED = '{"name": "g7"}'
+
+
 def _schema(dsn: str) -> Tuple[List[Tuple], List[str]]:
     columns = _query(
         dsn,
@@ -241,7 +251,11 @@ def test_upgrade_keeps_legacy_rows_and_is_idempotent(
             "target_type, target_id, details) VALUES (NOW(), 'admin', "
             "'group_create', 'group', '7', '{}')"
         )
-    assert _run_migrations(fresh_db) == 1
+    before_upgrade = _applied_migrations(fresh_db)
+    assert _MIGRATION_NAME not in before_upgrade
+    _run_migrations(fresh_db)
+    # Not a total count: later migrations land after 052 too.
+    assert _MIGRATION_NAME in _applied_migrations(fresh_db) - before_upgrade
     row = _query(
         fresh_db,
         "SELECT admin_id, outcome, source, ip_address, correlation_id, node_id, "
@@ -303,7 +317,7 @@ def test_legacy_log_entry_points_write_through_insert_events(fresh_db: str) -> N
     pool = ConnectionPool(fresh_db, min_size=1, max_size=2)
     try:
         backend = AuditLogPostgresBackend(pool)
-        backend.log("admin", "group_create", "group", "7", '{"k": 1}')
+        backend.log("admin", "group_create", "group", "7", _GROUP_DETAILS_IN)
         backend.log_raw("2026-01-01T00:00:00+00:00", "admin", "migrated", "x", "all")
     finally:
         pool.close()
@@ -314,7 +328,7 @@ def test_legacy_log_entry_points_write_through_insert_events(fresh_db: str) -> N
         "FROM audit_logs ORDER BY id",
     )
     assert [r[:3] for r in rows] == [
-        ("group_create", '{"k": 1}', 0),
+        ("group_create", _GROUP_DETAILS_STORED, 0),
         ("migrated", None, 0),
     ]
     assert all(r[3] for r in rows) and rows[0][3] != rows[1][3]
@@ -374,7 +388,7 @@ def test_groups_backend_audit_rows_go_through_the_one_write(fresh_db: str) -> No
             action_type="group_create",
             target_type="group",
             target_id="7",
-            details='{"k": 1}',
+            details=_GROUP_DETAILS_IN,
         )
     finally:
         pool.close()
@@ -383,7 +397,7 @@ def test_groups_backend_audit_rows_go_through_the_one_write(fresh_db: str) -> No
         "SELECT admin_id, action_type, details, event_uuid, correlation_id "
         "FROM audit_logs",
     )
-    assert [r[:3] for r in rows] == [("admin", "group_create", '{"k": 1}')]
+    assert [r[:3] for r in rows] == [("admin", "group_create", _GROUP_DETAILS_STORED)]
     assert rows[0][3] and rows[0][4]
 
 

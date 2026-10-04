@@ -189,10 +189,11 @@ class TestSeedRuntimeToPg:
 
         # Finding 4 fix: _seed_runtime_to_pg now does INSERT then SELECT.
         # First execute (INSERT) returns a cursor not used for fetchone.
-        # Second execute (SELECT version) returns the seeded version.
+        # Second execute (SELECT) adopts the committed row -- config_json and
+        # version in one read (Bug #2017).
         insert_cursor = MagicMock()
         select_cursor = MagicMock()
-        select_cursor.fetchone.return_value = {"version": 1}
+        select_cursor.fetchone.return_value = {"version": 1, "config_json": {}}
         mock_conn.execute.side_effect = [insert_cursor, select_cursor]
 
         config_service._pool = mock_pool

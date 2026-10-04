@@ -55,9 +55,11 @@ destination is reported as a self-heal FAILURE, not a success.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
@@ -65,8 +67,12 @@ from code_indexer.storage.shared.chunk_layout import (
 )
 from code_indexer.storage.shared.collection_migration import (
     _check_integrity_fresh_connection,
+    run_integrity_check_fresh_connection,
 )
-from code_indexer.storage.sqlite_chunk_store import ChunkStore
+from code_indexer.storage.sqlite_chunk_store import (
+    ChunkStore,
+    sqlite_error_reports_corruption,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +100,10 @@ class CollectionIntegrityFailure:
     # claims a NEW commit that chunks.db does not actually contain.
     metadata_restored_files: List[Path] = field(default_factory=list)
     metadata_restore_error: Optional[str] = None
+    # Bug #2022: the integrity check itself could not run or complete (I/O
+    # error, lock, busy, missing file). The store is NOT known to be damaged,
+    # so no restore is ever attempted over it.
+    check_inconclusive: bool = False
 
 
 @dataclass
@@ -130,33 +140,51 @@ def discover_chunks_db_collection_dirs(index_dir: Path) -> List[Path]:
     return collections
 
 
-def flush_and_check_chunks_db_integrity(chunks_db_path: Path) -> Tuple[bool, str]:
-    """Force *chunks_db_path* durable on the actual backing store, then
-    verify its integrity via a genuinely fresh, read-only connection.
+class IntegrityVerdict(str, Enum):
+    """Bug #2022: outcome of one collection's integrity check. Only CORRUPT
+    -- the check completed (or SQLite itself raised a corruption report) and
+    found damage -- may ever lead to a restore. INCONCLUSIVE means the check
+    could not run or complete (I/O error, lock, busy, missing file)."""
 
-    Returns ``(True, "ok")`` when durable and healthy; ``(False, detail)``
-    otherwise -- including when the durability flush itself raises (e.g. an
-    ``OSError`` fsync'ing over NFS), which is folded into the same
-    ``False``-with-detail contract rather than propagating a raw exception,
-    so a single collection's failure never aborts the whole gate run.
-    """
+    HEALTHY = "healthy"
+    CORRUPT = "corrupt"
+    INCONCLUSIVE = "inconclusive"
+
+
+def _verdict_for_raised(exc: BaseException, step: str) -> Tuple[IntegrityVerdict, str]:
+    detail = f"{step} raised {type(exc).__name__}: {exc}"
+    if sqlite_error_reports_corruption(exc):
+        return IntegrityVerdict.CORRUPT, detail
+    logger.error("Bug #2022: integrity check inconclusive -- %s", detail)
+    return IntegrityVerdict.INCONCLUSIVE, detail
+
+
+def check_chunks_db_integrity(chunks_db_path: Path) -> Tuple[IntegrityVerdict, str]:
+    """Force *chunks_db_path* durable on the actual backing store, then run
+    ``PRAGMA integrity_check`` on a genuinely fresh, read-only connection.
+    Never raises: a flush or check that fails is a verdict, not an error."""
     chunks_db_path = Path(chunks_db_path)
     if not chunks_db_path.exists():
-        return False, "chunks.db does not exist"
-
+        return IntegrityVerdict.INCONCLUSIVE, "chunks.db does not exist"
     try:
         with ChunkStore(chunks_db_path, durable_synchronous=True) as store:
             store.flush_durable()
     except Exception as exc:
-        logger.error(
-            "Bug #1506: durable flush failed for %s (%s)",
-            chunks_db_path,
-            exc,
-        )
-        return False, f"flush_durable failed: {type(exc).__name__}: {exc}"
+        return _verdict_for_raised(exc, "flush_durable")
+    try:
+        rows = run_integrity_check_fresh_connection(chunks_db_path)
+    except (sqlite3.Error, OSError) as exc:
+        return _verdict_for_raised(exc, "integrity_check")
+    if rows == ["ok"]:
+        return IntegrityVerdict.HEALTHY, "ok"
+    return IntegrityVerdict.CORRUPT, "; ".join(rows)
 
-    ok, detail = _check_integrity_fresh_connection(chunks_db_path)
-    return ok, detail
+
+def flush_and_check_chunks_db_integrity(chunks_db_path: Path) -> Tuple[bool, str]:
+    """``(True, "ok")`` when durable and healthy; ``(False, detail)``
+    otherwise (see :func:`check_chunks_db_integrity`)."""
+    verdict, detail = check_chunks_db_integrity(chunks_db_path)
+    return verdict is IntegrityVerdict.HEALTHY, detail
 
 
 def restore_chunks_db_via_reflink(
@@ -236,15 +264,36 @@ def restore_metadata_files_via_reflink(
     return restored
 
 
+class RestoreVetoedError(RuntimeError):
+    """Bug #2022: the caller's ``before_restore`` check refused a restore
+    (e.g. the refresh lost its write lock). Propagates out of the gate; the
+    restore copy never starts."""
+
+
+def _check_restore_allowed(before_restore: Optional[Callable[[], None]]) -> None:
+    if before_restore is None:
+        return
+    try:
+        before_restore()
+    except Exception as exc:
+        raise RestoreVetoedError(f"restore vetoed: {exc}") from exc
+
+
 def run_refresh_integrity_gate(
     *,
     source_index_dir: Path,
     healthy_index_dir: Optional[Path],
     clone_backend: Optional[Any] = None,
+    before_restore: Optional[Callable[[], None]] = None,
 ) -> RefreshIntegrityGateResult:
     """Run the Bug #1506 durability-flush + integrity gate against every
     CHUNKS_DB collection under *source_index_dir* (the just-mutated
     ``master_path``'s ``.code-indexer/index/``).
+
+    Bug #2022: a restore is attempted only for a CORRUPT verdict (never for
+    an INCONCLUSIVE one), and *before_restore* (e.g. a write-lock ownership
+    check) is called immediately before each restore copy; anything it
+    raises aborts the restore and propagates as ``RestoreVetoedError``.
 
     On any collection's integrity-check failure, attempt a reflink
     self-heal of ITS ``chunks.db`` from the corresponding collection
@@ -287,8 +336,8 @@ def run_refresh_integrity_gate(
     collections = discover_chunks_db_collection_dirs(Path(source_index_dir))
     for collection_dir in collections:
         chunks_db_path = collection_dir / _CHUNKS_DB_FILENAME
-        ok, detail = flush_and_check_chunks_db_integrity(chunks_db_path)
-        if ok:
+        verdict, detail = check_chunks_db_integrity(chunks_db_path)
+        if verdict is IntegrityVerdict.HEALTHY:
             result.checked_collections.append(collection_dir)
             continue
 
@@ -296,6 +345,17 @@ def run_refresh_integrity_gate(
         failure = CollectionIntegrityFailure(
             collection_dir=collection_dir, detail=detail
         )
+        if verdict is IntegrityVerdict.INCONCLUSIVE:
+            # Bug #2022: unverifiable is not corrupt -- never restore over it.
+            failure.check_inconclusive = True
+            logger.error(
+                "Bug #2022: integrity of %s could not be verified (%s) -- "
+                "refusing to publish and NOT restoring over it.",
+                chunks_db_path,
+                detail,
+            )
+            result.failures.append(failure)
+            continue
         logger.error(
             "Bug #1506: chunks.db integrity check FAILED for %s (%s) -- "
             "refusing to publish this refresh cycle.",
@@ -332,6 +392,9 @@ def run_refresh_integrity_gate(
                     source_detail,
                 )
             else:
+                # Bug #2022: the caller re-verifies it may still write
+                # (e.g. lock ownership) immediately before each copy.
+                _check_restore_allowed(before_restore)
                 failure.self_heal_attempted = True
                 try:
                     restore_chunks_db_via_reflink(
@@ -363,6 +426,7 @@ def run_refresh_integrity_gate(
                         # permanently fool the next refresh cycle's
                         # git-ref-only change detection.
                         try:
+                            _check_restore_allowed(before_restore)
                             failure.metadata_restored_files = (
                                 restore_metadata_files_via_reflink(
                                     clone_backend,
@@ -379,6 +443,8 @@ def run_refresh_integrity_gate(
                                     collection_dir,
                                     failure.metadata_restored_files,
                                 )
+                        except RestoreVetoedError:
+                            raise
                         except Exception as metadata_exc:
                             failure.metadata_restore_error = (
                                 f"{type(metadata_exc).__name__}: {metadata_exc}"
@@ -407,6 +473,8 @@ def run_refresh_integrity_gate(
                             chunks_db_path,
                             post_detail,
                         )
+                except RestoreVetoedError:
+                    raise
                 except Exception as exc:
                     failure.self_heal_error = f"{type(exc).__name__}: {exc}"
                     logger.error(

@@ -220,11 +220,76 @@ def test_the_per_door_check_reports_a_door_missing_its_entry_point() -> None:
     assert _missing_door_wiring(doors, sources) == ["refresh: b.py lacks x"]
 
 
+# Unaudited internal helper an internal caller may use instead of calling the
+# scheduler directly; its own body is checked so it cannot hide an audited call.
+_INTERNAL_REFRESH_HELPER = "request_cidx_meta_refresh"
+_INTERNAL_REFRESH_HELPER_FILE = (
+    Path(code_indexer.__file__).parent / "global_repos" / "meta_description_hook.py"
+)
+
+
+def _function_body(source: str, name: str) -> str:
+    """Source of the module-level function ``name``, re-rendered from its AST."""
+    matches = [
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    ]
+    assert len(matches) == 1, f"expected one definition of {name}"
+    return ast.unparse(matches[0])
+
+
+def _unaudited_refresh_violations(
+    callers: Dict[str, str], helper_body: str
+) -> List[str]:
+    violations: List[str] = []
+    if not _uses(helper_body, {"trigger_refresh_for_repo"}):
+        violations.append(f"{_INTERNAL_REFRESH_HELPER} lacks trigger_refresh_for_repo")
+    violations.extend(
+        f"{_INTERNAL_REFRESH_HELPER} uses {use}"
+        for use in _uses(helper_body, {"request_golden_repo_refresh"})
+    )
+    for caller, source in callers.items():
+        if not _uses(source, {"trigger_refresh_for_repo", _INTERNAL_REFRESH_HELPER}):
+            violations.append(f"{caller} reaches no unaudited refresh entry point")
+        violations.extend(
+            f"{caller} uses {use}"
+            for use in _uses(source, {"request_golden_repo_refresh"})
+        )
+    return violations
+
+
 def test_internal_refresh_callers_stay_unaudited() -> None:
-    for path in _INTERNAL_REFRESH_CALLERS:
-        source = path.read_text()
-        assert _uses(source, {"trigger_refresh_for_repo"}), path
-        assert _uses(source, {"request_golden_repo_refresh"}) == [], path
+    callers = {str(path): path.read_text() for path in _INTERNAL_REFRESH_CALLERS}
+    helper_body = _function_body(
+        _INTERNAL_REFRESH_HELPER_FILE.read_text(), _INTERNAL_REFRESH_HELPER
+    )
+    assert _unaudited_refresh_violations(callers, helper_body) == []
+
+
+def test_the_internal_refresh_check_reports_an_unaudited_route_violation() -> None:
+    """Negative controls: a caller using neither unaudited entry point, and a
+    helper body that calls the audited front door, are both reported."""
+    good_helper = "def request_cidx_meta_refresh(s):\n    s.trigger_refresh_for_repo(a)"
+    clean_callers = {
+        "direct.py": "s.trigger_refresh_for_repo(a)",
+        "helper.py": "request_cidx_meta_refresh(s)",
+    }
+    assert _unaudited_refresh_violations(clean_callers, good_helper) == []
+    assert _unaudited_refresh_violations({"c.py": "s.other(a)"}, good_helper) == [
+        "c.py reaches no unaudited refresh entry point"
+    ]
+    audited_helper = (
+        "def request_cidx_meta_refresh(s):\n"
+        "    request_golden_repo_refresh(s, a, actor=u)"
+    )
+    assert _unaudited_refresh_violations(
+        {"helper.py": "request_cidx_meta_refresh(s)"}, audited_helper
+    ) == [
+        "request_cidx_meta_refresh lacks trigger_refresh_for_repo",
+        "request_cidx_meta_refresh uses 2: request_golden_repo_refresh",
+    ]
 
 
 def test_the_reconciler_removes_orphans_as_the_system_component() -> None:

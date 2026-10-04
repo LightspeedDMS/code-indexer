@@ -728,6 +728,25 @@ class GoldenRepoManager:
         if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
+        # The removal job deletes the registry row FIRST (Bug #1317) and the
+        # clone directory LAST, so the alias looks free while its removal is
+        # still running. An add accepted in that window has its fresh clone
+        # rmtree'd by the removal. Checked AFTER the row check: a removal can
+        # only be submitted while the row exists, so once the row is gone no
+        # new removal can start behind this check. JobTracker is the
+        # cluster-visible record of active jobs.
+        if self.job_tracker is not None:
+            try:
+                self.job_tracker.check_operation_conflict(
+                    "remove_golden_repo", repo_alias=alias
+                )
+            except DuplicateJobError as removal_active:
+                raise GoldenRepoError(
+                    f"Golden repository '{alias}' is still being removed "
+                    f"(job {removal_active.existing_job_id}); add it again "
+                    "after that job completes"
+                ) from removal_active
+
         # Skip git validation for local:// URLs (Story #538) or when caller
         # explicitly opts out (Story #1092: batch-create fast path).
         if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):

@@ -18,6 +18,8 @@ import threading
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from code_indexer.config import ConfigManager
 from code_indexer.server.services.auto_watch_manager import AutoWatchManager
 
@@ -71,6 +73,7 @@ class TestModuleLevelSingletonImportIsThreadFree:
     module's OWN `auto_watch_manager = AutoWatchManager()` statement.
     """
 
+    @pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
     def test_module_import_spawns_zero_checker_threads(self) -> None:
         """Runs in a FRESH SUBPROCESS (mirrors
         test_file_service_deferred_construction_1650.py's established

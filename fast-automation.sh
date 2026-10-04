@@ -246,6 +246,21 @@ echo "⏱️  pytest-timeout ceiling for this run: ${PYTEST_TIMEOUT}s (override 
 
 check_load_before_run
 
+# Real-server-home isolation (Bug #1996 follow-up): no test may resolve the
+# developer's real ~/.cidx-server -- HOME and the server data dirs point at
+# scratch -- and the lane fails if the real launch.json / config.json changed.
+# shellcheck source=scripts/real-server-home-guard.sh
+source "$PROJECT_DIR/scripts/real-server-home-guard.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
+# Under the real ~/.tmp, not /tmp: tests root their tmp dirs at ~/.tmp, and
+# config discovery walking up from /tmp can hit stray configs there.
+mkdir -p "$HOME/.tmp"
+LANE_SCRATCH=$(mktemp -d "$HOME/.tmp/cidx-lane-home-XXXXXX")
+trap 'rm -rf "$LANE_SCRATCH"' EXIT
+REAL_HOME_STATE="$LANE_SCRATCH/real-home-guard.state"
+real_home_guard_snapshot "$REAL_HOME_STATE"
+real_home_lane_env "$LANE_SCRATCH"
+
 # Run ONLY fast unit tests that don't require external services
 # TELEMETRY: Add --durations=0 to capture ALL test durations
 echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_FILE"
@@ -383,6 +398,13 @@ python3 -m pytest \
     2>&1 | tee "$TELEMETRY_FILE"
 
 PYTEST_EXIT_CODE=${PIPESTATUS[0]}
+
+# Fail the lane if the run changed the developer's real ~/.cidx-server.
+real_home_guard_verify "$REAL_HOME_STATE" && REAL_HOME_OK=0 || REAL_HOME_OK=$?
+if [ "$REAL_HOME_OK" -ne 0 ]; then
+    print_error "This run changed the developer's real ~/.cidx-server (see above)"
+fi
+PYTEST_EXIT_CODE=$(real_home_guard_exit_code "$PYTEST_EXIT_CODE" "$REAL_HOME_OK")
 
 # TELEMETRY: Extract duration data
 grep -E "^[0-9]+\.[0-9]+s (call|setup|teardown)" "$TELEMETRY_FILE" | sort -rn > "$DURATION_FILE"

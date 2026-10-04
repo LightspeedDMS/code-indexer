@@ -643,9 +643,9 @@ class TestGrepContextLines:
     Tests verify that grep parser correctly captures context_before and context_after
     from grep's -C flag output, restoring feature parity with ripgrep backend.
 
-    Grep output format:
-    - Match lines: filename:linenum:content (colon separators)
-    - Context lines: filename-linenum-content (dash separators)
+    Grep output format (grep runs with --null, Bug #2030):
+    - Match lines: filename\\0linenum:content (NUL after filename, then colon)
+    - Context lines: filename\\0linenum-content (NUL after filename, then dash)
     - Group separators: -- (between match groups)
     """
 

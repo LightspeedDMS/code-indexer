@@ -121,5 +121,20 @@
                 <button type="submit" class="secondary">Remove Trusted CA</button>
             </div>
         </form>
+        <h3>Operations</h3>
+        <p class="section-description">
+            Arming (canary, visibility confirmation, readiness) and recovery (halts, quarantine,
+            open batches, stranded destinations). Reading needs an admin session; every action
+            needs TOTP elevation while elevation enforcement is on.
+        </p>
+        <input type="hidden" id="siem-ops-csrf" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-actions">
+            <button type="button" class="outline small" onclick="htmx.trigger(document.body, 'siem-ops-changed')">Refresh</button>
+        </div>
+        <div id="siem-ops-result" role="status" aria-live="polite"></div>
+        <div id="siem-ops-arming" hx-get="/admin/siem-delivery/partials/arming" hx-trigger="load, siem-ops-changed from:body">Loading arming status...</div>
+        <div id="siem-ops-recovery" hx-get="/admin/siem-delivery/partials/recovery" hx-trigger="load, siem-ops-changed from:body">Loading recovery status...</div>
+        <div id="siem-ops-dialog"></div>
+        <script src="/admin/static/js/siem_delivery_ops.js?v={{ static_version }}"></script>
     </article>
 </details>

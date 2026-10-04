@@ -100,6 +100,7 @@ class TestRepositoryStatsServiceNoCwdFallbackSideEffect:
             ".code-indexer/index directory behind (Bug #1691)"
         )
 
+    @pytest.mark.timeout(SUBPROCESS_IMPORT_TIMEOUT_SECONDS + 15)
     def test_module_level_singleton_import_does_not_touch_cwd(self, tmp_path) -> None:
         """Bug #1691: importing the module-level `stats_service` singleton
         must not create .code-indexer/index at whatever CWD happens to be

@@ -20,9 +20,10 @@ QUARANTINE_LISTING_MAX = 1000
 
 
 def _scheduler(request: Request) -> Any:
-    scheduler = getattr(request.app.state, "siem_delivery_scheduler", None)
+    from ..services.siem_delivery.admin import find_scheduler
+
+    scheduler, error = find_scheduler(request.app.state)
     if scheduler is None:
-        error = getattr(request.app.state, "siem_delivery_startup_error", None)
         raise HTTPException(
             status_code=503,
             detail=f"SIEM delivery is not running in this process: {error}",

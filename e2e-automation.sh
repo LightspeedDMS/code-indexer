@@ -1050,11 +1050,41 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 # fires even on an early credential-missing exit — matching the pre-existing
 # "runs on EXIT" guarantee (see cleanup_all_servers_and_reset definition
 # above) for every exit path of a direct execution, not just the phase loop.
+#
+# shellcheck source=scripts/real-server-home-guard.sh
+source "$SCRIPT_DIR/scripts/real-server-home-guard.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
 trap cleanup_all_servers_and_reset EXIT
 
 # Bug #1996: refuse an empty HOME and any caller-chosen root inside the real
 # server home BEFORE a single directory is created, cloned into or copied.
 preflight_protected_paths || exit 2
+
+# Real-server-home guard (Bug #1996 follow-up): snapshot the developer's real
+# ~/.cidx-server launch.json / config.json now (nothing has started yet) and
+# verify AFTER server cleanup on every exit path, so shutdown writes count
+# too; any change fails the run.  Only names, mtimes and hashes are shown.
+# A cleanup failure cannot skip the guard, and a failing suite keeps its own
+# exit code (real_home_guard_exit_code).
+mkdir -p "$HOME/.tmp"
+E2E_REAL_HOME_STATE="$(mktemp "$HOME/.tmp/cidx-e2e-real-home-XXXXXX")"
+real_home_guard_snapshot "$E2E_REAL_HOME_STATE"
+_e2e_exit_with_real_home_guard() {
+    local rc=$? guard_rc=0
+    if ! cleanup_all_servers_and_reset; then
+        _red "e2e cleanup failed"
+        if [[ $rc -eq 0 ]]; then
+            rc=1
+        fi
+    fi
+    real_home_guard_verify "$E2E_REAL_HOME_STATE" || guard_rc=$?
+    if [[ $guard_rc -ne 0 ]]; then
+        _red "This run changed the developer's real ~/.cidx-server (see above)"
+    fi
+    rm -f "$E2E_REAL_HOME_STATE"
+    exit "$(real_home_guard_exit_code "$rc" "$guard_rc")"
+}
+trap _e2e_exit_with_real_home_guard EXIT
 
 # ---------------------------------------------------------------------------
 # Required credentials — no built-in defaults; must come from .e2e-automation

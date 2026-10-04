@@ -8,7 +8,6 @@ AC3: Unit tests verify caching behavior (cached hit, TTL expiry, invalidation).
 TDD: Tests written FIRST before implementation (red phase).
 """
 
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,13 +23,9 @@ from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 
 @pytest.fixture
-def temp_db_path():
-    """Temporary SQLite DB file for GroupAccessManager."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = Path(f.name)
-    yield db_path
-    if db_path.exists():
-        db_path.unlink()
+def temp_db_path(tmp_path: Path) -> Path:
+    """Per-test SQLite DB file for GroupAccessManager (never in shared /tmp)."""
+    return tmp_path / "group_access.db"
 
 
 @pytest.fixture

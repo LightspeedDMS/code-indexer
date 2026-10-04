@@ -250,45 +250,41 @@ class TestRunCategoryCredentials:
     """Tests for run_category() dispatching CREDENTIALS category."""
 
     @pytest.mark.asyncio
-    async def test_run_category_dispatches_credentials(self):
+    async def test_run_category_dispatches_credentials(self, tmp_path):
         """Test run_category() dispatches to run_credential_diagnostics() for CREDENTIALS category."""
-        import tempfile
-        import os
+        # Fresh per-test database (no cache from DB) in the real
+        # <server_dir>/data/cidx_server.db layout -- never directly in /tmp,
+        # where server_dir (db_path.parent.parent) would resolve to "/".
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        tmp_db_path = str(data_dir / "cidx_server.db")
 
-        # Use temporary database to avoid cache from DB
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
+        service = DiagnosticsService(db_path=tmp_db_path)
 
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
+        # Clear cache to ensure fresh run
+        service.clear_cache(DiagnosticCategory.CREDENTIALS)
 
-            # Clear cache to ensure fresh run
-            service.clear_cache(DiagnosticCategory.CREDENTIALS)
+        # Mock run_credential_diagnostics()
+        mock_results = [
+            MagicMock(name="SSH Keys", status=DiagnosticStatus.WORKING),
+            MagicMock(name="GitHub Token", status=DiagnosticStatus.WORKING),
+            MagicMock(name="GitLab Token", status=DiagnosticStatus.NOT_CONFIGURED),
+        ]
 
-            # Mock run_credential_diagnostics()
-            mock_results = [
-                MagicMock(name="SSH Keys", status=DiagnosticStatus.WORKING),
-                MagicMock(name="GitHub Token", status=DiagnosticStatus.WORKING),
-                MagicMock(name="GitLab Token", status=DiagnosticStatus.NOT_CONFIGURED),
-            ]
+        with patch.object(
+            service,
+            "run_credential_diagnostics",
+            new=AsyncMock(return_value=mock_results),
+        ) as mock_run_creds:
+            await service.run_category(DiagnosticCategory.CREDENTIALS)
 
-            with patch.object(
-                service,
-                "run_credential_diagnostics",
-                new=AsyncMock(return_value=mock_results),
-            ) as mock_run_creds:
-                await service.run_category(DiagnosticCategory.CREDENTIALS)
+            # Verify run_credential_diagnostics was called
+            mock_run_creds.assert_called_once()
 
-                # Verify run_credential_diagnostics was called
-                mock_run_creds.assert_called_once()
-
-            # Verify results were cached
-            cached_results = service.get_category_status(DiagnosticCategory.CREDENTIALS)
-            assert len(cached_results) == 3
-            assert cached_results == mock_results
-        finally:
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
+        # Verify results were cached
+        cached_results = service.get_category_status(DiagnosticCategory.CREDENTIALS)
+        assert len(cached_results) == 3
+        assert cached_results == mock_results
 
 
 @pytest.mark.slow

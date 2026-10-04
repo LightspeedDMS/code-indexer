@@ -87,6 +87,7 @@ from ..web import (
 from ..web.repo_category_routes import repo_category_web_router
 from ..web.dependency_map_routes import dependency_map_router
 from ..web.audit_log_routes import audit_log_web_router
+from ..web.siem_delivery_routes import siem_delivery_web_router
 
 # Import helper functions from app_helpers (extracted to break circular import with app.py)
 
@@ -314,6 +315,9 @@ def register_inline_routes(
 
     # Include the Audit Logs page router with /admin prefix
     app.include_router(audit_log_web_router, prefix="/admin", tags=["admin"])
+
+    # Include the SIEM delivery operator panels and actions with /admin prefix
+    app.include_router(siem_delivery_web_router, prefix="/admin", tags=["admin"])
 
     # Include wiki router (Stories #280-#283)
     from ..wiki.routes import wiki_router

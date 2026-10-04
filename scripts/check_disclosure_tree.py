@@ -171,9 +171,11 @@ ALLOWLIST: Dict[str, Set[str]] = {
         # 10023/10394/10875).
         # 12.81.0 shifted them another +13 (10023/10394/10875 ->
         # 10036/10407/10888).
-        "CHANGELOG.md:10036",
-        "CHANGELOG.md:10407",
-        "CHANGELOG.md:10888",
+        # 12.82.0 shifted them another +30 (10036/10407/10888 ->
+        # 10066/10437/10918).
+        "CHANGELOG.md:10066",
+        "CHANGELOG.md:10437",
+        "CHANGELOG.md:10918",
     },
     "operator-email-domain": {
         # This script necessarily names the literal it searches for.

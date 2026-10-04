@@ -17,6 +17,7 @@ import time
 import sys
 import os
 import pwd
+import re
 import shutil
 import tarfile
 import tempfile
@@ -130,6 +131,67 @@ HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 # Bug #1392: quick `python -c` probe for check_integrity/repair_orphans,
 # same budget as the existing _hnswlib_importable() import probe.
 HNSWLIB_CAPABILITY_PROBE_TIMEOUT_SECONDS = 10
+
+
+def _posix_ere_literal(text: str) -> str:
+    """An anchored POSIX ERE (git config's value-pattern syntax) matching
+    exactly *text*."""
+    return "^" + re.sub(r"([\\^$.|?*+()\[\]{}])", r"\\\1", text) + "$"
+
+
+def ensure_single_safe_directory(
+    path: str, sudo_user: Optional[str] = None, add_if_absent: bool = True
+) -> Optional[str]:
+    """Make *path* appear exactly once in the global git safe.directory list
+    (Bug #2028: deploys used to append it unconditionally, on every run).
+
+    Exactly one entry: no-op.  None: added (unless *add_if_absent* is
+    False).  Several: ONE ``--replace-all`` whose value pattern matches only
+    *path* collapses them to one entry -- the entry is never absent, other
+    values and keys are untouched.  The listing's exit 1 means "absent"; any
+    other failure to read is an error, never "absent" (nothing is written).
+    *sudo_user* runs git as that account.
+
+    Returns None on success, else git's stderr: each caller keeps its own
+    logging and fatal/non-fatal semantics.
+    """
+    git = ["sudo", "-u", sudo_user] if sudo_user else []
+    git += ["git", "config", "--global"]
+    listed = subprocess.run(
+        [*git, "--get-all", "safe.directory"], capture_output=True, text=True
+    )
+    if listed.returncode == 0:
+        count = listed.stdout.splitlines().count(path)
+    elif listed.returncode == 1:  # key absent
+        count = 0
+    else:
+        return listed.stderr or f"git config --get-all exited {listed.returncode}"
+    if count == 1 or (count == 0 and not add_if_absent):
+        logger.debug(
+            f"Git safe.directory needs no change: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+    if count == 0:
+        command = [*git, "--add", "safe.directory", path]
+    else:
+        command = [*git, "--replace-all", "safe.directory", path]
+        command.append(_posix_ere_literal(path))
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        return result.stderr or f"git config exited {result.returncode}"
+    if count > 1:
+        logger.info(
+            f"Collapsed {count} duplicate git safe.directory entries to one: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.info(
+            f"Added git safe.directory entry: {path}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    return None
+
 
 # Bug #839: Claude CLI auto-update timeout constants
 NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
@@ -696,48 +758,40 @@ class DeploymentExecutor:
             )
             return False
 
+    def _hnswlib_submodule_dir(self) -> Path:
+        """The hnswlib submodule checkout whose safe.directory entry the
+        auto-updater manages (Bug #2028)."""
+        return self.repo_path / "third_party" / "hnswlib"
+
     def _ensure_submodule_safe_directory(self) -> bool:
         """Add submodule paths to git safe.directory config.
 
         Git's "dubious ownership" check applies to each git repository independently.
         Submodules are separate repositories and need their own safe.directory entries.
+        Bug #2028: added only when absent (duplicates are collapsed).
 
         Returns:
             True if successful or not needed, False on error
         """
         try:
             # Known submodule paths
-            submodule_paths = [
-                self.repo_path / "third_party" / "hnswlib",
-            ]
+            submodule_paths = [self._hnswlib_submodule_dir()]
 
             for submodule_path in submodule_paths:
                 # Skip if submodule directory doesn't exist yet
                 if not submodule_path.exists():
                     continue
 
-                # Add to global safe.directory (runs as root, so use root's config)
-                result = subprocess.run(
-                    [
-                        "git",
-                        "config",
-                        "--global",
-                        "--add",
-                        "safe.directory",
-                        str(submodule_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-
-                if result.returncode != 0:
+                # Global safe.directory (runs as root, so root's config)
+                error = ensure_single_safe_directory(str(submodule_path))
+                if error is not None:
                     logger.warning(
-                        f"Could not add submodule to safe.directory: {submodule_path}: {result.stderr}",
+                        f"Could not add submodule to safe.directory: {submodule_path}: {error}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 else:
-                    logger.info(
-                        f"Added submodule to git safe.directory: {submodule_path}",
+                    logger.debug(
+                        f"Submodule git safe.directory configured: {submodule_path}",
                         extra={"correlation_id": get_correlation_id()},
                     )
 
@@ -982,23 +1036,11 @@ class DeploymentExecutor:
                     )
                     return False
 
-            # Add fallback path to git safe.directory
-            result = subprocess.run(
-                [
-                    "git",
-                    "config",
-                    "--global",
-                    "--add",
-                    "safe.directory",
-                    str(HNSWLIB_FALLBACK_PATH),
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if result.returncode != 0:
+            # Fallback path in git safe.directory, only when absent (Bug #2028)
+            error = ensure_single_safe_directory(str(HNSWLIB_FALLBACK_PATH))
+            if error is not None:
                 logger.warning(
-                    f"Could not add fallback path to safe.directory: {result.stderr}",
+                    f"Could not add fallback path to safe.directory: {error}",
                     extra={"correlation_id": get_correlation_id()},
                 )
                 # Not fatal, continue with clone
@@ -3301,6 +3343,29 @@ class DeploymentExecutor:
             )
             return False
 
+    def _ensure_safe_directory_entries_deduplicated(self) -> bool:
+        """Bug #2028 self-heal: collapse the duplicate safe.directory entries
+        that earlier, non-idempotent deploys appended to this account's global
+        git config for the paths the auto-updater manages.  Never adds an
+        absent entry and never touches other values or keys.  Non-fatal: a git
+        failure is logged loudly and the deploy continues.
+        """
+        managed = (self._hnswlib_submodule_dir(), HNSWLIB_FALLBACK_PATH)
+        for path in managed:
+            try:
+                error = ensure_single_safe_directory(str(path), add_if_absent=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+            if error is not None:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-226",
+                        f"Could not deduplicate git safe.directory entries "
+                        f"for {path}: {error}",
+                    )
+                )
+        return True
+
     def _ensure_git_safe_directory(self) -> bool:
         """Ensure git safe.directory is configured for the service user.
 
@@ -3340,60 +3405,19 @@ class DeploymentExecutor:
             # Extract WorkingDirectory from service file - this is the canonical repo path
             repo_root = self._extract_working_directory(content)
 
-            # Check if already configured
-            check_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--get-all",
-                    "safe.directory",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if check_result.returncode == 0:
-                # Check if our repo path is in the output
-                configured_paths = check_result.stdout.strip().split("\n")
-                if str(repo_root) in configured_paths:
-                    logger.debug(
-                        f"Git safe.directory already configured for {service_user}: {repo_root}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return True
-
-            # Add safe.directory configuration
-            add_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--add",
-                    "safe.directory",
-                    str(repo_root),
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if add_result.returncode != 0:
+            # Only when absent; duplicates collapsed (Bug #2028)
+            error = ensure_single_safe_directory(str(repo_root), sudo_user=service_user)
+            if error is not None:
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-027",
-                        f"Failed to add git safe.directory: {add_result.stderr}",
+                        f"Failed to add git safe.directory: {error}",
                     )
                 )
                 return False
 
-            logger.info(
-                f"Added git safe.directory for {service_user}: {repo_root}",
+            logger.debug(
+                f"Git safe.directory configured for {service_user}: {repo_root}",
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
@@ -3451,61 +3475,19 @@ class DeploymentExecutor:
                 )
                 return True
 
-            # Check if the wildcard is already configured
-            check_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--get-all",
-                    "safe.directory",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if check_result.returncode == 0:
-                configured_paths = check_result.stdout.strip().split("\n")
-                if "*" in configured_paths:
-                    logger.debug(
-                        f"Git safe.directory wildcard already configured for "
-                        f"{service_user}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                    return True
-
-            # Add the wildcard safe.directory configuration
-            add_result = subprocess.run(
-                [
-                    "sudo",
-                    "-u",
-                    service_user,
-                    "git",
-                    "config",
-                    "--global",
-                    "--add",
-                    "safe.directory",
-                    "*",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if add_result.returncode != 0:
+            # Only when absent; duplicates collapsed (Bug #2028)
+            error = ensure_single_safe_directory("*", sudo_user=service_user)
+            if error is not None:
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-216",
-                        f"Failed to add git safe.directory wildcard: "
-                        f"{add_result.stderr}",
+                        f"Failed to add git safe.directory wildcard: {error}",
                     )
                 )
                 return False
 
-            logger.info(
-                f"Added git safe.directory wildcard for {service_user}",
+            logger.debug(
+                f"Git safe.directory wildcard configured for {service_user}",
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
@@ -4276,6 +4258,10 @@ class DeploymentExecutor:
         # golden-repos/activated-repos (owned by a different OS user than the
         # service account) regardless of which directory they live in.
         self._ensure_git_safe_directory_wildcard()
+
+        # Step 5.6: Bug #2028 - collapse duplicate safe.directory entries that
+        # earlier non-idempotent deploys appended (self-heal; non-fatal).
+        self._ensure_safe_directory_entries_deduplicated()
 
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()

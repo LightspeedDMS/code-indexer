@@ -55,6 +55,13 @@ from code_indexer.server.services.audit_events import AUDIT_ACTION_CATALOG
 _PROBE = Path(__file__).with_name("_audit_route_table_probe.py")
 _SRC_ROOT = Path(code_indexer.__file__).resolve().parent.parent
 
+# Budget for the fresh-interpreter route-table probe behind `route_entries`.
+# The module fixture's setup is charged to whichever test requests it first,
+# so every test requesting `route_entries` carries _ROUTE_PROBE_TIMEOUT: the
+# suite's default 15 s pytest-timeout must not fire before this budget.
+_ROUTE_PROBE_TIMEOUT_SECONDS = 300
+_ROUTE_PROBE_TIMEOUT = pytest.mark.timeout(_ROUTE_PROBE_TIMEOUT_SECONDS + 15)
+
 _ADMIN_PERMISSIONS = frozenset(
     {"manage_users", "manage_golden_repos", "repository:admin", "public"}
 )
@@ -400,6 +407,23 @@ _ROUTE_MAPPED: Dict[str, Tuple[str, ...]] = {
     "POST /api/admin/siem-delivery/destinations/{destination_key}/abandon": (
         "siem_destination_abandoned",
     ),
+    # The same SIEM actions through the Web UI (same shared service, same types)
+    "POST /admin/siem-delivery/canary": ("siem_canary_sent",),
+    "POST /admin/siem-delivery/canary/confirm-visible": (
+        "siem_canary_visibility_confirmed",
+    ),
+    "POST /admin/siem-delivery/resume": ("siem_delivery_resumed",),
+    "POST /admin/siem-delivery/quarantine/requeue": ("siem_quarantine_requeued",),
+    "POST /admin/siem-delivery/batches/{batch_id}/acknowledge": (
+        "siem_batch_acknowledged",
+    ),
+    "POST /admin/siem-delivery/batches/{batch_id}/rebatch": ("siem_batch_rebatched",),
+    "POST /admin/siem-delivery/destinations/{destination_key}/retarget": (
+        "siem_destination_retargeted",
+    ),
+    "POST /admin/siem-delivery/destinations/{destination_key}/abandon": (
+        "siem_destination_abandoned",
+    ),
     # Server operations
     "POST /api/admin/maintenance/enter": ("maintenance_mode_entered",),
     "POST /api/admin/maintenance/exit": ("maintenance_mode_exited",),
@@ -594,7 +618,7 @@ def route_entries(tmp_path_factory: pytest.TempPathFactory) -> List[RouteEntry]:
         env=env,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=_ROUTE_PROBE_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stderr[-4000:]
     entries: List[RouteEntry] = json.loads(out.read_text(encoding="utf-8"))
@@ -641,11 +665,13 @@ def test_every_mcp_door_is_mapped_exempt_or_a_known_gap(mcp_registries) -> None:
     assert unclassified(inventory, _MCP_MAPPED, _MCP_EXEMPT, _MCP_GAPS) == []
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_every_mutating_route_is_mapped_exempt_or_self_service(route_entries) -> None:
     inventory = route_inventory(route_entries)
     assert unclassified(inventory, *_ROUTE_TABLES) == []
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
     route_entries,
 ) -> None:
@@ -662,6 +688,7 @@ def test_the_conditionally_mounted_fault_injection_router_is_inventoried(
     assert expected <= route_inventory(route_entries)
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_no_self_service_route_sits_behind_an_admin_gate(route_entries) -> None:
     assert self_service_behind_a_gate(route_entries, _ROUTE_SELF_SERVICE) == []
 
@@ -670,6 +697,7 @@ def test_no_door_is_left_as_a_known_gap() -> None:
     assert (_ROUTE_GAPS, _MCP_GAPS) == ({}, {})
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_no_classification_names_a_door_outside_the_inventory(
     mcp_registries, route_entries
 ) -> None:
@@ -720,6 +748,7 @@ def test_every_mapped_mcp_door_reaches_its_emission(mcp_registries) -> None:
     assert missing_emissions(_MCP_MAPPED, reached) == []
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_every_mapped_route_door_reaches_its_emission(route_entries) -> None:
     assert missing_emissions(_ROUTE_MAPPED, _route_reach(route_entries)) == []
 
@@ -739,6 +768,7 @@ def test_every_allowlisted_catalog_type_is_claimed_by_a_door() -> None:
     assert sorted(allowlisted - claimed) == []
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_known_gaps_still_reach_no_audit_emission(
     mcp_registries, route_entries
 ) -> None:
@@ -781,6 +811,7 @@ def test_an_unmapped_elevation_marked_handler_is_reported() -> None:
     assert unclassified(inventory, _MCP_MAPPED) == ["example_marked"]
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_an_unmapped_gated_route_is_reported(route_entries) -> None:
     dummy = {
         "key": "POST /api/admin/example-dummy",
@@ -801,6 +832,7 @@ def test_an_unmapped_gated_route_is_reported(route_entries) -> None:
     ]
 
 
+@_ROUTE_PROBE_TIMEOUT
 def test_a_new_route_with_an_unknown_admin_helper_is_reported(route_entries) -> None:
     """A gate the name lists do not know still cannot hide a mutating route."""
     unknown_helper = {

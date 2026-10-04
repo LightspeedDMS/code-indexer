@@ -123,8 +123,10 @@ def _admin_routers():
         router as admin_provider_health_router,
     )
     from code_indexer.server.web.mfa_routes import mfa_router
+    from code_indexer.server.web.siem_delivery_routes import siem_delivery_web_router
 
     return [
+        siem_delivery_web_router,
         web_router,
         repo_category_web_router,
         dependency_map_router,

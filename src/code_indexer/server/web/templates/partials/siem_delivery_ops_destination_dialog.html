@@ -1,0 +1,26 @@
+<!-- SIEM Delivery destination dialog: abandon (typed confirmation) and retarget -->
+{% macro count(n) %}{{ (("{:,}".format(cap)) ~ "+") if n > cap else "{:,}".format(n) }}{% endmacro %}
+{% set s = doc.summary %}
+{% set key = s.destination_key %}
+<article id="siem-ops-destination" data-destination-key="{{ key }}">
+    <h5>Destination {{ key }}</h5>
+    <p>Region {{ s.region or '-' }}, project {{ s.project_id or '-' }}, location {{ s.location or '-' }}, instance {{ s.instance_id or '-' }}{% if not s.known %} (not a known destination){% endif %}</p>
+    <p>Currently queued; may grow until the action runs: pending {{ count(s.pending) }}, batched {{ count(s.batched) }}, quarantined {{ count(s.quarantined) }}</p>
+    {% if doc.config_error %}<p class="validation-error">Configuration invalid here: {{ doc.config_error }}</p>{% endif %}
+    <form id="siem-ops-abandon-form" hx-post="/admin/siem-delivery/destinations/{{ key | urlencode }}/abandon" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result">
+        <p><strong>IRREVERSIBLE.</strong> Abandon all undelivered events for region {{ s.region or '-' }}, project {{ s.project_id or '-' }}, instance {{ s.instance_id or '-' }} ({{ key }}). They are never delivered.</p>
+        <label>Type ABANDON to confirm
+            <input type="text" name="confirm_word" autocomplete="off" spellcheck="false">
+        </label>
+        <button type="submit" class="secondary">Abandon</button>
+    </form>
+    {% if doc.configured_key %}
+    <form id="siem-ops-retarget-form" hx-post="/admin/siem-delivery/destinations/{{ key | urlencode }}/retarget" hx-include="#siem-ops-csrf" hx-target="#siem-ops-result"
+          hx-confirm="Moves these events to the configured destination {{ doc.configured_key }}.">
+        <p>Retarget: moves these events to the configured destination {{ doc.configured_key }}.</p>
+        <button type="submit" class="secondary">Retarget</button>
+    </form>
+    {% else %}
+    <p>No destination is configured to retarget to.</p>
+    {% endif %}
+</article>

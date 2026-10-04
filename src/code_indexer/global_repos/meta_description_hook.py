@@ -100,6 +100,9 @@ _refresh_scheduler: Optional[Any] = None  # type: ignore
 _debouncer: Optional["CidxMetaRefreshDebouncer"] = None
 
 _DEFAULT_DEBOUNCE_SECONDS = 30
+#: Pacing cap on the debouncer's retry interval after a generic failure
+#: (store or job tracker unavailable): retries slow down, never give up.
+_MAX_RETRY_INTERVAL_SECONDS = 900.0
 
 
 class CidxMetaRefreshDebouncer:
@@ -125,6 +128,14 @@ class CidxMetaRefreshDebouncer:
     ) -> None:
         self._refresh_scheduler = refresh_scheduler
         self._debounce_seconds = debounce_seconds
+        # Paced retry interval after a generic failure (doubles, capped).
+        self._retry_delay: float = debounce_seconds
+        # Bumped by every signal_dirty: a submission settles only the
+        # signals that arrived before it started.
+        self._signal_seq: int = 0
+        # Identifies the owned timer: only the callback carrying the current
+        # token acts (a cancelled timer's callback may still run).
+        self._timer_token: int = 0
         self._dirty: bool = False
         self._timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
@@ -139,6 +150,7 @@ class CidxMetaRefreshDebouncer:
         the call is silently ignored.
         """
         with self._lock:
+            self._signal_seq += 1
             self._dirty = True
             if self._timer is not None:
                 self._timer.cancel()
@@ -148,55 +160,108 @@ class CidxMetaRefreshDebouncer:
                     "cidx-meta debouncer: shutdown in progress, ignoring signal_dirty"
                 )
                 return
-            self._timer = threading.Timer(
-                self._debounce_seconds, self._on_timer_expired
-            )
-            self._timer.daemon = True
-            self._timer.start()
+            self._start_timer_locked(self._debounce_seconds)
         logger.debug(
             "cidx-meta marked dirty, debounce timer (re)started "
             f"(interval={self._debounce_seconds}s)"
         )
 
-    def _on_timer_expired(self) -> None:
+    def _on_timer_expired(self, timer_token: int) -> None:
         """
         Called by the timer thread when the debounce interval elapses.
 
+        Bug #2022: acts only for the timer it belongs to (*timer_token*).
+        Timer.run checks cancellation only before calling back, so a timer
+        cancelled and replaced by signal_dirty can still get here: it then
+        returns without touching the replacement or submitting.
+
         Clears dirty state after successful refresh.  If trigger raises
         DuplicateJobError the job is still running; re-mark dirty and retry
-        after another debounce interval.  Any other exception is logged and
-        swallowed (non-blocking).
+        after another debounce interval.  A RefreshDeferredError was
+        persisted durably and needs nothing more here.  Any other exception
+        (store or job tracker unavailable) keeps the refresh owed: it is
+        logged and retried at a doubling interval capped at
+        _MAX_RETRY_INTERVAL_SECONDS -- paced, never given up.
+
+        Bug #2022: a submission settles only the signals that arrived before
+        it started. A write signalled while it was in flight stays owed.
         """
+        from code_indexer.global_repos.refresh_failure_recovery import (
+            RefreshDeferredError,
+        )
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
         with self._lock:
+            if timer_token != self._timer_token:
+                return  # a newer timer owns the refresh
             if not self._dirty or self._shutdown:
                 return
             # Don't clear _dirty yet — clear after successful refresh
             self._timer = None
+            submitted_seq = self._signal_seq
 
         # Trigger outside lock to avoid holding lock during I/O
         try:
             self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
             logger.info("Debounced cidx-meta refresh triggered successfully")
-            # Success — NOW clear dirty
-            with self._lock:
-                self._dirty = False
+            self._settle_submission(submitted_seq)
+        except RefreshDeferredError as exc:
+            # Bug #2022: the trigger was persisted as pending; the refresh
+            # scheduler fires it once the backoff ends -- no retry spin here.
+            logger.info(
+                f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
+                f"persisted failure backoff; the refresh scheduler fires it "
+                f"once the backoff ends"
+            )
+            self._settle_submission(submitted_seq)
         except DuplicateJobError:
             logger.info("cidx-meta refresh still running, will retry after debounce")
             with self._lock:
                 # _dirty stays True (was never cleared)
-                if not self._shutdown:
-                    self._timer = threading.Timer(
-                        self._debounce_seconds, self._on_timer_expired
-                    )
-                    self._timer.daemon = True
-                    self._timer.start()
+                self._schedule_retry_locked(self._debounce_seconds)
         except Exception as exc:
-            logger.warning("Debounced cidx-meta refresh failed: %s", exc)
-            # On generic failure, clear dirty to avoid infinite retry
+            # Bug #2022: nothing durable records this refresh yet, so it stays
+            # owed (dirty) and is retried, paced, until it is submitted.
             with self._lock:
+                self._retry_delay = min(
+                    self._retry_delay * 2, _MAX_RETRY_INTERVAL_SECONDS
+                )
+                delay = self._retry_delay
+                self._schedule_retry_locked(delay)
+            logger.warning(
+                "Debounced cidx-meta refresh failed (%s: %s); retrying in %.1fs",
+                type(exc).__name__,
+                exc,
+                delay,
+            )
+
+    def _settle_submission(self, submitted_seq: int) -> None:
+        """A submission (or durable deferral) that started at *submitted_seq*
+        covers the signals up to it. A signal that arrived while it was in
+        flight is a newer write it may not cover: that refresh stays owed,
+        and the timer that signal started owns it (this callback had already
+        released its own timer, so signal_dirty always starts a new one)."""
+        with self._lock:
+            self._retry_delay = self._debounce_seconds
+            if self._signal_seq == submitted_seq:
                 self._dirty = False
+
+    def _schedule_retry_locked(self, delay: float) -> None:
+        """Start a retry timer (caller holds the lock), unless shut down or a
+        timer is already pending -- one a concurrent signal started serves."""
+        if self._shutdown or self._timer is not None:
+            return
+        self._start_timer_locked(delay)
+
+    def _start_timer_locked(self, delay: float) -> None:
+        """Start the one owned timer (caller holds the lock); its callback
+        carries a fresh token, so a callback of any earlier timer is stale."""
+        self._timer_token += 1
+        self._timer = threading.Timer(
+            delay, self._on_timer_expired, args=(self._timer_token,)
+        )
+        self._timer.daemon = True
+        self._timer.start()
 
     def shutdown(self) -> None:
         """
@@ -270,6 +335,42 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
     """
     global _debouncer
     _debouncer = debouncer
+
+
+def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
+    """Trigger a cidx-meta refresh for a writer; never raises into the writer
+    (callers run it in ``finally`` blocks). A refresh already running is
+    handed to the debouncer, which retries later. A refresh deferred by the
+    Bug #2022 failure backoff was persisted as a pending trigger, which the
+    refresh scheduler fires once the backoff ends. Any other failure (store
+    or job tracker unavailable) is logged at ERROR and handed to the
+    debouncer for a retry."""
+    from code_indexer.global_repos.refresh_failure_recovery import (
+        RefreshDeferredError,
+    )
+    from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+    try:
+        refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+    except RefreshDeferredError as exc:
+        logger.info(
+            f"cidx-meta refresh deferred until {exc.backoff_until:.0f}: "
+            f"persisted failure backoff; the refresh scheduler fires it then"
+        )
+    except DuplicateJobError as exc:
+        if _debouncer is None:
+            logger.warning(f"cidx-meta refresh not retried (no debouncer): {exc}")
+            return
+        logger.info(f"cidx-meta refresh debounced for retry: {exc}")
+        _debouncer.signal_dirty()
+    except Exception as exc:
+        logger.error(
+            f"cidx-meta refresh request failed (the write itself succeeded; "
+            f"{'retried by the debouncer' if _debouncer else 'not retried'}): "
+            f"{type(exc).__name__}: {exc}"
+        )
+        if _debouncer is not None:
+            _debouncer.signal_dirty()
 
 
 def atomic_write_description(

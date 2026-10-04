@@ -39,8 +39,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 30
+
+# A fresh interpreter importing the server exceeds the suite's default 15 s
+# pytest-timeout under parallel gate load; the ceiling must sit above the
+# subprocess's own budget.
+pytestmark = pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
 
 
 def test_importing_mcp_search_handler_spawns_zero_bgm_threads_and_zero_golden_repo_loads() -> (

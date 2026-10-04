@@ -154,7 +154,8 @@ def _write_many_grep_match_lines(
 ) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for i in range(num_events):
-            f.write(f"file{i}.py:1:{'x' * content_bytes}\n")
+            # grep --null record format (Bug #2030): path\0LINE:content
+            f.write(f"file{i}.py\x001:{'x' * content_bytes}\n")
 
 
 def _build_grep_service(tmp_path) -> RegexSearchService:

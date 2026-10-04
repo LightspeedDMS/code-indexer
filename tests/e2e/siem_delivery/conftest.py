@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from tests.e2e.siem_delivery.front_door import FrontDoor
     from tests.e2e.siem_delivery.restartable_server import RestartableServer
     from tests.e2e.siem_delivery.siem_api import SiemDelivery
+    from tests.e2e.siem_delivery.web_ops import DestinationRestore
 
 HTTP_TIMEOUT_SECONDS = 60.0
 
@@ -267,6 +268,20 @@ def delivery(
         if not str(exc).startswith(DELIVERY_ABSENT):
             raise
         # The capability is absent: no halt can exist, so nothing to resolve.
+
+
+@pytest.fixture()
+def destination_restore(delivery: "SiemDelivery") -> Iterator["DestinationRestore"]:
+    """The destination and credential this scenario INHERITED, recorded
+    before it runs (so before its first ``arm()``); teardown restores them on
+    pass AND fail and abandons the destinations the scenario appended to
+    ``created``.  A restore failure is its own pytest ERROR; it never
+    replaces the test's own failure."""
+    from tests.e2e.siem_delivery.web_ops import inherited_state, restore_destination
+
+    inherited = inherited_state(delivery)
+    yield inherited
+    restore_destination(delivery, inherited)
 
 
 @pytest.fixture(scope="session", autouse=True)
