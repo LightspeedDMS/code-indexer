@@ -131,33 +131,19 @@ class FakeGlobalReposBackend:
         pass
 
 
-class FakeGoldenRepoMetadataBackend:
-    """
-    Minimal stand-in for GoldenRepoMetadataBackend's refresh-integrity
-    quarantine methods (Bug #1506) -- reports "never quarantined" and
-    no-ops on record/reset, sufficient for tests that don't exercise
-    quarantine behavior directly but whose refresh path now reads this
-    state on every cycle.
-    """
-
-    def get_refresh_integrity_failure_state(self, golden_alias: str):
-        return None
-
-    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
-        return 1
-
-    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
-        return None
-
-
 class FakeBackendRegistry:
     """
-    Minimal BackendRegistry-like object with a global_repos attribute.
+    Minimal BackendRegistry-like object with a global_repos attribute and a
+    REAL golden-repo metadata store (SQLite in a temp dir), so the refresh
+    path's quarantine and failure-backoff reads and writes behave as in
+    production instead of being stubbed out.
     """
 
-    def __init__(self, global_repos: FakeGlobalReposBackend) -> None:
+    def __init__(
+        self, global_repos: FakeGlobalReposBackend, golden_repo_metadata: Any
+    ) -> None:
         self.global_repos = global_repos
-        self.golden_repo_metadata = FakeGoldenRepoMetadataBackend()
+        self.golden_repo_metadata = golden_repo_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +159,16 @@ def _app_state_postgres_mode(
     Context manager that temporarily sets app.state to postgres mode with a
     fake backend registry, restoring original state on exit.
     """
-    from code_indexer.server import app as app_module
+    import tempfile
 
-    fake_registry = FakeBackendRegistry(backend)
+    from code_indexer.server import app as app_module
+    from tests.fixtures.refresh_scheduler_stores import real_metadata_store
+
+    # Real store; the TemporaryDirectory finalizer removes it in any case.
+    metadata_dir = tempfile.TemporaryDirectory(prefix="cluster-metadata-")
+    fake_registry = FakeBackendRegistry(
+        backend, real_metadata_store(Path(metadata_dir.name))
+    )
 
     # Sentinel distinguishes "attribute was never set" from "attribute was
     # explicitly set to None" so teardown restores the TRUE prior state
@@ -201,6 +194,7 @@ def _app_state_postgres_mode(
             app_module.app.state.golden_repos_dir = golden_repos_dir
         yield fake_registry
     finally:
+        metadata_dir.cleanup()
         _restore("storage_mode", saved_storage_mode)
         _restore("backend_registry", saved_backend_registry)
         if golden_repos_dir is not None:

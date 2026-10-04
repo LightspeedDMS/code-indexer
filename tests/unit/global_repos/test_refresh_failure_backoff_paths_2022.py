@@ -213,3 +213,27 @@ def test_backed_off_alias_without_changes_regates_publishes_and_clears(
     assert result.get("message") == "Refresh complete", result
     assert harness.scheduler.alias_manager.read_alias(ALIAS) != str(newer)
     assert recovery.active_backoff_until(metadata, ALIAS) is None
+
+
+_TRACE_SYNC_LOGGER = "code_indexer.server.services.langfuse_trace_sync_service"
+
+
+def test_trace_sync_reports_a_deferred_trigger_as_persisted(
+    tmp_path: Path, metadata: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    jobs = RecordingJobManager()
+    harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    service = _make_trace_sync_service(tmp_path, harness)
+
+    with caplog.at_level("DEBUG", logger=_TRACE_SYNC_LOGGER):
+        _sync_once(service)
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _TRACE_SYNC_LOGGER and ALIAS in r.getMessage()
+    ]
+    assert any("deferred" in m and "persisted" in m for m in lines), lines
+    assert not any("already in progress" in m for m in lines), lines

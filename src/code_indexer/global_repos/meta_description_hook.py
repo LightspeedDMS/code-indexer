@@ -286,11 +286,12 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
 
 
 def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
-    """Trigger a cidx-meta refresh for a writer; never drops it and never
-    raises into the writer. A refresh already running is handed to the
-    debouncer, which retries later. A refresh deferred by the Bug #2022
-    failure backoff was persisted as a pending trigger, which the refresh
-    scheduler fires once the backoff ends."""
+    """Trigger a cidx-meta refresh for a writer; never raises into the writer
+    (callers run it in ``finally`` blocks). A refresh already running is
+    handed to the debouncer, which retries later. A refresh deferred by the
+    Bug #2022 failure backoff was persisted as a pending trigger, which the
+    refresh scheduler fires once the backoff ends. Any other failure (store
+    or job tracker unavailable) is logged at ERROR."""
     from code_indexer.global_repos.refresh_failure_recovery import (
         RefreshDeferredError,
     )
@@ -309,6 +310,11 @@ def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
             return
         logger.info(f"cidx-meta refresh debounced for retry: {exc}")
         _debouncer.signal_dirty()
+    except Exception as exc:
+        logger.error(
+            f"cidx-meta refresh request failed (the write itself succeeded): "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 def atomic_write_description(

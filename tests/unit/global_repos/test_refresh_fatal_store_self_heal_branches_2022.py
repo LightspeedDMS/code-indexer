@@ -149,15 +149,15 @@ def test_backoff_store_failures_are_logged_never_raised(
 ) -> None:
     failing = Mock()
     failing.record_refresh_failure_backoff.side_effect = OSError("store down")
-    failing.reset_refresh_failure_backoff.side_effect = OSError("store down")
+    failing.resolve_refresh_failure_backoff.side_effect = OSError("store down")
 
     with caplog.at_level(logging.ERROR):
         recovery.record_failure_backoff(failing, ALIAS, "disk full")
-        recovery.clear_failure_backoff(failing, ALIAS)
+        recovery.resolve_after_publish(failing, ALIAS, 0.0)
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any("failed to persist refresh failure backoff" in m for m in messages)
-    assert any("failed to clear refresh failure backoff" in m for m in messages)
+    assert any("failed to resolve the refresh failure backoff" in m for m in messages)
 
 
 def test_backoff_store_rejects_blank_alias_and_detail(metadata: Any) -> None:
@@ -168,9 +168,15 @@ def test_backoff_store_rejects_blank_alias_and_detail(metadata: Any) -> None:
     with pytest.raises(ValueError):
         metadata.get_refresh_failure_backoff_state("")
     with pytest.raises(ValueError):
-        metadata.reset_refresh_failure_backoff("")
+        metadata.resolve_refresh_failure_backoff("", 0.0)
+    with pytest.raises(ValueError):
+        metadata.mark_refresh_trigger_pending("", 0.0)
+    with pytest.raises(ValueError):
+        metadata.lease_pending_refresh_trigger("", 0.0, 1.0)
+    with pytest.raises(ValueError):
+        metadata.lease_pending_refresh_trigger(ALIAS, 5.0, 5.0)  # not exclusive
 
-    metadata.reset_refresh_failure_backoff(ALIAS)  # no state: a no-op
+    metadata.resolve_refresh_failure_backoff(ALIAS, 0.0)  # no state: a no-op
     assert metadata.get_refresh_failure_backoff_state(ALIAS) is None
     assert metadata.record_refresh_failure_backoff(ALIAS, "disk full") == 1
     assert metadata.record_refresh_failure_backoff(ALIAS, "disk full") == 2

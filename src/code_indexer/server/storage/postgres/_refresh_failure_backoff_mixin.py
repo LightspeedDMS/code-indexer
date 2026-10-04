@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from .connection_pool import ConnectionPool
@@ -81,7 +81,7 @@ class _RefreshFailureBackoffPostgresMixin:
 
     _STATE_COLUMNS = (
         "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
-        "pending_trigger"
+        "pending_trigger, pending_due_at, pending_marked_at"
     )
 
     @staticmethod
@@ -92,60 +92,80 @@ class _RefreshFailureBackoffPostgresMixin:
             "last_detail": row[2],
             "last_failed_at": float(row[3]),
             "pending_trigger": bool(row[4]),
+            "pending_due_at": None if row[5] is None else float(row[5]),
+            "pending_marked_at": None if row[6] is None else float(row[6]),
         }
 
-    def reset_refresh_failure_backoff(self, golden_alias: str) -> None:
-        """Clear the backoff state (a verified refresh succeeded). A no-op
-        for an alias with no recorded state."""
-        if not golden_alias:
-            raise ValueError("golden_alias must be a non-empty string")
+    def _update_one(self, sql: str, params: Tuple[Any, ...]) -> bool:
+        """Run a single-row conditional UPDATE; True when it changed a row."""
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM refresh_failure_backoff_state WHERE golden_alias = %s",
-                    (golden_alias,),
-                )
+                cur.execute(sql, params)
+                updated: bool = cur.rowcount == 1
             conn.commit()
+        return updated
 
-    def mark_refresh_trigger_pending(self, golden_alias: str) -> None:
-        """Remember a system refresh trigger deferred by the backoff, so it
-        fires once the backoff ends (migration 059). A no-op when no backoff
-        is recorded."""
+    def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
+        """Remember a system refresh trigger deferred by the backoff, due at
+        *due_at* (migrations 059/060). False when no backoff row exists any
+        more (it was resolved concurrently), so nothing defers the trigger."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE refresh_failure_backoff_state SET pending_trigger = TRUE "
-                    "WHERE golden_alias = %s",
-                    (golden_alias,),
-                )
-            conn.commit()
+        return self._update_one(
+            "UPDATE refresh_failure_backoff_state SET pending_trigger = TRUE, "
+            "pending_due_at = %s, pending_marked_at = %s WHERE golden_alias = %s",
+            (due_at, time.time(), golden_alias),
+        )
 
-    def list_pending_refresh_triggers(self) -> List[Dict[str, Any]]:
-        """Backoff states that carry a deferred trigger (only failing
-        aliases, never the whole fleet)."""
+    def list_due_refresh_triggers(self, now: float) -> List[Dict[str, Any]]:
+        """Deferred triggers due at *now* (partial index from migration 060)."""
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT {self._STATE_COLUMNS} FROM refresh_failure_backoff_state "
-                    "WHERE pending_trigger ORDER BY golden_alias"
+                    "WHERE pending_trigger AND pending_due_at <= %s "
+                    "ORDER BY pending_due_at",
+                    (now,),
                 )
                 rows = cur.fetchall()
         return [self._state_from_row(row) for row in rows]
 
-    def claim_pending_refresh_trigger(self, golden_alias: str) -> bool:
-        """Atomically take the deferred trigger; True for exactly one caller
-        across the cluster (single conditional UPDATE)."""
+    def lease_pending_refresh_trigger(
+        self, golden_alias: str, now: float, until: float
+    ) -> bool:
+        """Atomically take a due trigger until *until*: True for exactly one
+        caller across the cluster. The trigger stays pending, so a crash
+        before the refresh completes only delays it to the lease end."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if until <= now:
+            raise ValueError("lease end must be later than now")
+        return self._update_one(
+            "UPDATE refresh_failure_backoff_state SET pending_due_at = %s "
+            "WHERE golden_alias = %s AND pending_trigger AND pending_due_at <= %s",
+            (until, golden_alias, now),
+        )
+
+    def resolve_refresh_failure_backoff(
+        self, golden_alias: str, cycle_started_at: float
+    ) -> None:
+        """A verified publish resolves the failure and any trigger it covers.
+        A trigger deferred after *cycle_started_at* may not be covered: its
+        row survives re-armed (no failure left, due now). One transaction."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE refresh_failure_backoff_state SET pending_trigger = FALSE "
-                    "WHERE golden_alias = %s AND pending_trigger",
-                    (golden_alias,),
+                    "DELETE FROM refresh_failure_backoff_state "
+                    "WHERE golden_alias = %s AND NOT (pending_trigger "
+                    "AND COALESCE(pending_marked_at, 0) >= %s)",
+                    (golden_alias, cycle_started_at),
                 )
-                claimed = bool(cur.rowcount == 1)
+                cur.execute(
+                    "UPDATE refresh_failure_backoff_state SET "
+                    "consecutive_failure_count = 0, pending_due_at = %s, "
+                    "updated_at = %s WHERE golden_alias = %s",
+                    (time.time(), datetime.now(timezone.utc), golden_alias),
+                )
             conn.commit()
-        return claimed

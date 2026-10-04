@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 from code_indexer.global_repos.refresh_integrity_gate import (
     RefreshIntegrityGateResult,
@@ -52,9 +52,6 @@ FAILURE_BACKOFF_CAP_SECONDS = 21600
 #: FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
 REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
 
-#: Refresh results that prove the alias is healthy again.
-_VERIFIED_SUCCESS_MESSAGES = frozenset({"Refresh complete", "No changes detected"})
-
 
 def failure_backoff_seconds(consecutive_failures: int) -> int:
     exponent = max(0, consecutive_failures - 1)
@@ -68,9 +65,11 @@ def failure_backoff_seconds(consecutive_failures: int) -> int:
 
 def active_backoff_until(metadata: Any, alias_name: str) -> Optional[float]:
     """Epoch time until which system submissions of *alias_name* are
-    deferred, or None. A store read failure propagates (fail closed)."""
+    deferred, or None. A row with no failures left (re-armed by a verified
+    publish to keep a pending trigger) defers nothing. A store read failure
+    propagates (fail closed)."""
     state = metadata.get_refresh_failure_backoff_state(alias_name)
-    if state is None:
+    if state is None or int(state["consecutive_failure_count"]) == 0:
         return None
     until = _backoff_end(state)
     return until if until > time.time() else None
@@ -102,10 +101,14 @@ class RefreshDeferredError(DuplicateJobError):
 def defer_if_backed_off(metadata: Any, alias_name: str) -> None:
     """Raise RefreshDeferredError when *alias_name* is inside its backoff,
     after persisting a pending trigger that fire_expired_deferred_triggers
-    submits once the backoff ends (the trigger is deferred, never dropped)."""
+    submits once the backoff ends (the trigger is deferred, never dropped).
+    Returns normally -- the caller submits -- when the backoff row vanished
+    between the read and the mark (a concurrent verified publish)."""
     backoff_until = active_backoff_until(metadata, alias_name)
     if backoff_until is not None:
-        metadata.mark_refresh_trigger_pending(alias_name)
+        if not metadata.mark_refresh_trigger_pending(alias_name, backoff_until):
+            logger.info(f"Backoff of {alias_name} resolved meanwhile; submitting")
+            return
         logger.info(
             f"Refresh for {alias_name} deferred until {backoff_until:.0f} "
             f"(persisted failure backoff); it fires once the backoff ends"
@@ -123,26 +126,49 @@ def defer_due_alias(metadata: Any, registry: Any, alias_name: str) -> bool:
     return True
 
 
-def fire_expired_deferred_triggers(metadata: Any, submit: Callable[[str], Any]) -> None:
-    """Scheduler loop: submit each deferred system trigger whose backoff has
-    ended. The claim is an atomic store update, so one node fires it once.
-    Bounded by the failing aliases that carry a trigger, never the fleet."""
-    for state in metadata.list_pending_refresh_triggers():
+def _log_store_error(db_throttle: Any, exc: Exception, what: str) -> None:
+    if not db_throttle.on_db_error(exc, logger):
+        logger.error(f"Bug #2022: {what}: {type(exc).__name__}: {exc}")
+
+
+def fire_expired_deferred_triggers(
+    metadata: Any, submit: Callable[[str], Any], db_throttle: Any
+) -> None:
+    """Scheduler loop: submit each deferred system trigger that is due.
+
+    The trigger is LEASED (an atomic store update, so one scheduler takes
+    it) for the alias's backoff interval and stays pending: only a verified
+    publish resolves it. Process death before or after the submission, an
+    orphaned job or a failed submission therefore only delays it to the
+    lease end, while a pass during an in-flight job neither writes nor logs.
+    Errors are handled per alias (``db_throttle`` as in the due loop), so one
+    row never fails the iteration. Index-backed: touches due triggers only.
+    """
+    now = time.time()
+    try:
+        due = metadata.list_due_refresh_triggers(now)
+    except Exception as exc:
+        _log_store_error(db_throttle, exc, "listing due deferred refreshes failed")
+        return
+    for state in due:
         alias_name = state["golden_alias"]
-        if _backoff_end(state) > time.time():
-            continue
-        if not metadata.claim_pending_refresh_trigger(alias_name):
-            continue
+        lease_until = now + failure_backoff_seconds(
+            int(state["consecutive_failure_count"])
+        )
         try:
+            if not metadata.lease_pending_refresh_trigger(alias_name, now, lease_until):
+                continue  # another scheduler holds it
             submit(alias_name)
+            db_throttle.on_db_success(logger)
         except DuplicateJobError as exc:
-            # In flight already, or re-deferred (and re-marked) by a new backoff.
-            logger.info(f"Deferred refresh of {alias_name} not submitted: {exc}")
+            # In flight already (dedup), or re-deferred by a newer backoff.
+            logger.debug(f"Deferred refresh of {alias_name} not submitted: {exc}")
         except Exception as exc:
-            metadata.mark_refresh_trigger_pending(alias_name)
-            logger.error(
-                f"Bug #2022: deferred refresh of {alias_name} failed to submit, "
-                f"retrying next cycle: {type(exc).__name__}: {exc}"
+            _log_store_error(
+                db_throttle,
+                exc,
+                f"deferred refresh of {alias_name} not submitted; "
+                f"retried when its lease ends",
             )
 
 
@@ -164,23 +190,29 @@ def record_failure_backoff(metadata: Any, alias_name: str, detail: str) -> None:
     )
 
 
-def clear_failure_backoff(metadata: Any, alias_name: str) -> None:
+def begin_refresh_cycle(metadata: Any, alias_name: str) -> Tuple[bool, float]:
+    """(regate, cycle_started_at) for a refresh cycle. The start is taken
+    before the state is read, so a trigger deferred from here on counts as
+    arriving during the cycle (resolve_after_publish keeps it)."""
+    cycle_started_at = time.time()
+    return has_unresolved_outcome(metadata, alias_name), cycle_started_at
+
+
+def resolve_after_publish(
+    metadata: Any, alias_name: str, cycle_started_at: float
+) -> None:
+    """A verified publish resolves the alias's failure backoff and every
+    deferred trigger it covers; a trigger deferred during this cycle stays
+    pending, re-armed to fire at once. The only resolution point: while a
+    row exists, a cycle re-gates and cannot end as "No changes detected".
+    A store error is logged, never raised: the alias is already published."""
     try:
-        metadata.reset_refresh_failure_backoff(alias_name)
+        metadata.resolve_refresh_failure_backoff(alias_name, cycle_started_at)
     except Exception as exc:
         logger.error(
-            f"Bug #2022: failed to clear refresh failure backoff for "
-            f"{alias_name}: {type(exc).__name__}: {exc}"
+            f"Bug #2022: failed to resolve the refresh failure backoff of "
+            f"{alias_name} after publishing: {type(exc).__name__}: {exc}"
         )
-
-
-def clear_backoff_after_verified_success(
-    metadata: Any, alias_name: str, result: Dict[str, Any]
-) -> None:
-    """A published refresh, or one that verified nothing needs indexing,
-    ends the backoff. Skips (write lock held, not found, ...) do not."""
-    if result.get("success") and result.get("message") in _VERIFIED_SUCCESS_MESSAGES:
-        clear_failure_backoff(metadata, alias_name)
 
 
 def record_integrity_strike(

@@ -47,17 +47,30 @@ _MAX_CAUSE_CHAIN_DEPTH = 32
 
 class RecordingJobManager:
     """Stands in for BackgroundJobManager at the submission boundary only:
-    records which aliases were submitted, never runs them."""
+    records which aliases were submitted, never runs them. An alias a test
+    puts in ``in_flight`` models a refresh job already running: submitting
+    it raises the real ``DuplicateJobError`` (the job tracker's dedup).
+    ``attempts`` records every submission, including rejected ones."""
 
     def __init__(self) -> None:
         self.submitted: List[str] = []
+        self.attempts: List[str] = []
+        self.in_flight: Set[str] = set()
         self.max_concurrent_jobs = _MAX_CONCURRENT_JOBS
         self._background_jobs_config = SimpleNamespace(
             max_concurrent_refresh_jobs=_MAX_CONCURRENT_REFRESH_JOBS
         )
 
     def submit_job(self, **kwargs: Any) -> str:
-        self.submitted.append(kwargs["repo_alias"])
+        from code_indexer.server.repositories.background_jobs import (
+            DuplicateJobError,
+        )
+
+        alias = kwargs["repo_alias"]
+        self.attempts.append(alias)
+        if alias in self.in_flight:
+            raise DuplicateJobError("global_repo_refresh", alias, "job-in-flight")
+        self.submitted.append(alias)
         return f"job-{len(self.submitted)}"
 
     def count_active_refresh_jobs(self) -> int:

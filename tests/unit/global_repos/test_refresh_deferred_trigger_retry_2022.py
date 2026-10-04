@@ -51,7 +51,7 @@ def _wait_until(condition: Callable[[], bool]) -> bool:
     return condition()
 
 
-def _harness_with_backed_off_meta(
+def _harness_with_meta(
     tmp_path: Path, metadata: Any
 ) -> "tuple[Harness, RecordingJobManager]":
     harness = build_harness(tmp_path, metadata, snapshot_mode="none")
@@ -64,9 +64,16 @@ def _harness_with_backed_off_meta(
         index_path=str(meta_dir),
         allow_reserved=True,
     )
-    metadata.record_refresh_failure_backoff(META_ALIAS, "disk full")
     jobs = RecordingJobManager()
     harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
+    return harness, jobs
+
+
+def _harness_with_backed_off_meta(
+    tmp_path: Path, metadata: Any
+) -> "tuple[Harness, RecordingJobManager]":
+    harness, jobs = _harness_with_meta(tmp_path, metadata)
+    metadata.record_refresh_failure_backoff(META_ALIAS, "disk full")
     return harness, jobs
 
 
@@ -134,3 +141,49 @@ def test_writer_helper_leaves_a_deferred_trigger_to_the_scheduler(
     run_one_scheduler_iteration(harness)
 
     assert jobs.submitted == [META_ALIAS], "the writer's deferred refresh was dropped"
+
+
+def test_writer_helper_hands_an_in_flight_refresh_to_the_debouncer(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs = _harness_with_meta(tmp_path, metadata)  # no backoff
+    jobs.in_flight.add(META_ALIAS)  # an earlier refresh is still running
+    debouncer = CidxMetaRefreshDebouncer(
+        harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
+    )
+    monkeypatch.setattr(meta_description_hook, "_debouncer", debouncer)
+    try:
+        meta_description_hook.request_cidx_meta_refresh(harness.scheduler)
+        time.sleep(DEFERRED_OBSERVATION_SECONDS)
+        assert jobs.submitted == []
+
+        jobs.in_flight.discard(META_ALIAS)  # the running refresh finished
+
+        assert _wait_until(lambda: jobs.submitted == [META_ALIAS]), (
+            "a write during an in-flight refresh was never re-triggered"
+        )
+    finally:
+        debouncer.shutdown()
+
+
+def test_writer_helper_never_raises_into_the_writer(
+    tmp_path: Path,
+    metadata: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness, jobs = _harness_with_meta(tmp_path, metadata)
+
+    def _store_down(alias_name: str, *args: Any, **kwargs: Any) -> Any:
+        raise OSError("metadata store unavailable")
+
+    monkeypatch.setattr(harness.scheduler, "trigger_refresh_for_repo", _store_down)
+
+    with caplog.at_level("ERROR"):
+        meta_description_hook.request_cidx_meta_refresh(harness.scheduler)
+
+    assert jobs.submitted == []
+    assert any(
+        "metadata store unavailable" in r.getMessage() and r.levelname == "ERROR"
+        for r in caplog.records
+    ), "a failed cidx-meta refresh request was not reported"

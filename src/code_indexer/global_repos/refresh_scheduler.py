@@ -1925,7 +1925,9 @@ class RefreshScheduler:
                             )
 
                 failure_recovery.fire_expired_deferred_triggers(
-                    self.golden_repo_metadata, self._submit_refresh_job
+                    self.golden_repo_metadata,
+                    self._submit_refresh_job,
+                    self._db_throttle,
                 )
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0
@@ -1993,9 +1995,10 @@ class RefreshScheduler:
         ):
             return None
 
-        # Bug #2022: system triggers honour the persisted failure backoff
-        # (raises RefreshDeferredError, a retryable DuplicateJobError).
-        if submitter_username == "system" and not force_reset:
+        # Bug #2022: defer in backoff unless externally managed (no loop fires it).
+        if submitter_username == "system" and not (
+            force_reset or self._is_externally_managed()
+        ):
             failure_recovery.defer_if_backed_off(self.golden_repo_metadata, alias_name)
 
         if not self.background_job_manager:
@@ -2111,9 +2114,6 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
             )
             _status = "success" if result.get("success") else "error"
-            failure_recovery.clear_backoff_after_verified_success(
-                self.golden_repo_metadata, alias_name, result
-            )
             return result
         finally:
             _record_refresh_duration_metric(
@@ -2272,8 +2272,7 @@ class RefreshScheduler:
                     # Initialized here so _check_extension_drift can set it before
                     # any early-return exit in the local/git branching below.
                     force_reconcile = False
-                    # Bug #2022: an unresolved failure re-gates, never "no changes".
-                    regate = failure_recovery.has_unresolved_outcome(
+                    regate, cycle_started_at = failure_recovery.begin_refresh_cycle(
                         self.golden_repo_metadata, alias_name
                     )
 
@@ -2973,8 +2972,10 @@ class RefreshScheduler:
                         cleanup_manager=self.cleanup_manager,
                     )
 
-                    # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
+                    failure_recovery.resolve_after_publish(  # Bug #2022: published
+                        self.golden_repo_metadata, alias_name, cycle_started_at
+                    )
 
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
@@ -3209,7 +3210,6 @@ class RefreshScheduler:
         }
 
     def _ownership_check(self, repo_name: str) -> Callable[[], None]:
-        """Raises when this refresh no longer owns *repo_name*'s write lock."""
         return partial(
             self.raise_if_write_lock_ownership_lost,
             repo_name,

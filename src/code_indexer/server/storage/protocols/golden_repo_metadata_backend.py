@@ -124,19 +124,26 @@ class GoldenRepoMetadataBackend(Protocol):
     # self-heal cannot repair (refresh_scheduler.py).
     def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int: ...
 
-    def reset_refresh_failure_backoff(self, golden_alias: str) -> None: ...
-
     def get_refresh_failure_backoff_state(
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
-    # Durable marker for a system trigger deferred by that backoff; the
-    # scheduler claims it atomically once the backoff ends.
-    def mark_refresh_trigger_pending(self, golden_alias: str) -> None: ...
+    # Durable marker for a system trigger deferred by that backoff. A
+    # scheduler leases a due trigger (it stays pending until a verified
+    # publish resolves it, so a crash only delays it to the lease end).
+    def mark_refresh_trigger_pending(
+        self, golden_alias: str, due_at: float
+    ) -> bool: ...
 
-    def list_pending_refresh_triggers(self) -> List[Dict[str, Any]]: ...
+    def list_due_refresh_triggers(self, now: float) -> List[Dict[str, Any]]: ...
 
-    def claim_pending_refresh_trigger(self, golden_alias: str) -> bool: ...
+    def lease_pending_refresh_trigger(
+        self, golden_alias: str, now: float, until: float
+    ) -> bool: ...
+
+    def resolve_refresh_failure_backoff(
+        self, golden_alias: str, cycle_started_at: float
+    ) -> None: ...
 
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's
