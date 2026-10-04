@@ -317,6 +317,7 @@ class TestSyncJobManagerMaintenanceIntegration:
         from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
         from code_indexer.server.jobs.exceptions import MaintenanceModeError
         from unittest.mock import MagicMock, patch
+        import os
         import tempfile
 
         _reset_maintenance_state()
@@ -339,7 +340,9 @@ class TestSyncJobManagerMaintenanceIntegration:
                 mock_get_registry.return_value = mock_registry
 
                 scheduler = RefreshScheduler(
-                    golden_repos_dir=tmpdir,
+                    # the lazy stores resolve in the golden dir's PARENT:
+                    # tmpdir itself would put cidx_server.db in /tmp
+                    golden_repos_dir=os.path.join(tmpdir, "golden-repos"),
                     config_source=mock_config,
                     query_tracker=mock_query_tracker,
                     cleanup_manager=mock_cleanup_manager,

@@ -98,15 +98,40 @@ class TestActivatedRepoConfigCreation:
 
     @pytest.fixture
     def activated_repo_manager(
-        self, temp_data_dir, golden_repo_manager_mock, background_job_manager_mock
+        self,
+        temp_data_dir,
+        golden_repo_manager_mock,
+        background_job_manager_mock,
+        monkeypatch,
     ):
-        """Create ActivatedRepoManager instance with temp directory."""
-        return ActivatedRepoManager(
+        """Create ActivatedRepoManager instance with temp directory.
+
+        Activation reaches CommitterResolutionService's
+        _create_default_ssh_key_manager(), which resolves server_dir from the
+        process-wide ConfigService singleton and opens
+        <server_dir>/data/cidx_server.db.  Point that singleton at the SAME
+        temp directory with a real schema so the tests are hermetic, not
+        reliant on another test having populated the session-shared server
+        home first.
+        """
+        from code_indexer.server.services.config_service import (
+            reset_config_service,
+        )
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", temp_data_dir)
+        db_path = Path(temp_data_dir) / "data" / "cidx_server.db"
+        DatabaseSchema(str(db_path)).initialize_database()
+        reset_config_service()
+
+        yield ActivatedRepoManager(
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
             clone_backend=LocalCloneBackend(),
         )
+
+        reset_config_service()
 
     def test_activated_repo_has_config_yml_after_activation(
         self, activated_repo_manager, temp_data_dir

@@ -138,35 +138,24 @@ class TestDiagnosticsService:
         service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         assert service is not None
 
-    def test_get_status_returns_not_run_initially(self):
+    def test_get_status_returns_not_run_initially(self, tmp_path):
         """Test get_status returns NOT_RUN for all categories initially (with empty DB)."""
-        import tempfile
-        import os
+        # Fresh per-test database (clean state), never in the shared /tmp
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
+        status = service.get_status()
 
-        # Use temporary database to ensure clean state
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
-            tmp_db_path = tmp_db.name
+        assert DiagnosticCategory.CLI_TOOLS in status
+        assert DiagnosticCategory.SDK_PREREQUISITES in status
+        assert DiagnosticCategory.EXTERNAL_APIS in status
+        assert DiagnosticCategory.CREDENTIALS in status
+        assert DiagnosticCategory.INFRASTRUCTURE in status
 
-        try:
-            service = DiagnosticsService(db_path=tmp_db_path)
-            status = service.get_status()
-
-            assert DiagnosticCategory.CLI_TOOLS in status
-            assert DiagnosticCategory.SDK_PREREQUISITES in status
-            assert DiagnosticCategory.EXTERNAL_APIS in status
-            assert DiagnosticCategory.CREDENTIALS in status
-            assert DiagnosticCategory.INFRASTRUCTURE in status
-
-            # All should be NOT_RUN initially (placeholders)
-            for category, results in status.items():
-                for result in results:
-                    assert result.status == DiagnosticStatus.NOT_RUN, (
-                        f"{result.name} should be NOT_RUN initially, got {result.status}"
-                    )
-        finally:
-            # Cleanup temp DB
-            if os.path.exists(tmp_db_path):
-                os.unlink(tmp_db_path)
+        # All should be NOT_RUN initially (placeholders)
+        for category, results in status.items():
+            for result in results:
+                assert result.status == DiagnosticStatus.NOT_RUN, (
+                    f"{result.name} should be NOT_RUN initially, got {result.status}"
+                )
 
     @pytest.mark.asyncio
     async def test_run_all_diagnostics_placeholder(self, tmp_path):

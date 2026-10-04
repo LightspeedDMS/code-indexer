@@ -6,9 +6,7 @@ Tests for DatabaseHealthService, specifically:
 Tests for _format_file_size() helper function and get_tooltip() with size.
 """
 
-import os
 import sqlite3
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -85,30 +83,26 @@ class TestFormatFileSize:
 class TestGetTooltipWithSize:
     """Tests for get_tooltip() method including file size."""
 
-    def test_tooltip_includes_size_for_existing_file(self):
+    def test_tooltip_includes_size_for_existing_file(self, tmp_path: Path):
         """Tooltip should include 'Size:' line for existing database file."""
-        # Create a temporary file with known size
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            # Write 5 KB of data
-            f.write(b"x" * 5120)
-            temp_path = f.name
+        # A file with known size (5 KB), in the test's own tmp_path
+        db_file = tmp_path / "test.db"
+        db_file.write_bytes(b"x" * 5120)
+        temp_path = str(db_file)
 
-        try:
-            result = DatabaseHealthResult(
-                file_name="test.db",
-                display_name="Test Database",
-                status=DatabaseHealthStatus.HEALTHY,
-                checks={"connect": CheckResult(passed=True)},
-                db_path=temp_path,
-            )
+        result = DatabaseHealthResult(
+            file_name="test.db",
+            display_name="Test Database",
+            status=DatabaseHealthStatus.HEALTHY,
+            checks={"connect": CheckResult(passed=True)},
+            db_path=temp_path,
+        )
 
-            tooltip = result.get_tooltip()
+        tooltip = result.get_tooltip()
 
-            assert "Test Database" in tooltip
-            assert temp_path in tooltip
-            assert "Size: 5.0 KB" in tooltip
-        finally:
-            os.unlink(temp_path)
+        assert "Test Database" in tooltip
+        assert temp_path in tooltip
+        assert "Size: 5.0 KB" in tooltip
 
     def test_tooltip_omits_size_when_file_not_found(self):
         """Tooltip should omit size line when file doesn't exist."""
@@ -126,76 +120,69 @@ class TestGetTooltipWithSize:
         assert "/nonexistent/path/missing.db" in tooltip
         assert "Size:" not in tooltip
 
-    def test_tooltip_size_appears_between_path_and_error(self):
+    def test_tooltip_size_appears_between_path_and_error(self, tmp_path: Path):
         """For unhealthy DB, size should appear between path and error info."""
-        # Create a temporary file with known size
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            # Write 10 KB of data
-            f.write(b"y" * 10240)
-            temp_path = f.name
+        # A file with known size (10 KB), in the test's own tmp_path
+        db_file = tmp_path / "unhealthy.db"
+        db_file.write_bytes(b"y" * 10240)
+        temp_path = str(db_file)
 
-        try:
-            result = DatabaseHealthResult(
-                file_name="unhealthy.db",
-                display_name="Unhealthy Database",
-                status=DatabaseHealthStatus.WARNING,
-                checks={
-                    "connect": CheckResult(passed=True),
-                    "not_locked": CheckResult(
-                        passed=False, error_message="Database locked"
-                    ),
-                },
-                db_path=temp_path,
-            )
+        result = DatabaseHealthResult(
+            file_name="unhealthy.db",
+            display_name="Unhealthy Database",
+            status=DatabaseHealthStatus.WARNING,
+            checks={
+                "connect": CheckResult(passed=True),
+                "not_locked": CheckResult(
+                    passed=False, error_message="Database locked"
+                ),
+            },
+            db_path=temp_path,
+        )
 
-            tooltip = result.get_tooltip()
-            lines = tooltip.split("\n")
+        tooltip = result.get_tooltip()
+        lines = tooltip.split("\n")
 
-            # Expected order:
-            # Line 0: display_name
-            # Line 1: db_path
-            # Line 2: Size: X KB
-            # Line 3: Not Locked: Database locked
-            assert len(lines) == 4
-            assert lines[0] == "Unhealthy Database"
-            assert lines[1] == temp_path
-            assert lines[2] == "Size: 10.0 KB"
-            assert "Not Locked" in lines[3]
-            assert "Database locked" in lines[3]
-        finally:
-            os.unlink(temp_path)
+        # Expected order:
+        # Line 0: display_name
+        # Line 1: db_path
+        # Line 2: Size: X KB
+        # Line 3: Not Locked: Database locked
+        assert len(lines) == 4
+        assert lines[0] == "Unhealthy Database"
+        assert lines[1] == temp_path
+        assert lines[2] == "Size: 10.0 KB"
+        assert "Not Locked" in lines[3]
+        assert "Database locked" in lines[3]
 
-    def test_tooltip_healthy_with_existing_file(self):
+    def test_tooltip_healthy_with_existing_file(self, tmp_path: Path):
         """Healthy database with existing file should show name, path, size."""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            # Write 1 MB of data
-            f.write(b"z" * 1048576)
-            temp_path = f.name
+        # A file with known size (1 MB), in the test's own tmp_path
+        db_file = tmp_path / "healthy.db"
+        db_file.write_bytes(b"z" * 1048576)
+        temp_path = str(db_file)
 
-        try:
-            result = DatabaseHealthResult(
-                file_name="healthy.db",
-                display_name="Healthy Database",
-                status=DatabaseHealthStatus.HEALTHY,
-                checks={
-                    "connect": CheckResult(passed=True),
-                    "read": CheckResult(passed=True),
-                    "write": CheckResult(passed=True),
-                    "integrity": CheckResult(passed=True),
-                    "not_locked": CheckResult(passed=True),
-                },
-                db_path=temp_path,
-            )
+        result = DatabaseHealthResult(
+            file_name="healthy.db",
+            display_name="Healthy Database",
+            status=DatabaseHealthStatus.HEALTHY,
+            checks={
+                "connect": CheckResult(passed=True),
+                "read": CheckResult(passed=True),
+                "write": CheckResult(passed=True),
+                "integrity": CheckResult(passed=True),
+                "not_locked": CheckResult(passed=True),
+            },
+            db_path=temp_path,
+        )
 
-            tooltip = result.get_tooltip()
-            lines = tooltip.split("\n")
+        tooltip = result.get_tooltip()
+        lines = tooltip.split("\n")
 
-            assert len(lines) == 3
-            assert lines[0] == "Healthy Database"
-            assert lines[1] == temp_path
-            assert lines[2] == "Size: 1.0 MB"
-        finally:
-            os.unlink(temp_path)
+        assert len(lines) == 3
+        assert lines[0] == "Healthy Database"
+        assert lines[1] == temp_path
+        assert lines[2] == "Size: 1.0 MB"
 
     def test_tooltip_error_status_without_file(self):
         """Error status DB without file should show name, path, error - no size."""
