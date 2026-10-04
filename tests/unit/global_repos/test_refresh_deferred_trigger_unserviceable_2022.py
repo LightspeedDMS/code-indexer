@@ -19,6 +19,7 @@ job-submission boundary is recorded.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 from code_indexer.global_repos.refresh_failure_recovery import (
     REFRESH_INTEGRITY_QUARANTINE_THRESHOLD,
     RefreshDeferredError,
+    settle_skip,
 )
 from tests.utils.golden_repo_metadata_stores import (
     STORE_KINDS,
@@ -275,8 +277,116 @@ def test_uninitialized_local_repo_keeps_the_trigger_and_escalates(
     result = harness.scheduler._execute_refresh(ALIAS)  # the fired job
 
     assert result.get("message") == "Not yet initialized, skipped", result
+    _assert_kept_and_escalated(metadata, before)
+
+
+def _assert_kept_and_escalated(metadata: Any, before: Dict[str, Any]) -> None:
     after = metadata.get_refresh_failure_backoff_state(ALIAS)
     assert after["pending_trigger"] is True, "a recoverable skip dropped the trigger"
     assert (
         after["consecutive_failure_count"] == before["consecutive_failure_count"] + 1
     ), "retries of a recoverable skip never escalate"
+    assert after["last_detail"] == before["last_detail"]
+
+
+class _StoreFailsOnce:
+    """The real store, except that the first call of one method raises a
+    store error (a connection lost mid-read)."""
+
+    def __init__(self, real: "GoldenRepoMetadataBackend", method: str) -> None:
+        self._real = real
+        self._method = method
+        self.failed = False
+
+    def _fail(self, *args: object, **kwargs: object) -> None:
+        self.failed = True
+        raise OSError("metadata store connection lost")
+
+    def __getattr__(self, name: str) -> Any:  # forwards any protocol member
+        if name == self._method and not self.failed:
+            return self._fail
+        return getattr(self._real, name)
+
+
+def test_failed_local_repair_keeps_the_trigger_and_escalates(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs = _deferred(tmp_path, metadata)
+    before = metadata.get_refresh_failure_backoff_state(ALIAS)
+    (harness.source / ".code-indexer" / "config.json").unlink()
+    no_tools = tmp_path / "no-tools"
+    no_tools.mkdir()
+    monkeypatch.setenv("PATH", str(no_tools))  # `cidx init` cannot run
+
+    result = harness.scheduler._execute_refresh(ALIAS)  # the fired job
+
+    assert result.get("message") == (
+        "Local repo config invalid and repair via cidx init failed"
+    ), result
+    _assert_kept_and_escalated(metadata, before)
+
+
+def test_unreadable_quarantine_state_keeps_the_trigger_and_escalates(
+    tmp_path: Path, metadata: Any
+) -> None:
+    harness, jobs = _deferred(tmp_path, metadata)
+    before = metadata.get_refresh_failure_backoff_state(ALIAS)
+    store = _StoreFailsOnce(metadata, "get_refresh_integrity_failure_state")
+    harness.scheduler.golden_repo_metadata = store
+
+    result = harness.scheduler._execute_refresh(ALIAS)  # the fired job
+
+    assert store.failed
+    assert result.get("skipped") == "quarantine_check_failed", result
+    _assert_kept_and_escalated(metadata, before)
+
+
+def test_unreadable_trigger_generation_never_crashes_the_refresh(
+    tmp_path: Path, metadata: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness, jobs = _deferred(tmp_path, metadata)
+    for _ in range(REFRESH_INTEGRITY_QUARANTINE_THRESHOLD):
+        metadata.record_refresh_integrity_failure(ALIAS, "corrupt chunks.db")
+    store = _StoreFailsOnce(metadata, "get_refresh_failure_backoff_state")
+    harness.scheduler.golden_repo_metadata = store
+
+    with caplog.at_level(logging.ERROR):
+        result = harness.scheduler._execute_refresh(ALIAS)  # the fired job
+
+    assert store.failed
+    assert result.get("skipped") == "integrity_quarantined", result
+    assert _pending(metadata), "a skip with no known generation dropped a trigger"
+    assert any(
+        "failed to read the trigger generation" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+    ), "the unreadable generation was not reported"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Refresh complete",
+        "No changes detected",
+        "Refresh integrity gate failed; publish skipped",
+    ],
+)
+def test_self_settled_results_leave_a_pending_trigger_untouched(
+    metadata: Any, message: str
+) -> None:
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    assert metadata.mark_refresh_trigger_pending(ALIAS, 0.0)
+    before = metadata.get_refresh_failure_backoff_state(ALIAS)
+
+    settle_skip(
+        metadata,
+        ALIAS,
+        before["trigger_generation"],
+        {
+            "success": message != "Refresh integrity gate failed; publish skipped",
+            "alias": ALIAS,
+            "message": message,
+        },
+    )
+
+    assert metadata.get_refresh_failure_backoff_state(ALIAS) == before

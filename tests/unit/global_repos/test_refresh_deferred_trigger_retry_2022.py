@@ -9,6 +9,7 @@ submission boundary is recorded.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator, List
@@ -246,4 +247,56 @@ def test_debouncer_keeps_retrying_through_an_outage(
             f"refresh lost after {len(attempts)} attempts during an outage"
         )
     finally:
+        debouncer.shutdown()
+
+
+#: Long enough that a timer started by a write during the in-flight
+#: submission fires only after that submission has returned.
+IN_FLIGHT_DEBOUNCE_SECONDS = 0.5
+
+
+def test_a_write_during_an_in_flight_submission_gets_its_own_refresh(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs = _harness_with_meta(tmp_path, metadata)
+    real_trigger = harness.scheduler.trigger_refresh_for_repo
+    in_flight = threading.Event()
+    release = threading.Event()
+    calls: List[str] = []
+
+    def _first_submission_stays_in_flight(
+        alias_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        calls.append(alias_name)
+        result = real_trigger(alias_name, *args, **kwargs)
+        if len(calls) == 1:
+            jobs.in_flight.add(alias_name)  # its job is now running
+            in_flight.set()
+            release.wait(WAIT_LIMIT_SECONDS)
+        return result
+
+    monkeypatch.setattr(
+        harness.scheduler, "trigger_refresh_for_repo", _first_submission_stays_in_flight
+    )
+    debouncer = CidxMetaRefreshDebouncer(
+        harness.scheduler, debounce_seconds=IN_FLIGHT_DEBOUNCE_SECONDS
+    )
+    monkeypatch.setattr(meta_description_hook, "_debouncer", debouncer)
+    try:
+        debouncer.signal_dirty()
+        assert in_flight.wait(WAIT_LIMIT_SECONDS), "the first submission never ran"
+
+        # A new write while that submission is still in flight: its job is
+        # running, so the writer's request is handed to the debouncer.
+        meta_description_hook.request_cidx_meta_refresh(harness.scheduler)
+        assert jobs.attempts == [META_ALIAS, META_ALIAS]
+
+        jobs.in_flight.discard(META_ALIAS)  # the first refresh finished
+        release.set()
+
+        assert _wait_until(lambda: jobs.submitted == [META_ALIAS, META_ALIAS]), (
+            "a write during an in-flight submission lost its refresh"
+        )
+    finally:
+        release.set()
         debouncer.shutdown()

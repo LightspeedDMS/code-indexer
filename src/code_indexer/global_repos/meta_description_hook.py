@@ -130,6 +130,9 @@ class CidxMetaRefreshDebouncer:
         self._debounce_seconds = debounce_seconds
         # Paced retry interval after a generic failure (doubles, capped).
         self._retry_delay: float = debounce_seconds
+        # Bumped by every signal_dirty: a submission settles only the
+        # signals that arrived before it started.
+        self._signal_seq: int = 0
         self._dirty: bool = False
         self._timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
@@ -144,6 +147,7 @@ class CidxMetaRefreshDebouncer:
         the call is silently ignored.
         """
         with self._lock:
+            self._signal_seq += 1
             self._dirty = True
             if self._timer is not None:
                 self._timer.cancel()
@@ -174,6 +178,9 @@ class CidxMetaRefreshDebouncer:
         (store or job tracker unavailable) keeps the refresh owed: it is
         logged and retried at a doubling interval capped at
         _MAX_RETRY_INTERVAL_SECONDS -- paced, never given up.
+
+        Bug #2022: a submission settles only the signals that arrived before
+        it started. A write signalled while it was in flight stays owed.
         """
         from code_indexer.global_repos.refresh_failure_recovery import (
             RefreshDeferredError,
@@ -185,15 +192,13 @@ class CidxMetaRefreshDebouncer:
                 return
             # Don't clear _dirty yet — clear after successful refresh
             self._timer = None
+            submitted_seq = self._signal_seq
 
         # Trigger outside lock to avoid holding lock during I/O
         try:
             self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
             logger.info("Debounced cidx-meta refresh triggered successfully")
-            # Success — NOW clear dirty
-            with self._lock:
-                self._dirty = False
-                self._retry_delay = self._debounce_seconds
+            self._settle_submission(submitted_seq)
         except RefreshDeferredError as exc:
             # Bug #2022: the trigger was persisted as pending; the refresh
             # scheduler fires it once the backoff ends -- no retry spin here.
@@ -202,19 +207,12 @@ class CidxMetaRefreshDebouncer:
                 f"persisted failure backoff; the refresh scheduler fires it "
                 f"once the backoff ends"
             )
-            with self._lock:
-                self._dirty = False
-                self._retry_delay = self._debounce_seconds
+            self._settle_submission(submitted_seq)
         except DuplicateJobError:
             logger.info("cidx-meta refresh still running, will retry after debounce")
             with self._lock:
                 # _dirty stays True (was never cleared)
-                if not self._shutdown:
-                    self._timer = threading.Timer(
-                        self._debounce_seconds, self._on_timer_expired
-                    )
-                    self._timer.daemon = True
-                    self._timer.start()
+                self._schedule_retry_locked(self._debounce_seconds)
         except Exception as exc:
             # Bug #2022: nothing durable records this refresh yet, so it stays
             # owed (dirty) and is retried, paced, until it is submitted.
@@ -223,16 +221,34 @@ class CidxMetaRefreshDebouncer:
                     self._retry_delay * 2, _MAX_RETRY_INTERVAL_SECONDS
                 )
                 delay = self._retry_delay
-                if not self._shutdown:
-                    self._timer = threading.Timer(delay, self._on_timer_expired)
-                    self._timer.daemon = True
-                    self._timer.start()
+                self._schedule_retry_locked(delay)
             logger.warning(
                 "Debounced cidx-meta refresh failed (%s: %s); retrying in %.1fs",
                 type(exc).__name__,
                 exc,
                 delay,
             )
+
+    def _settle_submission(self, submitted_seq: int) -> None:
+        """A submission (or durable deferral) that started at *submitted_seq*
+        covers the signals up to it. A signal that arrived while it was in
+        flight is a newer write it may not cover: that refresh stays owed,
+        with a retry timer pending."""
+        with self._lock:
+            self._retry_delay = self._debounce_seconds
+            if self._signal_seq == submitted_seq:
+                self._dirty = False
+            else:
+                self._schedule_retry_locked(self._debounce_seconds)
+
+    def _schedule_retry_locked(self, delay: float) -> None:
+        """Start a retry timer (caller holds the lock), unless shut down or a
+        timer is already pending -- one a concurrent signal started serves."""
+        if self._shutdown or self._timer is not None:
+            return
+        self._timer = threading.Timer(delay, self._on_timer_expired)
+        self._timer.daemon = True
+        self._timer.start()
 
     def shutdown(self) -> None:
         """
