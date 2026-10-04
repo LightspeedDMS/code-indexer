@@ -233,8 +233,14 @@ class TestCidxMetaRefreshDebouncerSignalDirty:
 
         debouncer.signal_dirty()
 
-        # Wait for timer to fire (0.05s + buffer)
-        time.sleep(0.2)
+        # Wait for the timer thread to fire (bounded poll: a fixed sleep
+        # flakes when the machine is loaded).
+        deadline = time.monotonic() + 5.0
+        while (
+            not mock_refresh_scheduler.trigger_refresh_for_repo.called
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
 
         mock_refresh_scheduler.trigger_refresh_for_repo.assert_called_once_with(
             "cidx-meta-global"
@@ -392,10 +398,14 @@ class TestCidxMetaRefreshDebouncerRetryOnDuplicateJobError:
         # Cleanup
         debouncer.shutdown()
 
-    def test_generic_exception_does_not_retry(self, mock_refresh_scheduler):
+    def test_generic_exception_keeps_the_refresh_owed_with_paced_retries(
+        self, mock_refresh_scheduler
+    ):
         """
-        Test that a generic Exception from trigger_refresh_for_repo does NOT
-        cause a retry (only DuplicateJobError retries).
+        Bug #2022 round 7: a generic Exception (store or job tracker down)
+        must not drop the refresh -- nothing durable records it yet. It stays
+        dirty with a retry timer pending, retried at a doubling interval
+        (0.05 s debounce: attempts at ~0.05 s, ~0.15 s, ~0.35 s), never spun.
         """
         from code_indexer.global_repos.meta_description_hook import (
             CidxMetaRefreshDebouncer,
@@ -409,18 +419,17 @@ class TestCidxMetaRefreshDebouncerRetryOnDuplicateJobError:
             refresh_scheduler=mock_refresh_scheduler,
             debounce_seconds=0.05,
         )
+        try:
+            debouncer.signal_dirty()
+            time.sleep(0.3)
 
-        debouncer.signal_dirty()
-
-        # Wait for timer to fire
-        time.sleep(0.15)
-
-        # Should have been called once (no retry for generic exception)
-        assert mock_refresh_scheduler.trigger_refresh_for_repo.call_count == 1
-
-        # Dirty should remain False (it was cleared before the attempt)
-        # and no retry timer should be running
-        assert debouncer._timer is None
+            # Paced, not spun: a fixed 0.05 s cadence would be ~6 attempts.
+            assert 1 <= mock_refresh_scheduler.trigger_refresh_for_repo.call_count <= 2
+            # Still owed, with the next retry scheduled.
+            assert debouncer._dirty is True
+            assert debouncer._timer is not None
+        finally:
+            debouncer.shutdown()
 
 
 class TestCidxMetaRefreshDebouncerShutdown:

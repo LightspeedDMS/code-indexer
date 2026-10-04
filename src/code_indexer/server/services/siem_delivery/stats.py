@@ -14,7 +14,7 @@ import logging
 import shutil
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from code_indexer.server.services.siem_delivery.capture import (
     CAPTURE_SNAPSHOT_MAX_AGE,
@@ -351,3 +351,158 @@ def list_quarantined(db: SiemDb, limit: int) -> List[Dict[str, Any]]:
         return rows
 
     return db.read(_q)
+
+
+# --- keyset pages for the Web recovery panel ----------------------------------------
+
+
+# Never ``body``: a page shows a batch, never its events.
+_BATCH_COLUMNS = (
+    "batch_id, destination_key, event_count, state, created_at, send_attempts, "
+    "last_class, lease_expires_at"
+)
+_BATCH_TIMESTAMPS = ("created_at", "lease_expires_at")
+
+
+def _slice_page(
+    rows: List[Dict[str, Any]], limit: int, cursor_of: Callable[[Dict[str, Any]], Any]
+) -> Dict[str, Any]:
+    """One page from ``limit + 1`` fetched rows: the extra row only proves
+    that more exist; ``next_after`` is the cursor of the last shown row."""
+    if limit < 1:
+        raise ValueError("page limit must be >= 1")
+    shown = rows[:limit]
+    return {
+        "rows": shown,
+        "has_more": len(rows) > limit,
+        "next_after": cursor_of(shown[-1]) if shown else None,
+    }
+
+
+def _iso(tx: SiemTx, value: Any) -> Optional[str]:
+    parsed = tx.dialect.parse_ts(value)
+    return parsed.isoformat() if parsed else None
+
+
+def quarantine_page(tx: SiemTx, after_id: int, limit: int = 100) -> Dict[str, Any]:
+    """Quarantined rows with ``id > after_id`` in id order (status, id index)."""
+    rows = tx.query(
+        "SELECT id, event_uuid, action_type, destination_key, quarantine_reason, "
+        "quarantine_signature, created_at FROM siem_delivery_queue "
+        "WHERE status = 'quarantined' AND id > ? ORDER BY id LIMIT ?",
+        (int(after_id), limit + 1),
+    )
+    for row in rows:
+        row["id"] = int(row["id"])
+        row["created_at"] = _iso(tx, row["created_at"])
+    return _slice_page(rows, limit, lambda r: r["id"])
+
+
+def open_batches_page(
+    tx: SiemTx, after: Optional[str], limit: int = 50
+) -> Dict[str, Any]:
+    """Open batches after the ``"<created_at iso>|<batch_id>"`` cursor, in
+    (created_at, batch_id) order (state, created_at index)."""
+    where = "state = 'pending_send'"
+    params: List[Any] = []
+    if after:
+        when, sep, batch_id = after.partition("|")
+        parsed = tx.dialect.parse_ts(when) if sep else None
+        if parsed is None or not batch_id:
+            raise ValueError("invalid open-batch cursor")
+        cut = tx.ts(parsed)
+        where += " AND (created_at > ? OR (created_at = ? AND batch_id > ?))"
+        params = [cut, cut, batch_id]
+    rows = tx.query(
+        f"SELECT {_BATCH_COLUMNS} FROM siem_delivery_batches WHERE {where} "
+        "ORDER BY created_at, batch_id LIMIT ?",
+        [*params, limit + 1],
+    )
+    for row in rows:
+        for name in _BATCH_TIMESTAMPS:
+            row[name] = _iso(tx, row[name])
+    return _slice_page(rows, limit, lambda r: f"{r['created_at']}|{r['batch_id']}")
+
+
+# Per known key: the pending count capped at COUNT_CAP + 1 (exact at or under
+# the cap) and whether batched / quarantined rows exist.  The count reads at
+# most cap + 1 queue rows and never sorts (no ORDER BY): on the covering
+# (status, destination_key, id) index for SQLite and a vacuumed PostgreSQL
+# table; before autovacuum PostgreSQL may use a bitmap scan, whose INDEX side
+# still collects all of the key's TIDs while its heap reads stop at cap + 1.
+_STRANDED_PAGE_SQL = (
+    "SELECT k.destination_key, k.region, k.project_id, k.instance_id, "
+    "(SELECT COUNT(*) FROM (SELECT 1 FROM siem_delivery_queue q "
+    "WHERE q.status = 'pending' AND q.destination_key = k.destination_key "
+    "LIMIT ?) c) AS pending, "
+    "EXISTS (SELECT 1 FROM siem_delivery_queue q WHERE q.status = 'batched' "
+    "AND q.destination_key = k.destination_key) AS has_batched, "
+    "EXISTS (SELECT 1 FROM siem_delivery_queue q WHERE q.status = 'quarantined' "
+    "AND q.destination_key = k.destination_key) AS has_quarantined "
+    "FROM siem_destinations k WHERE {where} ORDER BY k.destination_key LIMIT ?"
+)
+
+
+def stranded_page(
+    tx: SiemTx, configured_key: Optional[str], after_key: str, limit: int = 50
+) -> Dict[str, Any]:
+    """Known destinations other than the configured one, keyset by key, in
+    ONE bounded statement.
+
+    The cursor is the last EXAMINED key: a key with nothing undelivered is
+    left out of ``rows`` but still advances paging, so a page may show fewer
+    than *limit* keys while ``has_more`` stays truthful."""
+    where, params = "k.destination_key > ?", [after_key]
+    if configured_key is not None:
+        where += " AND k.destination_key <> ?"
+        params.append(configured_key)
+    keys = tx.query(
+        _STRANDED_PAGE_SQL.format(where=where),
+        [COUNT_CAP + 1, *params, limit + 1],
+    )
+    page = _slice_page(keys, limit, lambda r: str(r["destination_key"]))
+    rows = []
+    for row in page["rows"]:
+        entry = {
+            **row,
+            "pending": int(row["pending"]),
+            "has_batched": bool(row["has_batched"]),
+            "has_quarantined": bool(row["has_quarantined"]),
+        }
+        if entry["pending"] or entry["has_batched"] or entry["has_quarantined"]:
+            rows.append(entry)
+    return {**page, "rows": rows}
+
+
+def destination_summary(tx: SiemTx, key: str) -> Dict[str, Any]:
+    """Any destination by key: its coordinates (when known) and capped
+    counts of what is still undelivered for it."""
+    coords = tx.one(
+        "SELECT region, project_id, location, instance_id FROM siem_destinations "
+        "WHERE destination_key = ?",
+        (key,),
+    )
+    out: Dict[str, Any] = {
+        "destination_key": key,
+        "known": coords is not None,
+        **(
+            coords or dict.fromkeys(("region", "project_id", "location", "instance_id"))
+        ),
+    }
+    for status in ("pending", "batched", "quarantined"):
+        count = capped_count(tx, status, key)
+        out[status] = count
+        out[f"{status}_capped"] = count > COUNT_CAP
+    return out
+
+
+def batch_by_id(tx: SiemTx, batch_id: str) -> Optional[Dict[str, Any]]:
+    """One batch by primary key (never its body), or None."""
+    row = tx.one(
+        f"SELECT {_BATCH_COLUMNS} FROM siem_delivery_batches WHERE batch_id = ?",
+        (batch_id,),
+    )
+    if row is not None:
+        for name in _BATCH_TIMESTAMPS:
+            row[name] = _iso(tx, row[name])
+    return row

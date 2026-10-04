@@ -46,7 +46,12 @@ _BYTE_MAX_VALUE = 255.0
 _VECTOR_SCALE = 2.0
 _VECTOR_OFFSET = 1.0
 _FAKE_MAX_TOKENS = 8192
-_FILE_COUNT = 12
+# Each indexed file costs one serialized durable "dirty" epoch write (Bug
+# #1575 Part C: tmp-file + directory fsync under .index_rebuild.lock) per
+# run, so this count sets how many fsyncs sit on the critical path; at 12
+# files a slow disk pushed a two-run test past the 15 s timeout. Six still
+# leaves files to resume after the interrupt below.
+_FILE_COUNT = 6
 _INTERRUPT_AFTER_FILE_PROGRESS_CALLS = 3
 _RESUME_MARKER = "Resuming interrupted operation"
 # Emitted unconditionally on entry to SmartIndexer._do_reconcile_with_database

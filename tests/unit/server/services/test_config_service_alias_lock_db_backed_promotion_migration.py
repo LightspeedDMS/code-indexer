@@ -48,9 +48,14 @@ import json
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
+from tests.unit.server.siem.backends import (  # noqa: F401  (real-PG fixtures)
+    _pg_session_pool,
+    pg_pool,
+)
 
 # Named seed/expected version constants (avoid unexplained magic numbers).
 _SEED_VERSION_LEGACY_ROW = 5
@@ -241,91 +246,64 @@ class TestAliasLockDbBackedPromotionMigration:
         )
 
 
+def _pg_service(tmp_path: Path, pool: Any) -> ConfigService:
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    svc = ConfigService(server_dir_path=str(server_dir))
+    svc.load_config()
+    svc.set_connection_pool(pool)  # seeds the committed row
+    return svc
+
+
+def _make_pre_phase3_pg_row(pool: Any) -> None:  # Any: the pg_pool fixture's pool
+    """The committed alias-lock section as a pre-Phase-3 release left it."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE server_config SET config_json = jsonb_set(config_json, "
+            "'{alias_lock_config}', '{\"db_backed_enabled\": false}'::jsonb) "
+            "WHERE config_key = 'runtime'"
+        )
+
+
 class TestAliasLockDbBackedPromotionMigrationPgBackend:
     """Requirement 1 ("must work for BOTH backends"): the PostgreSQL/cluster
-    branch of the promotion migration. _save_runtime_to_pg issues
-    PostgreSQL-specific SQL (jsonb_set, ::jsonb/::int casts) that a plain
-    SQLite connection cannot execute, so -- mirroring this codebase's own
-    established precedent for testing this exact method
-    (test_config_service_pg_save.py's TestSeedRuntimeToPgRowFactory) -- a
-    MagicMock pool stands in for the psycopg3 connection pool (the real
-    external dependency boundary). The REAL _save_runtime_to_pg code runs
-    unmodified against it; nothing on ConfigService itself is patched.
-    """
+    branch, against a REAL PostgreSQL (skipped without TEST_POSTGRES_DSN).
 
-    def _make_mock_pool(self, version: int):
-        from unittest.mock import MagicMock
+    Bug #2017: the promotion re-decides on the RE-READ committed row and
+    writes it with a compare-and-set, so the assertions are on the committed
+    row and the process cache, not on the object passed in."""
 
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = {"version": version}
-        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    def test_pre_phase3_row_is_promoted_in_the_committed_row(
+        self,
+        tmp_path: Path,
+        pg_pool: Any,  # noqa: F811  (the imported fixture)
+    ) -> None:
+        svc = _pg_service(tmp_path, pg_pool)
+        _make_pre_phase3_pg_row(pg_pool)
+        version, raw = svc._read_committed_runtime()
 
-        mock_pool = MagicMock()
-        mock_pool.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_pool.connection.return_value.__exit__ = MagicMock(return_value=False)
-        return mock_pool
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), raw)
 
-    def test_pre_phase3_blob_promotes_via_save_runtime_to_pg(self, tmp_path):
-        """Marker missing from the raw stored dict + a PG pool attached ->
-        the promotion mutates the config AND the real _save_runtime_to_pg
-        actually opens a connection against the pool (never the SQLite
-        path)."""
-        server_dir = tmp_path / "server"
-        server_dir.mkdir()
-        svc = ConfigService(server_dir_path=str(server_dir))
-        svc.load_config()
-        svc._sqlite_db_path = None
-        svc._pool = self._make_mock_pool(version=3)
+        after, section = svc.read_committed_section("alias_lock_config")
+        assert after == version + 1
+        assert section["db_backed_enabled"] is True
+        assert section["db_backed_enabled_promoted"] is True
+        cached = svc.get_config().alias_lock_config
+        assert cached.db_backed_enabled is True
+        assert cached.db_backed_enabled_promoted is True
 
-        config = svc.get_config()
-        assert config.alias_lock_config.db_backed_enabled is True  # fresh default
-        config.alias_lock_config.db_backed_enabled = False  # simulate legacy load
+    def test_already_promoted_row_is_never_rewritten(
+        self,
+        tmp_path: Path,
+        pg_pool: Any,  # noqa: F811  (the imported fixture)
+    ) -> None:
+        svc = _pg_service(tmp_path, pg_pool)
+        _make_pre_phase3_pg_row(pg_pool)
+        _version, raw = svc._read_committed_runtime()
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), raw)
+        promoted_version, promoted_raw = svc._read_committed_runtime()
 
-        svc._apply_alias_lock_db_backed_promotion(
-            config, {"alias_lock_config": {"db_backed_enabled": False}}
-        )
+        # the real merge supplies the (now marked) committed row on reload
+        svc._apply_alias_lock_db_backed_promotion(svc.get_config(), promoted_raw)
 
-        # The real _save_runtime_to_pg ran against the pool (external
-        # boundary) -- proven by the pool actually being used to open a
-        # connection and issue the UPDATE.
-        assert svc._pool.connection.call_count >= 1
-        assert config.alias_lock_config.db_backed_enabled is True
-        assert config.alias_lock_config.db_backed_enabled_promoted is True
-
-    def test_already_promoted_blob_never_calls_save_runtime_to_pg_again(self, tmp_path):
-        """First call promotes (one PG write); a second call, now with the
-        marker present in the raw dict exactly as the real merge would
-        supply on a subsequent reload, must issue zero additional PG
-        writes."""
-        server_dir = tmp_path / "server"
-        server_dir.mkdir()
-        svc = ConfigService(server_dir_path=str(server_dir))
-        svc.load_config()
-        svc._sqlite_db_path = None
-        svc._pool = self._make_mock_pool(version=3)
-
-        config = svc.get_config()
-        config.alias_lock_config.db_backed_enabled = False
-
-        svc._apply_alias_lock_db_backed_promotion(
-            config, {"alias_lock_config": {"db_backed_enabled": False}}
-        )
-        connection_calls_after_first = svc._pool.connection.call_count
-        assert connection_calls_after_first >= 1
-        assert config.alias_lock_config.db_backed_enabled is True
-
-        svc._apply_alias_lock_db_backed_promotion(
-            config,
-            {
-                "alias_lock_config": {
-                    "db_backed_enabled": True,
-                    "db_backed_enabled_promoted": True,
-                }
-            },
-        )
-
-        assert svc._pool.connection.call_count == connection_calls_after_first
-        assert config.alias_lock_config.db_backed_enabled is True
+        assert svc._read_committed_runtime() == (promoted_version, promoted_raw)

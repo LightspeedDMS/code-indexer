@@ -158,6 +158,45 @@ def _wait_for_job(
     )
 
 
+def _wait_for_removal(
+    client: TestClient,
+    headers_fn: Callable[[], dict[str, str]],
+    base_clone: Path,
+) -> None:
+    """Wait until no remove_golden_repo job is active and the clone is gone.
+
+    DELETE /api/admin/golden-repos/{alias} answers 204 with no job id while
+    the removal runs in a background job, so the next test registering the
+    same alias must wait for that job through the jobs front door. Bounded
+    (Messi #14); raises on timeout rather than letting the next test race.
+    """
+    deadline = time.monotonic() + _JOB_TIMEOUT
+    while time.monotonic() < deadline:
+        active = []
+        for state in ("pending", "running"):
+            resp = client.get(
+                "/api/jobs",
+                params={"status": state, "limit": 100},
+                headers=headers_fn(),
+            )
+            assert resp.status_code == 200, (
+                f"job list ({state}) returned HTTP {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+            active += [
+                j["job_id"]
+                for j in resp.json()["jobs"]
+                if j["operation_type"] == "remove_golden_repo"
+            ]
+        if not active and not base_clone.exists():
+            return
+        time.sleep(_JOB_POLL)
+    raise TimeoutError(
+        f"golden repo removal did not finish within {_JOB_TIMEOUT}s "
+        f"(clone present: {base_clone.exists()})"
+    )
+
+
 def _list_snapshot_dirs(snapshot_manager: Any, alias: str) -> list[tuple[str, int]]:
     """READ-ONLY snapshot discovery via the wired VersionedSnapshotManager.
 
@@ -276,31 +315,28 @@ def retention_repo(
     try:
         yield ctx
     finally:
-        # Teardown: deregister golden repo, then remove temp dirs.
-        # Fetch headers fresh at teardown time (token may have been refreshed).
+        # Teardown: deregister the golden repo and WAIT for the background
+        # removal to finish -- the next test registers the same alias, and a
+        # re-add racing an in-flight removal is refused (or, before that was
+        # refused, had its fresh clone deleted by the removal). Fetch headers
+        # fresh at teardown time (token may have been refreshed).
         try:
             d = test_client.request(
                 "DELETE",
                 f"/api/admin/golden-repos/{_ALIAS}",
                 headers=admin_token_provider.get_headers(),
             )
-            if d.status_code in (200, 202):
-                jid = d.json().get("job_id")
-                if jid:
-                    _wait_for_job(
-                        test_client,
-                        jid,
-                        admin_token_provider.get_headers,
-                        "deregister",
-                    )
-        except Exception:  # noqa: BLE001 -- teardown is best-effort
-            pass
-        shutil.rmtree(workdir, ignore_errors=True)
-        # Restore the original min-retention-age floor so later tests sharing
-        # this session-scoped server's ConfigService are unaffected.
-        config_service.get_config().snapshot_min_retention_age_seconds = (
-            original_min_retention_age_seconds
-        )
+            assert d.status_code == 204, (
+                f"deregister returned HTTP {d.status_code}: {d.text[:300]}"
+            )
+            _wait_for_removal(test_client, admin_token_provider.get_headers, base_clone)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+            # Restore the original min-retention-age floor so later tests
+            # sharing this session-scoped server's ConfigService are unaffected.
+            config_service.get_config().snapshot_min_retention_age_seconds = (
+                original_min_retention_age_seconds
+            )
 
 
 def _refresh_once(

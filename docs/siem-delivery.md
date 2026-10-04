@@ -5,6 +5,11 @@ CIDX can deliver pilot security events to Google Security Operations
 delivered, the guarantee, configuration, arming, operation and the admin
 actions.
 
+For Google SecOps staff (where to find each setting's value in Google, the
+service account, searching and alerting), see
+[siem-secops-guide.md](siem-secops-guide.md). For every delivered event and
+its UDM fields, see [siem-secops-event-catalog.md](siem-secops-event-catalog.md).
+
 ## What is delivered
 
 Pilot scope only (a code constant, not a setting):
@@ -100,6 +105,10 @@ like every other admin secret change.
   made on any node applies at the next request everywhere. Without a usable
   credential a process probes `credential_missing` or `credential_invalid`
   and capture does not arm.
+- Replacing or removing a stored key disarms delivery in the same
+  transaction and clears the canary: re-arming needs a fresh canary and
+  confirmation (see Arming). A canary sent while the key was being replaced
+  is refused when recorded (HTTP 409; run it again).
 - A `service_account_key_path` value saved by 12.79.0 is IGNORED: each process
   logs one WARNING, never reads that file, and the destination counts as
   "credential missing" until a key is uploaded. The next save of the section
@@ -132,24 +141,111 @@ every certificate).
 - Setting, replacing and removing need TOTP elevation and are recorded as a
   `config_changed` row whose values carry the fingerprint before and after.
 - The UI shows each certificate's subject, issuer, SHA-256 fingerprint and
-  expiry. A change does not change the destination key (no disarm); the
-  combined trust is built once per bundle and picked up through the
-  committed-configuration read on the next cycle.
+  expiry. The combined trust is built once per bundle and picked up through
+  the committed-configuration read on the next cycle.
+- A change (set, replace or remove) does not change the destination key,
+  but it ends the configuration lifetime: delivery disarms and needs a fresh
+  canary (see Arming). Set the CA before running the canary.
 
 ## Arming
 
 Capture starts only after one atomic arming statement succeeds. That statement requires:
 
 1. a synthetic canary (one event per UDM mapping entry plus one unmapped
-   event), sent once and ACCEPTED: `POST /api/admin/siem-delivery/canary`;
-2. every canary `productLogId` confirmed visible in SecOps search:
-   `POST /api/admin/siem-delivery/canary/confirm-visible` with
-   `{"canary_run_id": ..., "visible_product_log_ids": [...]}`;
+   event), sent once and ACCEPTED;
+2. every canary `productLogId` confirmed visible in SecOps search;
 3. at least one live server process, every live process able to mint a token
    for the destination, and (cluster) every active node represented.
 
 A destination change disarms. A new mapping version does not disarm, but it
 shows a DEGRADED reason until the canary is re-run.
+
+The order is: configure (key, optional CA, destination fields with
+`enabled` off), run the canary, confirm it, then enable; capture arms on a
+later cycle. The canary runs while delivery is disabled, as long as a
+destination is configured.
+
+A canary confirmation is valid only for the configuration lifetime that
+produced it (Bug #2018). The lifetime is the committed section's
+`arming_epoch`, a token no form can set: every configuration change carries
+it over from the committed pre-image and renews it when the destination is
+disabled, cleared or changed, or the trusted CA changes
+(`siem_delivery/boundary.py` `carry_arming_epoch`). The canary records the
+epoch it ran under (`siem_delivery_state.canary_config_epoch`, PostgreSQL
+migration 056); the arming statement and the fence require it to equal the
+committed epoch (`state_store.CANARY_CONFIRMED_FOR`), so a newer version of
+another lifetime disarms and a stale confirmation is refused. Replacing or
+removing the service-account key clears the canary and disarms in its own
+transaction. A canary is recorded only if, under the state-row lock, the key
+it was sent with is still the stored one, its lifetime is still the
+committed one, and no run issued later was recorded; otherwise nothing
+changes and the action answers 409. Runs are ordered by a durable,
+strictly increasing ordinal taken under the state-row lock before the send
+(`canary_issued_seq` issues it, `canary_run_seq` keeps the recorded run's;
+PostgreSQL migration 057), never by clocks, so two runs started in the same
+clock tick are still ordered. Enabling, and every other change
+of the section, keeps a confirmed canary valid.
+
+Fail closed at once: `state_store.capture_active` also requires the state's
+canary epoch to equal the committed one, and the scheduler subscribes to the
+config service's commits (`ConfigService.register_on_commit_callback`, at
+`register_process`). A SIEM-section commit, or a credential change, in a
+process re-applies the fence, the capture snapshot and the status view in
+that process immediately (`scheduler.apply_committed_change`); the snapshot
+publish is monotonic in the config version, so a slower cycle that read an
+older version cannot re-arm it. Other processes and nodes follow at their
+next cycle (`cycle_idle_seconds`, 30 s). Events they capture in that window
+are bounded by that cycle and by the 90 s capture-snapshot age
+(`CAPTURE_SNAPSHOT_MAX_AGE`). They are counted as captures after the
+boundary (`capture_after_boundary`, see Capture above) only when the change
+is a disable, a clear, a destination change or a reset (the boundary kinds
+`stats.py` counts); after a trusted-CA change or a credential replacement or
+removal they are NOT counted.
+
+A configuration saved before the epoch existed has the empty epoch, so an
+already armed destination stays armed across the upgrade until its next
+lifetime-ending change. During a mixed-version cluster upgrade, re-run the
+canary once all nodes are upgraded: older nodes do not take a canary run
+number, so run ordering holds only when every node runs this release.
+
+### Arming from the Web UI
+
+Config page, "SIEM Delivery (Google SecOps)" section, "Operations":
+
+1. The arming checklist explains the state, row by row: enabled and the
+   committed destination (with its config version), the stored credential,
+   the canary for this destination and mapping, confirmed ids of expected,
+   processes ready (aggregated over every live process, failing ones listed),
+   nodes without a process (cluster), and ARMED. ARMED is authoritative; the
+   other rows explain it. The checklist reads the COMMITTED configuration and
+   the database, so a save made through any node shows immediately; the
+   "this process" line below it is a per-process diagnostic only.
+2. "Run canary" sends the synthetic events once and lists each
+   `product_log_id` with its action and event type, plus the run-wide SecOps
+   search: `metadata.vendor_name = "CIDX" AND
+   additional.fields["correlation_id"] = "canary-<run_id>"`.
+3. The analyst finds the ids in SecOps; tick them, or paste them (separated
+   by spaces, new lines or commas), and press "Confirm visible".
+4. Watch the ARMED row (the panel refreshes after every action; "Refresh"
+   reloads it).
+
+REST alternative: `POST /api/admin/siem-delivery/canary`, then
+`POST /api/admin/siem-delivery/canary/confirm-visible` with
+`{"canary_run_id": ..., "visible_product_log_ids": [...]}`.
+
+### Who can do what
+
+- Reading the panels (and REST `GET /stats`, `GET /quarantine`) needs an
+  admin; no elevation.
+- Every action (canary, confirm visible, resume, requeue, acknowledge,
+  re-batch, retarget, abandon) needs an admin with TOTP elevation while
+  `elevation_enforcement_enabled` is ON, on both the Web and REST doors
+  (the Web opens the TOTP modal and replays the action). With enforcement
+  OFF, actions pass through exactly like every other elevated route.
+- Abandon through the Web requires typing `ABANDON` exactly; REST abandon
+  takes no body.
+- Each action writes the same audit row on both doors; a refused action
+  writes none.
 
 ## Operation and visibility
 
@@ -158,8 +254,10 @@ shows a DEGRADED reason until the canary is re-run.
   and this process's liveness.
 - `GET /api/admin/siem-delivery/quarantine?limit=N`: quarantined rows (event
   uuid, reason, sanitised signature).
-- `/health`: SIEM reasons are DEGRADED only. A SecOps outage never makes a
-  node unhealthy.
+- `GET /api/system/health` (authenticated): SIEM reasons appear in
+  `failure_reasons` and are DEGRADED only. A SecOps outage never makes a
+  node unhealthy. The public `/healthz` returns the resulting status only
+  (DEGRADED answers HTTP 200); `GET /health` does not include SIEM reasons.
 - OTEL: `cidx.siem.*` gauges (pending, quarantined, oldest pending age,
   backlog estimate, halted, capture active, unrecoverable, capture after
   boundary) and counters (delivered, capture failures, unmapped types, ...).
@@ -179,7 +277,20 @@ Request-wide failures halt delivery without quarantining anything. These are
 request-level 400s, 401/403, 404/413/415/501, a duplicate response, and
 unclassified responses. A probe retries each halt class on its own schedule
 and clears the halt by itself once the cause is fixed. The one exception is
-the duplicate-response halt, which needs an admin decision:
+the duplicate-response halt, which needs an admin decision.
+
+Recovery from the Web UI (Config page, SIEM section, "Operations", "Halts and
+recovery"): the halt (class, signature, since, next probe) with Resume; the
+halted batch, always shown even when it is beyond the first page, with
+Acknowledge and Re-batch; open batches, quarantined rows (select and Requeue)
+and stranded destinations, each paged with "More"; and "Open destination by
+key" for any key. Retarget and Abandon open a dialog with the destination's
+region, project and instance and its pending, batched and quarantined counts,
+labelled "currently queued; may grow until the action runs" (shown as
+10,000+ beyond the cap). Abandon is irreversible and requires typing
+`ABANDON`; the result shows the exact number of events abandoned.
+
+REST alternative:
 
 - `POST /api/admin/siem-delivery/batches/{batch_id}/acknowledge`: the events
   are confirmed present in SecOps; mark them delivered.
@@ -227,6 +338,8 @@ actions are audited.
 Decommissioning: disable delivery and clear the destination fields, then
 abandon the old key (the clearing save itself captures one row for the removed
 destination). Once those rows are abandoned, every SIEM health reason clears.
+Configuring the same destination again later starts a new configuration
+lifetime: it arms only after a fresh canary and confirmation.
 
 ## Retention
 
@@ -248,12 +361,23 @@ compressed.
 
 Before enabling against a real tenant:
 
-1. Grant a dedicated identity only the events-import permission.
-2. Configure the region, project, location and instance, and upload the
-   service-account key in the Web UI.
-3. Run the canary.
-4. Search each canary `productLogId` in SecOps and submit the confirmation.
-5. Record the real 400 body shape and any duplicate response.
-6. Confirm that the IAM permission name is correct.
-7. Verify that `principal.ip` is the client address.
-8. Re-verify the region list against Google's documentation.
+1. Turn TOTP elevation enforcement ON (`elevation_enforcement_enabled`) and
+   confirm that a SIEM action asks for elevation.
+2. Grant a dedicated identity only the events-import permission.
+3. Upload the service-account key (and, only if needed, the trusted CA) in
+   the Web UI, then configure the region, project, location and instance
+   with `enabled` off.
+4. Run the canary.
+5. Search each canary `productLogId` in SecOps and submit the confirmation.
+6. Enable delivery, and wait for the ARMED row.
+7. Record the real 400 body shape and any duplicate response.
+8. Confirm that the IAM permission name is correct.
+9. Verify that `principal.ip` is the client address.
+10. Re-verify the region list against Google's documentation.
+
+The same steps from a shell are in the
+[operator curl runbook](siem-secops-curl-runbook.md). The Web UI `session`
+cookie is `Secure` whenever the server is not bound to localhost, so a
+deployment served over plain `http` needs a TLS front door for browser and
+curl web-form use (the key and CA uploads exist only as Web forms; public
+issue #2004).

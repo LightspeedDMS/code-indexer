@@ -42,6 +42,7 @@ print("app_in_dict:", "app" in vars(app_module))
 """
 
 
+@pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
 def test_accessors_return_none_without_building_the_app(tmp_path: Path) -> None:
     home = tmp_path / "home"
     server_dir = home / ".cidx-server"

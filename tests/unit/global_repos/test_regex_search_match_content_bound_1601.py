@@ -208,7 +208,7 @@ class TestSingleLineMatchContentBound:
         service = self._build_grep_service(tmp_path)
 
         huge_line = "z" * (_MAX_MATCH_CONTENT_BYTES + 500)
-        output = f"file1.py:1:{huge_line}"
+        output = f"file1.py\x001:{huge_line}"  # grep --null record (Bug #2030)
 
         matches, total = service._parse_grep_output(
             output, max_results=_TEST_MAX_RESULTS, context_lines=0
@@ -228,7 +228,7 @@ class TestSingleLineMatchContentBound:
         real parser, is returned unchanged."""
         service = self._build_grep_service(tmp_path)
 
-        output = "file1.py:1:def func_1():"
+        output = "file1.py\x001:def func_1():"  # grep --null record (Bug #2030)
 
         matches, total = service._parse_grep_output(
             output, max_results=_TEST_MAX_RESULTS, context_lines=0

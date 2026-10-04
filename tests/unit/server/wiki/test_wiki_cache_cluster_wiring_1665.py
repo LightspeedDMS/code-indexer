@@ -86,34 +86,39 @@ def _app_state_wiki_context(
     wiki_cache_backend: Optional[Any] = None,
     golden_repo_manager: Optional[Any] = None,
 ) -> Generator[None, None, None]:
-    """Temporarily configure the REAL server app's app.state for
+    """Temporarily install a running server app whose app.state drives
     resolve_backend_registry_attr("wiki_cache", ...) resolution, restoring
-    the exact prior state (including "attribute never existed") on exit.
+    the exact prior module entry (including "never existed") on exit.
 
     `golden_repo_manager`, when supplied, is set on app.state.golden_repo_manager
     -- the attribute web/routes.py's _get_golden_repo_manager() reads.
+
+    The app is a lightweight real FastAPI app with a real starlette ``State``,
+    placed in ``code_indexer.server.app.__dict__['app']`` -- where both the
+    production ``app_module.app`` lookups and
+    ``registry_factory._running_server_app_state()`` find it -- NOT the
+    module's lazy ``app`` singleton, whose first access runs the whole
+    ``create_app()`` (~3 s, inside a per-test timeout) for no reason here.
     """
-    from code_indexer.server import app as app_module
+    from fastapi import FastAPI
 
-    attrs = ("storage_mode", "backend_registry", "golden_repo_manager")
-    saved = {a: getattr(app_module.app.state, a, _UNSET) for a in attrs}
+    from code_indexer.server import app as app_module  # never builds the app
 
+    server_app = FastAPI()
+    if postgres_mode:
+        server_app.state.storage_mode = "postgres"
+        server_app.state.backend_registry = _FakeBackendRegistry(wiki_cache_backend)
+    if golden_repo_manager is not None:
+        server_app.state.golden_repo_manager = golden_repo_manager
+    saved = app_module.__dict__.get("app", _UNSET)
+    app_module.__dict__["app"] = server_app
     try:
-        if postgres_mode:
-            app_module.app.state.storage_mode = "postgres"
-            app_module.app.state.backend_registry = _FakeBackendRegistry(
-                wiki_cache_backend
-            )
-        if golden_repo_manager is not None:
-            app_module.app.state.golden_repo_manager = golden_repo_manager
         yield
     finally:
-        for attr, value in saved.items():
-            if value is _UNSET:
-                if hasattr(app_module.app.state, attr):
-                    delattr(app_module.app.state, attr)
-            else:
-                setattr(app_module.app.state, attr, value)
+        if saved is _UNSET:
+            app_module.__dict__.pop("app", None)
+        else:
+            app_module.__dict__["app"] = saved
 
 
 # ---------------------------------------------------------------------------
@@ -254,16 +259,17 @@ class TestSite3McpGuidesHandler:
     def _with_golden_repo_manager(self, grm_mock) -> Generator[None, None, None]:
         from code_indexer.server import app as app_module
 
-        saved = getattr(app_module, "golden_repo_manager", _UNSET)
+        # via __dict__: getattr/hasattr on the module would run its PEP 562
+        # __getattr__ and build the whole server app (create_app())
+        saved = app_module.__dict__.get("golden_repo_manager", _UNSET)
+        app_module.__dict__["golden_repo_manager"] = grm_mock
         try:
-            app_module.golden_repo_manager = grm_mock
             yield
         finally:
             if saved is _UNSET:
-                if hasattr(app_module, "golden_repo_manager"):
-                    delattr(app_module, "golden_repo_manager")
+                app_module.__dict__.pop("golden_repo_manager", None)
             else:
-                app_module.golden_repo_manager = saved
+                app_module.__dict__["golden_repo_manager"] = saved
 
     def test_uses_shared_postgres_backend_in_cluster_mode(self, tmp_path):
         from code_indexer.server.mcp.handlers.guides import (

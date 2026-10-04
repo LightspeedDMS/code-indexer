@@ -269,7 +269,8 @@ SQLITE_SCHEMA: Sequence[str] = (
         last_boundary_scanned_id INTEGER NOT NULL DEFAULT 0,
         requeued_mapping_version INTEGER NOT NULL DEFAULT 0,
         stats_json TEXT,
-        stats_refreshed_at TEXT)""",
+        stats_refreshed_at TEXT,
+        canary_config_epoch TEXT NOT NULL DEFAULT '')""",
     """CREATE TABLE IF NOT EXISTS siem_process_status (
         process_id TEXT PRIMARY KEY,
         node_id TEXT NOT NULL,
@@ -338,6 +339,18 @@ def ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
     """Create the SIEM tables in groups.db (inside the caller's transaction)."""
     for statement in SQLITE_SCHEMA:
         conn.execute(statement)
+    state_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(siem_delivery_state)")
+    }
+    # Bug #2018 (PostgreSQL: migrations 056, 057): one idempotent path for
+    # fresh and upgraded files
+    for column, ddl in (
+        ("canary_config_epoch", "TEXT NOT NULL DEFAULT ''"),
+        ("canary_issued_seq", "INTEGER NOT NULL DEFAULT 0"),
+        ("canary_run_seq", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in state_columns:
+            conn.execute(f"ALTER TABLE siem_delivery_state ADD COLUMN {column} {ddl}")
     for name, table, columns in SIEM_INDEXES:
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({columns})")
     conn.execute(STATE_ROW_INSERT)

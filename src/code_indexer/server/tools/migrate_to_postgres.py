@@ -7,6 +7,12 @@ Reads all data from SQLite databases (cidx_server.db and groups.db) and
 writes it into PostgreSQL. Validates data integrity after migration.
 Idempotent (safe to re-run).
 
+WARNING -- OFFLINE ONLY: stop every cidx-server node first.  This tool
+OVERWRITES the runtime configuration row (``server_config``) with an
+unconditional upsert, bypassing the compare-and-set every server-process
+writer uses (Bug #2017, ``services/config_runtime_row.py``).  Run against a
+live cluster, it silently replaces configuration saved meanwhile.
+
 Usage:
     python3 -m code_indexer.server.tools.migrate_to_postgres \
       --sqlite-path ~/.cidx-server/data/cidx_server.db \
@@ -194,6 +200,8 @@ NULL_DEFAULT_COLUMNS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Unconditional overwrite (no version compare-and-set): offline use only,
+# never against a live cluster -- see the module docstring (Bug #2017).
 UPSERT_OVERWRITE_TABLES: Dict[str, str] = {
     "server_config": "config_key",
 }
@@ -1006,7 +1014,8 @@ def _reencrypt_decrypt_token(encrypted_token: str, key: bytes) -> str:
     decryptor = cipher.decryptor()
     padded = decryptor.update(enc_data) + decryptor.finalize()
     unpadder = padding.PKCS7(128).unpadder()
-    return (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+    plain: str = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+    return plain
 
 
 def _reencrypt_encrypt_token(token: str, key: bytes) -> str:

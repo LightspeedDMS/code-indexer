@@ -1801,7 +1801,8 @@ class ServerConfig:
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
-    # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
+    # Kill switch: False = elevation enforcement disabled (protected routes pass
+    # through with no elevation check; only POST /auth/elevate answers 503).
     # Idle timeout and max age mirror ElevatedSessionManager defaults.
     elevation_enforcement_enabled: bool = False
     elevation_idle_timeout_seconds: int = 300  # 5 minutes idle

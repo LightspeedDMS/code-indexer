@@ -42,13 +42,15 @@ class TestEnsureSubmoduleSafeDirectory:
             with patch(
                 "code_indexer.server.auto_update.deployment_executor.subprocess.run"
             ) as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
+                # empty listing: the entry is absent
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
                 result = executor._ensure_submodule_safe_directory()
 
         assert result is True
-        # Verify git config --add was called with submodule path
-        mock_run.assert_called_once()
+        # Bug #2028: listed first, then added because absent
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[0][0][0][-2:] == ["--get-all", "safe.directory"]
         call_args = mock_run.call_args[0][0]
         assert "git" in call_args
         assert "config" in call_args

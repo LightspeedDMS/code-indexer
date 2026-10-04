@@ -9,8 +9,6 @@ Verifies that:
 4. MetaDirectoryUpdater.update() does NOT contain migration logic.
 """
 
-import shutil
-import tempfile
 from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, patch
@@ -53,12 +51,12 @@ def _make_alias_content(description: str) -> str:
 
 
 @pytest.fixture
-def cidx_meta_dir():
-    """Temporary cidx-meta directory."""
-    tmp = tempfile.mkdtemp()
-    p = Path(tmp)
-    yield p
-    shutil.rmtree(tmp, ignore_errors=True)
+def cidx_meta_dir(tmp_path):
+    """cidx-meta directory in the test's own tmp_path (its parent is used
+    as the golden-repos dir and holds the tracking DB: never /tmp)."""
+    meta_dir = tmp_path / "cidx-meta"
+    meta_dir.mkdir()
+    return meta_dir
 
 
 def _make_minimal_scheduler(
@@ -79,7 +77,8 @@ def _make_minimal_scheduler(
         DescriptionRefreshScheduler,
     )
 
-    tmp_db = tempfile.mktemp(suffix=".db")
+    # beside cidx-meta in tmp_path (tempfile.mktemp left a /tmp/*.db behind)
+    tmp_db = str(cidx_meta_dir.parent / "description_refresh_tracking.db")
 
     tracking_backend = DescriptionRefreshTrackingBackend(tmp_db)
     golden_backend = MagicMock()

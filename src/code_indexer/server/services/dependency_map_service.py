@@ -1030,8 +1030,19 @@ class DependencyMapService:
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
             # Must be inside finally so it runs after lock is released, but gated on success
             # to satisfy AC5 (no trigger on exception).
-            if _analysis_succeeded and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+            if _analysis_succeeded:
+                self._request_cidx_meta_refresh()
+
+    def _request_cidx_meta_refresh(self) -> None:
+        """Ask for a cidx-meta reindex after a successful write; a refresh
+        that cannot start now is retried later, never dropped (Bug #2022)."""
+        if self._refresh_scheduler is None:
+            return
+        from code_indexer.global_repos.meta_description_hook import (
+            request_cidx_meta_refresh,
+        )
+
+        request_cidx_meta_refresh(self._refresh_scheduler)
 
     def _setup_analysis(self) -> Dict[str, Any]:
         """
@@ -4086,8 +4097,8 @@ class DependencyMapService:
             # AC2: Writer triggers refresh so RefreshScheduler captures complete data.
             # Must be inside finally so it runs after lock is released, but gated on success
             # to satisfy AC5 (no trigger on exception).
-            if _delta_succeeded and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+            if _delta_succeeded:
+                self._request_cidx_meta_refresh()
 
     # ---------------------------------------------------------------------------
     # Story #359: Domain Document Refinement
@@ -4494,8 +4505,8 @@ class DependencyMapService:
                 self._refresh_scheduler.release_write_lock(
                     "cidx-meta", owner_name="dependency_map_service"
                 )
-            if any_changed and self._refresh_scheduler is not None:
-                self._refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
+            if any_changed:
+                self._request_cidx_meta_refresh()
 
         return None
 

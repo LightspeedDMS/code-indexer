@@ -36,6 +36,14 @@ from code_indexer.server.auth import dependencies as _deps
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.user_manager import User, UserRole
 import code_indexer.server.mcp.handlers.admin.mcp_credentials as mcp_credentials_handlers
+from tests.unit.server._collection_time_server_app import (
+    build_server_app_at_collection,
+)
+
+# Keep at MODULE level: the real app is a lazy singleton (Bug #1638) whose
+# first build (~3.5 s) must happen at collection, not inside some test's 15 s
+# pytest-timeout budget (server-fast chunk 2).  See the helper's docstring.
+_SERVER_APP = build_server_app_at_collection()
 
 # ---------------------------------------------------------------------------
 # Patch targets

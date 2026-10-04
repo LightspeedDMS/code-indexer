@@ -98,15 +98,16 @@ class TestEarlyTerminationCleanup:
             service = RegexSearchService(tmp_path)
 
         captured_path: dict = {}
+        # grep --null record format (Bug #2030): path\0LINE:content
         mock_executor = _mock_output_capped_executor(
-            "file.py:1:def func():\n", captured_path
+            "file.py\x001:def func():\n", captured_path
         )
 
         with patch(
             "code_indexer.global_repos.regex_search.SubprocessExecutor",
             return_value=mock_executor,
         ):
-            await service._search_grep(
+            matches, _total = await service._search_grep(
                 pattern="func",
                 search_path=tmp_path,
                 include_patterns=None,
@@ -117,6 +118,9 @@ class TestEarlyTerminationCleanup:
                 timeout_seconds=_TEST_TIMEOUT_SECONDS,
             )
 
+        # Guards the fixture itself: output in a format the grep parser no
+        # longer accepts would parse zero records and pass silently.
+        assert [m.file_path for m in matches] == ["file.py"]
         assert "path" in captured_path, "executor was never invoked"
         assert not os.path.exists(captured_path["path"]), (
             "temp file leaked on the early-termination (output_capped) path"

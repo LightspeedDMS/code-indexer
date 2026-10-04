@@ -132,6 +132,17 @@ _MATCH_CONTENT_TRUNCATION_MARKER_BYTES = len(
     _MATCH_CONTENT_TRUNCATION_MARKER.encode("utf-8")
 )
 
+# Bug #2030: grep runs with ``--null`` (see _build_grep_command), so every
+# record is ``path\0LINE:content`` (match) or ``path\0LINE-content``
+# (context). A path cannot contain NUL, so the path ends at the first NUL and
+# the separator is the first non-digit after it -- independent of any
+# ``-<digits>-`` or ``:<digits>:`` segment inside directory or file names, and
+# of separator-shaped text inside the content. Groups: 1=path, 2=line,
+# 3=content. A line without a NUL (e.g. "Binary file X matches") is not a
+# record.
+_GREP_MATCH_RECORD = re.compile(r"^([^\x00]+)\x00(\d+):(.*)$")
+_GREP_CONTEXT_RECORD = re.compile(r"^([^\x00]+)\x00(\d+)-(.*)$")
+
 
 def _bounded_match_content(value: str) -> str:
     """Truncate ``value`` to at most ``_MAX_MATCH_CONTENT_BYTES`` UTF-8
@@ -1957,10 +1968,15 @@ class RegexSearchService:
         """Build grep command with common flags.
 
         Always includes -H flag to force filename output even when searching
-        a single file. This ensures consistent parsing of grep output where
-        the regex expects 'filename:line:content' format.
+        a single file, and ``--null`` (Bug #2030) so grep terminates every
+        filename with a NUL byte instead of the ``:``/``-`` separator. Records
+        are therefore ``path\\0LINE:content`` (match) and
+        ``path\\0LINE-content`` (context): a path can never contain NUL, so
+        parsing is independent of the path's own characters. ``--null`` is
+        the long form accepted by both GNU and BSD grep (BSD's ``-Z`` means
+        decompress).
         """
-        cmd = ["grep", "-E", "-H"]
+        cmd = ["grep", "-E", "-H", "--null"]
         if recursive:
             cmd.append("-rn")
         else:
@@ -1984,7 +2000,8 @@ class RegexSearchService:
         collecting_context_after: bool,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
-        """Handle one grep match-line record ("path:linenum:content").
+        """Handle one grep match-line record ("path\\0linenum:content",
+        matched by ``_GREP_MATCH_RECORD`` -- Bug #2030).
 
         Mirrors ``_process_ripgrep_match_event``: capacity checked first
         (max_results, then the round-5 Priority 1 aggregate ``budget``),
@@ -2037,7 +2054,8 @@ class RegexSearchService:
         context_lines: int,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
-        """Handle one grep context-line record ("path-linenum-content").
+        """Handle one grep context-line record ("path\\0linenum-content",
+        matched by ``_GREP_CONTEXT_RECORD`` -- Bug #2030).
 
         Mirrors ``_process_ripgrep_context_event``'s bound + aggregate
         ``budget`` reservation (round 5 Priority 1); ``stop=True`` when
@@ -2066,8 +2084,9 @@ class RegexSearchService:
         context_lines: int,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
-        """Parse grep match/context lines into RegexMatch objects (see
-        ``_ResultContentBudget`` for ``budget``). Return stays
+        """Parse grep ``--null`` match/context records into RegexMatch
+        objects (see ``_GREP_MATCH_RECORD`` for the record format, Bug #2030,
+        and ``_ResultContentBudget`` for ``budget``). Return stays
         (matches, total) for direct-caller compatibility."""
         if budget is None:
             budget = _ResultContentBudget()
@@ -2080,7 +2099,7 @@ class RegexSearchService:
             if line.strip() == "--":
                 collecting, context_before = False, []
                 continue
-            m = re.match(r"^(.+?):(\d+):(.*)$", line)
+            m = _GREP_MATCH_RECORD.match(line)
             if m:
                 stop, total, context_before, collecting = self._process_grep_match_line(
                     m, matches, total, max_results, context_before, collecting, budget
@@ -2088,7 +2107,7 @@ class RegexSearchService:
                 if stop:
                     break
                 continue
-            c = re.match(r"^(.+?)-(\d+)-(.*)$", line)
+            c = _GREP_CONTEXT_RECORD.match(line)
             if c:
                 context_before, collecting, stop = self._process_grep_context_line(
                     c, matches, context_before, collecting, context_lines, budget

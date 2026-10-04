@@ -228,6 +228,9 @@ class SiemCredentialStore:
                 f"SELECT {_IDENTITY_COLUMNS} FROM siem_delivery_credential WHERE id = 1"
             )
             assert row is not None
+            if prior:
+                # Bug #2018: the canary proved the REPLACED key
+                state_store.invalidate_canary(tx)
             return ("replaced" if prior else "set"), _identity(row)
 
         result: Tuple[str, Dict[str, Any]] = self.db.write(_do, phase="credential")
@@ -244,10 +247,20 @@ class SiemCredentialStore:
             if row is None:
                 return None
             tx.execute("DELETE FROM siem_delivery_credential WHERE id = 1")
+            state_store.invalidate_canary(tx)  # Bug #2018
             return _identity(row)
 
         removed: Optional[Dict[str, Any]] = self.db.write(_do, phase="credential")
         return removed
+
+    def credential_id(self) -> Optional[str]:
+        """The stored key's storage id (new on every set), None when none."""
+        row = self.db.read(
+            lambda tx: tx.one(
+                "SELECT credential_id FROM siem_delivery_credential WHERE id = 1"
+            )
+        )
+        return str(row["credential_id"]) if row is not None else None
 
     def identity(self) -> Optional[Dict[str, Any]]:
         row = self.db.read(

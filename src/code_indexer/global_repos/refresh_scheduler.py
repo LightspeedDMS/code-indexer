@@ -41,10 +41,8 @@ from .snapshot_retention import (
     discover_and_enforce_temporal_retention,
     enforce_snapshot_retention,
 )
-from .refresh_integrity_gate import (
-    RefreshIntegrityGateResult,
-    run_refresh_integrity_gate,
-)
+from .refresh_integrity_gate import RefreshIntegrityGateResult
+from . import refresh_failure_recovery as failure_recovery
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.utils.subprocess_diagnostics import (
@@ -72,6 +70,12 @@ from code_indexer.server.storage.shared.nfs_visibility import (
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from functools import partial
+
+from code_indexer.services.index_failure_exit_codes import (
+    FatalChunkStoreIndexError,
+    chunk_store_failure_kind_for_exit_code,
+)
 
 # Story #1586 AC4: cidx.repos.refresh.duration OTEL metric -- peek_telemetry_
 # manager() (never get_telemetry_manager()) for the same reason job_tracker.py
@@ -123,12 +127,10 @@ def _record_refresh_duration_metric(
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 
-# Bug #1506: N consecutive ordinary-refresh integrity-gate failures for the
-# same golden_alias are QUARANTINED (loudly logged for operator attention)
-# -- mirrors description_refresh_scheduler.py's
-# PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
-# FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
-_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+# Bug #1506: quarantine threshold, single definition in failure_recovery.
+_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = (
+    failure_recovery.REFRESH_INTEGRITY_QUARANTINE_THRESHOLD
+)
 
 # Bug #1769: N consecutive local-repo `cidx init` repair failures for the
 # same golden_alias are QUARANTINED (loudly logged for operator
@@ -835,8 +837,8 @@ class RefreshScheduler:
     # _handle_fetch_error): re-cloning an inaccessible/nonexistent repo
     # cannot possibly succeed and would only waste a subprocess + network
     # round trip.
-    PERMANENT_BACKOFF_BASE_SECONDS: int = 300  # 5 minutes
-    PERMANENT_BACKOFF_CAP_SECONDS: int = 21600  # 6 hours
+    PERMANENT_BACKOFF_BASE_SECONDS = failure_recovery.FAILURE_BACKOFF_BASE_SECONDS
+    PERMANENT_BACKOFF_CAP_SECONDS = failure_recovery.FAILURE_BACKOFF_CAP_SECONDS
 
     # ------------------------------------------------------------------
     # Story #284: Back-propagating jitter for staggered refresh scheduling
@@ -979,16 +981,7 @@ class RefreshScheduler:
         (returns None) -- out of scope for #1341.
         """
         if category == "permanent":
-            exponent = max(0, consecutive_failures - 1)
-            # int ** int is typed Any in typeshed (negative exponents yield
-            # float) -- exponent is always >= 0 here, so int(...) is safe
-            # and satisfies the declared Optional[int] return type.
-            return int(
-                min(
-                    self.PERMANENT_BACKOFF_BASE_SECONDS * (2**exponent),
-                    self.PERMANENT_BACKOFF_CAP_SECONDS,
-                )
-            )
+            return failure_recovery.failure_backoff_seconds(consecutive_failures)
 
         if (
             category == "transient"
@@ -1886,6 +1879,10 @@ class RefreshScheduler:
                     # retry on the very next poll.
                     _submit_failed = False
                     try:
+                        if failure_recovery.defer_due_alias(
+                            self.golden_repo_metadata, self.registry, alias_name
+                        ):
+                            continue
                         self._submit_refresh_job(alias_name)
                         self._db_throttle.on_db_success(logger)
                     except DuplicateJobError:
@@ -1925,6 +1922,11 @@ class RefreshScheduler:
                                 f"Failed to persist next_refresh for {alias_name}: {e}"
                             )
 
+                failure_recovery.fire_expired_deferred_triggers(
+                    self.golden_repo_metadata,
+                    self._submit_refresh_job,
+                    self._db_throttle,
+                )
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0
 
@@ -1990,6 +1992,12 @@ class RefreshScheduler:
             and self._scheduled_local_repo_repair_is_quarantined(alias_name)
         ):
             return None
+
+        # Bug #2022: defer in backoff unless externally managed (no loop fires it).
+        if submitter_username == "system" and not (
+            force_reset or self._is_externally_managed()
+        ):
+            failure_recovery.defer_if_backed_off(self.golden_repo_metadata, alias_name)
 
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
@@ -2096,6 +2104,7 @@ class RefreshScheduler:
         """
         _refresh_start_monotonic = time.monotonic()
         _status = "error"
+        settle = failure_recovery.skip_settler(self.golden_repo_metadata, alias_name)
         try:
             result = self._execute_refresh_impl(
                 alias_name,
@@ -2104,6 +2113,7 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
             )
             _status = "success" if result.get("success") else "error"
+            settle(result)
             return result
         finally:
             _record_refresh_duration_metric(
@@ -2262,6 +2272,9 @@ class RefreshScheduler:
                     # Initialized here so _check_extension_drift can set it before
                     # any early-return exit in the local/git branching below.
                     force_reconcile = False
+                    regate, covered_generation = failure_recovery.begin_refresh_cycle(
+                        self.golden_repo_metadata, alias_name
+                    )
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -2454,7 +2467,7 @@ class RefreshScheduler:
                                     master_path, _branch
                                 ).sync()
 
-                                if _sync_result.skipped and not force_reset:
+                                if _sync_result.skipped and not (force_reset or regate):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
                                         "skipping refresh",
@@ -2483,7 +2496,7 @@ class RefreshScheduler:
                                 force_reconcile = self._check_extension_drift(
                                     source_path, alias_name
                                 )
-                                if not force_reconcile:
+                                if not (force_reconcile or regate):
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
@@ -2570,7 +2583,7 @@ class RefreshScheduler:
                             # state left to check. Mirrors the post-migration
                             # block's identical call above.
                             sync_result = CidxMetaBackupSync(master_path, branch).sync()
-                            if sync_result.skipped and not force_reset:
+                            if sync_result.skipped and not (force_reset or regate):
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
                                     alias_name,
@@ -2748,7 +2761,7 @@ class RefreshScheduler:
                                                     source_path, alias_name
                                                 )
                                             )
-                                        if not force_reconcile:
+                                        if not (force_reconcile or regate):
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
@@ -2822,15 +2835,28 @@ class RefreshScheduler:
                         # Reuses the SAME factory the golden-repo
                         # add/registration path already applies -- never a
                         # second, duplicated copy.
-                        self._index_source(
-                            alias_name=alias_name,
-                            source_path=source_path,
-                            progress_callback=progress_callback,
-                            orphan_event_callback=_make_hnsw_orphan_event_logger(
-                                alias_name
-                            ),
-                            force_reconcile=force_reconcile,
-                        )
+                        try:
+                            self._index_source(
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                progress_callback=progress_callback,
+                                orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                    alias_name
+                                ),
+                                force_reconcile=force_reconcile,
+                            )
+                        except FatalChunkStoreIndexError as fatal_exc:
+                            # Bug #2022: self-heal under the lock; stay failed.
+                            failure_recovery.self_heal_after_fatal_chunk_store_failure(
+                                metadata=self.golden_repo_metadata,
+                                snapshot_manager=self._snapshot_manager,
+                                alias_name=alias_name,
+                                source_path=source_path,
+                                current_target=current_target,
+                                error=fatal_exc,
+                                verify_ownership=self._ownership_check(repo_name),
+                            )
+                            raise
 
                         # Bug #1506: run-boundary durability-flush +
                         # integrity gate (still under the write lock
@@ -2946,8 +2972,10 @@ class RefreshScheduler:
                         cleanup_manager=self.cleanup_manager,
                     )
 
-                    # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
+                    failure_recovery.resolve_after_publish(  # Bug #2022: published
+                        self.golden_repo_metadata, alias_name, covered_generation
+                    )
 
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
@@ -2985,7 +3013,7 @@ class RefreshScheduler:
                     _tracker_raised = True
                     raise RuntimeError(
                         f"Refresh failed for {alias_name}: {type(e).__name__}: {e}"
-                    )
+                    ) from e
 
         finally:
             # Story #1586 AC4/Finding 2: cidx.repos.refresh.duration is now
@@ -3181,59 +3209,12 @@ class RefreshScheduler:
             "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
         }
 
-    def _record_integrity_gate_failure(
-        self, alias_name: str, gate_result: RefreshIntegrityGateResult
-    ) -> None:
-        """Log + persist a Bug #1506 integrity-gate failure (quarantine
-        bookkeeping), extracted from ``_run_and_publish_integrity_gate``
-        purely to keep that method short."""
-        detail_summary = "; ".join(
-            f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
+    def _ownership_check(self, repo_name: str) -> Callable[[], None]:
+        return partial(
+            self.raise_if_write_lock_ownership_lost,
+            repo_name,
+            owner_name="refresh_scheduler",
         )
-        logger.error(
-            f"Bug #1506: refusing to publish refresh for "
-            f"{alias_name} -- integrity gate failed for "
-            f"{len(gate_result.failures)} collection(s): "
-            f"{detail_summary}. The already-published alias "
-            f"continues serving the last verified-good snapshot."
-        )
-        try:
-            failure_count = self.golden_repo_metadata.record_refresh_integrity_failure(
-                alias_name, detail_summary
-            )
-            if failure_count >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD:
-                logger.error(
-                    f"Bug #1506: {alias_name} has failed the refresh "
-                    f"integrity gate {failure_count} consecutive times -- "
-                    f"QUARANTINED. Operator attention is required to "
-                    f"investigate the underlying corruption source."
-                )
-        except Exception as quarantine_exc:
-            logger.error(
-                f"Bug #1506: failed to record refresh-integrity "
-                f"quarantine state for {alias_name} (non-fatal): "
-                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
-            )
-
-    def _reset_integrity_gate_quarantine(self, alias_name: str) -> None:
-        """Clear any prior Bug #1506 quarantine state on a gate pass,
-        extracted from ``_run_and_publish_integrity_gate`` purely to keep
-        that method short."""
-        try:
-            self.golden_repo_metadata.reset_refresh_integrity_failure(alias_name)
-        except Exception as reset_exc:
-            # Bug #1506 4th-pass review Item 3: bumped from WARNING to
-            # ERROR -- if this bookkeeping write repeatedly fails, the
-            # consecutive-failure-count circuit breaker never gets reset
-            # either, silently confusing future quarantine decisions. This
-            # does not fail the current cycle (already correct: the gate
-            # itself already decided to publish), it only ensures the
-            # swallowed failure is loudly visible for operator diagnosis.
-            logger.error(
-                f"Bug #1506: failed to reset refresh-integrity quarantine "
-                f"state for {alias_name} (non-fatal): "
-                f"{type(reset_exc).__name__}: {reset_exc}"
-            )
 
     def _run_and_publish_integrity_gate(
         self,
@@ -3257,26 +3238,19 @@ class RefreshScheduler:
         convention (an early-return dict for ``_execute_refresh``, a
         raised ``RuntimeError`` for ``_create_new_index``).
         """
-        healthy_index_dir = (
-            Path(current_target) / ".code-indexer" / "index"
-            if current_target and current_target != source_path
-            else None
-        )
-        clone_backend = (
-            getattr(self._snapshot_manager, "_clone_backend", None)
-            if self._snapshot_manager is not None
-            else None
-        )
-        gate_result = run_refresh_integrity_gate(
-            source_index_dir=Path(source_path) / ".code-indexer" / "index",
-            healthy_index_dir=healthy_index_dir,
-            clone_backend=clone_backend,
+        gate_result = failure_recovery.run_integrity_gate_against_published(
+            self._snapshot_manager,
+            source_path,
+            current_target,
+            before_restore=self._ownership_check(alias_name.removesuffix("-global")),
         )
         if not gate_result.passed:
-            self._record_integrity_gate_failure(alias_name, gate_result)
+            failure_recovery.record_publish_gate_failure(
+                self.golden_repo_metadata, alias_name, gate_result
+            )
             return gate_result
 
-        self._reset_integrity_gate_quarantine(alias_name)
+        failure_recovery.reset_integrity_strikes(self.golden_repo_metadata, alias_name)
         return gate_result
 
     def _index_source(
@@ -3600,6 +3574,20 @@ class RefreshScheduler:
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
                     )
+                # Bug #2022: the child's reserved exit code names a fatal
+                # chunk-store failure kind; surface it typed for self-heal.
+                fatal_kind = chunk_store_failure_kind_for_exit_code(e.returncode)
+                if fatal_kind is not None:
+                    logger.error(
+                        f"{phase_name} indexing on source failed for {alias_name} "
+                        f"with a fatal chunk-store {fatal_kind.value} failure: "
+                        f"{error_msg}"
+                    )
+                    raise FatalChunkStoreIndexError(
+                        f"{phase_name} indexing on source failed for {alias_name}: "
+                        f"fatal chunk-store {fatal_kind.value} failure: {error_msg}",
+                        fatal_kind,
+                    ) from e
                 logger.error(
                     f"{phase_name} indexing on source failed for {alias_name}: {error_msg}",
                     exc_info=True,

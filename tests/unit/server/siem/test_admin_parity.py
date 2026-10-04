@@ -7,7 +7,7 @@ import dataclasses
 import json
 import logging
 import threading
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
 
@@ -48,6 +48,11 @@ class _CommittedConfig:
     def read_committed_section(self, name: str) -> Tuple[int, Dict[str, Any]]:
         assert name == "siem_delivery_config"
         return self.version, dict(self.section)
+
+    def register_on_commit_callback(self, callback: Any) -> Callable[[], None]:
+        """Commits happen by assigning section/version here: no callback;
+        the returned unregister handle has nothing to release."""
+        return lambda: None
 
 
 class _NoJobs:
@@ -170,6 +175,7 @@ def test_concurrent_arming_statements_arm_exactly_once(wired: Tuple[Any, ...]) -
         first, "alice", canary["canary_run_id"], canary["expected_product_log_ids"]
     )
     dest = harness_destination(sidecar)
+    epoch = first.committed_view().section.arming_epoch
     results: List[Dict[str, Any]] = []
     barrier = threading.Barrier(2)
 
@@ -182,6 +188,7 @@ def test_concurrent_arming_statements_arm_exactly_once(wired: Tuple[Any, ...]) -
                 enabled=True,
                 destination_key=dest.key,
                 mapping_version=first.mapping_version,
+                config_epoch=epoch,
                 probe_fresh_seconds=600,
             )
         )

@@ -42,7 +42,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from code_indexer.storage.id_index_manager import IDIndexManager
 from code_indexer.storage.shared.chunk_layout import (
@@ -1534,19 +1534,28 @@ def _check_integrity_fresh_connection(chunks_db_path: Path) -> "tuple[bool, str]
     if not path.exists():
         return False, "file does not exist"
 
-    uri = f"{path.resolve().as_uri()}?mode=ro"
     try:
-        conn = sqlite3.connect(uri, uri=True)
-        try:
-            rows = conn.execute("PRAGMA integrity_check").fetchall()
-        finally:
-            conn.close()
+        rows = run_integrity_check_fresh_connection(path)
     except sqlite3.Error as exc:
         return False, str(exc)
 
-    if len(rows) == 1 and rows[0][0] == "ok":
+    if rows == ["ok"]:
         return True, "ok"
-    return False, "; ".join(str(row[0]) for row in rows)
+    return False, "; ".join(rows)
+
+
+def run_integrity_check_fresh_connection(chunks_db_path: Path) -> List[str]:
+    """Run ``PRAGMA integrity_check`` on a genuinely NEW, READ-ONLY
+    connection to an existing *chunks_db_path* and return its result rows
+    (``["ok"]`` when healthy). A ``sqlite3.Error`` -- the check could not run
+    or complete -- propagates, so callers can tell "the check reported
+    damage" apart from "the check itself failed" (Bug #2022)."""
+    uri = f"{Path(chunks_db_path).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+    finally:
+        conn.close()
 
 
 def _best_effort_remove_untrusted_chunks_db(chunks_db_path: Path) -> None:

@@ -282,39 +282,54 @@ L4="$TELEMETRY_DIR/chunk4-web-repos-routers-${TIMESTAMP}.log"
 L5="$TELEMETRY_DIR/chunk5-rest-${TIMESTAMP}.log"
 L6="$TELEMETRY_DIR/chunk6-rest2-${TIMESTAMP}.log"
 
-# Cleanup temp dirs on exit
-trap 'rm -rf "$D1" "$D2" "$D3" "$D4" "$D5" "$D6"' EXIT
+# Real-server-home isolation (Bug #1996 follow-up): no chunk may resolve the
+# developer's real ~/.cidx-server -- HOME and the server data dirs point at
+# scratch -- and the lane fails if the real launch.json / config.json changed.
+# shellcheck source=scripts/real-server-home-guard.sh
+source "$PROJECT_DIR/scripts/real-server-home-guard.sh"
+unset CIDX_REAL_HOME_GUARD_DIR  # a developer-shell export must not redirect it
+# Under the real ~/.tmp, not /tmp: tests root their tmp dirs at ~/.tmp, and
+# config discovery walking up from /tmp can hit stray configs there.
+mkdir -p "$HOME/.tmp"
+LANE_SCRATCH=$(mktemp -d "$HOME/.tmp/cidx-lane-home-XXXXXX")
+
+# Cleanup temp dirs on exit (armed before the snapshot and lane env)
+trap 'rm -rf "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$LANE_SCRATCH"' EXIT
+
+REAL_HOME_STATE="$LANE_SCRATCH/real-home-guard.state"
+real_home_guard_snapshot "$REAL_HOME_STATE"
+real_home_lane_env "$LANE_SCRATCH"
 
 WALL_START=$(date +%s)
 
 # Launch all 6 chunks in parallel
-CIDX_SERVER_DATA_DIR="$D1" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D1" CIDX_DATA_DIR="$D1" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/services/ "${PYTEST_COMMON_OPTS[@]}" \
     >"$L1" 2>&1 &
 PID1=$!
 
-CIDX_SERVER_DATA_DIR="$D2" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D2" CIDX_DATA_DIR="$D2" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/auth/ "${PYTEST_COMMON_OPTS[@]}" \
     >"$L2" 2>&1 &
 PID2=$!
 
-CIDX_SERVER_DATA_DIR="$D3" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D3" CIDX_DATA_DIR="$D3" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/storage/ tests/unit/server/wiki/ "${PYTEST_COMMON_OPTS[@]}" \
     >"$L3" 2>&1 &
 PID3=$!
 
-CIDX_SERVER_DATA_DIR="$D4" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D4" CIDX_DATA_DIR="$D4" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/web/ tests/unit/server/repositories/ tests/unit/server/routers/ "${PYTEST_COMMON_OPTS[@]}" \
     >"$L4" 2>&1 &
 PID4=$!
 
-CIDX_SERVER_DATA_DIR="$D5" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D5" CIDX_DATA_DIR="$D5" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/mcp/ tests/unit/server/telemetry/ tests/unit/server/handlers/ \
     "${PYTEST_COMMON_OPTS[@]}" \
     >"$L5" 2>&1 &
 PID5=$!
 
-CIDX_SERVER_DATA_DIR="$D6" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+CIDX_SERVER_DATA_DIR="$D6" CIDX_DATA_DIR="$D6" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
     python3 -m pytest tests/unit/server/ \
     --ignore=tests/unit/server/services/ \
     --ignore=tests/unit/server/auth/ \
@@ -345,6 +360,13 @@ WALL_END=$(date +%s)
 WALL_SECS=$((WALL_END - WALL_START))
 
 TEST_EXIT_CODE=$(( C1 | C2 | C3 | C4 | C5 | C6 ))
+
+# Fail the lane if any chunk changed the developer's real ~/.cidx-server.
+real_home_guard_verify "$REAL_HOME_STATE" && REAL_HOME_OK=0 || REAL_HOME_OK=$?
+if [ "$REAL_HOME_OK" -ne 0 ]; then
+    print_error "This run changed the developer's real ~/.cidx-server (see above)"
+fi
+TEST_EXIT_CODE=$(real_home_guard_exit_code "$TEST_EXIT_CODE" "$REAL_HOME_OK")
 
 # Report per-chunk results
 echo ""

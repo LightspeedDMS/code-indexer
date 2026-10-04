@@ -465,9 +465,12 @@ class TestRemoveRepo:
 
         backend.remove_repo("target")
 
-        sql = mock_cursor.execute.call_args[0][0]
-        assert "DELETE FROM golden_repos_metadata" in sql
-        assert "alias = %s" in sql
+        statements = [c[0][0] for c in mock_cursor.execute.call_args_list]
+        assert "DELETE FROM golden_repos_metadata" in statements[0]
+        assert "alias = %s" in statements[0]
+        # Bug #2022: the repo's refresh failure backoff goes in the same
+        # transaction, after the repo row.
+        assert "DELETE FROM refresh_failure_backoff_state" in statements[1]
 
 
 # ---------------------------------------------------------------------------

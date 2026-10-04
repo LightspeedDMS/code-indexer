@@ -54,8 +54,26 @@ def make_search_result(matches):
 
 
 def _run(coro):
-    """Run a coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously on a private event loop, then release it.
+
+    handle_regex_search offloads reranking via
+    ``loop.run_in_executor(None, ...)``, which starts the loop's default
+    ThreadPoolExecutor -- a NON-daemon ``asyncio_N`` thread. Shutting that
+    executor down and closing the loop before returning keeps the thread
+    from outliving the test session (Bug #1800 guard), exactly as
+    production's ``handle_regex_search_sync`` does via ``asyncio.run``.
+    ``asyncio.run`` itself is not used here because it resets the thread's
+    current event loop to None, which would change behaviour for any later
+    test that calls ``asyncio.get_event_loop()``.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            loop.close()
 
 
 @contextmanager

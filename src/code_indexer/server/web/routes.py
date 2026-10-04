@@ -55,7 +55,11 @@ from .auth import (
     SessionData,
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
-from ..services.config_service import BootstrapFileNotWritten, get_config_service
+from ..services.config_service import (
+    BootstrapFileNotWritten,
+    ConfigChangeConflict,
+    get_config_service,
+)
 from ..services.golden_repo_audited_ops import request_golden_repo_refresh
 from ..utils.bounded_submission_gate import (
     BoundedSubmissionGate,
@@ -9523,37 +9527,20 @@ async def _read_siem_form(
 ) -> Tuple[Any, Any]:
     """(form, None), or (None, error page): the body is read under a hard
     cap BEFORE parsing (413 over it), counts are bounded, CSRF is checked."""
-    from .siem_forms import FormTooLarge, read_capped_form
-
-    def _error(message: str, code: int) -> Any:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=message,
-            validation_errors={"siem_delivery": message},
-            status_code=code,
-        )
+    from .siem_forms import FormRefused, read_checked_form
 
     try:
-        form = await read_capped_form(
+        form = await read_checked_form(
             request, max_files=max_files, max_fields=max_fields
         )
-    except FormTooLarge:
-        return None, _error(
-            "SIEM Delivery: the upload is larger than 512 KiB",
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-        )
-    except ValueError:
-        return None, _error(
-            "SIEM Delivery: the form is malformed", status.HTTP_400_BAD_REQUEST
-        )
-    csrf = form.get("csrf_token")
-    if not validate_login_csrf_token(request, csrf if isinstance(csrf, str) else None):
+    except FormRefused as refused:
+        errors = None if refused.status == 403 else {"siem_delivery": refused.message}
         return None, _create_config_page_response(
             request,
             session,
-            error_message="Invalid CSRF token",
-            status_code=status.HTTP_403_FORBIDDEN,
+            error_message=refused.message,
+            validation_errors=errors,
+            status_code=refused.status,
         )
     return form, None
 
@@ -12781,6 +12768,30 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
     restart_thread.start()
 
 
+def _restart_request_failed(exc: Exception) -> JSONResponse:
+    """The restart request raised, so nothing is restarting: release the
+    in-progress flag (a later restart stays possible) and tell the UI."""
+    global _restart_in_progress
+    with _restart_lock:
+        _restart_in_progress = False
+    logger.error("Server restart request failed: %s", exc, exc_info=True)
+    if isinstance(exc, ConfigChangeConflict):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "message": "The configuration kept changing concurrently; "
+                "no restart was requested. Try again."
+            },
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": "The restart request failed; no restart was requested. "
+            "See the server log."
+        },
+    )
+
+
 @web_router.post(
     "/restart",
     response_class=JSONResponse,
@@ -12836,55 +12847,62 @@ def restart_server(request: Request) -> JSONResponse:
             )
         _restart_in_progress = True
 
-    # Log restart request with username
-    username = session.username
-    logger.info(f"Server restart requested by {username}")
+    # This request OWNS the claim from here on: any failure before a restart
+    # is under way releases it (_restart_request_failed), or every later
+    # restart would be refused.  Solo success hands the claim to the delayed
+    # restart worker.
+    try:
+        username = session.username
+        logger.info(f"Server restart requested by {username}")
 
-    # Story #1200 AC7: branch on cluster vs solo mode.
-    #
-    # Cluster (PG pool present): bump launch_restart_generation only.
-    # The bumping node does NOT synchronously write restart.signal here — its
-    # own check_pending_launch_restart() poll (running every interval) detects
-    # target > applied and signals itself (MAJOR-M3 / FIX-2).  All other nodes
-    # are signalled by their own poll loops independently.
-    #
-    # Solo: retain the existing single-node restart path (materialize + signal /
-    # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
-    from code_indexer.server.services.server_restart_audited import (
-        request_server_restart,
-    )
-
-    config_svc = get_config_service()
-    if config_svc._pool is not None:
-        # Cluster mode: bump generation, let per-poll check handle restart.signal.
-        # The audit row is written durably BEFORE the bump.
-        request_server_restart(
-            config_svc.bump_launch_restart_generation, actor=username, scope="cluster"
+        # Story #1200 AC7: branch on cluster vs solo mode.
+        #
+        # Cluster (PG pool present): bump launch_restart_generation only.
+        # The bumping node does NOT synchronously write restart.signal here —
+        # its own check_pending_launch_restart() poll (running every interval)
+        # detects target > applied and signals itself (MAJOR-M3 / FIX-2).  All
+        # other nodes are signalled by their own poll loops independently.
+        #
+        # Solo: retain the existing single-node restart path (materialize +
+        # signal / os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+        from code_indexer.server.services.server_restart_audited import (
+            request_server_restart,
         )
-        with _restart_lock:
-            _restart_in_progress = False
+
+        config_svc = get_config_service()
+        if config_svc._pool is not None:
+            # Cluster mode: bump generation, let per-poll check handle
+            # restart.signal.  The audit row is written durably BEFORE the bump.
+            request_server_restart(
+                config_svc.bump_launch_restart_generation,
+                actor=username,
+                scope="cluster",
+            )
+            with _restart_lock:
+                _restart_in_progress = False
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "message": (
+                        "Cluster restart requested: generation bumped. "
+                        "All nodes will restart via the auto-updater."
+                    )
+                },
+            )
+
+        # Solo mode: materialize launch config then schedule single-node
+        # restart.  The audit row is written durably BEFORE it is scheduled.
+        def _restart_this_node() -> None:
+            config_svc.materialize_launch_config()
+            _schedule_delayed_restart(delay=2)
+
+        request_server_restart(_restart_this_node, actor=username, scope="node")
+        # Return 202 Accepted immediately
         return JSONResponse(
-            status_code=202,
-            content={
-                "message": (
-                    "Cluster restart requested: generation bumped. "
-                    "All nodes will restart via the auto-updater."
-                )
-            },
+            status_code=202, content={"message": "Server is restarting in 2 seconds..."}
         )
-
-    # Solo mode: materialize launch config then schedule single-node restart.
-    # The audit row is written durably BEFORE the restart is scheduled.
-    def _restart_this_node() -> None:
-        config_svc.materialize_launch_config()
-        _schedule_delayed_restart(delay=2)
-
-    request_server_restart(_restart_this_node, actor=username, scope="node")
-
-    # Return 202 Accepted immediately
-    return JSONResponse(
-        status_code=202, content={"message": "Server is restarting in 2 seconds..."}
-    )
+    except Exception as exc:
+        return _restart_request_failed(exc)
 
 
 @api_router.get("/server-time")

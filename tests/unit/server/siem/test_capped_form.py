@@ -101,3 +101,41 @@ def test_a_normal_form_parses() -> None:
     assert form["csrf_token"] == "t"
     upload = form["service_account_file"]
     assert asyncio.run(upload.read()) == b'{"a":1}'
+
+
+def _checked(request: Request, **limits: Any) -> Any:
+    from code_indexer.server.web.siem_forms import read_checked_form
+
+    return asyncio.run(read_checked_form(request, **limits))
+
+
+def test_checked_form_refuses_an_oversize_body_with_413() -> None:
+    from code_indexer.server.web.siem_forms import FormRefused
+
+    small = 64 * 1024
+    body = _Body(_multipart([("f", None, b"x" * (small + 1))]))
+    with pytest.raises(FormRefused) as exc:
+        _checked(
+            _request(body, content_length=len(body.body)),
+            max_files=0,
+            max_fields=2,
+            max_body=small,
+        )
+    assert exc.value.status == 413 and "64 KiB" in exc.value.message
+    assert body.pulled == 0
+
+
+def test_checked_form_refuses_a_malformed_form_with_400() -> None:
+    from code_indexer.server.web.siem_forms import FormRefused
+
+    two_files = _multipart([("a", "a.json", b"{}"), ("b", "b.json", b"{}")])
+    with pytest.raises(FormRefused) as exc:
+        _checked(
+            _request(_Body(two_files), content_length=len(two_files)),
+            max_files=1,
+            max_fields=2,
+        )
+    assert (exc.value.status, exc.value.message) == (
+        400,
+        "SIEM Delivery: the form is malformed",
+    )

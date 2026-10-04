@@ -4847,7 +4847,11 @@ def index(
                 progress_manager.stop_progress()
                 rich_live_manager.stop_display()
             console.print(f"❌ Indexing failed: {e}", style="red")
-            sys.exit(1)
+            # Bug #2022: a fatal chunk-store failure exits with a reserved
+            # per-kind code so the server can tell corruption apart.
+            from .services.index_failure_exit_codes import index_failure_exit_code
+
+            sys.exit(index_failure_exit_code(e))
 
         # Clean up progress manager and Rich Live display before completion summary
         if display_initialized:
@@ -4989,7 +4993,9 @@ def index(
 
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")
-        sys.exit(1)
+        from .services.index_failure_exit_codes import index_failure_exit_code
+
+        sys.exit(index_failure_exit_code(e))
     finally:
         # Codex Finding 1a: release the foreground index-mutation lock on
         # EVERY exit path (normal return, sys.exit -> SystemExit, or any

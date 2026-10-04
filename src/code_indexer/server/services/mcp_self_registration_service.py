@@ -10,7 +10,7 @@ import base64
 import logging
 import subprocess
 import threading
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from code_indexer.server.services.audit_events import SystemComponent
 
@@ -49,7 +49,8 @@ class MCPSelfRegistrationService:
         Initialize MCP self-registration service.
 
         Args:
-            config_manager: ServerConfigManager for persistent config storage
+            config_manager: the ConfigService (load_config to read; the
+                credential is stored with apply_system_change, Bug #2017)
             mcp_credential_manager: MCPCredentialManager for credential generation
         """
         self._config_manager = config_manager
@@ -193,10 +194,15 @@ class MCPSelfRegistrationService:
                 actor=SystemComponent.MCP_SELF_REGISTRATION,
             )
 
-            # Store in config (Story #203 Finding 1: update dataclass fields)
-            stored_config.client_id = cred["client_id"]
-            stored_config.client_secret = cred["client_secret"]
-            self._config_manager.save_config(config)
+            # Store in config (Story #203 Finding 1: update dataclass fields).
+            # Bug #2017: only these two fields, applied to the COMMITTED
+            # configuration -- never a write-back of the copy read above.
+            def _store(candidate: Any) -> None:
+                section = candidate.mcp_self_registration
+                section.client_id = cred["client_id"]
+                section.client_secret = cred["client_secret"]
+
+            self._config_manager.apply_system_change(_store)
 
             logger.info("Generated new MCP self-registration credentials")
             return {

@@ -99,6 +99,8 @@ def assert_error_logged(
 
 
 @pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+# Both tests make loop iterations fail on purpose (conftest guard opt-in).
+@pytest.mark.scheduler_iteration_failures_expected
 class TestBug729UnboundRefreshInterval:
     """
     Verify that _scheduler_loop() does NOT raise UnboundLocalError when a

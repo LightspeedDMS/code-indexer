@@ -21,8 +21,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 60
+
+# Every test spawns a fresh interpreter importing the server; under parallel
+# gate load that exceeds the suite's default 15 s pytest-timeout, so the
+# ceiling must sit above the subprocess's own budget.
+pytestmark = pytest.mark.timeout(SUBPROCESS_TIMEOUT_SECONDS + 15)
 
 
 def _run_and_assert_ok(code: str) -> str:
