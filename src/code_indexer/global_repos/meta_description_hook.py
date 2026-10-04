@@ -100,6 +100,9 @@ _refresh_scheduler: Optional[Any] = None  # type: ignore
 _debouncer: Optional["CidxMetaRefreshDebouncer"] = None
 
 _DEFAULT_DEBOUNCE_SECONDS = 30
+#: Pacing cap on the debouncer's retry interval after a generic failure
+#: (store or job tracker unavailable): retries slow down, never give up.
+_MAX_RETRY_INTERVAL_SECONDS = 900.0
 
 
 class CidxMetaRefreshDebouncer:
@@ -125,6 +128,8 @@ class CidxMetaRefreshDebouncer:
     ) -> None:
         self._refresh_scheduler = refresh_scheduler
         self._debounce_seconds = debounce_seconds
+        # Paced retry interval after a generic failure (doubles, capped).
+        self._retry_delay: float = debounce_seconds
         self._dirty: bool = False
         self._timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
@@ -164,8 +169,11 @@ class CidxMetaRefreshDebouncer:
 
         Clears dirty state after successful refresh.  If trigger raises
         DuplicateJobError the job is still running; re-mark dirty and retry
-        after another debounce interval.  Any other exception is logged and
-        swallowed (non-blocking).
+        after another debounce interval.  A RefreshDeferredError was
+        persisted durably and needs nothing more here.  Any other exception
+        (store or job tracker unavailable) keeps the refresh owed: it is
+        logged and retried at a doubling interval capped at
+        _MAX_RETRY_INTERVAL_SECONDS -- paced, never given up.
         """
         from code_indexer.global_repos.refresh_failure_recovery import (
             RefreshDeferredError,
@@ -185,6 +193,7 @@ class CidxMetaRefreshDebouncer:
             # Success — NOW clear dirty
             with self._lock:
                 self._dirty = False
+                self._retry_delay = self._debounce_seconds
         except RefreshDeferredError as exc:
             # Bug #2022: the trigger was persisted as pending; the refresh
             # scheduler fires it once the backoff ends -- no retry spin here.
@@ -195,6 +204,7 @@ class CidxMetaRefreshDebouncer:
             )
             with self._lock:
                 self._dirty = False
+                self._retry_delay = self._debounce_seconds
         except DuplicateJobError:
             logger.info("cidx-meta refresh still running, will retry after debounce")
             with self._lock:
@@ -206,10 +216,23 @@ class CidxMetaRefreshDebouncer:
                     self._timer.daemon = True
                     self._timer.start()
         except Exception as exc:
-            logger.warning("Debounced cidx-meta refresh failed: %s", exc)
-            # On generic failure, clear dirty to avoid infinite retry
+            # Bug #2022: nothing durable records this refresh yet, so it stays
+            # owed (dirty) and is retried, paced, until it is submitted.
             with self._lock:
-                self._dirty = False
+                self._retry_delay = min(
+                    self._retry_delay * 2, _MAX_RETRY_INTERVAL_SECONDS
+                )
+                delay = self._retry_delay
+                if not self._shutdown:
+                    self._timer = threading.Timer(delay, self._on_timer_expired)
+                    self._timer.daemon = True
+                    self._timer.start()
+            logger.warning(
+                "Debounced cidx-meta refresh failed (%s: %s); retrying in %.1fs",
+                type(exc).__name__,
+                exc,
+                delay,
+            )
 
     def shutdown(self) -> None:
         """

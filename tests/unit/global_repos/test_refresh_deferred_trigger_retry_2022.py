@@ -214,3 +214,36 @@ def test_writer_helper_retries_a_failed_request_through_the_debouncer(
         )
     finally:
         debouncer.shutdown()
+
+
+#: An outage spanning several debouncer timer firings.
+OUTAGE_FAILURES = 3
+
+
+def test_debouncer_keeps_retrying_through_an_outage(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs = _harness_with_meta(tmp_path, metadata)
+    real_trigger = harness.scheduler.trigger_refresh_for_repo
+    attempts: List[str] = []
+
+    def _store_down_for_a_while(alias_name: str, *args: Any, **kwargs: Any) -> Any:
+        attempts.append(alias_name)
+        if len(attempts) <= OUTAGE_FAILURES:
+            raise OSError("metadata store unavailable")
+        return real_trigger(alias_name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        harness.scheduler, "trigger_refresh_for_repo", _store_down_for_a_while
+    )
+    debouncer = CidxMetaRefreshDebouncer(
+        harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
+    )
+    try:
+        debouncer.signal_dirty()
+
+        assert _wait_until(lambda: jobs.submitted == [META_ALIAS]), (
+            f"refresh lost after {len(attempts)} attempts during an outage"
+        )
+    finally:
+        debouncer.shutdown()

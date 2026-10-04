@@ -127,8 +127,7 @@ def _record_refresh_duration_metric(
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 
-# Bug #1506: consecutive integrity-gate failures that QUARANTINE an alias
-# (single definition, shared with the strike recorder).
+# Bug #1506: quarantine threshold, single definition in failure_recovery.
 _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = (
     failure_recovery.REFRESH_INTEGRITY_QUARANTINE_THRESHOLD
 )
@@ -2105,6 +2104,7 @@ class RefreshScheduler:
         """
         _refresh_start_monotonic = time.monotonic()
         _status = "error"
+        settle = failure_recovery.skip_settler(self.golden_repo_metadata, alias_name)
         try:
             result = self._execute_refresh_impl(
                 alias_name,
@@ -2113,7 +2113,7 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
             )
             _status = "success" if result.get("success") else "error"
-            failure_recovery.settle_skip(self.golden_repo_metadata, alias_name, result)
+            settle(result)
             return result
         finally:
             _record_refresh_duration_metric(

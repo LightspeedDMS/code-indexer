@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -236,41 +237,87 @@ def resolve_after_publish(
         )
 
 
-#: Refresh results no refresh can get past without an operator: an
-#: integrity quarantine, and an orphaned clone (no source left to index).
-UNSERVICEABLE_SKIPS = frozenset({"integrity_quarantined"})
-UNSERVICEABLE_MESSAGES = frozenset({"Orphaned golden repo (clone missing), skipped"})
-#: A transient skip: another writer holds the alias's write lock.
-WRITE_LOCK_HELD_MESSAGE = "Skipped, write lock held"
+#: Refresh results no refresh can get past without an operator or a new
+#: registration: integrity or local-repair quarantine, an orphaned clone,
+#: and an alias or registry entry that no longer exists.
+UNSERVICEABLE_SKIPS = frozenset(
+    {"integrity_quarantined", "local_repo_repair_quarantined"}
+)
+UNSERVICEABLE_MESSAGES = frozenset(
+    {
+        "Orphaned golden repo (clone missing), skipped",
+        "Alias not found, skipped",
+        "Repo not in registry, skipped",
+    }
+)
+#: Results that settled the alias's state themselves (a publish, a verified
+#: no-change, or an integrity-gate failure recording its own strike/backoff).
+SELF_SETTLED_MESSAGES = frozenset(
+    {
+        "Refresh complete",
+        "No changes detected",
+        "Refresh integrity gate failed; publish skipped",
+    }
+)
+
+
+def skip_settler(
+    metadata: "GoldenRepoMetadataBackend", alias_name: str
+) -> Callable[[Dict[str, Any]], None]:
+    """Called before a refresh runs, so before it can decide to skip: binds
+    settle_skip to the trigger generation that exists now. A trigger
+    deferred after this point has a newer generation and survives the
+    skip. A store read failure is logged; that skip then drops nothing."""
+    covered: Optional[int] = None
+    try:
+        state = metadata.get_refresh_failure_backoff_state(alias_name)
+        covered = (
+            NO_TRIGGER_GENERATION if state is None else int(state["trigger_generation"])
+        )
+    except Exception as exc:
+        logger.error(
+            f"Bug #2022: failed to read the trigger generation of {alias_name}; "
+            f"a skip of this refresh drops no trigger: {type(exc).__name__}: {exc}"
+        )
+    return partial(settle_skip, metadata, alias_name, covered)
 
 
 def settle_skip(
-    metadata: "GoldenRepoMetadataBackend", alias_name: str, result: Dict[str, Any]
+    metadata: "GoldenRepoMetadataBackend",
+    alias_name: str,
+    covered_generation: Optional[int],
+    result: Dict[str, Any],
 ) -> None:
     """Settle a refresh that returned without publishing, so a deferred
-    trigger does not re-fire forever as a job that does nothing: an
-    unserviceable skip drops the trigger; a held write lock keeps it but
-    escalates its retry interval (one more failure, bounded by the backoff
-    cap). A store error is logged, never raised."""
+    trigger does not re-fire forever as a job that does nothing. An
+    unserviceable skip drops the trigger -- only the generation that existed
+    before the refresh ran (*covered_generation*), so a newer one survives.
+    A self-settled result needs nothing. Any other skip is recoverable (held
+    write lock, uninitialized local repo, unreadable quarantine state, a
+    failed local repair): the trigger stays, with one more failure so its
+    retry interval escalates (bounded by the backoff cap) -- one
+    generation-conditional store statement that keeps the original failure
+    reason and never recreates a row a publish deleted. A store error is
+    logged, never raised."""
+    message = result.get("message")
     try:
         if (
             result.get("skipped") in UNSERVICEABLE_SKIPS
-            or result.get("message") in UNSERVICEABLE_MESSAGES
+            or message in UNSERVICEABLE_MESSAGES
         ):
-            if metadata.clear_refresh_trigger(alias_name):
+            if covered_generation is not None and metadata.clear_refresh_trigger(
+                alias_name, covered_generation
+            ):
                 logger.warning(
                     f"Bug #2022: deferred refresh of {alias_name} dropped: "
-                    f"{result.get('message')} (needs an operator)"
+                    f"{message} (needs an operator)"
                 )
-        elif result.get("message") == WRITE_LOCK_HELD_MESSAGE:
-            state = metadata.get_refresh_failure_backoff_state(alias_name)
-            if state is not None and state["pending_trigger"]:
-                count = metadata.record_refresh_failure_backoff(
-                    alias_name, "write lock held by another writer"
-                )
+        elif message not in SELF_SETTLED_MESSAGES and covered_generation is not None:
+            count = metadata.escalate_refresh_trigger(alias_name, covered_generation)
+            if count is not None:
                 logger.warning(
                     f"Bug #2022: deferred refresh of {alias_name} skipped "
-                    f"(write lock held); retried in {failure_backoff_seconds(count)}s"
+                    f"({message}); retried in {failure_backoff_seconds(count)}s"
                 )
     except Exception as exc:
         logger.error(

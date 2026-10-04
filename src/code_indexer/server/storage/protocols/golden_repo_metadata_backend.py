@@ -145,7 +145,13 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str, covered_generation: int
     ) -> None: ...
 
-    def clear_refresh_trigger(self, golden_alias: str) -> bool: ...
+    def clear_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> bool: ...
+
+    def escalate_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> Optional[int]: ...
 
     # Bug #1769: local-repo `cidx init` repair per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py's

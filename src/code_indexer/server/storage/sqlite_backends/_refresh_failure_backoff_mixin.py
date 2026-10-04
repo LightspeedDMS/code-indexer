@@ -269,19 +269,56 @@ class _RefreshFailureBackoffSqliteMixin:
 
         self._conn_manager.execute_atomic(operation)
 
-    def clear_refresh_trigger(self, golden_alias: str) -> bool:
+    def clear_refresh_trigger(self, golden_alias: str, covered_generation: int) -> bool:
         """Drop the deferred trigger of an alias no refresh can serve (it
-        needs an operator); the failure state stays. True when one was
-        dropped."""
+        needs an operator), but only while its generation is still the one
+        the skip decided on: a trigger deferred since then survives. The
+        failure state stays. True when one was dropped."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
 
         def operation(conn: sqlite3.Connection) -> bool:
             cursor = conn.execute(
                 "UPDATE refresh_failure_backoff_state SET pending_trigger = 0 "
-                "WHERE golden_alias = ? AND pending_trigger = 1",
-                (golden_alias,),
+                "WHERE golden_alias = ? AND pending_trigger = 1 "
+                "AND trigger_generation = ?",
+                (golden_alias, covered_generation),
             )
             return cursor.rowcount == 1
 
         return bool(self._conn_manager.execute_atomic(operation))
+
+    def escalate_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> Optional[int]:
+        """A recoverable skip of a deferred trigger: one more failure, so its
+        retry interval escalates -- only while that trigger (generation
+        *covered_generation*) is still pending. One conditional statement:
+        a row a publish deleted meanwhile is never recreated, and the
+        original failure reason (last_detail) is kept. Returns the new
+        failure count, or None when nothing matched."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        failed_at = time.time()
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: sqlite3.Connection) -> Optional[int]:
+            cursor = conn.execute(
+                "UPDATE refresh_failure_backoff_state SET "
+                "consecutive_failure_count = consecutive_failure_count + 1, "
+                "last_failed_at = ?, updated_at = ? "
+                "WHERE golden_alias = ? AND pending_trigger = 1 "
+                "AND trigger_generation = ?",
+                (failed_at, updated_at, golden_alias, covered_generation),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT consecutive_failure_count FROM refresh_failure_backoff_state "
+                "WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            return int(row[0])
+
+        escalated: Optional[int] = self._conn_manager.execute_atomic(operation)
+        return escalated

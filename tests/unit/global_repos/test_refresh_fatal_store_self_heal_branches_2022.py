@@ -153,14 +153,41 @@ def test_backoff_store_failures_are_logged_never_raised(
 
     with caplog.at_level(logging.ERROR):
         recovery.record_failure_backoff(failing, ALIAS, "disk full")
-        recovery.resolve_after_publish(failing, ALIAS, 0.0)
+        recovery.resolve_after_publish(failing, ALIAS, recovery.NO_TRIGGER_GENERATION)
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any("failed to persist refresh failure backoff" in m for m in messages)
     assert any("failed to resolve the refresh failure backoff" in m for m in messages)
 
 
+def test_escalation_never_recreates_a_resolved_row_nor_touches_another_generation(
+    metadata: Any,
+) -> None:
+    gone = recovery.NO_TRIGGER_GENERATION
+    assert metadata.escalate_refresh_trigger(ALIAS, gone) is None
+    assert metadata.get_refresh_failure_backoff_state(ALIAS) is None, "row recreated"
+
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    assert metadata.mark_refresh_trigger_pending(ALIAS, 0.0)
+    state = metadata.get_refresh_failure_backoff_state(ALIAS)
+    other = state["trigger_generation"] + 1
+    assert metadata.escalate_refresh_trigger(ALIAS, other) is None
+    after_other = metadata.get_refresh_failure_backoff_state(ALIAS)
+    assert after_other["consecutive_failure_count"] == 1
+
+    count = metadata.escalate_refresh_trigger(ALIAS, state["trigger_generation"])
+    assert count == 2
+    after = metadata.get_refresh_failure_backoff_state(ALIAS)
+    assert after["consecutive_failure_count"] == 2
+    assert after["last_detail"] == "disk full"
+    assert after["pending_trigger"] is True
+
+
 def test_backoff_store_rejects_blank_alias_and_detail(metadata: Any) -> None:
+    with pytest.raises(ValueError):
+        metadata.clear_refresh_trigger("", recovery.NO_TRIGGER_GENERATION)
+    with pytest.raises(ValueError):
+        metadata.escalate_refresh_trigger("", recovery.NO_TRIGGER_GENERATION)
     with pytest.raises(ValueError):
         metadata.record_refresh_failure_backoff("", "disk full")
     with pytest.raises(ValueError):
@@ -168,7 +195,7 @@ def test_backoff_store_rejects_blank_alias_and_detail(metadata: Any) -> None:
     with pytest.raises(ValueError):
         metadata.get_refresh_failure_backoff_state("")
     with pytest.raises(ValueError):
-        metadata.resolve_refresh_failure_backoff("", 0.0)
+        metadata.resolve_refresh_failure_backoff("", recovery.NO_TRIGGER_GENERATION)
     with pytest.raises(ValueError):
         metadata.mark_refresh_trigger_pending("", 0.0)
     with pytest.raises(ValueError):

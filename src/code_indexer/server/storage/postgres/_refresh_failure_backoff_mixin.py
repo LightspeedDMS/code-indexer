@@ -179,14 +179,47 @@ class _RefreshFailureBackoffPostgresMixin:
                 )
             conn.commit()
 
-    def clear_refresh_trigger(self, golden_alias: str) -> bool:
+    def clear_refresh_trigger(self, golden_alias: str, covered_generation: int) -> bool:
         """Drop the deferred trigger of an alias no refresh can serve (it
-        needs an operator); the failure state stays. True when one was
-        dropped."""
+        needs an operator), but only while its generation is still the one
+        the skip decided on: a trigger deferred since then survives. The
+        failure state stays. True when one was dropped."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         return self._update_one(
             "UPDATE refresh_failure_backoff_state SET pending_trigger = FALSE "
-            "WHERE golden_alias = %s AND pending_trigger",
-            (golden_alias,),
+            "WHERE golden_alias = %s AND pending_trigger "
+            "AND trigger_generation = %s",
+            (golden_alias, covered_generation),
         )
+
+    def escalate_refresh_trigger(
+        self, golden_alias: str, covered_generation: int
+    ) -> Optional[int]:
+        """A recoverable skip of a deferred trigger: one more failure, so its
+        retry interval escalates -- only while that trigger (generation
+        *covered_generation*) is still pending. One conditional statement:
+        a row a publish deleted meanwhile is never recreated, and the
+        original failure reason (last_detail) is kept. Returns the new
+        failure count, or None when nothing matched."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE refresh_failure_backoff_state SET "
+                    "consecutive_failure_count = consecutive_failure_count + 1, "
+                    "last_failed_at = %s, updated_at = %s "
+                    "WHERE golden_alias = %s AND pending_trigger "
+                    "AND trigger_generation = %s "
+                    "RETURNING consecutive_failure_count",
+                    (
+                        time.time(),
+                        datetime.now(timezone.utc),
+                        golden_alias,
+                        covered_generation,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return None if row is None else int(row[0])

@@ -253,3 +253,37 @@ def test_due_trigger_query_uses_its_index(tmp_path: Path) -> None:
         assert "idx_refresh_failure_backoff_due" in plan, plan
     finally:
         conn.close()
+
+
+def test_generation_counter_is_seeded_from_existing_rows_and_never_lowered(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    from code_indexer.server.storage.sqlite_backends._refresh_failure_backoff_mixin import (
+        create_refresh_failure_backoff_table,
+    )
+
+    def _counter(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT value FROM refresh_trigger_generation_counter WHERE id = 1"
+        ).fetchone()
+        return int(row[0])
+
+    # A table written before the store-wide counter existed: generation 41.
+    conn = _legacy_round3_table(tmp_path / "seed.db")
+    try:
+        conn.execute(
+            "ALTER TABLE refresh_failure_backoff_state "
+            "ADD COLUMN trigger_generation INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute("UPDATE refresh_failure_backoff_state SET trigger_generation = 41")
+        create_refresh_failure_backoff_table(conn)
+        assert _counter(conn) >= 41, "a new generation could reuse an existing one"
+
+        conn.execute("UPDATE refresh_trigger_generation_counter SET value = 50")
+        create_refresh_failure_backoff_table(conn)
+        create_refresh_failure_backoff_table(conn)
+        assert _counter(conn) == 50, "re-running the schema lowered the counter"
+    finally:
+        conn.close()
