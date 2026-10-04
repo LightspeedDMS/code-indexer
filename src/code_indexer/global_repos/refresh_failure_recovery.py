@@ -236,6 +236,49 @@ def resolve_after_publish(
         )
 
 
+#: Refresh results no refresh can get past without an operator: an
+#: integrity quarantine, and an orphaned clone (no source left to index).
+UNSERVICEABLE_SKIPS = frozenset({"integrity_quarantined"})
+UNSERVICEABLE_MESSAGES = frozenset({"Orphaned golden repo (clone missing), skipped"})
+#: A transient skip: another writer holds the alias's write lock.
+WRITE_LOCK_HELD_MESSAGE = "Skipped, write lock held"
+
+
+def settle_skip(
+    metadata: "GoldenRepoMetadataBackend", alias_name: str, result: Dict[str, Any]
+) -> None:
+    """Settle a refresh that returned without publishing, so a deferred
+    trigger does not re-fire forever as a job that does nothing: an
+    unserviceable skip drops the trigger; a held write lock keeps it but
+    escalates its retry interval (one more failure, bounded by the backoff
+    cap). A store error is logged, never raised."""
+    try:
+        if (
+            result.get("skipped") in UNSERVICEABLE_SKIPS
+            or result.get("message") in UNSERVICEABLE_MESSAGES
+        ):
+            if metadata.clear_refresh_trigger(alias_name):
+                logger.warning(
+                    f"Bug #2022: deferred refresh of {alias_name} dropped: "
+                    f"{result.get('message')} (needs an operator)"
+                )
+        elif result.get("message") == WRITE_LOCK_HELD_MESSAGE:
+            state = metadata.get_refresh_failure_backoff_state(alias_name)
+            if state is not None and state["pending_trigger"]:
+                count = metadata.record_refresh_failure_backoff(
+                    alias_name, "write lock held by another writer"
+                )
+                logger.warning(
+                    f"Bug #2022: deferred refresh of {alias_name} skipped "
+                    f"(write lock held); retried in {failure_backoff_seconds(count)}s"
+                )
+    except Exception as exc:
+        logger.error(
+            f"Bug #2022: failed to settle the skipped refresh of {alias_name}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 def record_integrity_strike(
     metadata: "GoldenRepoMetadataBackend",
     alias_name: str,

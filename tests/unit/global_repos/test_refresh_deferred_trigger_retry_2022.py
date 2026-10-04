@@ -187,3 +187,30 @@ def test_writer_helper_never_raises_into_the_writer(
         "metadata store unavailable" in r.getMessage() and r.levelname == "ERROR"
         for r in caplog.records
     ), "a failed cidx-meta refresh request was not reported"
+
+
+def test_writer_helper_retries_a_failed_request_through_the_debouncer(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs = _harness_with_meta(tmp_path, metadata)
+    real_trigger = harness.scheduler.trigger_refresh_for_repo
+    failures = [OSError("metadata store briefly unavailable")]
+
+    def _store_down_once(alias_name: str, *args: Any, **kwargs: Any) -> Any:
+        if failures:
+            raise failures.pop()
+        return real_trigger(alias_name, *args, **kwargs)
+
+    monkeypatch.setattr(harness.scheduler, "trigger_refresh_for_repo", _store_down_once)
+    debouncer = CidxMetaRefreshDebouncer(
+        harness.scheduler, debounce_seconds=DEBOUNCE_SECONDS
+    )
+    monkeypatch.setattr(meta_description_hook, "_debouncer", debouncer)
+    try:
+        meta_description_hook.request_cidx_meta_refresh(harness.scheduler)
+
+        assert _wait_until(lambda: jobs.submitted == [META_ALIAS]), (
+            "a request that failed on a store error was dropped"
+        )
+    finally:
+        debouncer.shutdown()

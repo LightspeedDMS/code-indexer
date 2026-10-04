@@ -186,8 +186,21 @@ def test_externally_managed_mode_submits_instead_of_deferring(
     jobs = RecordingJobManager()
     harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
     metadata.record_refresh_failure_backoff(ALIAS, "disk full")
-    # The mode's own predicate: no scheduler loop runs to fire a deferral.
-    monkeypatch.setattr(harness.scheduler, "_is_externally_managed", lambda: True)
+    # The real flag, read through the real GlobalRepoOperations config path.
+    from types import SimpleNamespace
+
+    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+    from code_indexer.server.utils.config_manager import ServerConfig
+
+    config = ServerConfig(server_dir=str(tmp_path / "server"))
+    assert config.golden_repos_config is not None  # set by __post_init__
+    config.golden_repos_config.externally_managed = True
+    monkeypatch.setattr(
+        "code_indexer.server.services.config_service.get_config_service",
+        lambda: SimpleNamespace(get_config=lambda: config),
+    )
+    harness.scheduler.config_source = GlobalRepoOperations(str(tmp_path))
+    assert harness.scheduler._is_externally_managed() is True
 
     harness.scheduler.trigger_refresh_for_repo(ALIAS)
 
@@ -337,3 +350,104 @@ def test_trigger_deferred_during_a_cycle_survives_a_lagging_marker_clock(
     run_one_scheduler_iteration(harness)
 
     assert jobs.submitted == [ALIAS], "clock skew let the publish swallow a trigger"
+
+
+def test_trigger_deferred_during_the_git_sync_survives_the_publish(
+    tmp_path: Path, metadata: Any
+) -> None:
+    from code_indexer.global_repos.git_pull_updater import GitPullUpdater
+
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean", git_remote=True)
+    jobs = RecordingJobManager()
+    harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    real_has_changes = GitPullUpdater.has_changes
+
+    def _fetch_while_a_trace_write_arrives(updater: GitPullUpdater) -> bool:
+        with pytest.raises(RefreshDeferredError):
+            harness.scheduler.trigger_refresh_for_repo(ALIAS)
+        return real_has_changes(updater)  # the real git fetch and compare
+
+    with (
+        patch.object(GitPullUpdater, "has_changes", _fetch_while_a_trace_write_arrives),
+        patch(_INDEX_CHILD, return_value=0),
+    ):
+        result = harness.scheduler._execute_refresh(ALIAS)
+    assert result.get("message") == "Refresh complete", result
+
+    run_one_scheduler_iteration(harness)
+
+    assert jobs.submitted == [ALIAS], "a trigger deferred during the git sync was lost"
+
+
+def test_fired_triggers_publish_resolves_it_for_good(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs, clock = _deferred_trigger(tmp_path, metadata, monkeypatch)
+    clock.pass_the_backoff()
+    run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [ALIAS]
+
+    with patch(_INDEX_CHILD, return_value=0):  # the fired job runs
+        result = harness.scheduler._execute_refresh(ALIAS)
+    assert result.get("message") == "Refresh complete", result
+    assert metadata.get_refresh_failure_backoff_state(ALIAS) is None
+
+    clock.pass_the_backoff()
+    run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [ALIAS], "a resolved trigger fired again"
+
+
+#: Slack between the scheduler pass's clock read and this test's.
+LEASE_TOLERANCE_SECONDS = 5.0
+
+
+def test_lease_lasts_the_aliases_backoff_interval(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from code_indexer.global_repos.refresh_failure_recovery import (
+        failure_backoff_seconds,
+    )
+
+    harness, jobs, clock = _deferred_trigger(tmp_path, metadata, monkeypatch)
+    clock.pass_the_backoff()
+    fired_at = time.time()
+    run_one_scheduler_iteration(harness)
+    assert jobs.submitted == [ALIAS]
+
+    state = metadata.get_refresh_failure_backoff_state(ALIAS)
+    expected = failure_backoff_seconds(int(state["consecutive_failure_count"]))
+    assert state["pending_due_at"] - fired_at == pytest.approx(
+        expected, abs=LEASE_TOLERANCE_SECONDS
+    )
+
+
+class _AnotherSchedulerLeasesFirst:
+    """The real store, except that another scheduler leases every due
+    trigger between this pass's listing and its own lease."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def list_due_refresh_triggers(self, now: float) -> Any:
+        due = self._real.list_due_refresh_triggers(now)
+        for state in due:
+            assert self._real.lease_pending_refresh_trigger(
+                state["golden_alias"], now, now + ONE_DAY_SECONDS
+            )
+        return due
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def test_trigger_leased_by_another_scheduler_is_not_submitted(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness, jobs, clock = _deferred_trigger(tmp_path, metadata, monkeypatch)
+    harness.scheduler.golden_repo_metadata = _AnotherSchedulerLeasesFirst(metadata)
+    clock.pass_the_backoff()
+
+    run_one_scheduler_iteration(harness)
+
+    assert jobs.submitted == [], "a trigger another scheduler leased was submitted"

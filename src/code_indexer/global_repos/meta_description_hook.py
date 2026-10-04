@@ -291,7 +291,8 @@ def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
     handed to the debouncer, which retries later. A refresh deferred by the
     Bug #2022 failure backoff was persisted as a pending trigger, which the
     refresh scheduler fires once the backoff ends. Any other failure (store
-    or job tracker unavailable) is logged at ERROR."""
+    or job tracker unavailable) is logged at ERROR and handed to the
+    debouncer for a retry."""
     from code_indexer.global_repos.refresh_failure_recovery import (
         RefreshDeferredError,
     )
@@ -312,9 +313,12 @@ def request_cidx_meta_refresh(refresh_scheduler: Any) -> None:
         _debouncer.signal_dirty()
     except Exception as exc:
         logger.error(
-            f"cidx-meta refresh request failed (the write itself succeeded): "
+            f"cidx-meta refresh request failed (the write itself succeeded; "
+            f"{'retried by the debouncer' if _debouncer else 'not retried'}): "
             f"{type(exc).__name__}: {exc}"
         )
+        if _debouncer is not None:
+            _debouncer.signal_dirty()
 
 
 def atomic_write_description(

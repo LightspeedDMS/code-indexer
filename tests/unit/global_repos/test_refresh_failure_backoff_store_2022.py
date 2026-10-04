@@ -163,6 +163,40 @@ def test_publish_rearms_a_trigger_marked_after_the_cycle_began_whatever_the_cloc
     assert _due(metadata, time.time()) == [GLOBAL], "it fires without waiting"
 
 
+def test_stale_cycle_never_resolves_a_recreated_rows_trigger(metadata: Any) -> None:
+    """ABA: the row a cycle captured is resolved by another publisher and
+    recreated by a new failure; the newer trigger must not share the stale
+    cycle's generation."""
+    metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
+    metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 300)
+    stale_covered = _generation(metadata)  # a cycle starts
+    metadata.resolve_refresh_failure_backoff(GLOBAL, stale_covered)  # row deleted
+    metadata.record_refresh_failure_backoff(GLOBAL, "another failure")  # recreated
+    metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 300)  # newer trigger
+
+    metadata.resolve_refresh_failure_backoff(GLOBAL, stale_covered)  # stale publish
+
+    state = metadata.get_refresh_failure_backoff_state(GLOBAL)
+    assert state is not None, "a stale cycle deleted a newer trigger"
+    assert state["pending_trigger"] is True
+    assert state["trigger_generation"] != stale_covered
+
+
+def test_mark_on_a_rearmed_row_reports_no_backoff(metadata: Any) -> None:
+    metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
+    covered = _generation(metadata)
+    metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 600)  # mid-cycle
+    metadata.resolve_refresh_failure_backoff(GLOBAL, covered)  # re-armed, due now
+    rearmed = metadata.get_refresh_failure_backoff_state(GLOBAL)
+
+    # A deferral that read the old backoff before the publish marks late.
+    assert metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 600) is False
+
+    after = metadata.get_refresh_failure_backoff_state(GLOBAL)
+    assert after["pending_due_at"] == rearmed["pending_due_at"], "stale due time"
+    assert after["trigger_generation"] == rearmed["trigger_generation"]
+
+
 def _legacy_round3_table(path: Path) -> Any:
     """A table as created before the pending-trigger columns existed."""
     import sqlite3

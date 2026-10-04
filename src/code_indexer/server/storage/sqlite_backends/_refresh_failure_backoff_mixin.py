@@ -72,6 +72,17 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_refresh_failure_backoff_due "
         "ON refresh_failure_backoff_state (pending_trigger, pending_due_at)"
     )
+    # Store-wide source of trigger generations: a value is never reused, not
+    # even by a row deleted and recreated while a refresh cycle is in flight.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS refresh_trigger_generation_counter ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO refresh_trigger_generation_counter (id, value) "
+        "SELECT 1, COALESCE(MAX(trigger_generation), 0) "
+        "FROM refresh_failure_backoff_state"
+    )
 
 
 def delete_refresh_failure_backoff_for_repo(
@@ -172,18 +183,26 @@ class _RefreshFailureBackoffSqliteMixin:
 
     def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
         """Remember a system refresh trigger deferred by the backoff, due at
-        *due_at*, advancing the trigger generation in the same statement.
-        False when no backoff row exists any more (it was resolved
-        concurrently), so nothing defers the trigger."""
+        *due_at*. The trigger gets a fresh generation from the store-wide
+        counter in the same transaction, so it never equals a generation an
+        in-flight cycle captured -- not even after the row was recreated.
+        False when no active backoff is left (the row was resolved, or
+        re-armed with no failure, concurrently), so nothing defers the
+        trigger and the caller submits it normally."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         marked_at = time.time()
 
         def operation(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                "UPDATE refresh_trigger_generation_counter SET value = value + 1 "
+                "WHERE id = 1"
+            )
             cursor = conn.execute(
                 "UPDATE refresh_failure_backoff_state SET pending_trigger = 1, "
-                "pending_due_at = ?, pending_marked_at = ?, "
-                "trigger_generation = trigger_generation + 1 WHERE golden_alias = ?",
+                "pending_due_at = ?, pending_marked_at = ?, trigger_generation = "
+                "(SELECT value FROM refresh_trigger_generation_counter WHERE id = 1) "
+                "WHERE golden_alias = ? AND consecutive_failure_count > 0",
                 (due_at, marked_at, golden_alias),
             )
             return cursor.rowcount == 1
@@ -249,3 +268,20 @@ class _RefreshFailureBackoffSqliteMixin:
             )
 
         self._conn_manager.execute_atomic(operation)
+
+    def clear_refresh_trigger(self, golden_alias: str) -> bool:
+        """Drop the deferred trigger of an alias no refresh can serve (it
+        needs an operator); the failure state stays. True when one was
+        dropped."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                "UPDATE refresh_failure_backoff_state SET pending_trigger = 0 "
+                "WHERE golden_alias = ? AND pending_trigger = 1",
+                (golden_alias,),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._conn_manager.execute_atomic(operation))

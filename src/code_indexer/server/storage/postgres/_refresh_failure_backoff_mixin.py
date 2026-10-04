@@ -108,15 +108,19 @@ class _RefreshFailureBackoffPostgresMixin:
 
     def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
         """Remember a system refresh trigger deferred by the backoff, due at
-        *due_at*, advancing the trigger generation in the same statement
-        (migrations 059-061). False when no backoff row exists any more (it
-        was resolved concurrently), so nothing defers the trigger."""
+        *due_at* (migrations 059-061). The trigger gets a fresh generation
+        from the store-wide sequence in the same statement, so it never
+        equals a generation an in-flight cycle captured -- not even after
+        the row was recreated. False when no active backoff is left (the row
+        was resolved, or re-armed with no failure, concurrently), so nothing
+        defers the trigger and the caller submits it normally."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         return self._update_one(
             "UPDATE refresh_failure_backoff_state SET pending_trigger = TRUE, "
-            "pending_due_at = %s, pending_marked_at = %s, "
-            "trigger_generation = trigger_generation + 1 WHERE golden_alias = %s",
+            "pending_due_at = %s, pending_marked_at = %s, trigger_generation = "
+            "nextval('refresh_trigger_generation_seq') "
+            "WHERE golden_alias = %s AND consecutive_failure_count > 0",
             (due_at, time.time(), golden_alias),
         )
 
@@ -174,3 +178,15 @@ class _RefreshFailureBackoffPostgresMixin:
                     (time.time(), datetime.now(timezone.utc), golden_alias),
                 )
             conn.commit()
+
+    def clear_refresh_trigger(self, golden_alias: str) -> bool:
+        """Drop the deferred trigger of an alias no refresh can serve (it
+        needs an operator); the failure state stays. True when one was
+        dropped."""
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        return self._update_one(
+            "UPDATE refresh_failure_backoff_state SET pending_trigger = FALSE "
+            "WHERE golden_alias = %s AND pending_trigger",
+            (golden_alias,),
+        )

@@ -1880,7 +1880,6 @@ class RefreshScheduler:
                     # retry on the very next poll.
                     _submit_failed = False
                     try:
-                        # Bug #2022: a backed-off alias is deferred via next_refresh.
                         if failure_recovery.defer_due_alias(
                             self.golden_repo_metadata, self.registry, alias_name
                         ):
@@ -2114,6 +2113,7 @@ class RefreshScheduler:
                 tracked_by_caller=tracked_by_caller,
             )
             _status = "success" if result.get("success") else "error"
+            failure_recovery.settle_skip(self.golden_repo_metadata, alias_name, result)
             return result
         finally:
             _record_refresh_duration_metric(
