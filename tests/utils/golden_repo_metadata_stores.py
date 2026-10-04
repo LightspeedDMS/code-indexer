@@ -16,6 +16,8 @@ from typing import Any, Iterator
 
 import pytest
 
+from tests.utils.sqlite_db_templates import copy_migrated_sqlite_db
+
 PG_DSN = os.environ.get("TEST_POSTGRES_DSN", "")
 STORE_KINDS = ("sqlite", "postgres")
 
@@ -28,6 +30,19 @@ def _pg_dsn_for(dbname: str) -> str:
     return make_conninfo(**params)  # type: ignore[arg-type]
 
 
+def _initialize_metadata_db(db_path: Path) -> None:
+    from code_indexer.server.storage.database_manager import (
+        DatabaseConnectionManager,
+    )
+    from code_indexer.server.storage.sqlite_backends.golden_repo_metadata_backend import (
+        GoldenRepoMetadataSqliteBackend,
+    )
+
+    GoldenRepoMetadataSqliteBackend(str(db_path)).ensure_table_exists()
+    # Release (and deregister) the pooled connection before the file is copied.
+    DatabaseConnectionManager.get_instance(str(db_path)).close_all()
+
+
 @contextlib.contextmanager
 def golden_repo_metadata_store(kind: str, tmp_path: Path) -> Iterator[Any]:
     """Yield a real metadata backend of ``kind`` ('sqlite' or 'postgres')."""
@@ -37,7 +52,11 @@ def golden_repo_metadata_store(kind: str, tmp_path: Path) -> Iterator[Any]:
         )
 
         db_path = tmp_path / "metadata-store" / "cidx_server.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        # A migrated copy (a fresh one costs ~18 durable DDL syncs per test);
+        # the real, idempotent ensure_table_exists() below still runs on it.
+        copy_migrated_sqlite_db(
+            "golden-repo-metadata-db", _initialize_metadata_db, db_path
+        )
         backend = GoldenRepoMetadataSqliteBackend(str(db_path))
         backend.ensure_table_exists()
         yield backend

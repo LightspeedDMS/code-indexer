@@ -99,15 +99,33 @@ def _config(codebase_dir: Path) -> SimpleNamespace:
 
 
 def _console() -> "tuple[Console, io.StringIO]":
+    # soft_wrap=True: Rich never inserts line breaks into printed text, so a
+    # long tmp path is captured whole. Assertions on reported directory names
+    # must not depend on the TMPDIR length or the console width.
     buf = io.StringIO()
-    return Console(file=buf, force_terminal=False, width=120), buf
+    return Console(file=buf, force_terminal=False, width=120, soft_wrap=True), buf
+
+
+@pytest.fixture(autouse=True)
+def _cwd_in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test with ``tmp_path`` as the cwd so socket paths can be
+    RELATIVE.
+
+    A Unix socket path is limited to 108 bytes; under a long TMPDIR an
+    absolute ``tmp_path / "daemon.sock"`` exceeds it and connect/bind raise
+    "AF_UNIX path too long". Production avoids this with a short hashed
+    socket path; here a relative path (resolved by the kernel against the
+    cwd) keeps the tests independent of the TMPDIR length.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 def _wire(tmp_path: Path):
     codebase = tmp_path / "repo"
     index_dir = codebase / ".code-indexer" / "index"
     index_dir.mkdir(parents=True)
-    cm = _FakeConfigManager(tmp_path / "daemon.sock")
+    # Relative to the cwd (== tmp_path, see _cwd_in_tmp_path).
+    cm = _FakeConfigManager(Path("daemon.sock"))
     return codebase, index_dir, cm
 
 
@@ -147,8 +165,10 @@ class TestIndexMutationLockRename:
 # Finding 6: daemon liveness fails CLOSED on indeterminate (EACCES).
 # --------------------------------------------------------------------------
 class TestDaemonLivenessFailsClosed:
-    def test_eacces_socket_fails_closed(self, tmp_path: Path) -> None:
-        sock_path = tmp_path / "daemon.sock"
+    # Socket paths are RELATIVE to the cwd (== tmp_path, see _cwd_in_tmp_path)
+    # so they stay under the AF_UNIX limit for any TMPDIR length.
+    def test_eacces_socket_fails_closed(self) -> None:
+        sock_path = Path("daemon.sock")
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(sock_path))
         server.listen(1)
@@ -163,12 +183,12 @@ class TestDaemonLivenessFailsClosed:
             os.chmod(sock_path, 0o600)
             server.close()
 
-    def test_absent_socket_still_not_live(self, tmp_path: Path) -> None:
-        cm = _FakeConfigManager(tmp_path / "nope.sock")
+    def test_absent_socket_still_not_live(self) -> None:
+        cm = _FakeConfigManager(Path("nope.sock"))
         check_no_live_daemon(cm)  # ENOENT -> definitive not-live, no raise
 
-    def test_stale_regular_file_still_not_live(self, tmp_path: Path) -> None:
-        sock_path = tmp_path / "daemon.sock"
+    def test_stale_regular_file_still_not_live(self) -> None:
+        sock_path = Path("daemon.sock")
         sock_path.write_bytes(b"")  # ECONNREFUSED on connect -> not live
         cm = _FakeConfigManager(sock_path)
         check_no_live_daemon(cm)  # must NOT raise

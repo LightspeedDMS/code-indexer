@@ -33,6 +33,7 @@ from tests.utils.fatal_chunk_store_fixtures import (
     make_chunks_db_repo,
     write_metadata_marker,
 )
+from tests.utils.sqlite_db_templates import copy_migrated_sqlite_db
 
 REPO = "my-repo"
 ALIAS = "my-repo-global"
@@ -155,6 +156,10 @@ def _attach_local_origin(source: Path, tmp_path: Path) -> None:
     )
 
 
+def _initialize_server_db(db_path: Path) -> None:
+    DatabaseSchema(str(db_path)).initialize_database()
+
+
 def build_harness(
     tmp_path: Path, metadata: Any, snapshot_mode: str, git_remote: bool = False
 ) -> Harness:
@@ -182,7 +187,10 @@ def build_harness(
     current_target = snapshot if snapshot is not None else source
 
     db_path = golden.parent / "cidx_server.db"
-    DatabaseSchema(str(db_path)).initialize_database()
+    # A migrated copy, then the real (idempotent, now read-only) init: a fresh
+    # migration costs ~40 durable DDL syncs per test.
+    copy_migrated_sqlite_db("cidx-server-db", _initialize_server_db, db_path)
+    _initialize_server_db(db_path)
     registry = GlobalRegistry(str(golden), use_sqlite=True, db_path=str(db_path))
     repo_url = GIT_REPO_URL if git_remote else f"local://{REPO}"
     registry.register_global_repo(REPO, ALIAS, repo_url, index_path=str(current_target))
