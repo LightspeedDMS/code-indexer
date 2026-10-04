@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.82.0] - 2026-10-04
+
+### Added
+
+- SIEM delivery: the Web UI configuration screen has Arming and Recovery panels. The arming panel shows readiness (sharing its predicates with arming itself), runs the canary, confirms that the canary is visible in the tenant and enables delivery. The recovery panel lists quarantined rows, open batches and stranded destinations with keyset paging, and offers resume, requeue, acknowledge, rebatch, retarget and abandon. Every write is admin-only, requires TOTP elevation (following the global enforcement switch) and a per-session CSRF token, and calls the same service functions as the REST endpoints; abandon requires the confirmation word ABANDON.
+
+### Fixed
+
+- Configuration changes from different processes no longer overwrite each other: every runtime configuration row write is a compare-and-set on the row version (SQLite `BEGIN IMMEDIATE`, PostgreSQL a version-guarded `UPDATE`). A change re-reads the committed row, applies its mutation and retries a bounded number of times before failing loudly; a stale whole-configuration save is refused. Startup migrations, the launch restart generation and first-boot seeding (both outcomes adopt the committed row) follow the same rule (#2017).
+- SIEM delivery: a canary confirms only the configuration lifetime it was run for. Arming and capture require the canary's configuration epoch to equal the committed epoch, which is renewed when the destination is disabled, cleared or changed or the trusted CA changes; replacing or removing the credential clears the canary state. Capture stops in the saving process immediately and in other processes within one cycle. Canary runs are ordered by a durable run number rather than clocks. PostgreSQL migrations 056 and 057 (#2018).
+- A failed restart request releases the restart-in-progress flag and reports that no restart was requested, so the restart can be retried.
+- SIEM delivery: the stranded-destinations count is capped without sorting a destination's backlog on either backend.
+- Refresh self-heals a corrupt source chunk store. `cidx index` exits 86 only when SQLite reports the store damaged and 87 for environment faults (I/O, locked, busy, disk full, permission). On corruption the refresh restores the affected collection from the published snapshot under the alias write lock, only for a confirmed corrupt verdict, and records an integrity strike; an inconclusive check backs off instead. Repeated failures back off per alias, persisted in `refresh_failure_backoff_state` (PostgreSQL migrations 058 to 061). Deferred system refresh triggers survive process death and are leased so that one node submits them, ordered by a store-wide generation instead of clocks. The cidx-meta refresh debouncer keeps a refresh owed until it is submitted or durably deferred, and only its current timer acts (#2022).
+- The auto-updater adds git `safe.directory` entries only when absent, and each deploy collapses existing duplicates of its managed paths to a single entry (#2028).
+- `regex_search` parses grep output with NUL-terminated file paths, so paths containing `-<digits>-` or `:<digits>:` no longer split context and match lines at the wrong place (#2030).
+- Adding a golden repository is refused while a removal of the same alias is still running. The removal deletes the registry row before the clone directory, so an add accepted in that window lost its fresh clone to the removal.
+
+### Documentation
+
+- A Google Security Operations guide covering the delivered events, every SIEM delivery setting, the service account, arming with the canary, searching, health and troubleshooting, plus an event catalog with example UDM for every delivered event type. The SIEM delivery docs describe the Web UI arming and recovery flow and an operator curl runbook.
+
+### Tests
+
+- Test lanes isolate the developer's server home and fail a run that changes it; unit-test databases stay inside per-test directories.
+- Scheduler-loop tests fail on any scheduler iteration error unless they expect one; live PostgreSQL storage tests no longer depend on database state.
+- Unit tests no longer build the full server application by accident.
+- Refresh-store and golden-repo metadata tests copy SQLite databases built once from the production initializer instead of creating each schema from scratch; CLI output checks no longer depend on console width or temporary path length.
+- The regex_search MCP tests close their event loop, the offload test no longer depends on test order, and grep-only tests run without ripgrep.
+- Server tests that start a fresh interpreter or build the full application carry an explicit pytest timeout above their own subprocess budget, so the suite-wide 15 second ceiling no longer fires first when the server lanes run in parallel.
+
 ## [12.81.0] - 2026-10-02
 
 ### Fixed
