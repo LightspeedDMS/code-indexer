@@ -224,7 +224,7 @@ class TestGrepOutputParsingContainment:
         repo = tmp_path / "repo"
         repo.mkdir()
         service = RegexSearchService(repo)
-        output = "../outside.txt:1:secret content here\n"
+        output = "../outside.txt\x001:secret content here\n"  # grep --null (#2030)
 
         with caplog.at_level(logging.WARNING):
             matches, total = service._parse_grep_output(output, 100, 0)
@@ -240,7 +240,7 @@ class TestGrepOutputParsingContainment:
         (repo / "src").mkdir(parents=True)
         (repo / "src" / "main.py").write_text("x = 1\n")
         service = RegexSearchService(repo)
-        output = "src/main.py:1:x = 1\n"
+        output = "src/main.py\x001:x = 1\n"  # grep --null record (Bug #2030)
 
         matches, total = service._parse_grep_output(output, 100, 0)
 
