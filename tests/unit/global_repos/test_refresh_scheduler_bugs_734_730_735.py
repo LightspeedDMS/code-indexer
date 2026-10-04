@@ -18,7 +18,8 @@ import inspect
 import logging
 import pathlib
 import textwrap
-from unittest.mock import Mock, patch
+import threading
+from unittest.mock import DEFAULT, Mock, patch
 
 import pytest
 
@@ -53,6 +54,7 @@ def mock_config_source():
 def mock_registry():
     registry = Mock()
     registry.list_global_repos.return_value = []
+    registry.list_due_repos.return_value = []  # the loop iterates it
     return registry
 
 
@@ -64,14 +66,23 @@ def scheduler(
     mock_cleanup_manager,
     mock_registry,
 ):
+    from code_indexer.server.storage.sqlite_backends.golden_repo_metadata_backend import (
+        GoldenRepoMetadataSqliteBackend,
+    )
+
     golden_dir = tmp_path / "golden-repos"
     golden_dir.mkdir()
+    # A real, empty metadata store: the loop's deferred-trigger pass reads it
+    # (never the lazily resolved server database).
+    metadata = GoldenRepoMetadataSqliteBackend(str(tmp_path / "cidx_server.db"))
+    metadata.ensure_table_exists()
     return RefreshScheduler(
         golden_repos_dir=str(golden_dir),
         config_source=mock_config_source,
         query_tracker=mock_query_tracker,
         cleanup_manager=mock_cleanup_manager,
         registry=mock_registry,
+        golden_repo_metadata_backend=metadata,
     )
 
 
@@ -94,13 +105,17 @@ class TestBug734StartSurvivesCleanupException:
     patching any method on RefreshScheduler itself.
     """
 
-    def test_bug_734_start_survives_cleanup_exception(self, scheduler, caplog):
+    def test_bug_734_start_survives_cleanup_exception(
+        self, scheduler, mock_registry, caplog
+    ):
         """
         Create a .write_mode/ directory with a marker file so cleanup_stale_write_mode_markers
         enters its real code path, then inject an OSError via pathlib.Path.glob.
 
-        Call start() — the scheduler thread MUST still be launched, and at least
-        one ERROR record with exc_info attached MUST be present in the logs.
+        Call start() — the scheduler thread MUST still be launched, the startup
+        cleanup failure MUST be logged at ERROR with exc_info, and the launched
+        loop MUST then run an iteration WITHOUT error (a loop that fails every
+        iteration is not a surviving scheduler).
         """
         # Create a .write_mode/ dir with one marker so the method reaches glob()
         write_mode_dir = scheduler.golden_repos_dir / ".write_mode"
@@ -109,37 +124,64 @@ class TestBug734StartSurvivesCleanupException:
             '{"entered_at": "2020-01-01T00:00:00"}'
         )
 
+        real_glob = pathlib.Path.glob
+        starter = threading.current_thread()
+
         def raising_glob(self_path, pattern):
-            raise OSError("simulated glob failure during startup cleanup")
+            # Only start()'s startup cleanup fails; the loop thread's own
+            # periodic cleanup uses the real glob.
+            if threading.current_thread() is starter:
+                raise OSError("simulated glob failure during startup cleanup")
+            return real_glob(self_path, pattern)
+
+        iteration_reached = threading.Event()
+
+        def signal_due_query(*args, **kwargs):
+            iteration_reached.set()
+            return DEFAULT  # the registry mock's configured return value
+
+        mock_registry.list_due_repos.side_effect = signal_due_query
 
         with patch.object(pathlib.Path, "glob", raising_glob):
             with caplog.at_level(logging.ERROR):
                 scheduler.start()
+        thread = scheduler._thread  # stop() resets the attribute
 
         try:
             # Thread must have been created and started despite the exception
-            assert scheduler._thread is not None, (
+            assert thread is not None, (
                 "scheduler._thread is None — thread was never assigned after cleanup raised"
             )
-            assert scheduler._thread.is_alive(), (
+            assert thread.is_alive(), (
                 "scheduler._thread exists but is not alive — thread never started"
             )
-
-            # At least one ERROR record must be present
-            error_records = [r for r in caplog.records if r.levelname == "ERROR"]
-            assert error_records, (
-                "Expected at least one ERROR log record for cleanup failure, got none"
-            )
-
-            # The error must carry exc_info (logged with exc_info=True per the fix spec)
-            records_with_exc_info = [r for r in error_records if r.exc_info is not None]
-            assert records_with_exc_info, (
-                "Expected at least one ERROR record to have exc_info attached "
-                "(logged with exc_info=True). Records found: "
-                f"{[(r.message, r.exc_info) for r in error_records]}"
+            assert iteration_reached.wait(timeout=10), (
+                "scheduler loop never reached its due-repo query"
             )
         finally:
             scheduler.stop()
+        assert not thread.is_alive(), "scheduler thread did not exit"
+
+        # The startup cleanup failure is logged at ERROR with exc_info
+        cleanup_errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR"
+            and "startup cleanup_stale_write_mode_markers failed" in r.getMessage()
+            and r.exc_info is not None
+        ]
+        assert cleanup_errors, (
+            "Expected the startup cleanup failure logged at ERROR with exc_info. "
+            f"Records found: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+
+        # The launched loop ran its iteration without error
+        loop_failures = [
+            r.getMessage()
+            for r in caplog.records
+            if "scheduler iteration failed" in r.getMessage()
+        ]
+        assert loop_failures == [], f"scheduler loop iteration failed: {loop_failures}"
 
 
 # ---------------------------------------------------------------------------
