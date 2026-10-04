@@ -133,6 +133,9 @@ class CidxMetaRefreshDebouncer:
         # Bumped by every signal_dirty: a submission settles only the
         # signals that arrived before it started.
         self._signal_seq: int = 0
+        # Identifies the owned timer: only the callback carrying the current
+        # token acts (a cancelled timer's callback may still run).
+        self._timer_token: int = 0
         self._dirty: bool = False
         self._timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
@@ -157,19 +160,20 @@ class CidxMetaRefreshDebouncer:
                     "cidx-meta debouncer: shutdown in progress, ignoring signal_dirty"
                 )
                 return
-            self._timer = threading.Timer(
-                self._debounce_seconds, self._on_timer_expired
-            )
-            self._timer.daemon = True
-            self._timer.start()
+            self._start_timer_locked(self._debounce_seconds)
         logger.debug(
             "cidx-meta marked dirty, debounce timer (re)started "
             f"(interval={self._debounce_seconds}s)"
         )
 
-    def _on_timer_expired(self) -> None:
+    def _on_timer_expired(self, timer_token: int) -> None:
         """
         Called by the timer thread when the debounce interval elapses.
+
+        Bug #2022: acts only for the timer it belongs to (*timer_token*).
+        Timer.run checks cancellation only before calling back, so a timer
+        cancelled and replaced by signal_dirty can still get here: it then
+        returns without touching the replacement or submitting.
 
         Clears dirty state after successful refresh.  If trigger raises
         DuplicateJobError the job is still running; re-mark dirty and retry
@@ -188,6 +192,8 @@ class CidxMetaRefreshDebouncer:
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
         with self._lock:
+            if timer_token != self._timer_token:
+                return  # a newer timer owns the refresh
             if not self._dirty or self._shutdown:
                 return
             # Don't clear _dirty yet — clear after successful refresh
@@ -233,20 +239,27 @@ class CidxMetaRefreshDebouncer:
         """A submission (or durable deferral) that started at *submitted_seq*
         covers the signals up to it. A signal that arrived while it was in
         flight is a newer write it may not cover: that refresh stays owed,
-        with a retry timer pending."""
+        and the timer that signal started owns it (this callback had already
+        released its own timer, so signal_dirty always starts a new one)."""
         with self._lock:
             self._retry_delay = self._debounce_seconds
             if self._signal_seq == submitted_seq:
                 self._dirty = False
-            else:
-                self._schedule_retry_locked(self._debounce_seconds)
 
     def _schedule_retry_locked(self, delay: float) -> None:
         """Start a retry timer (caller holds the lock), unless shut down or a
         timer is already pending -- one a concurrent signal started serves."""
         if self._shutdown or self._timer is not None:
             return
-        self._timer = threading.Timer(delay, self._on_timer_expired)
+        self._start_timer_locked(delay)
+
+    def _start_timer_locked(self, delay: float) -> None:
+        """Start the one owned timer (caller holds the lock); its callback
+        carries a fresh token, so a callback of any earlier timer is stale."""
+        self._timer_token += 1
+        self._timer = threading.Timer(
+            delay, self._on_timer_expired, args=(self._timer_token,)
+        )
         self._timer.daemon = True
         self._timer.start()
 
