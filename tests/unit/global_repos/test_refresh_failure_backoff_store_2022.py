@@ -115,22 +115,46 @@ def test_lease_is_exclusive_and_keeps_the_trigger_pending(metadata: Any) -> None
     assert _due(metadata, now + 300) == [GLOBAL], "lease end makes it due again"
 
 
-def test_publish_deletes_a_trigger_marked_before_the_cycle(metadata: Any) -> None:
+def _generation(metadata: Any) -> int:
+    state = metadata.get_refresh_failure_backoff_state(GLOBAL)
+    return 0 if state is None else int(state["trigger_generation"])
+
+
+def test_mark_advances_the_trigger_generation(metadata: Any) -> None:
+    metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
+    before = _generation(metadata)
+
+    metadata.mark_refresh_trigger_pending(GLOBAL, time.time())
+    metadata.mark_refresh_trigger_pending(GLOBAL, time.time())
+
+    assert _generation(metadata) == before + 2
+
+
+def test_publish_deletes_a_trigger_its_cycle_covered(metadata: Any) -> None:
     metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
     metadata.mark_refresh_trigger_pending(GLOBAL, time.time())
-    cycle_started_at = time.time() + 1  # the cycle began after the trigger
+    covered = _generation(metadata)  # the cycle began after the trigger
 
-    metadata.resolve_refresh_failure_backoff(GLOBAL, cycle_started_at)
+    metadata.resolve_refresh_failure_backoff(GLOBAL, covered)
 
     assert metadata.get_refresh_failure_backoff_state(GLOBAL) is None
 
 
-def test_publish_rearms_a_trigger_marked_during_the_cycle(metadata: Any) -> None:
-    metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
-    cycle_started_at = time.time() - 1
-    metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 600)
+#: Cross-node clock skew observed on a staging VM.
+CLOCK_LAG_SECONDS = 70.0
 
-    metadata.resolve_refresh_failure_backoff(GLOBAL, cycle_started_at)
+
+def test_publish_rearms_a_trigger_marked_after_the_cycle_began_whatever_the_clocks(
+    metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata.record_refresh_failure_backoff(GLOBAL, "disk full")
+    covered = _generation(metadata)  # captured at cycle start
+    real_time = time.time
+    with monkeypatch.context() as lagging_node:
+        lagging_node.setattr(time, "time", lambda: real_time() - CLOCK_LAG_SECONDS)
+        metadata.mark_refresh_trigger_pending(GLOBAL, time.time() + 600)
+
+    metadata.resolve_refresh_failure_backoff(GLOBAL, covered)
 
     state = metadata.get_refresh_failure_backoff_state(GLOBAL)
     assert state is not None, "a trigger that arrived during the cycle was lost"

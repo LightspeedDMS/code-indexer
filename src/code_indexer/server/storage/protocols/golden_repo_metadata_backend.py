@@ -142,7 +142,7 @@ class GoldenRepoMetadataBackend(Protocol):
     ) -> bool: ...
 
     def resolve_refresh_failure_backoff(
-        self, golden_alias: str, cycle_started_at: float
+        self, golden_alias: str, covered_generation: int
     ) -> None: ...
 
     # Bug #1769: local-repo `cidx init` repair per-repo failure

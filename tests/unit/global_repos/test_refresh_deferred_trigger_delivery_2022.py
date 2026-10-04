@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Iterator, Tuple
+from typing import Any, Iterator, List, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -155,7 +155,9 @@ class _ResolvedJustBeforeMark:
         self._real = real
 
     def mark_refresh_trigger_pending(self, golden_alias: str, *args: Any) -> Any:
-        self._real.resolve_refresh_failure_backoff(golden_alias, time.time() + 1)
+        state = self._real.get_refresh_failure_backoff_state(golden_alias)
+        covered = state["trigger_generation"]  # that publish covered all so far
+        self._real.resolve_refresh_failure_backoff(golden_alias, covered)
         return self._real.mark_refresh_trigger_pending(golden_alias, *args)
 
     def __getattr__(self, name: str) -> Any:
@@ -299,3 +301,39 @@ def test_trigger_deferred_during_a_publishing_cycle_survives_it(
     run_one_scheduler_iteration(harness)
 
     assert jobs.submitted == [ALIAS], "the publish swallowed a newer trigger"
+
+
+#: Cross-node clock skew observed on a staging VM.
+MARKER_CLOCK_LAG_SECONDS = 70.0
+_INDEX_CHILD = (
+    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+)
+
+
+def test_trigger_deferred_during_a_cycle_survives_a_lagging_marker_clock(
+    tmp_path: Path, metadata: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = build_harness(tmp_path, metadata, snapshot_mode="clean")
+    jobs = RecordingJobManager()
+    harness.scheduler.background_job_manager = jobs  # type: ignore[assignment]
+    metadata.record_refresh_failure_backoff(ALIAS, "disk full")
+    clock = _Clock(monkeypatch)
+
+    def _index_child(command: List[str], **kwargs: object) -> int:
+        # While the child indexes the source, a trace write arrives from a
+        # node whose clock runs behind the refreshing node's.
+        clock.offset = -MARKER_CLOCK_LAG_SECONDS
+        try:
+            with pytest.raises(RefreshDeferredError):
+                harness.scheduler.trigger_refresh_for_repo(ALIAS)
+        finally:
+            clock.offset = 0.0
+        return 0
+
+    with patch(_INDEX_CHILD, side_effect=_index_child):
+        result = harness.scheduler._execute_refresh(ALIAS)
+    assert result.get("message") == "Refresh complete", result
+
+    run_one_scheduler_iteration(harness)
+
+    assert jobs.submitted == [ALIAS], "clock skew let the publish swallow a trigger"

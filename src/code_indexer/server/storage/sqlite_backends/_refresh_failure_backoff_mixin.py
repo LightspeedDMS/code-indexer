@@ -25,6 +25,7 @@ _ADDED_COLUMNS = (
     ("pending_trigger", "INTEGER NOT NULL DEFAULT 0"),
     ("pending_due_at", "REAL"),
     ("pending_marked_at", "REAL"),
+    ("trigger_generation", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -32,8 +33,11 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
     """Bug #2022: per-golden-alias refresh failure backoff state.
     ``last_failed_at`` is wall-clock epoch seconds (``time.time()``) so the
     backoff window survives restarts. ``pending_trigger`` marks a deferred
-    system refresh, due at ``pending_due_at``; ``pending_marked_at`` is when
-    it was last deferred. Idempotent; upgrades a table created earlier."""
+    system refresh, due at ``pending_due_at``. ``trigger_generation`` is a
+    store-ordered counter every deferral advances: a publish resolves only
+    the generation its cycle captured (never a wall-clock comparison across
+    nodes). ``pending_marked_at`` is informational only. Idempotent;
+    upgrades a table created earlier."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS refresh_failure_backoff_state (
@@ -44,7 +48,8 @@ def create_refresh_failure_backoff_table(conn: sqlite3.Connection) -> None:
             updated_at TEXT,
             pending_trigger INTEGER NOT NULL DEFAULT 0,
             pending_due_at REAL,
-            pending_marked_at REAL
+            pending_marked_at REAL,
+            trigger_generation INTEGER NOT NULL DEFAULT 0
         )
     """
     )
@@ -83,7 +88,7 @@ def delete_refresh_failure_backoff_for_repo(
 
 _STATE_COLUMNS = (
     "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
-    "pending_trigger, pending_due_at, pending_marked_at"
+    "pending_trigger, pending_due_at, pending_marked_at, trigger_generation"
 )
 
 #: Deferred triggers that are due (index idx_refresh_failure_backoff_due).
@@ -106,6 +111,7 @@ def _state_from_row(row: Any) -> Dict[str, Any]:
         "pending_trigger": bool(row[4]),
         "pending_due_at": _optional_float(row[5]),
         "pending_marked_at": _optional_float(row[6]),
+        "trigger_generation": int(row[7]),
     }
 
 
@@ -166,7 +172,8 @@ class _RefreshFailureBackoffSqliteMixin:
 
     def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
         """Remember a system refresh trigger deferred by the backoff, due at
-        *due_at*. False when no backoff row exists any more (it was resolved
+        *due_at*, advancing the trigger generation in the same statement.
+        False when no backoff row exists any more (it was resolved
         concurrently), so nothing defers the trigger."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
@@ -175,7 +182,8 @@ class _RefreshFailureBackoffSqliteMixin:
         def operation(conn: sqlite3.Connection) -> bool:
             cursor = conn.execute(
                 "UPDATE refresh_failure_backoff_state SET pending_trigger = 1, "
-                "pending_due_at = ?, pending_marked_at = ? WHERE golden_alias = ?",
+                "pending_due_at = ?, pending_marked_at = ?, "
+                "trigger_generation = trigger_generation + 1 WHERE golden_alias = ?",
                 (due_at, marked_at, golden_alias),
             )
             return cursor.rowcount == 1
@@ -215,21 +223,23 @@ class _RefreshFailureBackoffSqliteMixin:
         return bool(self._conn_manager.execute_atomic(operation))
 
     def resolve_refresh_failure_backoff(
-        self, golden_alias: str, cycle_started_at: float
+        self, golden_alias: str, covered_generation: int
     ) -> None:
-        """A verified publish resolves the failure and any trigger it covers.
-        A trigger deferred after *cycle_started_at* may not be covered: its
-        row survives re-armed (no failure left, due now)."""
+        """A verified publish resolves the failure and every trigger its
+        cycle covered: the row is deleted only while its trigger generation
+        still equals *covered_generation* (captured from the store before
+        the cycle read its source). A trigger deferred after that advanced
+        the generation, whatever any node's clock says: its row survives
+        re-armed (no failure left, due now). One atomic operation."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         now = time.time()
 
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute(
-                "DELETE FROM refresh_failure_backoff_state WHERE golden_alias = ? "
-                "AND NOT (pending_trigger = 1 "
-                "AND COALESCE(pending_marked_at, 0) >= ?)",
-                (golden_alias, cycle_started_at),
+                "DELETE FROM refresh_failure_backoff_state "
+                "WHERE golden_alias = ? AND trigger_generation = ?",
+                (golden_alias, covered_generation),
             )
             conn.execute(
                 "UPDATE refresh_failure_backoff_state SET "

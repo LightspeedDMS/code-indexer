@@ -2272,7 +2272,7 @@ class RefreshScheduler:
                     # Initialized here so _check_extension_drift can set it before
                     # any early-return exit in the local/git branching below.
                     force_reconcile = False
-                    regate, cycle_started_at = failure_recovery.begin_refresh_cycle(
+                    regate, covered_generation = failure_recovery.begin_refresh_cycle(
                         self.golden_repo_metadata, alias_name
                     )
 
@@ -2974,7 +2974,7 @@ class RefreshScheduler:
 
                     self.registry.update_refresh_timestamp(alias_name)
                     failure_recovery.resolve_after_publish(  # Bug #2022: published
-                        self.golden_repo_metadata, alias_name, cycle_started_at
+                        self.golden_repo_metadata, alias_name, covered_generation
                     )
 
                     # AC6: Reconcile registry with filesystem at END of refresh

@@ -190,24 +190,45 @@ def record_failure_backoff(metadata: Any, alias_name: str, detail: str) -> None:
     )
 
 
-def begin_refresh_cycle(metadata: Any, alias_name: str) -> Tuple[bool, float]:
-    """(regate, cycle_started_at) for a refresh cycle. The start is taken
-    before the state is read, so a trigger deferred from here on counts as
-    arriving during the cycle (resolve_after_publish keeps it)."""
-    cycle_started_at = time.time()
-    return has_unresolved_outcome(metadata, alias_name), cycle_started_at
+#: Trigger generation of an alias with no backoff row (the column default).
+NO_TRIGGER_GENERATION = 0
+
+
+def begin_refresh_cycle(
+    metadata: "GoldenRepoMetadataBackend", alias_name: str
+) -> Tuple[bool, int]:
+    """(regate, covered_generation) for a refresh cycle, read from the store
+    before the cycle reads its source.
+
+    regate: a failure no verified publish has resolved yet -- a persisted
+    backoff (unrepaired failure or inconclusive check) or integrity strikes;
+    such a cycle must re-gate and publish, never take a "No changes
+    detected" shortcut. covered_generation: the row's trigger generation;
+    every later deferral advances it, so resolve_after_publish keeps that
+    trigger. Store-ordered, never a wall clock (nodes' clocks differ). A
+    store read failure propagates."""
+    state = metadata.get_refresh_failure_backoff_state(alias_name)
+    covered_generation = (
+        NO_TRIGGER_GENERATION if state is None else int(state["trigger_generation"])
+    )
+    regate = (
+        state is not None
+        or metadata.get_refresh_integrity_failure_state(alias_name) is not None
+    )
+    return regate, covered_generation
 
 
 def resolve_after_publish(
-    metadata: Any, alias_name: str, cycle_started_at: float
+    metadata: "GoldenRepoMetadataBackend", alias_name: str, covered_generation: int
 ) -> None:
     """A verified publish resolves the alias's failure backoff and every
-    deferred trigger it covers; a trigger deferred during this cycle stays
-    pending, re-armed to fire at once. The only resolution point: while a
-    row exists, a cycle re-gates and cannot end as "No changes detected".
-    A store error is logged, never raised: the alias is already published."""
+    deferred trigger its cycle covered (*covered_generation*); a trigger
+    deferred during the cycle stays pending, re-armed to fire at once. The
+    only resolution point: while a row exists, a cycle re-gates and cannot
+    end as "No changes detected". A store error is logged, never raised:
+    the alias is already published."""
     try:
-        metadata.resolve_refresh_failure_backoff(alias_name, cycle_started_at)
+        metadata.resolve_refresh_failure_backoff(alias_name, covered_generation)
     except Exception as exc:
         logger.error(
             f"Bug #2022: failed to resolve the refresh failure backoff of "
@@ -265,19 +286,6 @@ def reset_integrity_strikes(
             f"state for {alias_name} (non-fatal): "
             f"{type(reset_exc).__name__}: {reset_exc}"
         )
-
-
-def has_unresolved_outcome(
-    metadata: "GoldenRepoMetadataBackend", alias_name: str
-) -> bool:
-    """True while *alias_name* has a failure no verified publish has resolved
-    yet: a persisted backoff (unrepaired failure or inconclusive check) or
-    integrity strikes. Such a cycle must re-gate and publish, never take the
-    "No changes detected" shortcut. A store read failure propagates."""
-    return (
-        metadata.get_refresh_failure_backoff_state(alias_name) is not None
-        or metadata.get_refresh_integrity_failure_state(alias_name) is not None
-    )
 
 
 def record_publish_gate_failure(

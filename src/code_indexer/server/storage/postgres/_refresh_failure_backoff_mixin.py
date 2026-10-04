@@ -81,7 +81,7 @@ class _RefreshFailureBackoffPostgresMixin:
 
     _STATE_COLUMNS = (
         "golden_alias, consecutive_failure_count, last_detail, last_failed_at, "
-        "pending_trigger, pending_due_at, pending_marked_at"
+        "pending_trigger, pending_due_at, pending_marked_at, trigger_generation"
     )
 
     @staticmethod
@@ -94,6 +94,7 @@ class _RefreshFailureBackoffPostgresMixin:
             "pending_trigger": bool(row[4]),
             "pending_due_at": None if row[5] is None else float(row[5]),
             "pending_marked_at": None if row[6] is None else float(row[6]),
+            "trigger_generation": int(row[7]),
         }
 
     def _update_one(self, sql: str, params: Tuple[Any, ...]) -> bool:
@@ -107,13 +108,15 @@ class _RefreshFailureBackoffPostgresMixin:
 
     def mark_refresh_trigger_pending(self, golden_alias: str, due_at: float) -> bool:
         """Remember a system refresh trigger deferred by the backoff, due at
-        *due_at* (migrations 059/060). False when no backoff row exists any
-        more (it was resolved concurrently), so nothing defers the trigger."""
+        *due_at*, advancing the trigger generation in the same statement
+        (migrations 059-061). False when no backoff row exists any more (it
+        was resolved concurrently), so nothing defers the trigger."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         return self._update_one(
             "UPDATE refresh_failure_backoff_state SET pending_trigger = TRUE, "
-            "pending_due_at = %s, pending_marked_at = %s WHERE golden_alias = %s",
+            "pending_due_at = %s, pending_marked_at = %s, "
+            "trigger_generation = trigger_generation + 1 WHERE golden_alias = %s",
             (due_at, time.time(), golden_alias),
         )
 
@@ -147,20 +150,22 @@ class _RefreshFailureBackoffPostgresMixin:
         )
 
     def resolve_refresh_failure_backoff(
-        self, golden_alias: str, cycle_started_at: float
+        self, golden_alias: str, covered_generation: int
     ) -> None:
-        """A verified publish resolves the failure and any trigger it covers.
-        A trigger deferred after *cycle_started_at* may not be covered: its
-        row survives re-armed (no failure left, due now). One transaction."""
+        """A verified publish resolves the failure and every trigger its
+        cycle covered: the row is deleted only while its trigger generation
+        still equals *covered_generation* (captured from the store before
+        the cycle read its source). A trigger deferred after that advanced
+        the generation, whatever any node's clock says: its row survives
+        re-armed (no failure left, due now). One transaction."""
         if not golden_alias:
             raise ValueError("golden_alias must be a non-empty string")
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM refresh_failure_backoff_state "
-                    "WHERE golden_alias = %s AND NOT (pending_trigger "
-                    "AND COALESCE(pending_marked_at, 0) >= %s)",
-                    (golden_alias, cycle_started_at),
+                    "WHERE golden_alias = %s AND trigger_generation = %s",
+                    (golden_alias, covered_generation),
                 )
                 cur.execute(
                     "UPDATE refresh_failure_backoff_state SET "
