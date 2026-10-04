@@ -6,8 +6,6 @@ C2: _execute_refresh() uses mtime-based change detection for local repos.
 C3: _execute_refresh() skips GitPullUpdater and uses live source path.
 """
 
-import shutil
-import tempfile
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +15,10 @@ import pytest
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from tests.fixtures.refresh_scheduler_stores import (
+    make_registered_repos_due,
+    real_metadata_store,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,19 +27,23 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 
 
 @pytest.fixture
-def temp_golden_repos_dir():
-    """Create temporary golden repos directory."""
-    temp_dir = tempfile.mkdtemp()
-    yield temp_dir
-    shutil.rmtree(temp_dir, ignore_errors=True)
+def temp_golden_repos_dir(tmp_path):
+    """Golden repos directory in the test's own tmp_path.  Its parent is
+    where the scheduler's lazy stores resolve, so it must never be a shared
+    directory such as /tmp (a mkdtemp() dir put cidx_server.db in /tmp)."""
+    golden_dir = tmp_path / "golden-repos"
+    golden_dir.mkdir()
+    return str(golden_dir)
 
 
 @pytest.fixture
 def mock_registry():
-    """Create a mock registry."""
+    """Create a mock registry; every registered repo is due, so the loop's
+    per-repo skip is actually exercised."""
     registry = MagicMock()
     registry.list_global_repos.return_value = []
     registry.get_global_repo.return_value = None
+    make_registered_repos_due(registry)
     return registry
 
 
@@ -51,17 +57,20 @@ def mock_config_source():
 
 @pytest.fixture
 def scheduler(
+    tmp_path,
     temp_golden_repos_dir,
     mock_registry,
     mock_config_source,
 ):
-    """Create a RefreshScheduler with injected mock registry."""
+    """Create a RefreshScheduler with injected mock registry and a real
+    metadata store."""
     return RefreshScheduler(
         golden_repos_dir=temp_golden_repos_dir,
         config_source=mock_config_source,
         query_tracker=MagicMock(spec=QueryTracker),
         cleanup_manager=MagicMock(spec=CleanupManager),
         registry=mock_registry,
+        golden_repo_metadata_backend=real_metadata_store(tmp_path / "server-data"),
     )
 
 

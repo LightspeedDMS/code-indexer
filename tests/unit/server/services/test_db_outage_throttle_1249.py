@@ -537,6 +537,12 @@ class TestRefreshSchedulerLoopIntegration:
         mock_registry.update_next_refresh.return_value = None
 
         import tempfile
+        from pathlib import Path
+
+        from tests.fixtures.refresh_scheduler_stores import (
+            real_metadata_store,
+            scheduler_iteration_failures,
+        )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             scheduler = RefreshScheduler(
@@ -545,6 +551,11 @@ class TestRefreshSchedulerLoopIntegration:
                 query_tracker=mock_query_tracker,
                 cleanup_manager=mock_cleanup_manager,
                 registry=mock_registry,
+                # inside tmp_dir: the lazily resolved store would be
+                # tmp_dir's parent (/tmp/cidx_server.db, shared)
+                golden_repo_metadata_backend=real_metadata_store(
+                    Path(tmp_dir) / "server-data"
+                ),
             )
 
             logger = logging.getLogger("code_indexer.global_repos.refresh_scheduler")
@@ -583,3 +594,4 @@ class TestRefreshSchedulerLoopIntegration:
                 f"{len(error_records)}: {[r.message for r in error_records]}"
             )
             assert len(wait_calls) >= N_ITERATIONS
+            assert scheduler_iteration_failures(caplog.records) == []

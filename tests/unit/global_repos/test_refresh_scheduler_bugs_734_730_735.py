@@ -270,6 +270,8 @@ class TestBug730ScipGenerateHasTimeout:
 # ---------------------------------------------------------------------------
 
 
+# Fails loop iterations on purpose to observe the backoff (conftest guard opt-in).
+@pytest.mark.scheduler_iteration_failures_expected
 class TestBug735ExponentialBackoffOnConsecutiveFailures:
     """
     Bug #735: _scheduler_loop() has no backoff on consecutive failures.  A
