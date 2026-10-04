@@ -29,6 +29,9 @@ from code_indexer.server.self_monitoring import log_query
 # repository is public, so no host-specific path belongs in test source.
 _SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(code_indexer.__file__)))
 
+# Budget for each `python -m ...log_query` subprocess in TestMainCliInvocation.
+_CLI_SUBPROCESS_TIMEOUT_SECONDS = 30
+
 
 def _make_logs_db(tmp_path, extra_rows=0):
     db_path = str(tmp_path / "logs.db")
@@ -258,6 +261,10 @@ class TestBlobSizeCap:
         assert rows == [(100,)]
 
 
+# Each test spawns a fresh interpreter importing the server package; under
+# parallel gate load that exceeds the suite's default 15 s pytest-timeout,
+# so the ceiling must sit above the subprocess's own budget.
+@pytest.mark.timeout(_CLI_SUBPROCESS_TIMEOUT_SECONDS + 15)
 class TestMainCliInvocation:
     """End-to-end: invoke the module exactly as the self-monitoring scan's
     Bash allow rule pins it -- `<python> -m
@@ -265,7 +272,7 @@ class TestMainCliInvocation:
     path supplied ONLY via the environment variable, never a CLI argument.
     """
 
-    def _run_module(self, sql, env_overrides, timeout=30):
+    def _run_module(self, sql, env_overrides, timeout=_CLI_SUBPROCESS_TIMEOUT_SECONDS):
         env = {**os.environ, **env_overrides}
         return subprocess.run(
             [
@@ -302,7 +309,7 @@ class TestMainCliInvocation:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_CLI_SUBPROCESS_TIMEOUT_SECONDS,
             env=env,
             cwd=_SRC_ROOT,
         )
