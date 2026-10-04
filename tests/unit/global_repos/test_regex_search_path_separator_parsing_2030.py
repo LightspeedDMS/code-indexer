@@ -29,9 +29,13 @@ from code_indexer.global_repos.regex_search import RegexMatch, RegexSearchServic
 _GREP_BINARY = shutil.which("grep")
 _RG_BINARY = shutil.which("rg")
 
-pytestmark = pytest.mark.skipif(
+# Per-test marks, not a module-level skip: a host without ripgrep must still
+# run every grep-path test (and vice versa).
+_NEEDS_GREP = pytest.mark.skipif(_GREP_BINARY is None, reason="needs real grep")
+_NEEDS_RG = pytest.mark.skipif(_RG_BINARY is None, reason="needs real ripgrep")
+_NEEDS_GREP_AND_RG = pytest.mark.skipif(
     _GREP_BINARY is None or _RG_BINARY is None,
-    reason="Bug #2030 tests drive both real grep and real ripgrep",
+    reason="needs real grep and real ripgrep",
 )
 
 # Separator-shaped segments under test: "-<digits>-" and ":<digits>:".
@@ -96,10 +100,14 @@ def _record(rel: str, line_number: int, sep: str, content: str) -> str:
 
 
 _ENGINE_PATHS = [
-    pytest.param("grep", None, id="grep-recursive"),
-    pytest.param("grep", _GLOB_ALL_PY, id="grep-glob-batch"),
-    pytest.param("ripgrep", None, id="ripgrep"),
-    pytest.param("ripgrep", _GLOB_ALL_PY, id="ripgrep-glob"),
+    pytest.param("grep", None, id="grep-recursive", marks=_NEEDS_GREP),
+    pytest.param("grep", _GLOB_ALL_PY, id="grep-glob-batch", marks=_NEEDS_GREP),
+    pytest.param("ripgrep", None, id="ripgrep", marks=_NEEDS_RG),
+    pytest.param("ripgrep", _GLOB_ALL_PY, id="ripgrep-glob", marks=_NEEDS_RG),
+]
+_ENGINES = [
+    pytest.param("grep", id="grep", marks=_NEEDS_GREP),
+    pytest.param("ripgrep", id="ripgrep", marks=_NEEDS_RG),
 ]
 
 
@@ -126,6 +134,7 @@ class TestSegmentPathsWithContext:
             assert m.context_after == _AFTER_LINES, rel
 
     @pytest.mark.asyncio
+    @_NEEDS_GREP_AND_RG
     async def test_grep_and_ripgrep_agree_on_segment_paths(
         self, segment_repo: Path
     ) -> None:
@@ -168,7 +177,7 @@ class TestSegmentPathsWithoutContext:
             assert m.context_before == [] and m.context_after == [], rel
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("engine", ["grep", "ripgrep"])
+    @pytest.mark.parametrize("engine", _ENGINES)
     async def test_multiline_paths_attributed_to_real_path(
         self, segment_repo: Path, engine: str
     ) -> None:
@@ -186,6 +195,7 @@ class TestSegmentPathsWithoutContext:
             assert by_path[rel].line_number == _MATCH_LINE_NUMBER, rel
 
 
+@_NEEDS_GREP
 class TestGrepNullDelimitedCommand:
     def test_build_grep_command_requests_null_delimited_filenames(
         self, segment_repo: Path
@@ -199,6 +209,7 @@ class TestGrepNullDelimitedCommand:
             assert cmd.index("--null") < cmd.index(_PATTERN)
 
 
+@_NEEDS_GREP
 class TestGrepNullDelimitedRecordParsing:
     """Direct parser tests over grep's ``--null`` record format:
     ``path\\0LINE:content`` (match) / ``path\\0LINE-content`` (context)."""

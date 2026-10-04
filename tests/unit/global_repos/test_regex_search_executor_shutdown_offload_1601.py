@@ -60,8 +60,9 @@ def _write_synthetic_ripgrep_json(path: str) -> None:
 
 
 def _write_synthetic_grep_output(path: str) -> None:
+    # grep --null record format (Bug #2030): path\0LINE:content
     with open(path, "w", encoding="utf-8") as f:
-        f.write("file1.py:1:def func_1():\n")
+        f.write("file1.py\x001:def func_1():\n")
 
 
 def _mock_executor_copying_from(source_path: str, shutdown_captured: Dict[str, int]):
@@ -131,7 +132,7 @@ class TestExecutorShutdownOffload:
             return_value=mock_executor,
         ):
             search_method = getattr(service, search_attr)
-            await search_method(
+            matches, _total = await search_method(
                 pattern="func",
                 search_path=tmp_path,
                 include_patterns=None,
@@ -142,6 +143,9 @@ class TestExecutorShutdownOffload:
                 timeout_seconds=30,
             )
 
+        # Guards the fixture itself: synthetic output in a format the parser
+        # no longer accepts would parse zero records and pass silently.
+        assert [m.file_path for m in matches] == ["file1.py"]
         assert "thread_id" in shutdown_captured, "executor.shutdown was never called"
         assert shutdown_captured["thread_id"] != caller_thread_id, (
             f"{search_attr}'s executor.shutdown(wait=True) ran on the "
