@@ -3157,7 +3157,15 @@ class RefreshScheduler:
                     if _is_refresh_cancellation(e):
                         # Bug #2012: a cancellation is not a failure -- the
                         # job is finished as cancelled by its manager.
-                        logger.info(f"Refresh cancelled for {alias_name}: {e}")
+                        from code_indexer.server.logging_utils import (
+                            mask_url_credentials,
+                        )
+
+                        logger.info(
+                            "Refresh cancelled for %s: %s",
+                            alias_name,
+                            mask_url_credentials(str(e)),
+                        )
                         _tracker_raised = True
                         raise
                     logger.error(

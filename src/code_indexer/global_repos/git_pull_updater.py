@@ -18,6 +18,10 @@ from code_indexer.server.utils.cancellable_subprocess import (
 )
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.credential_redaction import (
+    redact_command,
+    redact_command_output,
+)
 from code_indexer.utils.subprocess_diagnostics import (
     DEFAULT_DIAGNOSTIC_MAX_CHARS,
     format_completed_process_diagnostic as _format_subprocess_failure_diagnostic,
@@ -44,6 +48,15 @@ def _stream_to_str(value: Optional[Union[str, bytes]]) -> str:
     return value
 
 
+def _log_safe_stdout(result: "subprocess.CompletedProcess[str]") -> str:
+    """Bug #2012: a successful git command's stdout, credential-redacted
+    against its own argv, for the success-path INFO logs (git echoes remote
+    URLs, which may carry userinfo)."""
+    args = getattr(result, "args", None)
+    argv = args if isinstance(args, (list, tuple)) else ()
+    return str(redact_command_output(result.stdout.strip(), argv))
+
+
 def _format_timeout_diagnostic(e: subprocess.TimeoutExpired) -> str:
     """Bug #1830 AC2: build a diagnostic identifying WHICH command timed
     out, after how long, and any partial output captured before the
@@ -59,14 +72,20 @@ def _format_timeout_diagnostic(e: subprocess.TimeoutExpired) -> str:
     Bug #1830's own concern, not #1832's, so this stays local. It reuses
     DEFAULT_DIAGNOSTIC_MAX_CHARS so both cap to the same length.
     """
-    cmd = e.cmd
+    raw_cmd = e.cmd
+    # Bug #2012: the diagnostic is logged and raised -- redact credentials.
+    cmd = redact_command(raw_cmd)
     cmd_display = (
         " ".join(str(part) for part in cmd)
         if isinstance(cmd, _Sequence) and not isinstance(cmd, (str, bytes))
         else str(cmd)
     )
-    stdout_text = _stream_to_str(e.stdout)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
-    stderr_text = _stream_to_str(e.stderr)[:DEFAULT_DIAGNOSTIC_MAX_CHARS]
+    stdout_text = redact_command_output(_stream_to_str(e.stdout), raw_cmd)[
+        :DEFAULT_DIAGNOSTIC_MAX_CHARS
+    ]
+    stderr_text = redact_command_output(_stream_to_str(e.stderr), raw_cmd)[
+        :DEFAULT_DIAGNOSTIC_MAX_CHARS
+    ]
     return (
         f"command='{cmd_display}' timeout={e.timeout}s "
         f"stdout={stdout_text!r} stderr={stderr_text!r}"
@@ -436,7 +455,7 @@ class GitPullUpdater(UpdateStrategy):
                     )
                 logger.info(
                     f"Successfully reset {self.repo_path} to origin/{branch} after cleanup: "
-                    f"{retry_reset.stdout.strip()}"
+                    f"{_log_safe_stdout(retry_reset)}"
                 )
                 return
             # Bug #1832: name exit code + both streams, not stderr alone.
@@ -447,7 +466,7 @@ class GitPullUpdater(UpdateStrategy):
 
         logger.info(
             f"Successfully reset {self.repo_path} to origin/{branch}: "
-            f"{reset_result.stdout.strip()}"
+            f"{_log_safe_stdout(reset_result)}"
         )
 
     def update(self, force_reset: bool = False) -> None:
@@ -517,7 +536,9 @@ class GitPullUpdater(UpdateStrategy):
                         "Proceeding with pull anyway."
                     )
                 else:
-                    logger.info(f"Git reset successful: {reset_result.stdout.strip()}")
+                    logger.info(
+                        f"Git reset successful: {_log_safe_stdout(reset_result)}"
+                    )
 
             if force_reset:
                 # AC3/AC4: Force reset path — skip git pull, go straight to
@@ -591,7 +612,7 @@ class GitPullUpdater(UpdateStrategy):
                     if retry.returncode == 0:
                         logger.info(
                             f"Git pull retry successful after removing untracked files: "
-                            f"{retry.stdout.strip()}"
+                            f"{_log_safe_stdout(retry)}"
                         )
                         return
                     # Bug #1832: name exit code + both streams, not stderr alone.
@@ -607,7 +628,7 @@ class GitPullUpdater(UpdateStrategy):
                     f"{_format_subprocess_failure_diagnostic(result)}"
                 )
 
-            logger.info(f"Git pull successful: {result.stdout.strip()}")
+            logger.info(f"Git pull successful: {_log_safe_stdout(result)}")
 
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"Git pull timed out for {self.repo_path}")

@@ -43,6 +43,13 @@ from code_indexer.utils.process_group import (
     terminate_process_group as _terminate_process_group,
 )
 
+# Bug #2012 follow-up: an argv or captured output never leaves this module
+# (exception messages, logs) without credential redaction.
+from code_indexer.utils.credential_redaction import (
+    redact_command,
+    redact_command_output,
+)
+
 logger = logging.getLogger(__name__)
 
 # Bug #1746 M2 (code review finding): a real-word-boundary match for a
@@ -89,12 +96,14 @@ def _drain_stream(
     try:
         for line in iter(stream.readline, ""):
             if _ERROR_TOKEN_PATTERN.search(line):
+                # Bug #2012 follow-up: argv and the echoed line are logged
+                # redacted (URL userinfo, token-bearing option values).
                 logger.error(
                     "Subprocess %s emitted an ERROR-level %s line while "
                     "still running: %s",
-                    subprocess_args,
+                    redact_command(subprocess_args),
                     stream_label,
-                    line.rstrip(),
+                    redact_command_output(line.rstrip(), subprocess_args),
                 )
             chunks.append(line)
     finally:
@@ -205,7 +214,7 @@ def run_cancellable_subprocess(
 
     if cancelled:
         raise SubprocessCancelledError(
-            f"Subprocess {args!r} cancelled during execution "
+            f"Subprocess {redact_command(args)!r} cancelled during execution "
             "(job cancellation requested)"
         )
     if timed_out:
@@ -215,10 +224,10 @@ def run_cancellable_subprocess(
         # purely to satisfy mypy's Optional[float] narrowing; it is never
         # actually exercised.
         raise subprocess.TimeoutExpired(
-            cmd=args,
+            cmd=redact_command(args),
             timeout=timeout if timeout is not None else poll_interval,
-            output="".join(stdout_chunks),
-            stderr="".join(stderr_chunks),
+            output=redact_command_output("".join(stdout_chunks), args),
+            stderr=redact_command_output("".join(stderr_chunks), args),
         )
 
     return subprocess.CompletedProcess(
@@ -252,12 +261,30 @@ def run_with_cancel(
     text). Arguments that cannot be honoured raise ``TypeError``.
     """
     if cancel_check is None:
-        return subprocess.run(args, **run_kwargs)
+        # Bug #2012: the errors leave this module redacted on this path too;
+        # `from None` drops the unredacted original from the traceback.
+        try:
+            return subprocess.run(args, **run_kwargs)
+        except subprocess.CalledProcessError as exc:
+            raise subprocess.CalledProcessError(
+                exc.returncode,
+                redact_command(exc.cmd),
+                output=redact_command_output(exc.output, exc.cmd),
+                stderr=redact_command_output(exc.stderr, exc.cmd),
+            ) from None
+        except subprocess.TimeoutExpired as exc:
+            raise subprocess.TimeoutExpired(
+                redact_command(exc.cmd),
+                exc.timeout,
+                output=redact_command_output(exc.output, exc.cmd),
+                stderr=redact_command_output(exc.stderr, exc.cmd),
+            ) from None
 
     unsupported = set(run_kwargs) - _RUN_WITH_CANCEL_ARGS
     if unsupported:
         raise TypeError(
-            f"run_with_cancel cannot honour {sorted(unsupported)} for {args!r}"
+            f"run_with_cancel cannot honour {sorted(unsupported)} "
+            f"for {redact_command(args)!r}"
         )
     result = run_cancellable_subprocess(
         args,
@@ -268,6 +295,9 @@ def run_with_cancel(
     )
     if run_kwargs.get("check") and result.returncode != 0:
         raise subprocess.CalledProcessError(
-            result.returncode, args, output=result.stdout, stderr=result.stderr
+            result.returncode,
+            redact_command(args),
+            output=redact_command_output(result.stdout, args),
+            stderr=redact_command_output(result.stderr, args),
         )
     return result
