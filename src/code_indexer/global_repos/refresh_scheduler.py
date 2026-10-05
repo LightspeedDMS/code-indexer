@@ -69,6 +69,7 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     wait_for_nfs_visibility,
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.utils.credential_redaction import redact_command_output
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
@@ -2811,8 +2812,9 @@ class RefreshScheduler:
                                         f"Base clone for {alias_name} on '{current_branch}' instead of "
                                         f"'{default_branch}', resetting to default branch"
                                     )
+                                    checkout_cmd = ["git", "checkout", default_branch]
                                     checkout_result = run_with_cancel(
-                                        ["git", "checkout", default_branch],
+                                        checkout_cmd,
                                         cancel_check,
                                         cwd=master_path,
                                         capture_output=True,
@@ -2822,7 +2824,7 @@ class RefreshScheduler:
                                     if checkout_result.returncode != 0:
                                         logger.error(
                                             f"Failed to reset {alias_name} to {default_branch}: "
-                                            f"{checkout_result.stderr}"
+                                            f"{redact_command_output(checkout_result.stderr, checkout_cmd)}"
                                         )
                             except Exception as e:
                                 if _is_refresh_cancellation(e):
