@@ -237,7 +237,7 @@ class AccessFilteringService:
             return True
         return alias in golden_names
 
-    def _caller_activation_sources(self, user_id: str) -> Dict[str, _ActivationSource]:
+    def caller_activation_sources(self, user_id: str) -> Dict[str, _ActivationSource]:
         """Map each of the CALLER'S OWN activation aliases to its golden repos.
 
         Only the caller's activations are read (never another user's). A
@@ -317,34 +317,63 @@ class AccessFilteringService:
 
         accessible = self.get_accessible_repos(user_id)
         # One activation lookup per call, never per row.
-        activation_sources = self._caller_activation_sources(user_id)
-
-        def _all_granted(golden: Any) -> bool:
-            return bool(golden) and all(g in accessible for g in golden)
+        activation_sources = self.caller_activation_sources(user_id)
 
         def _is_accessible(result: Any) -> bool:
             alias = self._get_raw_repo_alias(result)
-            activation = activation_sources.get(alias)
             recorded = self._recorded_activation_sources(result)
-            if recorded is not None:
-                # Activation-derived row: it must belong to one of the
-                # caller's CURRENT activations, and both the recorded and the
-                # current sources must be granted.
-                return (
-                    activation is not None
-                    and _all_granted([self._strip_global(g) for g in recorded])
-                    and _all_granted(activation.golden)
+            if recorded is None:
+                return self.alias_granted(alias, accessible, activation_sources)
+            # Activation-derived row: it must belong to one of the caller's
+            # CURRENT activations, and both the recorded and the current
+            # sources must be granted.
+            activation = activation_sources.get(alias)
+            return (
+                activation is not None
+                and self._all_granted(
+                    [self._strip_global(g) for g in recorded], accessible
                 )
-            name_granted = self._strip_global(alias) in accessible
-            if activation is None:
-                return name_granted
-            sources_granted = _all_granted(activation.golden)
-            if activation.collides:
-                # Ambiguous label: both readings must be granted.
-                return name_granted and sources_granted
-            return sources_granted
+                and self._all_granted(activation.golden, accessible)
+            )
 
         return [r for r in results if _is_accessible(r)]
+
+    @staticmethod
+    def _all_granted(golden: Any, accessible: Set[str]) -> bool:
+        return bool(golden) and all(g in accessible for g in golden)
+
+    @classmethod
+    def alias_granted(
+        cls,
+        alias: str,
+        accessible: Set[str],
+        activation_sources: Dict[str, _ActivationSource],
+    ) -> bool:
+        """The non-admin access decision for one repository alias.
+
+        Shared by filter_query_results (rows carrying no recorded
+        provenance) and the MCP dispatcher's repository pre-check, so an
+        alias is judged the same before a tool runs and on its results.
+        *accessible* is get_accessible_repos() and *activation_sources* is
+        caller_activation_sources() for the same caller.
+
+        An alias of one of the caller's OWN activations is granted when
+        every golden repository that activation was created from is granted;
+        the activation mapping takes precedence over golden-name matching,
+        and an ambiguous (colliding) activation alias needs both. Any other
+        alias -- another user's activation included, indistinguishable from
+        an unknown alias -- is granted only as a granted golden repository
+        name (minus -global).
+        """
+        name_granted = cls._strip_global(alias) in accessible
+        activation = activation_sources.get(alias)
+        if activation is None:
+            return name_granted
+        sources_granted = cls._all_granted(activation.golden, accessible)
+        if activation.collides:
+            # Ambiguous label: both readings must be granted.
+            return name_granted and sources_granted
+        return sources_granted
 
     def filter_repo_listing(self, repos: List[str], user_id: str) -> List[str]:
         """

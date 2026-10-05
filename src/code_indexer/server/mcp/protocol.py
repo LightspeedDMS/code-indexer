@@ -6,7 +6,7 @@ and execution. Phase 1 implementation with stub handlers for tools/list and tool
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Dict, Any, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, Any, List, Optional, Set, Tuple, Union
 from code_indexer.server.auth.dependencies import (
     get_current_user,
     get_current_user_for_mcp,
@@ -16,8 +16,12 @@ from code_indexer.server.auth.dependencies import (
 )
 from code_indexer.server.auth import dependencies as auth_deps
 from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.access_filtering_service import (
+    AccessFilteringService,
+)
 from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
+import anyio.to_thread
 import asyncio
 import contextvars
 import functools
@@ -102,6 +106,18 @@ def _recognized_repo_param_names(tool_name: str) -> Tuple[str, ...]:
     if tool_name in _REPO_NAME_PARAM_TOOLS:
         names = names + ("repo_name",)
     return names
+
+
+# Recognized parameters that can only name a GOLDEN repository (activation
+# source aliases, write-exception and wiki repos, dep-map entries). Their
+# handlers look the value up in golden-keyed stores, never among the
+# caller's activations, so they are judged by golden name alone: the
+# caller's own activation alias is never a grant here, whatever its
+# sources. repository_alias, alias and user_alias can name the caller's
+# own activation and are judged by its source repositories instead.
+_GOLDEN_ONLY_REPO_PARAMS: frozenset = frozenset(
+    {"golden_repo_alias", "golden_repo_aliases", "repo_alias", "repo_name"}
+)
 
 
 # Timeout in seconds for sync tool handlers executed via run_in_executor.
@@ -618,6 +634,27 @@ def _resolve_acting_users_scope(
     return set(admin_repos & union_repos)
 
 
+def _read_for_access_check(tool_name: str, what: str, read: Callable[[], Any]) -> Any:
+    """Run one store read an access decision needs, failing closed.
+
+    A failure inside the read is refused with a fixed message: its text
+    (paths, SQL) is logged at WARNING with the traceback, never returned
+    to the client.
+    """
+    try:
+        return read()
+    except Exception:
+        logger.warning(
+            "Repository access check for tool %s failed reading %s",
+            tool_name,
+            what,
+            exc_info=True,
+        )
+        raise ValueError(
+            f"Access denied: access check failed for tool '{tool_name}'"
+        ) from None
+
+
 def _check_repository_access(
     arguments: Dict[str, Any],
     effective_user: User,
@@ -687,46 +724,70 @@ def _check_repository_access(
             f" to the specified acting users"
         )
 
-    # is_admin_user()/get_accessible_repos() are computed AT MOST ONCE per
-    # call (memoized here), not once per checked alias -- multiple
-    # recognized repo params may be present and every one of them must be
-    # checked, but the underlying service lookups never need repeating.
+    # is_admin_user()/get_accessible_repos()/caller_activation_sources() are
+    # computed AT MOST ONCE per call (memoized here), not once per checked
+    # alias -- multiple recognized repo params may be present and every one
+    # of them must be checked, but the underlying service lookups never
+    # need repeating.
     _memo: Dict[str, Any] = {}
 
+    def _lookup(key: str, read: Callable[[str], Any]) -> Any:
+        """One memoized service lookup for the effective user.
+
+        *read* is resolved by the caller, so a missing service or method
+        still raises AttributeError there (the dispatcher's "service
+        unavailable" refusal); a failure inside it fails closed
+        (:func:`_read_for_access_check`).
+        """
+        if key not in _memo:
+            _memo[key] = _read_for_access_check(
+                tool_name, key, lambda: read(effective_user.username)
+            )
+        return _memo[key]
+
     def _is_admin() -> bool:
-        if "is_admin" not in _memo:
-            _memo["is_admin"] = access_service.is_admin_user(effective_user.username)
-        return bool(_memo["is_admin"])
+        return bool(_lookup("is_admin", access_service.is_admin_user))
 
     def _accessible() -> Any:
-        if "accessible" not in _memo:
-            _memo["accessible"] = access_service.get_accessible_repos(
-                effective_user.username
-            )
-        return _memo["accessible"]
+        return _lookup("accessible", access_service.get_accessible_repos)
 
-    def _check_one(raw_alias: str) -> None:
+    def _activations() -> Any:
+        return _lookup("activations", access_service.caller_activation_sources)
+
+    def _sources(golden_only: bool) -> Any:
+        # A golden-only parameter (_GOLDEN_ONLY_REPO_PARAMS) never reads
+        # the caller's activations: it is judged by golden name alone.
+        return {} if golden_only else _activations()
+
+    def _check_one(raw_alias: str, golden_only: bool) -> None:
         """Check ONE alias string against accessible/scoped repos."""
-        normalized = _normalize(raw_alias)
         if scoped_repos is not None:
-            if normalized not in scoped_repos:
+            # Same rule against the acting users' narrowed set: an alias of
+            # the caller's own activation needs its SOURCE repos in scope.
+            if not AccessFilteringService.alias_granted(
+                raw_alias, scoped_repos, _sources(golden_only)
+            ):
                 _deny_scoped(raw_alias)
             return
         if _is_admin():
             return
-        if normalized not in _accessible():
+        # The query access filter's own rule: an alias of the caller's own
+        # activation is judged by that activation's source repositories.
+        if not AccessFilteringService.alias_granted(
+            raw_alias, _accessible(), _sources(golden_only)
+        ):
             _deny_single(raw_alias)
 
-    def _check_alias_list(aliases: list) -> None:
+    def _check_alias_list(aliases: list, golden_only: bool) -> None:
         """Check each string entry in a list of aliases.
 
         Shared by the golden_repo_aliases param and the omni list-form
         path (v10.4.3 security fix).
         """
-        for entry in aliases:
-            if not isinstance(entry, str) or not entry:
-                continue  # skip non-string / empty entries
-            _check_one(entry)
+        for entry in aliases:  # every entry is a string (validated below)
+            if not entry:
+                continue  # skip empty entries
+            _check_one(entry, golden_only)
 
     def _try_decode_json_array(value: Any) -> Any:
         """Return decoded list when value is a JSON-array string, else value.
@@ -759,6 +820,10 @@ def _check_repository_access(
         tool_name in _NEW_ALIAS_PARAM_TOOLS or tool_name in _OWNER_ENFORCED_TOOLS
     )
 
+    # Every present repository parameter is a string or a list of strings,
+    # validated before any is authorised: a malformed value is refused here
+    # rather than skipped and handed to a handler that cannot use it.
+    present: List[Tuple[str, Any]] = []
     for param_name in _recognized_repo_param_names(tool_name):
         if param_name == "user_alias" and skip_user_alias:
             continue
@@ -766,12 +831,24 @@ def _check_repository_access(
         if value is None:
             continue
         value = _try_decode_json_array(value)
+        if not (
+            isinstance(value, str)
+            or (isinstance(value, list) and all(isinstance(e, str) for e in value))
+        ):
+            raise ValueError(
+                f"Invalid repository parameter '{param_name}': expected a string"
+                f" or a list of strings"
+            )
+        present.append((param_name, value))
+
+    for param_name, value in present:
+        golden_only = param_name in _GOLDEN_ONLY_REPO_PARAMS
         if isinstance(value, list):
             if value:  # non-empty list only
-                _check_alias_list(value)
+                _check_alias_list(value, golden_only)
             continue
-        if isinstance(value, str) and value:
-            _check_one(value)
+        if value:
+            _check_one(value, golden_only)
 
 
 async def handle_tools_call(
@@ -854,33 +931,17 @@ async def handle_tools_call(
         reset_mcp_principal(principal_token)
 
 
-async def _dispatch_tool_call(
+def _authorize_tool_call(
     tool_name: str,
     arguments: Dict[str, Any],
-    user: User,
     effective_user: User,
-    session_state: Any,
-    *,
-    session_id: Optional[str],
-    elevation_key: Optional[str],
-    http_request: Optional[Request],
-    http_response: Optional[Response],
-    tool_access_memo: Optional[ToolAccessMemo],
-) -> Dict[str, Any]:
-    """Authorize and run one ``tools/call`` for :func:`handle_tools_call`,
-    which has resolved the session, read *effective_user* from it once and
-    bound the call's audit principal from that same user."""
-    from .handlers import HANDLER_REGISTRY
+    tool_access_memo: ToolAccessMemo,
+) -> None:
+    """Every authorization step of one ``tools/call``, in order; raises
+    ValueError on the first refusal and pops ``acting_users`` from
+    *arguments*. It reads the group, grant and activation stores
+    synchronously: :func:`_dispatch_tool_call` runs it on a worker thread."""
     from .tools import TOOL_REGISTRY
-    from code_indexer.server.services.langfuse_service import get_langfuse_service
-
-    # Permission checks and the handler use *effective_user* (CRITICAL 2
-    # fix): the impersonated user's permissions while impersonating, except
-    # for the tools that manage impersonation itself.  Never re-read from
-    # the session here: the audit principal was bound from this value.
-
-    if tool_access_memo is None:
-        tool_access_memo = _new_tool_access_memo()
 
     group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
     if group_decision is False:
@@ -912,15 +973,27 @@ async def _dispatch_tool_call(
 
         # Story #568: Resolve acting_users to scoped repo set for admin users.
         # Non-admin users: acting_users silently ignored (AC3).
+        # A missing service or user manager raises AttributeError here (the
+        # "service unavailable" refusal below); a failure inside a read
+        # fails closed with a fixed message (_read_for_access_check).
         _scoped_repos = None
         if acting_users_emails is not None:
-            if _access_service.is_admin_user(effective_user.username):
+            _is_admin_user = _access_service.is_admin_user
+            if _read_for_access_check(
+                tool_name,
+                "admin status",
+                lambda: _is_admin_user(effective_user.username),
+            ):
                 _user_manager = _handlers_module.app_module.app.state.user_manager
-                _scoped_repos = _resolve_acting_users_scope(
-                    emails=acting_users_emails,
-                    user_manager=_user_manager,
-                    access_service=_access_service,
-                    admin_username=effective_user.username,
+                _scoped_repos = _read_for_access_check(
+                    tool_name,
+                    "acting users scope",
+                    lambda: _resolve_acting_users_scope(
+                        emails=acting_users_emails,
+                        user_manager=_user_manager,
+                        access_service=_access_service,
+                        admin_username=effective_user.username,
+                    ),
                 )
 
         _check_repository_access(
@@ -941,12 +1014,10 @@ async def _dispatch_tool_call(
         # Uses the SAME recognized-parameter set as the main check above
         # (_recognized_repo_param_names) so a parameter recognized there can
         # never fail OPEN here for being missing from a separately
-        # maintained list.
-        _repo_param_names = _recognized_repo_param_names(tool_name)
+        # maintained list. Any non-empty value counts, malformed ones too.
         _has_repo_param = any(
-            (isinstance(arguments.get(p), str) and arguments.get(p))
-            or (isinstance(arguments.get(p), list) and arguments.get(p))
-            for p in _repo_param_names
+            arguments.get(p) not in (None, "", [])
+            for p in _recognized_repo_param_names(tool_name)
         )
         if _has_repo_param:
             logger.warning(
@@ -961,6 +1032,47 @@ async def _dispatch_tool_call(
             "Access filtering service not available for tool %s (no repo param), proceeding",
             tool_name,
         )
+
+
+async def _dispatch_tool_call(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    user: User,
+    effective_user: User,
+    session_state: Any,
+    *,
+    session_id: Optional[str],
+    elevation_key: Optional[str],
+    http_request: Optional[Request],
+    http_response: Optional[Response],
+    tool_access_memo: Optional[ToolAccessMemo],
+) -> Dict[str, Any]:
+    """Authorize and run one ``tools/call`` for :func:`handle_tools_call`,
+    which has resolved the session, read *effective_user* from it once and
+    bound the call's audit principal from that same user."""
+    from .handlers import HANDLER_REGISTRY
+    from code_indexer.server.services.langfuse_service import get_langfuse_service
+
+    # Permission checks and the handler use *effective_user* (CRITICAL 2
+    # fix): the impersonated user's permissions while impersonating, except
+    # for the tools that manage impersonation itself.  Never re-read from
+    # the session here: the audit principal was bound from this value.
+
+    if tool_access_memo is None:
+        tool_access_memo = _new_tool_access_memo()
+
+    # Every authorization step reads the group, grant and activation stores
+    # (database and filesystem I/O): run them, in order, on a worker thread,
+    # never on the event loop.
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _authorize_tool_call,
+            tool_name,
+            arguments,
+            effective_user,
+            tool_access_memo,
+        )
+    )
 
     # Get handler function
     if tool_name not in HANDLER_REGISTRY:

@@ -153,9 +153,12 @@ def _get_wiki_cache_for_handler():
 
 
 def _wiki_analytics_filter_by_search(
-    repo_alias: str, search_query: str, search_mode: str, username: str
+    wiki_alias: str, search_query: str, search_mode: str, username: str
 ) -> Optional[set]:
     """Filter wiki article paths via CIDX search (AC4).
+
+    Searches the wiki's GOLDEN repository (``{wiki_alias}-global``), never
+    a user activation that happens to carry the wiki's bare name.
 
     Returns a set of matching file_paths, or None if search was not performed.
     Returns an empty set when search runs but finds no matches.
@@ -169,7 +172,7 @@ def _wiki_analytics_filter_by_search(
     result = sqm.query_user_repositories(
         username=username,
         query_text=search_query,
-        repository_alias=repo_alias,
+        repository_alias=f"{wiki_alias}-global",
         search_mode=search_mode,
         limit=_WIKI_ANALYTICS_MAX_SEARCH_RESULTS,
         file_extensions=[".md"],
@@ -745,7 +748,7 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
 
         # AC4: Optional search filter - raises on sqm unavailability
         article_paths_filter = _wiki_analytics_filter_by_search(
-            repo_alias, search_query or "", search_mode, user.username
+            wiki_alias, search_query or "", search_mode, user.username
         )
         if article_paths_filter is not None and not article_paths_filter:
             return _mcp_response(
