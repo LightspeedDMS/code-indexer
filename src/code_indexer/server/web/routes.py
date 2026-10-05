@@ -5913,15 +5913,11 @@ def query_submit(
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
-            # Handle semantic/FTS/temporal queries
+            # Handle semantic/FTS/hybrid/temporal queries
             query_manager = _get_semantic_query_manager()
-            if not query_manager:
-                error_message = "Query service not available"
-            else:
-                # Find the username for this repository
-                # Repository format is "user_alias (username)"
-                repo_parts = repository.split(" (")
-                user_alias = repo_parts[0] if repo_parts else repository
+            # Repository format is "user_alias (username)"
+            repo_parts = repository.split(" (")
+            user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository from all available repos (including global)
             all_repos = _get_all_activated_repos_for_query(backend_registry)
@@ -5931,106 +5927,32 @@ def query_submit(
                     target_repo = repo
                     break
 
-            if not target_repo:
+            if not query_manager:
+                error_message = "Query service not available"
+            elif not target_repo:
                 error_message = f"Repository '{user_alias}' not found"
-            elif target_repo.get("is_global"):
-                # Handle global repository query
-                import os
-                from code_indexer.global_repos.alias_manager import AliasManager
-                from ..services.search_service import (
-                    SemanticSearchService,
-                    SemanticSearchRequest,
-                )
-
-                server_data_dir = os.environ.get(
-                    "CIDX_SERVER_DATA_DIR",
-                    os.path.expanduser("~/.cidx-server"),
-                )
-                aliases_dir = (
-                    Path(server_data_dir) / "data" / "golden-repos" / "aliases"
-                )
-                alias_manager = AliasManager(str(aliases_dir))
-
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
-                if not target_path:
-                    error_message = f"Global repository '{user_alias}' alias not found"
-                else:
-                    # Use SemanticSearchService for direct path query
-                    search_service = SemanticSearchService()
-                    search_request = SemanticSearchRequest(
-                        query=query_text.strip(),
-                        limit=limit,
-                        include_source=True,
-                        language=language if language else None,
-                        path_filter=path_pattern if path_pattern else None,
-                    )
-
-                    try:
-                        search_response = search_service.search_repository_path(
-                            target_path, search_request
-                        )
-
-                        # Convert results to template format
-                        for result in search_response.results:
-                            results.append(
-                                {
-                                    "file_path": result.file_path,
-                                    "line_numbers": str(result.line_start or 1),
-                                    "content": result.content or "",
-                                    "score": result.score,
-                                    "language": _detect_language_from_path(
-                                        result.file_path
-                                    ),
-                                }
-                            )
-                    except Exception as e:
-                        logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-034", f"Global repo query failed: {e}"
-                            ),
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        error_message = f"Query failed: {str(e)}"
             else:
-                repo_username = target_repo.get("username", session.username)
-
-                # Execute query for user-activated repositories
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                results.extend(
+                    _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
                     )
+                )
 
     except Exception as e:
         logger.error(
@@ -6308,6 +6230,72 @@ def _execute_scip_query(
     return results, None
 
 
+def _execute_text_query(
+    query_manager: Any,
+    target_repo: Dict[str, Any],
+    user_alias: str,
+    session_username: str,
+    query_text: str,
+    *,
+    limit: int,
+    min_score: Optional[float],
+    language: str,
+    path_filter: str,
+    search_mode: str,
+    time_range: str,
+    time_range_all: bool,
+    at_commit: str,
+    case_sensitive: bool,
+    fuzzy: bool,
+    regex: bool,
+) -> List[Dict[str, Any]]:
+    """Run a semantic/FTS/hybrid/temporal Web query; return template rows.
+
+    Shared by both Web query handlers. Activated and global repositories go
+    through the same mode-aware ``query_user_repositories`` path REST and
+    MCP use, with every form parameter. A global repository is queried as
+    the signed-in user, so the normal per-user repository access narrowing
+    applies (a repository the user cannot access is refused like an unknown
+    one); an activated repository is queried as its owner. Failures raise.
+    """
+    if target_repo.get("is_global"):
+        username = session_username
+    else:
+        username = target_repo.get("username", session_username)
+
+    query_response = query_manager.query_user_repositories(
+        username=username,
+        query_text=query_text.strip(),
+        repository_alias=user_alias,
+        limit=limit,
+        min_score=min_score,
+        language=language if language else None,
+        path_filter=path_filter if path_filter else None,
+        search_mode=search_mode,
+        time_range=time_range if time_range else None,
+        time_range_all=time_range_all,
+        at_commit=at_commit if at_commit else None,
+        case_sensitive=case_sensitive,
+        fuzzy=fuzzy,
+        regex=regex,
+    )
+
+    return [
+        {
+            "file_path": result.get("file_path", ""),
+            "line_numbers": f"{result.get('line_number', 1)}",
+            "content": result.get("code_snippet", ""),
+            "score": result.get("similarity_score", 0.0),
+            "language": _detect_language_from_path(result.get("file_path", "")),
+            "repository_alias": result.get("repository_alias", ""),
+            "source_repo": result.get("source_repo"),
+            "metadata": result.get("metadata"),
+            "temporal_context": result.get("temporal_context"),
+        }
+        for result in query_response.get("results", [])
+    ]
+
+
 @web_router.post("/partials/query-results", response_class=HTMLResponse)
 def query_results_partial_post(
     request: Request,
@@ -6430,104 +6418,28 @@ def query_results_partial_post(
                 results.extend(scip_results)
                 if scip_error:
                     error_message = scip_error
-            elif target_repo.get("is_global"):
-                # Handle global repository query
-                import os
-                from code_indexer.global_repos.alias_manager import AliasManager
-                from ..services.search_service import (
-                    SemanticSearchService,
-                    SemanticSearchRequest,
-                )
-
-                server_data_dir = os.environ.get(
-                    "CIDX_SERVER_DATA_DIR",
-                    os.path.expanduser("~/.cidx-server"),
-                )
-                aliases_dir = (
-                    Path(server_data_dir) / "data" / "golden-repos" / "aliases"
-                )
-                alias_manager = AliasManager(str(aliases_dir))
-
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
-                if not target_path:
-                    error_message = f"Global repository '{user_alias}' alias not found"
-                else:
-                    # Use SemanticSearchService for direct path query
-                    search_service = SemanticSearchService()
-                    search_request = SemanticSearchRequest(
-                        query=query_text.strip(),
-                        limit=limit,
-                        include_source=True,
-                        language=language if language else None,
-                        path_filter=path_pattern if path_pattern else None,
-                    )
-
-                    try:
-                        search_response = search_service.search_repository_path(
-                            target_path, search_request
-                        )
-
-                        # Convert results to template format
-                        for result in search_response.results:
-                            results.append(
-                                {
-                                    "file_path": result.file_path,
-                                    "line_numbers": str(result.line_start or 1),
-                                    "content": result.content or "",
-                                    "score": result.score,
-                                    "language": _detect_language_from_path(
-                                        result.file_path
-                                    ),
-                                }
-                            )
-                    except Exception as e:
-                        logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-040", f"Global repo query failed: {e}"
-                            ),
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        error_message = f"Query failed: {str(e)}"
             else:
-                # Execute query for user-activated repositories
-                repo_username = target_repo.get("username", session.username)
-
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                results.extend(
+                    _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
                     )
+                )
 
     except Exception as e:
         logger.error(
