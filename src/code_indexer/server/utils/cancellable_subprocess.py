@@ -30,13 +30,18 @@ naturally or `cancel_check()` fires — never both a fixed deadline.
 """
 
 import logging
-import os
 import re
-import signal
 import subprocess
 import threading
 import time
 from typing import Callable, List, Optional
+
+# Bug #2012: the single, layer-neutral group-termination implementation
+# (watches the whole group through the grace period, KILLs survivors, never
+# signals the caller's own group) -- previously duplicated in this module.
+from code_indexer.utils.process_group import (
+    terminate_process_group as _terminate_process_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +57,6 @@ _ERROR_TOKEN_PATTERN = re.compile(r"\bERROR\b")
 # seconds; this is NOT a wall-clock deadline on the subprocess itself.
 SHORT_POLL_SECONDS = 2.0
 
-# Grace period after SIGTERM before escalating to SIGKILL.
-SIGTERM_GRACE_SECONDS = 2.0
-
 # How long to wait for the stdout/stderr drain threads to finish after the
 # child has been reaped. Generous but bounded — the pipes are already
 # closed by the time we reach this join, so it should return almost
@@ -64,38 +66,6 @@ _DRAIN_JOIN_TIMEOUT_SECONDS = 5.0
 
 class SubprocessCancelledError(RuntimeError):
     """Raised when a cancellable subprocess is terminated due to job cancellation."""
-
-
-def _terminate_process_group(proc: "subprocess.Popen[str]") -> None:
-    """SIGTERM the process group, wait a grace period, escalate to SIGKILL.
-
-    Always blocks until the child is reaped so proc.returncode is populated
-    when this returns.
-    """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        # Process already gone.
-        proc.wait()
-        return
-
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        proc.wait()
-        return
-
-    try:
-        proc.wait(timeout=SIGTERM_GRACE_SECONDS)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait()
 
 
 def _drain_stream(
@@ -223,6 +193,12 @@ def run_cancellable_subprocess(
 
         if cancelled or timed_out:
             _terminate_process_group(proc)
+    except BaseException:
+        # Bug #2012: anything escaping the loop (e.g. a cancel_check that
+        # raises) must never leave the child's process group running.
+        if proc.poll() is None:
+            _terminate_process_group(proc)
+        raise
     finally:
         stdout_thread.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         stderr_thread.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
@@ -239,7 +215,10 @@ def run_cancellable_subprocess(
         # purely to satisfy mypy's Optional[float] narrowing; it is never
         # actually exercised.
         raise subprocess.TimeoutExpired(
-            cmd=args, timeout=timeout if timeout is not None else poll_interval
+            cmd=args,
+            timeout=timeout if timeout is not None else poll_interval,
+            output="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
         )
 
     return subprocess.CompletedProcess(
@@ -248,3 +227,47 @@ def run_cancellable_subprocess(
         stdout="".join(stdout_chunks),
         stderr="".join(stderr_chunks),
     )
+
+
+# run_with_cancel can honour exactly these subprocess.run arguments.
+_RUN_WITH_CANCEL_ARGS = frozenset(
+    {"cwd", "env", "timeout", "check", "capture_output", "text"}
+)
+
+
+def run_with_cancel(
+    args: List[str],
+    cancel_check: Optional[Callable[[], bool]],
+    **run_kwargs,
+) -> "subprocess.CompletedProcess[str]":
+    """Bug #2012: drop-in for ``subprocess.run(args, **run_kwargs)`` that the
+    owning job can cancel.
+
+    With ``cancel_check=None`` (no owning job, e.g. CLI mode) this IS
+    ``subprocess.run(args, **run_kwargs)`` -- same call, same behaviour.
+    With a check, the child runs through ``run_cancellable_subprocess`` in
+    its own process group: on cancel the whole group is terminated and
+    ``SubprocessCancelledError`` is raised; ``timeout`` and ``check=True``
+    keep their ``subprocess.run`` meaning (output is always captured as
+    text). Arguments that cannot be honoured raise ``TypeError``.
+    """
+    if cancel_check is None:
+        return subprocess.run(args, **run_kwargs)
+
+    unsupported = set(run_kwargs) - _RUN_WITH_CANCEL_ARGS
+    if unsupported:
+        raise TypeError(
+            f"run_with_cancel cannot honour {sorted(unsupported)} for {args!r}"
+        )
+    result = run_cancellable_subprocess(
+        args,
+        cwd=run_kwargs.get("cwd"),
+        env=run_kwargs.get("env"),
+        cancel_check=cancel_check,
+        timeout=run_kwargs.get("timeout"),
+    )
+    if run_kwargs.get("check") and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, args, output=result.stdout, stderr=result.stderr
+        )
+    return result

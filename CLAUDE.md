@@ -455,6 +455,23 @@ Two subsystems: **ClaudeCliManager** (queue-based thread pool, batch) and **Rese
 
 Any new background job MUST: (1) integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin visibility; (2) confirm the frontend reporting pattern with the user before implementing. **Auto-discovery pattern (Story #1157)**: `POST /api/discovery/{platform}/start` + `GET .../result/{job_id}` (`web/routes.py`); result storage MUST use `app.state.payload_cache`, never a module-level dict; manual dedup (scan `bgm.jobs.values()`) since `repo_alias=None` bypasses the DB gate.
 
+**Bug #2012**:
+- `BackgroundJobManager._load_jobs_sqlite` must NEVER load surviving running/pending rows into `self.jobs`: after the startup sweep they belong to another live worker/node, and an in-memory copy is never updated yet overrides the DB in `list_jobs`/`get_job_status` (an interrupted job showed `running` forever).
+- Cancellation reaches subprocesses only through the injected `cancel_check` (a worker declaring it gets the DB-backed check, polled ~every 2 s). Indexing children use `run_with_popen_progress(cancel_check=...)` (raises `IndexingCancelledError`, never an `IndexingSubprocessError`); every other refresh subprocess uses `run_with_cancel` (`server/utils/cancellable_subprocess.py`; exactly `subprocess.run` when no check; raises `SubprocessCancelledError`). Broad `except Exception` handlers on the refresh path must re-raise `_is_refresh_cancellation(e)`.
+- A BGM-submitted golden-repo refresh (`_submit_refresh_job`) binds every subprocess it starts to the job's cancel check:
+  - git fetch/pull/reset/branch/rev-parse/checkout and the re-clone;
+  - the `cidx init` repair;
+  - the repo-metrics `git ls-files`/`rev-list` in `gather_repo_metrics` (their 30 s timeouts are metadata bounds, not indexing timeouts);
+  - semantic/temporal indexing, and SCIP via `run_with_cancel`;
+  - the snapshot's `git update-index`/`restore`/`cidx fix-config`;
+  - the cidx-meta backup git calls.
+
+  A cancelled refresh records `status=cancelled` on `cidx.repos.refresh.duration`. Exception: the snapshot manager's CoW copy itself is not interruptible mid-copy; a cancel during it is honoured at the pre-swap recheck, and the unpublished snapshot is discarded.
+- GAP (follow-up): `execute_refresh_for_claimed_job` (cluster-reclaimed refreshes run by `DistributedJobWorkerService`) passes NO `cancel_check`, so those refreshes still cannot stop their subprocesses on cancel.
+- Publish rechecks: cancellation is re-checked before indexing, after indexing, after the integrity gate, before snapshot creation and before the alias swap. A snapshot created but not yet published goes to `cleanup_manager.schedule_cleanup`, and the job ends `cancelled`.
+- A failed cancel-flag read never stops a job (no wall-clock limit). It logs WARNING with traceback on the 1st and every `CANCEL_READ_WARN_EVERY`-th consecutive failure, ERROR once at `CANCEL_READ_ESCALATE_AFTER`, and a successful read resets the streak.
+- Process-group termination has ONE implementation, `code_indexer/utils/process_group.py`. It watches the whole group through the grace period, SIGKILLs survivors (a grandchild ignoring SIGTERM), and never signals the caller's own process group.
+
 -> Detail: docs/architecture-invariants.md#background-jobs
 
 ---

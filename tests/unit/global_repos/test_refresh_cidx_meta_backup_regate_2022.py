@@ -105,7 +105,9 @@ def _backup_enabled(
             during_sync()
         return sync_result
 
-    def _backup_sync(repo_path: str, branch: str) -> SimpleNamespace:
+    def _backup_sync(
+        repo_path: str, branch: str, cancel_check: object = None
+    ) -> SimpleNamespace:
         return SimpleNamespace(sync=_sync)
 
     with (

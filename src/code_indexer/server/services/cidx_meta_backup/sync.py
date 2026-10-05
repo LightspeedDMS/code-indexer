@@ -31,9 +31,10 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.utils.cancellable_subprocess import run_with_cancel
 
 
 @dataclass
@@ -50,9 +51,17 @@ class CidxMetaBackupSync:
     full design rationale.
     """
 
-    def __init__(self, cidx_meta_path: str, branch: str) -> None:
+    def __init__(
+        self,
+        cidx_meta_path: str,
+        branch: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
         self.cidx_meta_path = cidx_meta_path
         self.branch = branch
+        # Bug #2012: the owning refresh job's cancel check; every git call
+        # (status/add/commit/push) is then terminated on cancel.
+        self._cancel_check = cancel_check
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         env = build_non_interactive_git_env()
@@ -60,8 +69,9 @@ class CidxMetaBackupSync:
         env.setdefault("GIT_AUTHOR_EMAIL", "cidx-meta-backup@example.invalid")
         env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
         env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
-        return subprocess.run(
+        return run_with_cancel(
             ["git", *args],
+            self._cancel_check,
             cwd=self.cidx_meta_path,
             capture_output=True,
             text=True,

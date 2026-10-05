@@ -9,9 +9,13 @@ import logging
 import subprocess
 from collections.abc import Sequence as _Sequence
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from .git_error_classifier import GitFetchError
+from code_indexer.server.utils.cancellable_subprocess import (
+    SubprocessCancelledError,
+    run_with_cancel,
+)
 from code_indexer.global_repos.orphaned_repo_error import OrphanedRepoError
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.utils.subprocess_diagnostics import (
@@ -140,14 +144,22 @@ class GitPullUpdater(UpdateStrategy):
     Uses git diff-index for change detection and git pull for updates.
     """
 
-    def __init__(self, repo_path: str):
+    def __init__(
+        self, repo_path: str, cancel_check: Optional[Callable[[], bool]] = None
+    ):
         """
         Initialize git pull updater.
 
         Args:
             repo_path: Path to git repository
+            cancel_check: Bug #2012 -- the owning job's cancel check. When
+                set, every git subprocess runs in its own process group and
+                is terminated on cancel (SubprocessCancelledError, a
+                RuntimeError, propagates unchanged). None = plain
+                subprocess.run (no owning job).
         """
         self.repo_path = Path(repo_path)
+        self._cancel_check = cancel_check
 
         if not self.repo_path.exists():
             # Bug #1338: this is the ORPHAN case (registry row present, clone
@@ -155,6 +167,11 @@ class GitPullUpdater(UpdateStrategy):
             # plain ValueError, so the refresh-scheduler skip site can catch
             # it by TYPE instead of matching this message's text.
             raise OrphanedRepoError(f"Repository path does not exist: {repo_path}")
+
+    def _run(self, args: list, **run_kwargs) -> "subprocess.CompletedProcess[str]":
+        """Run one git subprocess, cancellable by the owning job (Bug #2012);
+        exactly subprocess.run(args, **run_kwargs) when no job owns it."""
+        return run_with_cancel(args, self._cancel_check, **run_kwargs)
 
     def has_changes(self) -> bool:
         """
@@ -172,7 +189,7 @@ class GitPullUpdater(UpdateStrategy):
         try:
             # First, fetch latest refs from remote
             try:
-                fetch_result = subprocess.run(
+                fetch_result = self._run(
                     ["git", "fetch", "origin"],
                     cwd=str(self.repo_path),
                     capture_output=True,
@@ -251,7 +268,7 @@ class GitPullUpdater(UpdateStrategy):
             # A detached/pinned ref is immutable for refresh purposes — skip the
             # upstream comparison entirely and return False gracefully.
             try:
-                symbolic_ref_result = subprocess.run(
+                symbolic_ref_result = self._run(
                     ["git", "symbolic-ref", "-q", "HEAD"],
                     cwd=str(self.repo_path),
                     capture_output=True,
@@ -274,7 +291,7 @@ class GitPullUpdater(UpdateStrategy):
 
             # Check for commits on remote not in local using HEAD..@{upstream}
             try:
-                log_result = subprocess.run(
+                log_result = self._run(
                     ["git", "log", "HEAD..@{upstream}", "--oneline"],
                     cwd=str(self.repo_path),
                     capture_output=True,
@@ -324,7 +341,7 @@ class GitPullUpdater(UpdateStrategy):
             Current branch name, or "main" as fallback
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=str(self.repo_path),
                 capture_output=True,
@@ -341,6 +358,8 @@ class GitPullUpdater(UpdateStrategy):
             logger.warning(
                 f"git rev-parse timed out for {self.repo_path}, falling back to 'main'"
             )
+        except SubprocessCancelledError:
+            raise  # Bug #2012: a cancelled job is not a detection failure
         except Exception as e:
             logger.warning(
                 f"git rev-parse raised {type(e).__name__} for {self.repo_path}, "
@@ -360,7 +379,7 @@ class GitPullUpdater(UpdateStrategy):
         Raises:
             RuntimeError: If fetch or reset fails
         """
-        fetch_result = subprocess.run(
+        fetch_result = self._run(
             ["git", "fetch", "origin"],
             cwd=str(self.repo_path),
             capture_output=True,
@@ -375,7 +394,7 @@ class GitPullUpdater(UpdateStrategy):
                 f"origin/{branch}: {_format_subprocess_failure_diagnostic(fetch_result)}"
             )
 
-        reset_result = subprocess.run(
+        reset_result = self._run(
             ["git", "reset", "--hard", f"origin/{branch}"],
             cwd=str(self.repo_path),
             capture_output=True,
@@ -401,7 +420,7 @@ class GitPullUpdater(UpdateStrategy):
                     if artifact.exists():
                         artifact.unlink()
                         logger.info(f"Removed conflicting untracked file: {artifact}")
-                retry_reset = subprocess.run(
+                retry_reset = self._run(
                     ["git", "reset", "--hard", f"origin/{branch}"],
                     cwd=str(self.repo_path),
                     capture_output=True,
@@ -457,7 +476,7 @@ class GitPullUpdater(UpdateStrategy):
         """
         try:
             # Story #726: Defense in depth - check for local modifications
-            status_result = subprocess.run(
+            status_result = self._run(
                 ["git", "status", "--porcelain"],
                 cwd=str(self.repo_path),
                 capture_output=True,
@@ -482,7 +501,7 @@ class GitPullUpdater(UpdateStrategy):
                 )
 
                 # Reset local modifications to allow clean pull
-                reset_result = subprocess.run(
+                reset_result = self._run(
                     ["git", "reset", "--hard", "HEAD"],
                     cwd=str(self.repo_path),
                     capture_output=True,
@@ -513,7 +532,7 @@ class GitPullUpdater(UpdateStrategy):
 
             logger.info(f"Executing git pull for {self.repo_path}")
 
-            result = subprocess.run(
+            result = self._run(
                 ["git", "pull"],
                 cwd=str(self.repo_path),
                 capture_output=True,
@@ -561,7 +580,7 @@ class GitPullUpdater(UpdateStrategy):
                             logger.info(
                                 f"Removed conflicting untracked file: {artifact}"
                             )
-                    retry = subprocess.run(
+                    retry = self._run(
                         ["git", "pull"],
                         cwd=str(self.repo_path),
                         capture_output=True,

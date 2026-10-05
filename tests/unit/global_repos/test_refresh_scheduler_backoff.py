@@ -236,7 +236,9 @@ class TestTransientErrorBackoffUnaffectedUntilSustained:
 
         # Unchanged pre-existing behavior: re-clone attempted exactly once
         # the count reaches MAX_TRANSIENT_FAILURES.
-        mock_reclone.assert_called_once_with(ALIAS, REPO_URL, MASTER_PATH)
+        mock_reclone.assert_called_once_with(
+            ALIAS, REPO_URL, MASTER_PATH, cancel_check=None
+        )
 
     def test_transient_failure_keeps_retrying_indefinitely_past_threshold(
         self, scheduler
@@ -297,5 +299,7 @@ class TestCorruptionCategoryUnaffected:
         with patch.object(scheduler, "_attempt_reclone") as mock_reclone:
             with pytest.raises(RuntimeError):
                 scheduler._handle_fetch_error(ALIAS, REPO_URL, MASTER_PATH, error)
-        mock_reclone.assert_called_once_with(ALIAS, REPO_URL, MASTER_PATH)
+        mock_reclone.assert_called_once_with(
+            ALIAS, REPO_URL, MASTER_PATH, cancel_check=None
+        )
         scheduler.registry.update_next_refresh.assert_not_called()

@@ -216,6 +216,15 @@ PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 # are unaffected and continue to respect PROGRESS_DEBOUNCE_INTERVAL.
 PROGRESS_COARSE_JUMP_THRESHOLD: int = 10
 
+# Bug #2012: a running job's cancel flag is re-read from the shared DB on
+# every progress tick and every cancel poll (~2 s). A failed read is logged
+# at WARNING on the 1st and every CANCEL_READ_WARN_EVERY-th consecutive
+# failure, and at ERROR once when the streak reaches
+# CANCEL_READ_ESCALATE_AFTER. The job is never stopped for it -- these
+# bound the LOGGING, never the job's runtime (Bug #1218).
+CANCEL_READ_WARN_EVERY: int = 30
+CANCEL_READ_ESCALATE_AFTER: int = 150
+
 # Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
 # Prevents unbounded DB fetches caused by large or uncapped page_size values.
 # The dashboard and API consumers use at most 50 rows per page in practice.
@@ -303,6 +312,9 @@ class BackgroundJobManager:
         self._job_tracker: Optional["JobTracker"] = job_tracker
         self._executor = None
         self._running_jobs: Dict[str, threading.Thread] = {}
+        # Bug #2012: consecutive failed reads of each running job's cancel
+        # flag (guarded by self._lock; see _check_db_cancellation).
+        self._cancel_read_failures: Dict[str, int] = {}
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
         # Story #26: Queue for pending jobs waiting for a slot
         self._pending_job_queue: queue.Queue = queue.Queue()
@@ -1482,20 +1494,57 @@ class BackgroundJobManager:
 
         Called from progress_callback to detect cancellations triggered
         on a different cluster node.  Bug #584.
+
+        Bug #2012: a failed read is never silent and never stops the job.
+        The 1st and every CANCEL_READ_WARN_EVERY-th consecutive failure is
+        logged at WARNING with its traceback; reaching
+        CANCEL_READ_ESCALATE_AFTER consecutive failures is logged at ERROR
+        exactly once (a cancel cannot be honoured while reads keep failing).
+        The job keeps running either way -- there is no wall-clock limit on
+        legitimate long work. A successful read ends the streak.
         """
+        if self._sqlite_backend is None:
+            return
         try:
-            if self._sqlite_backend is not None:
-                job_data = self._sqlite_backend.get_job(job_id)
-                if job_data and job_data.get("status") == "cancelled":
-                    with self._lock:
-                        if job_id in self.jobs:
-                            self.jobs[job_id].cancelled = True
-                            logging.debug(
-                                "Bug #584: Detected cross-node cancellation for job %s",
-                                job_id,
-                            )
+            job_data = self._sqlite_backend.get_job(job_id)
         except Exception:
-            pass  # Best-effort — don't break progress reporting
+            with self._lock:
+                failures = self._cancel_read_failures.get(job_id, 0) + 1
+                self._cancel_read_failures[job_id] = failures
+            if failures == CANCEL_READ_ESCALATE_AFTER:
+                logging.error(
+                    "Cancel flag of job %s unreadable for %d consecutive checks; "
+                    "the job keeps running but a cancel cannot be honoured "
+                    "until reads recover",
+                    job_id,
+                    failures,
+                    exc_info=True,
+                )
+            elif failures == 1 or failures % CANCEL_READ_WARN_EVERY == 0:
+                logging.warning(
+                    "Could not read the cancel flag of job %s (consecutive "
+                    "failure %d); the job keeps running",
+                    job_id,
+                    failures,
+                    exc_info=True,
+                )
+            return
+        with self._lock:
+            streak = self._cancel_read_failures.pop(job_id, 0)
+        if streak:
+            logging.info(
+                "Cancel flag of job %s readable again after %d failed checks",
+                job_id,
+                streak,
+            )
+        if job_data and job_data.get("status") == "cancelled":
+            with self._lock:
+                if job_id in self.jobs:
+                    self.jobs[job_id].cancelled = True
+                    logging.debug(
+                        "Bug #584: Detected cross-node cancellation for job %s",
+                        job_id,
+                    )
 
     def _close_thread_connections_on_all_managers(self, job_id: str) -> None:
         """Bug #878 Fix A.3 helper.
@@ -1971,6 +2020,8 @@ class BackgroundJobManager:
                 # concurrency via queue depth.  Only clean up running job ref.
                 with self._lock:
                     self._running_jobs.pop(job_id, None)
+                    # Bug #2012: the cancel-read streak never outlives its job.
+                    self._cancel_read_failures.pop(job_id, None)
         finally:
             # Bug #878 Fix A.3: Proactively close any SQLite connections
             # this worker thread opened on registered DatabaseConnectionManager
@@ -2670,14 +2721,13 @@ class BackgroundJobManager:
 
     def _load_jobs_sqlite(self) -> None:
         """
-        Load jobs from SQLite database into memory.
+        Startup housekeeping of the persistent job store.
 
-        Story #723: Clean up orphaned jobs before loading.
-        On server restart, any 'running' or 'pending' jobs are orphaned
-        since the processes executing them no longer exist.
-
-        Story #267 Component 6: Clean up old completed/failed jobs before loading.
-        Story #267 Component 8: Load only active/pending jobs (not all 10K).
+        Story #723: Clean up orphaned jobs (rows whose owning process is gone).
+        Story #267 Component 6: Clean up old completed/failed jobs.
+        Bug #2012: active rows that survive the sweep belong to other live
+        workers/nodes and are deliberately NOT loaded into memory -- see the
+        comment at the end of this method.
         """
         if not self._sqlite_backend:
             return
@@ -2720,45 +2770,31 @@ class BackgroundJobManager:
                     f"(older than {max_age} hours)"
                 )
 
-            # Story #267 Component 8: Load only active/pending jobs into memory.
-            # After orphan cleanup marks running/pending as failed, there should
-            # be very few active jobs. Historical data is served from SQLite directly.
-            loaded_count = 0
+            # Bug #2012: running/pending rows that survive the sweep above are
+            # owned by ANOTHER live process (a sibling worker, or another
+            # node in cluster mode) -- this process can neither execute nor
+            # track them. They are NOT loaded into memory: an in-memory copy
+            # is never updated again and, because list_jobs/get_job_status
+            # prefer memory over the shared DB, it kept reporting a job
+            # 'running' after its owner had saved it interrupted/finished
+            # (and inflated count_active_refresh_jobs). The shared DB row is
+            # the only source of truth for them; cancel_job already writes a
+            # cancel for a job not in memory straight to the DB.
+            foreign_active = 0
             for status_value in ["running", "pending"]:
-                status_jobs = self._sqlite_backend.list_jobs(
-                    status=status_value,
-                    limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                foreign_active += len(
+                    self._sqlite_backend.list_jobs(
+                        status=status_value,
+                        limit=self.MAX_ACTIVE_JOBS_PER_STATUS,
+                    )
                 )
-                for job_dict in status_jobs:
-                    self._deserialize_and_add_job(job_dict)
-                    loaded_count += 1
-
-            logging.info(f"Loaded {loaded_count} active jobs from SQLite into memory")
+            logging.info(
+                f"{foreign_active} active jobs owned by other live workers/nodes "
+                "left in the shared job store (not loaded into memory)"
+            )
 
         except Exception as e:
             logging.error(f"Failed to load jobs from SQLite: {e}")
-
-    def _deserialize_and_add_job(self, job_dict: Dict[str, Any]) -> None:
-        """Deserialize a job dictionary from SQLite and add to in-memory dict.
-
-        Story #267 Component 8: Extracted helper to avoid duplicating deserialization
-        logic when loading jobs per-status in _load_jobs_sqlite.
-        """
-        # Convert ISO strings back to datetime objects
-        for field_name in ["created_at", "started_at", "completed_at"]:
-            if job_dict.get(field_name) is not None and isinstance(
-                job_dict[field_name], str
-            ):
-                job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
-
-        # Convert string status back to enum
-        job_dict["status"] = JobStatus(job_dict["status"])
-
-        # Create job object (filter unknown keys for forward-compat)
-        job = BackgroundJob(
-            **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
-        )
-        self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
         """

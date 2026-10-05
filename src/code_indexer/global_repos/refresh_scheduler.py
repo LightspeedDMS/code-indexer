@@ -70,6 +70,10 @@ from code_indexer.server.storage.shared.nfs_visibility import (
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.server.utils.cancellable_subprocess import (
+    SubprocessCancelledError,
+    run_with_cancel,
+)
 from functools import partial
 
 from code_indexer.services.index_failure_exit_codes import (
@@ -339,6 +343,37 @@ def _build_source_trigram_index(alias_name: str, source_path: str) -> None:
             f"Trigram index build failed for {alias_name} "
             f"(regex search will full-scan): {tri_exc}"
         )
+
+
+def _is_refresh_cancellation(exc: BaseException) -> bool:
+    """Bug #2012: True for the two ways a refresh step reports that its job
+    was cancelled -- an indexing child (IndexingCancelledError) or any other
+    refresh subprocess (SubprocessCancelledError, via run_with_cancel)."""
+    from code_indexer.services.progress_subprocess_runner import (
+        IndexingCancelledError,
+    )
+
+    return isinstance(exc, (IndexingCancelledError, SubprocessCancelledError))
+
+
+def _raise_if_refresh_cancelled(
+    cancel_check: Optional[Callable[[], bool]], alias_name: str, stage: str
+) -> None:
+    """Bug #2012: stop a refresh whose job was cancelled, naming the stage
+    reached. A no-op when no cancel check is armed (CLI mode)."""
+    if cancel_check is None or not cancel_check():
+        return
+    raise _refresh_cancelled_error(alias_name, stage)
+
+
+def _refresh_cancelled_error(alias_name: str, stage: str) -> Exception:
+    from code_indexer.services.progress_subprocess_runner import (
+        IndexingCancelledError,
+    )
+
+    return IndexingCancelledError(
+        f"Refresh of {alias_name} cancelled {stage}; nothing was published"
+    )
 
 
 def _is_git_repo_url(repo_url: str) -> bool:
@@ -1069,6 +1104,7 @@ class RefreshScheduler:
         master_path: str,
         error: "GitFetchError",
         count: int,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         """
         Handle TRANSIENT/CORRUPTION fetch errors -- pre-existing behavior,
@@ -1085,7 +1121,9 @@ class RefreshScheduler:
             # Set cooldown before attempting — prevents retry storms even if
             # the attempt raises an exception.
             self._reclone_cooldowns[alias_name] = now + self.RECLONE_COOLDOWN_SECONDS
-            self._attempt_reclone(alias_name, repo_url, master_path)
+            self._attempt_reclone(
+                alias_name, repo_url, master_path, cancel_check=cancel_check
+            )
 
     def _apply_fetch_backoff(self, alias_name: str, category: str, count: int) -> None:
         """Push next_refresh out by the computed backoff, if any (Bug #1341)."""
@@ -1107,6 +1145,7 @@ class RefreshScheduler:
         repo_url: str,
         master_path: str,
         error: "GitFetchError",
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> NoReturn:
         """
         Handle a GitFetchError from has_changes().
@@ -1140,7 +1179,12 @@ class RefreshScheduler:
             self._log_permanent_fetch_failure(alias_name, count, error)
         else:
             self._handle_non_permanent_fetch_error(
-                alias_name, repo_url, master_path, error, count
+                alias_name,
+                repo_url,
+                master_path,
+                error,
+                count,
+                cancel_check=cancel_check,
             )
 
         self._apply_fetch_backoff(alias_name, error.category, count)
@@ -1150,7 +1194,11 @@ class RefreshScheduler:
         )
 
     def _attempt_reclone(
-        self, alias_name: str, repo_url: str, master_path: str
+        self,
+        alias_name: str,
+        repo_url: str,
+        master_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """
         Re-clone from the remote URL using a safe clone-to-temp-then-swap strategy.
@@ -1167,10 +1215,16 @@ class RefreshScheduler:
             alias_name: Global alias name (for logging)
             repo_url: Remote git URL to clone from
             master_path: Absolute path of the master clone directory
+            cancel_check: Bug #2012 -- the owning job's cancel check; the
+                `git clone` is terminated when the job is cancelled.
 
         Returns:
             True on success, False on failure (also logs CRITICAL on failure).
-            Never raises — all exceptions are caught and logged.
+
+        Raises:
+            SubprocessCancelledError: the job was cancelled mid-clone (the
+                partial temp clone is removed first; master is untouched).
+                Every other failure is caught, logged and returned as False.
         """
         master = Path(master_path)
         temp_clone = master.parent / f".reclone-{master.name}-tmp"
@@ -1180,13 +1234,20 @@ class RefreshScheduler:
             shutil.rmtree(str(temp_clone))
 
         try:
-            clone_result = subprocess.run(
+            clone_result = run_with_cancel(
                 ["git", "clone", repo_url, str(temp_clone)],
+                cancel_check,
                 capture_output=True,
                 text=True,
                 timeout=self.CLONE_TIMEOUT_SECONDS,
                 env=build_non_interactive_git_env(),
             )
+        except SubprocessCancelledError:
+            # Bug #2012: the job was cancelled mid-clone -- drop the partial
+            # temp clone; the master clone was never touched.
+            if temp_clone.exists():
+                shutil.rmtree(str(temp_clone))
+            raise
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.critical(
                 f"Auto re-clone FAILED for {alias_name}: {type(e).__name__}: {e}"
@@ -2013,12 +2074,16 @@ class RefreshScheduler:
         # worker must NOT register a second job for the same pair or it collides
         # with its own parent row and the refresh is marked failed before it
         # starts.
-        def _refresh_worker(progress_callback=None):
+        # Bug #2012: declaring cancel_check makes BackgroundJobManager inject
+        # its DB-backed check (sees a cancel issued on any worker or node),
+        # which stops the indexing subprocesses and skips the publish.
+        def _refresh_worker(progress_callback=None, cancel_check=None):
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=True,
+                cancel_check=cancel_check,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -2083,6 +2148,7 @@ class RefreshScheduler:
         force_reset: bool = False,
         progress_callback=None,
         tracked_by_caller: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Thin wrapper around _execute_refresh_impl(): times the call and
         records cidx.repos.refresh.duration via _record_refresh_duration_metric()
@@ -2111,10 +2177,15 @@ class RefreshScheduler:
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=tracked_by_caller,
+                cancel_check=cancel_check,
             )
             _status = "success" if result.get("success") else "error"
             settle(result)
             return result
+        except Exception as exc:
+            if _is_refresh_cancellation(exc):
+                _status = "cancelled"  # Bug #2012: a cancel is not an error
+            raise
         finally:
             _record_refresh_duration_metric(
                 alias_name,
@@ -2128,6 +2199,7 @@ class RefreshScheduler:
         force_reset: bool = False,
         progress_callback=None,
         tracked_by_caller: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -2340,7 +2412,7 @@ class RefreshScheduler:
                                 repair_succeeded,
                                 repair_error_detail,
                             ) = self._repair_uninitialized_local_repo(
-                                source_path, alias_name
+                                source_path, alias_name, cancel_check=cancel_check
                             )
                             if not repair_succeeded:
                                 self._record_local_repo_repair_failure(
@@ -2436,6 +2508,8 @@ class RefreshScheduler:
                                         refresh_scheduler=self,
                                     ).update()
                                 except Exception as _meta_err:
+                                    if _is_refresh_cancellation(_meta_err):
+                                        raise
                                     logger.warning(
                                         "MetaDirectoryUpdater failed for %s before backup sync: %s",
                                         alias_name,
@@ -2443,19 +2517,30 @@ class RefreshScheduler:
                                     )
 
                                 # MED-2: Idempotent bootstrap — cheap when remote URL unchanged.
+                                # Bug #2012: every backup git call is bound
+                                # to the job's cancel check.
                                 if _backup_cfg_local.remote_url:
                                     try:
-                                        CidxMetaBackupBootstrap().bootstrap(
+                                        CidxMetaBackupBootstrap(
+                                            cancel_check=cancel_check
+                                        ).bootstrap(
                                             master_path, _backup_cfg_local.remote_url
                                         )
                                     except Exception as _bootstrap_err:
+                                        if _is_refresh_cancellation(_bootstrap_err):
+                                            raise
                                         logger.warning(
                                             "cidx-meta backup bootstrap failed for %s: %s",
                                             alias_name,
                                             _bootstrap_err,
                                         )
 
-                                _branch = detect_default_branch(master_path) or "master"
+                                _branch = (
+                                    detect_default_branch(
+                                        master_path, cancel_check=cancel_check
+                                    )
+                                    or "master"
+                                )
 
                                 # Bug #1555: the remote is a passive backup
                                 # mirror, never a peer -- sync() publishes
@@ -2464,7 +2549,7 @@ class RefreshScheduler:
                                 # stuck on a content conflict and there is
                                 # no quarantine state left to check.
                                 _sync_result = CidxMetaBackupSync(
-                                    master_path, _branch
+                                    master_path, _branch, cancel_check=cancel_check
                                 ).sync()
 
                                 if _sync_result.skipped and not (force_reset or regate):
@@ -2551,6 +2636,8 @@ class RefreshScheduler:
                                     master_path, self.registry, refresh_scheduler=self
                                 ).update()
                             except Exception as meta_err:
+                                if _is_refresh_cancellation(meta_err):
+                                    raise
                                 logger.warning(
                                     "MetaDirectoryUpdater failed for %s before backup sync: %s",
                                     alias_name,
@@ -2562,18 +2649,27 @@ class RefreshScheduler:
                             # on the next refresh cycle.  CidxMetaBackupBootstrap.bootstrap()
                             # is cheap when the remote URL has not changed (reads
                             # `git remote get-url origin` and returns immediately on match).
+                            # Bug #2012: every backup git call is bound to
+                            # the job's cancel check.
                             if backup_cfg.remote_url:
                                 try:
-                                    CidxMetaBackupBootstrap().bootstrap(
-                                        master_path, backup_cfg.remote_url
-                                    )
+                                    CidxMetaBackupBootstrap(
+                                        cancel_check=cancel_check
+                                    ).bootstrap(master_path, backup_cfg.remote_url)
                                 except Exception as bootstrap_err:
+                                    if _is_refresh_cancellation(bootstrap_err):
+                                        raise
                                     logger.warning(
                                         "cidx-meta backup bootstrap failed for %s: %s",
                                         alias_name,
                                         bootstrap_err,
                                     )
-                            branch = detect_default_branch(master_path) or "master"
+                            branch = (
+                                detect_default_branch(
+                                    master_path, cancel_check=cancel_check
+                                )
+                                or "master"
+                            )
 
                             # Bug #1555: the remote is a passive backup
                             # mirror, never a peer -- sync() publishes local
@@ -2582,7 +2678,9 @@ class RefreshScheduler:
                             # content conflict and there is no quarantine
                             # state left to check. Mirrors the post-migration
                             # block's identical call above.
-                            sync_result = CidxMetaBackupSync(master_path, branch).sync()
+                            sync_result = CidxMetaBackupSync(
+                                master_path, branch, cancel_check=cancel_check
+                            ).sync()
                             if sync_result.skipped and not (force_reset or regate):
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
@@ -2622,7 +2720,10 @@ class RefreshScheduler:
                                 # no-ops here. #1338: caught by TYPE, never by
                                 # message-substring matching.
                                 try:
-                                    updater = GitPullUpdater(master_path)
+                                    # Bug #2012: its git calls are cancellable.
+                                    updater = GitPullUpdater(
+                                        master_path, cancel_check=cancel_check
+                                    )
                                 except OrphanedRepoError as orphan_exc:
                                     logger.warning(
                                         "Golden repo %s is orphaned (registry row "
@@ -2644,8 +2745,9 @@ class RefreshScheduler:
                             # pulling.  If the clone was switched to a wrong branch by any previous
                             # operation, reset it now so we don't perpetuate the contamination.
                             try:
-                                branch_result = subprocess.run(
+                                branch_result = run_with_cancel(
                                     ["git", "branch", "--show-current"],
+                                    cancel_check,
                                     cwd=master_path,
                                     capture_output=True,
                                     text=True,
@@ -2674,13 +2776,14 @@ class RefreshScheduler:
 
                                 if not default_branch:
                                     try:
-                                        symref_result = subprocess.run(
+                                        symref_result = run_with_cancel(
                                             [
                                                 "git",
                                                 "symbolic-ref",
                                                 "--short",
                                                 "refs/remotes/origin/HEAD",
                                             ],
+                                            cancel_check,
                                             cwd=master_path,
                                             capture_output=True,
                                             text=True,
@@ -2691,6 +2794,8 @@ class RefreshScheduler:
                                             if ref.startswith("origin/"):
                                                 default_branch = ref[len("origin/") :]
                                     except Exception as e:
+                                        if _is_refresh_cancellation(e):
+                                            raise
                                         logger.debug(
                                             "git symbolic-ref fallback failed for %s: %s",
                                             alias_name,
@@ -2706,8 +2811,9 @@ class RefreshScheduler:
                                         f"Base clone for {alias_name} on '{current_branch}' instead of "
                                         f"'{default_branch}', resetting to default branch"
                                     )
-                                    checkout_result = subprocess.run(
+                                    checkout_result = run_with_cancel(
                                         ["git", "checkout", default_branch],
+                                        cancel_check,
                                         cwd=master_path,
                                         capture_output=True,
                                         text=True,
@@ -2719,6 +2825,8 @@ class RefreshScheduler:
                                             f"{checkout_result.stderr}"
                                         )
                             except Exception as e:
+                                if _is_refresh_cancellation(e):
+                                    raise
                                 logger.warning(
                                     f"Branch verification failed for {alias_name}: {e}"
                                 )
@@ -2758,7 +2866,9 @@ class RefreshScheduler:
                                             # honoring the short-circuit.
                                             force_reconcile = (
                                                 self._check_stale_index_metadata(
-                                                    source_path, alias_name
+                                                    source_path,
+                                                    alias_name,
+                                                    cancel_check=cancel_check,
                                                 )
                                             )
                                         if not (force_reconcile or regate):
@@ -2778,7 +2888,11 @@ class RefreshScheduler:
                                         updater.update()
                                 except GitFetchError as e:
                                     self._handle_fetch_error(
-                                        alias_name, repo_url, master_path, e
+                                        alias_name,
+                                        repo_url,
+                                        master_path,
+                                        e,
+                                        cancel_check=cancel_check,
                                     )
                                     raise
 
@@ -2844,6 +2958,7 @@ class RefreshScheduler:
                                     alias_name
                                 ),
                                 force_reconcile=force_reconcile,
+                                cancel_check=cancel_check,
                             )
                         except FatalChunkStoreIndexError as fatal_exc:
                             # Bug #2022: self-heal under the lock; stay failed.
@@ -2865,10 +2980,22 @@ class RefreshScheduler:
                         # a pass and record_refresh_integrity_failure() on
                         # a failure internally -- see its docstring; no
                         # separate reset/record call is needed here.
+                        #
+                        # Bug #2012: cancellation is re-checked at every step
+                        # between the end of indexing and the alias swap
+                        # (after indexing, after the gate, before the
+                        # snapshot, before the swap), so a cancel landing
+                        # anywhere in that window never publishes.
+                        _raise_if_refresh_cancelled(
+                            cancel_check, alias_name, "after indexing"
+                        )
                         gate_result = self._run_and_publish_integrity_gate(
                             alias_name=alias_name,
                             source_path=source_path,
                             current_target=current_target,
+                        )
+                        _raise_if_refresh_cancelled(
+                            cancel_check, alias_name, "during the integrity gate"
                         )
                         if not gate_result.passed:
                             detail_summary = "; ".join(
@@ -2897,10 +3024,33 @@ class RefreshScheduler:
                         self.raise_if_write_lock_ownership_lost(
                             repo_name, owner_name="refresh_scheduler"
                         )
-
-                        new_index_path = self._create_snapshot(
-                            alias_name=alias_name, source_path=source_path
+                        _raise_if_refresh_cancelled(
+                            cancel_check, alias_name, "before the snapshot"
                         )
+
+                        # Bug #2012: the snapshot step's own subprocesses are
+                        # cancellable; cancel_check is passed only when set
+                        # (strict-signature test doubles, as with
+                        # orphan_event_callback in _index_source).
+                        _snapshot_kwargs: Dict[str, Any] = (
+                            {"cancel_check": cancel_check}
+                            if cancel_check is not None
+                            else {}
+                        )
+                        new_index_path = self._create_snapshot(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            **_snapshot_kwargs,
+                        )
+
+                        # Bug #2012: last check before publishing. The new
+                        # snapshot was never published, so it is handed to
+                        # the refcount-gated cleanup instead of leaking.
+                        if cancel_check is not None and cancel_check():
+                            self.cleanup_manager.schedule_cleanup(new_index_path)
+                            raise _refresh_cancelled_error(
+                                alias_name, "during the snapshot"
+                            )
 
                         # Swap alias to new index
                         logger.info(f"Swapping alias {alias_name} to new index")
@@ -3004,6 +3154,12 @@ class RefreshScheduler:
                     }
 
                 except Exception as e:
+                    if _is_refresh_cancellation(e):
+                        # Bug #2012: a cancellation is not a failure -- the
+                        # job is finished as cancelled by its manager.
+                        logger.info(f"Refresh cancelled for {alias_name}: {e}")
+                        _tracker_raised = True
+                        raise
                     logger.error(
                         f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
                         exc_info=True,
@@ -3260,6 +3416,7 @@ class RefreshScheduler:
         progress_callback=None,
         force_reconcile: bool = False,
         orphan_event_callback: Optional[Any] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -3501,7 +3658,15 @@ class RefreshScheduler:
         if enable_scip:
             _phase_types.append("scip")
 
-        file_count, commit_count = gather_repo_metrics(source_path)
+        # Bug #2012: no subprocess (not even the bounded repo-metrics git
+        # calls) is started for a job that is already cancelled.
+        _raise_if_refresh_cancelled(cancel_check, alias_name, "before indexing")
+        # Bug #2012: its git calls are cancellable too (cancel_check passed
+        # only when set -- several tests replace this with strict doubles).
+        _metrics_kwargs: Dict[str, Any] = (
+            {"cancel_check": cancel_check} if cancel_check is not None else {}
+        )
+        file_count, commit_count = gather_repo_metrics(source_path, **_metrics_kwargs)
         _opts = temporal_options or {}
         max_commits_opt = _opts.get("max_commits") if temporal_options else None
 
@@ -3562,6 +3727,11 @@ class RefreshScheduler:
             # **kwargs.
             if orphan_event_callback is not None:
                 _popen_kwargs["orphan_event_callback"] = orphan_event_callback
+            # Bug #2012: same strict-mock convention; a cancelled job's
+            # child is terminated and IndexingCancelledError propagates
+            # untouched (it is not an IndexingSubprocessError).
+            if cancel_check is not None:
+                _popen_kwargs["cancel_check"] = cancel_check
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
@@ -3725,8 +3895,11 @@ class RefreshScheduler:
                     detail="SCIP: generating code intelligence index...",
                 )
             try:
-                subprocess.run(
+                # Bug #2012: cancellable by the owning job; no timeout
+                # (Bug #1218). A cancel raises SubprocessCancelledError.
+                run_with_cancel(
                     scip_command,
+                    cancel_check,
                     cwd=str(source_path),
                     capture_output=True,
                     text=True,
@@ -3757,7 +3930,12 @@ class RefreshScheduler:
                     f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
                 )
 
-    def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
+    def _run_subprocess(
+        self,
+        *args: Any,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        **kwargs: Any,
+    ) -> Any:
         """Run a subprocess, optionally through a per-instance injection seam.
 
         Bug #1381 (mirrors bug #1375's DependencyMapAnalyzer.cli_dispatcher
@@ -3773,11 +3951,19 @@ class RefreshScheduler:
         in test_delta_merge_frontmatter.py).
         """
         runner: Optional[Callable[..., Any]] = getattr(self, "_subprocess_runner", None)
-        if runner is None:
-            runner = subprocess.run
-        return runner(*args, **kwargs)
+        if runner is not None:
+            return runner(*args, **kwargs)
+        # Bug #2012: bound to the owning job's cancel check; exactly
+        # subprocess.run(*args, **kwargs) when there is none.
+        (command,) = args
+        return run_with_cancel(command, cancel_check, **kwargs)
 
-    def _create_snapshot(self, alias_name: str, source_path: str) -> str:
+    def _create_snapshot(
+        self,
+        alias_name: str,
+        source_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
         """
         Create a versioned CoW snapshot of the already-indexed source (Story #229).
 
@@ -3863,6 +4049,7 @@ class RefreshScheduler:
                 try:
                     result = self._run_subprocess(
                         ["git", "update-index", "--refresh"],
+                        cancel_check=cancel_check,
                         cwd=str(versioned_path),
                         capture_output=True,
                         text=True,
@@ -3880,6 +4067,7 @@ class RefreshScheduler:
                 try:
                     result = self._run_subprocess(
                         ["git", "restore", "."],
+                        cancel_check=cancel_check,
                         cwd=str(versioned_path),
                         capture_output=True,
                         text=True,
@@ -3898,6 +4086,7 @@ class RefreshScheduler:
             try:
                 self._run_subprocess(
                     ["cidx", "fix-config", "--force"],
+                    cancel_check=cancel_check,
                     cwd=str(versioned_path),
                     capture_output=True,
                     text=True,
@@ -3936,11 +4125,17 @@ class RefreshScheduler:
             return str(versioned_path)
 
         except Exception as e:
-            # Cleanup partial artifacts on failure
-            logger.error(
-                f"Failed to create snapshot for {alias_name}, cleaning up: {type(e).__name__}: {e}",
-                exc_info=True,
-            )
+            # Cleanup partial artifacts on failure (Bug #2012: or cancel)
+            cancelled = _is_refresh_cancellation(e)
+            if cancelled:
+                logger.info(
+                    f"Snapshot creation for {alias_name} cancelled, cleaning up: {e}"
+                )
+            else:
+                logger.error(
+                    f"Failed to create snapshot for {alias_name}, cleaning up: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
             if versioned_path is not None and versioned_path.exists():
                 try:
                     shutil.rmtree(versioned_path)
@@ -3951,6 +4146,8 @@ class RefreshScheduler:
                         f"{type(cleanup_error).__name__}: {cleanup_error}",
                         exc_info=True,
                     )
+            if cancelled:
+                raise
             raise RuntimeError(
                 f"Failed to create snapshot for {alias_name}: {type(e).__name__}: {e}"
             )
@@ -4050,7 +4247,10 @@ class RefreshScheduler:
             return False
 
     def _repair_uninitialized_local_repo(
-        self, source_path: str, alias_name: str
+        self,
+        source_path: str,
+        alias_name: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[bool, Optional[str]]:
         """
         Self-heal a local repo whose .code-indexer/ directory exists but has
@@ -4077,8 +4277,12 @@ class RefreshScheduler:
             ``last_detail`` field instead of a generic placeholder.
         """
         try:
-            subprocess.run(
+            # Bug #2012: cancellable by the owning job; a cancellation
+            # (SubprocessCancelledError) is not a repair failure and
+            # propagates past the handler below.
+            run_with_cancel(
                 ["cidx", "init", "--no-override-file", "--force"],
+                cancel_check,
                 cwd=source_path,
                 check=True,
                 capture_output=True,
@@ -4340,7 +4544,12 @@ class RefreshScheduler:
             )
         return False
 
-    def _check_stale_index_metadata(self, source_path: str, alias_name: str) -> bool:
+    def _check_stale_index_metadata(
+        self,
+        source_path: str,
+        alias_name: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         """Detect an interrupted/stale index that has_changes() cannot see.
 
         Bug #1508: GitPullUpdater.has_changes() is a pure git-ref comparison
@@ -4456,14 +4665,17 @@ class RefreshScheduler:
             return False
 
         try:
-            head_result = subprocess.run(
+            head_result = run_with_cancel(
                 ["git", "rev-parse", "HEAD"],
+                cancel_check,
                 cwd=source_path,
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
         except Exception as e:
+            if _is_refresh_cancellation(e):
+                raise  # Bug #2012: a cancelled job, not an unknown HEAD
             logger.debug(
                 "Could not determine git HEAD for %s while checking for a "
                 "stale index: %s",
