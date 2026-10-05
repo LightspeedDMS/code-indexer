@@ -9358,7 +9358,10 @@ async def update_langfuse_pull_config(
     csrf_token: Optional[str] = Form(None),
 ):
     """Update Langfuse Trace Pull configuration (Story #164)."""
-    from ..services.config_service import get_config_service
+    from ..services.config_service import (
+        LangfusePullProjectsInvalid,
+        get_config_service,
+    )
 
     session = _require_admin_session(request)
     if not session:
@@ -9403,13 +9406,28 @@ async def update_langfuse_pull_config(
         projects_json = form_data.get("pull_projects", "[]")
         if projects_json:
             updates.append(("langfuse", "pull_projects", projects_json))
-        await asyncio.to_thread(
-            functools.partial(
-                config_service.update_settings_audited,
-                updates,
-                actor=session.username,
+        try:
+            await asyncio.to_thread(
+                functools.partial(
+                    config_service.update_settings_audited,
+                    updates,
+                    actor=session.username,
+                )
             )
-        )
+        except LangfusePullProjectsInvalid as rejected:
+            # The project list was refused (a project with no secret key or
+            # a duplicate public key): nothing was published.
+            logger.warning(
+                f"Langfuse pull config save rejected: {rejected}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Configuration not saved: {rejected}",
+                validation_errors={"langfuse_pull": str(rejected)},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
         return _create_config_page_response(
             request,

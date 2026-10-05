@@ -68,6 +68,11 @@ class BootstrapFileNotWritten(RuntimeError):
 _CHANGE_ATTEMPTS = 10
 
 
+class LangfusePullProjectsInvalid(ValueError):
+    """A submitted Langfuse pull-project list was refused (a duplicate public
+    key, or a project left with no secret key); nothing was published."""
+
+
 class ConfigChangeConflict(RuntimeError):
     """Every attempt of a configuration change lost its compare-and-set to a
     concurrent commit; nothing was published."""
@@ -760,7 +765,9 @@ class ConfigService:
                 "enabled": config.oidc_provider_config.enabled,
                 "issuer_url": config.oidc_provider_config.issuer_url,
                 "client_id": config.oidc_provider_config.client_id,
-                "client_secret": config.oidc_provider_config.client_secret,
+                # Stored secrets are write-only on the configuration page:
+                # only whether one is set is exposed, never its value.
+                "client_secret_set": bool(config.oidc_provider_config.client_secret),
                 "scopes": config.oidc_provider_config.scopes,
                 "email_claim": config.oidc_provider_config.email_claim,
                 "username_claim": config.oidc_provider_config.username_claim,
@@ -797,8 +804,9 @@ class ConfigService:
                 "public_key": (
                     config.langfuse_config.public_key if config.langfuse_config else ""
                 ),
-                "secret_key": (
-                    config.langfuse_config.secret_key if config.langfuse_config else ""
+                # Write-only secret: only whether one is set is exposed.
+                "secret_key_set": bool(
+                    config.langfuse_config and config.langfuse_config.secret_key
                 ),
                 "host": (
                     config.langfuse_config.host
@@ -821,8 +829,16 @@ class ConfigService:
                     if config.langfuse_config
                     else "https://cloud.langfuse.com"
                 ),
+                # Write-only secrets: each project exposes its public key and
+                # whether its secret key is set, never the secret itself.
                 "pull_projects": (
-                    [asdict(p) for p in config.langfuse_config.pull_projects]
+                    [
+                        {
+                            "public_key": p.public_key,
+                            "secret_key_set": bool(p.secret_key),
+                        }
+                        for p in config.langfuse_config.pull_projects
+                    ]
                     if config.langfuse_config
                     else []
                 ),
@@ -2394,7 +2410,10 @@ class ConfigService:
         elif key == "public_key":
             langfuse.public_key = str(value)
         elif key == "secret_key":
-            langfuse.secret_key = str(value)
+            # Write-only secret: the page never renders it, so a blank value
+            # means "keep the stored secret".
+            if value:
+                langfuse.secret_key = str(value)
         elif key == "host":
             langfuse.host = str(value)
         elif key == "auto_trace_enabled":
@@ -2419,10 +2438,37 @@ class ConfigService:
             import json as _json
 
             projects_data = _json.loads(value) if isinstance(value, str) else value
-            langfuse.pull_projects = [
+            submitted = [
                 LangfusePullProject(**p) if isinstance(p, dict) else p
                 for p in projects_data
             ]
+            # Write-only secrets: the submitted list replaces the stored one
+            # (a removed project is removed), but a blank secret keeps the
+            # secret stored for the same public key.  The whole save is
+            # refused (nothing published) when a public key is duplicated or
+            # a project would end up with no secret key at all.
+            public_keys = [p.public_key for p in submitted]
+            duplicates = sorted({k for k in public_keys if public_keys.count(k) > 1})
+            if duplicates:
+                raise LangfusePullProjectsInvalid(
+                    "Duplicate Langfuse pull project public key(s): "
+                    + ", ".join(duplicates)
+                )
+            stored_secrets = {
+                p.public_key: p.secret_key for p in langfuse.pull_projects
+            }
+            missing = []
+            for project in submitted:
+                if not project.secret_key:
+                    project.secret_key = stored_secrets.get(project.public_key, "")
+                if not project.secret_key:
+                    missing.append(project.public_key)
+            if missing:
+                raise LangfusePullProjectsInvalid(
+                    "Langfuse pull project(s) with no secret key (enter the "
+                    "secret key for a new or changed public key): " + ", ".join(missing)
+                )
+            langfuse.pull_projects = submitted
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
 
