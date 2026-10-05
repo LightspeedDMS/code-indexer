@@ -936,6 +936,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             ),
             line_start=chunk_task.chunk_data.get("line_start"),
             line_end=chunk_task.chunk_data.get("line_end"),
+            # Issue #2013: the file READ time (None -> schema default "now").
+            indexed_timestamp=chunk_task.file_metadata.get("content_read_timestamp"),
         )
 
         # Add filesystem metadata for non-git projects

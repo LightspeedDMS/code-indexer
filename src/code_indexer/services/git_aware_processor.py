@@ -157,6 +157,12 @@ class GitAwareDocumentProcessor(DocumentProcessor):
                         ),
                         line_start=chunk.get("line_start"),
                         line_end=chunk.get("line_end"),
+                        # Issue #2013: FileIdentifier's hash-read time. On this
+                        # (deprecated, uncalled) path get_file_metadata runs
+                        # AFTER chunking, so it does not precede the chunked
+                        # read: reconcile's racy-timestamp guarantee is only
+                        # claimed for the high-throughput path.
+                        indexed_timestamp=file_metadata.get("content_read_timestamp"),
                     )
 
                     # Manually add filesystem metadata for non-git projects

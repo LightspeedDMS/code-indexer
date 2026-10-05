@@ -64,6 +64,28 @@ except ImportError:
 PROGRESS_BATCH_SIZE = 100
 
 
+# Value prefix FileIdentifier._get_file_content_hash returns when the file
+# cannot be read (never a real content hash).
+_CONTENT_HASH_READ_ERROR_PREFIX = "sha256:error-"
+
+# File mtimes come from the filesystem's clock (an NFS server), read times
+# from the indexing host's clock: tolerate the filesystem being this far behind.
+_RACY_MTIME_CLOCK_SKEW_MARGIN_SECONDS = 2
+
+
+def working_dir_content_id(relative_path: str, mtime: int, size: int) -> str:
+    """The single format of an mtime/size-identified (working_dir) content id.
+
+    Issue #2013: reconcile compares the id derived from a stored point's
+    payload with the id built from the file on disk. Both sides MUST go
+    through this function. `mtime` is the INTEGER-second mtime the indexer
+    stores (`FileIdentifier._get_filesystem_metadata` writes
+    `int(st_mtime)` into the `filesystem_mtime` payload field), so callers
+    building the disk side pass `int(stat.st_mtime)`.
+    """
+    return f"{relative_path}:working_dir:{mtime}:{size}"
+
+
 @dataclass
 class ThroughputStats:
     """Statistics for tracking indexing throughput and throttling."""
@@ -2053,6 +2075,8 @@ class SmartIndexer(HighThroughputProcessor):
         # Codex #1505 review, Finding 1: same defensive default for the
         # hidden_branches map the branch-visibility loop reads.
         self._reconcile_hidden_branches: Dict[str, List[str]] = {}
+        # Issue #2013: same defensive default for the racy-timestamp index.
+        self._reconcile_working_dir_index: Dict[str, Tuple[float, Optional[str]]] = {}
 
         # Get indexed files using efficient snapshot approach (no infinite loops, minimal memory)
         indexed_files_with_timestamps = self._get_indexed_files_snapshot(
@@ -2140,7 +2164,7 @@ class SmartIndexer(HighThroughputProcessor):
                     # map (built once in `_get_indexed_files_snapshot` from
                     # the same bulk scroll already used for the timestamp
                     # snapshot) instead of issuing a per-file scroll_points
-                    # query via `_get_any_content_id_for_file`.
+                    # query (the former per-file lookup, since removed).
                     db_content_id = self._reconcile_db_content_ids.get(relative_path)
 
                     if db_content_id and current_effective_id != db_content_id:
@@ -2150,6 +2174,17 @@ class SmartIndexer(HighThroughputProcessor):
                         logger.info(
                             f"RECONCILE: Content ID mismatch for {relative_path}: "
                             f"current='{current_effective_id}' vs db='{db_content_id}' - will re-index"
+                        )
+                    elif db_content_id and self._working_dir_file_racily_modified(
+                        relative_path
+                    ):
+                        # Issue #2013: ids match but the file was rewritten
+                        # within the second it was read in.
+                        files_to_index.append(file_path)
+                        modified_files += 1
+                        logger.info(
+                            f"RECONCILE: {relative_path} changed within the "
+                            "second it was read in (content hash differs) - will re-index"
                         )
                     # else: file is up-to-date, don't re-index
 
@@ -3539,7 +3574,7 @@ class SmartIndexer(HighThroughputProcessor):
         # Issue #1505: derived in the SAME bulk-scroll pass as the timestamp
         # snapshot above, so the main reconcile loop can look up each file's
         # DB-side content id via a plain in-memory dict lookup instead of a
-        # per-file `scroll_points` query (`_get_any_content_id_for_file`).
+        # per-file `scroll_points` query.
         db_content_ids: Dict[str, str] = {}
         # Codex #1505 review, Finding 1: derived in this SAME bulk-scroll
         # pass too, so the branch-visibility ("unhide") check in
@@ -3547,6 +3582,9 @@ class SmartIndexer(HighThroughputProcessor):
         # `hidden_branches` via an in-memory dict lookup instead of issuing
         # a fresh `scroll_points` query PER indexed file.
         db_hidden_branches: Dict[str, List[str]] = {}
+        # Issue #2013: relative path -> (earliest indexed_timestamp, stored
+        # file_hash) for mtime/size-identified points (racy-timestamp check).
+        db_working_dir_index: Dict[str, Tuple[float, Optional[str]]] = {}
 
         try:
             if progress_callback:
@@ -3611,6 +3649,20 @@ class SmartIndexer(HighThroughputProcessor):
                         "hidden_branches", []
                     )
 
+                # Issue #2013 (racy timestamp): for an mtime/size-identified
+                # point keep the file's EARLIEST content-read time
+                # (`indexed_timestamp`) and its stored whole-file content
+                # hash. A point without one counts as 0.0, so that file is
+                # hash-checked on every reconcile.
+                if "filesystem_mtime" in payload:
+                    indexed_ts = float(payload.get("indexed_timestamp") or 0.0)
+                    previous = db_working_dir_index.get(relative_key)
+                    if previous is None or indexed_ts < previous[0]:
+                        db_working_dir_index[relative_key] = (
+                            indexed_ts,
+                            payload.get("file_hash"),
+                        )
+
             if progress_callback:
                 progress_callback(
                     0,
@@ -3632,9 +3684,11 @@ class SmartIndexer(HighThroughputProcessor):
             indexed_files_with_timestamps = {}
             db_content_ids = {}
             db_hidden_branches = {}
+            db_working_dir_index = {}
 
         self._reconcile_db_content_ids = db_content_ids
         self._reconcile_hidden_branches = db_hidden_branches
+        self._reconcile_working_dir_index = db_working_dir_index
         return indexed_files_with_timestamps
 
     def _derive_db_content_id_from_point(
@@ -3643,8 +3697,8 @@ class SmartIndexer(HighThroughputProcessor):
         """Derive the DB-side content id for a file from an already-fetched
         content point's payload, without any additional store query.
 
-        Mirrors `_get_any_content_id_for_file`'s identity scheme: working_dir
-        (mtime/size-identified) points use the mtime/size id; committed
+        The single DB-side derivation: working_dir (mtime/size-identified)
+        points use `working_dir_content_id` (Issue #2013); committed
         points prefer the git blob hash (Issue #1505 -- precise,
         single-batch-derivable) and fall back to the legacy git commit hash
         for older data that predates the blob-hash field.
@@ -3663,10 +3717,10 @@ class SmartIndexer(HighThroughputProcessor):
         payload = point.get("payload", {})
 
         if "filesystem_mtime" in payload:
-            return (
-                f"{relative_path}:working_dir:"
-                f"{payload.get('filesystem_mtime', 'unknown')}:"
-                f"{payload.get('filesystem_size', 0)}"
+            return working_dir_content_id(
+                relative_path,
+                payload["filesystem_mtime"],
+                payload.get("filesystem_size", 0),
             )
 
         blob_hash = payload.get("git_blob_hash")
@@ -3748,147 +3802,6 @@ class SmartIndexer(HighThroughputProcessor):
             except (ValueError, TypeError):
                 return 0.0
         return 0.0
-
-    def _get_currently_visible_content_id(
-        self, file_path: str, branch: str, collection_name: str
-    ) -> Optional[str]:
-        """Get the content ID currently visible for this file in this branch."""
-        try:
-            # Query for content points for this file that are NOT hidden in this branch
-            points, _ = self.vector_store_client.scroll_points(
-                filter_conditions={
-                    "must": [
-                        {"key": "type", "match": {"value": "content"}},
-                        {"key": "path", "match": {"value": file_path}},
-                    ],
-                    "must_not": [
-                        {"key": "hidden_branches", "match": {"any": [branch]}}
-                    ],
-                },
-                limit=10,  # Should be enough to find visible content
-                collection_name=collection_name,
-            )
-
-            if not points:
-                return None
-
-            # CRITICAL FIX: Check if there are multiple visible points for this file
-            # This can happen after git restore when both working_dir and committed content are visible
-            if len(points) > 1:
-                # Multiple content points visible - this is a problem that needs reconcile
-                logger.warning(
-                    f"Found {len(points)} visible content points for {file_path} in branch {branch}"
-                )
-
-                # Look for working directory content that should be hidden
-                working_dir_points = []
-                committed_points = []
-
-                for point in points:
-                    payload = point.get("payload", {})
-                    git_commit_hash = payload.get("git_commit_hash", "unknown")
-
-                    if git_commit_hash.startswith("working_dir_"):
-                        working_dir_points.append(point)
-                    else:
-                        committed_points.append(point)
-
-                # If we have both working_dir and committed content, prioritize committed
-                # and schedule hiding of working_dir content
-                if working_dir_points and committed_points:
-                    logger.info(
-                        f"Found mixed content for {file_path}: {len(working_dir_points)} working_dir + {len(committed_points)} committed - needs cleanup"
-                    )
-
-                    # Return the first committed content point to trigger reconcile
-                    # The reconcile will detect mismatch and re-index, which will hide working_dir content
-                    first_committed = committed_points[0]
-                    payload = first_committed.get("payload", {})
-                    commit = payload.get("git_commit_hash", "unknown")
-                    return f"{file_path}:{commit}"
-
-            # Find the most relevant content point (latest or most appropriate)
-            # For now, return the first visible content point's effective ID
-            for point in points:
-                payload = point.get("payload", {})
-
-                # Reconstruct content ID from point data
-                path = payload.get("path", "")
-                if path != file_path:
-                    continue
-
-                # Check if this is working_dir content or committed content
-                if "working_dir" in str(point.get("id", "")):
-                    # This is working directory content
-                    return f"{file_path}:working_dir:{payload.get('filesystem_mtime', 'unknown')}:{payload.get('file_size', 0)}"
-                else:
-                    # This is committed content
-                    # CRITICAL: Use git_commit_hash because that's what BranchAwareIndexer stores in payload
-                    # (see branch_aware_indexer.py line 798: "git_commit_hash": commit)
-                    # The ContentMetadata.git_commit field gets stored as git_commit_hash in Filesystem
-                    commit = payload.get(
-                        "git_commit_hash", payload.get("commit_hash", "unknown")
-                    )
-                    return f"{file_path}:{commit}"
-
-            return None
-
-        except Exception as e:
-            logger.warning(
-                f"Failed to get visible content ID for {file_path} in branch {branch}: {e}"
-            )
-            return None
-
-    def _get_any_content_id_for_file(
-        self, file_path: str, collection_name: str
-    ) -> Optional[str]:
-        """Get ANY content ID for this file, ignoring branch visibility.
-
-        Used by reconcile to check if file exists in database regardless of branch.
-        This is different from _get_currently_visible_content_id which filters by branch.
-        """
-        try:
-            # Query for ANY content for this file (no branch filtering)
-            # Try absolute path first (what's actually stored in /tmp directories)
-            absolute_path = str(self.config.codebase_dir / file_path)
-
-            points, _ = self.vector_store_client.scroll_points(
-                filter_conditions={
-                    "must": [
-                        {"key": "type", "match": {"value": "content"}},
-                        {"key": "path", "match": {"value": absolute_path}},
-                    ]
-                    # NO must_not for hidden_branches - we want ANY version
-                },
-                limit=1,
-                collection_name=collection_name,
-            )
-
-            # If not found with absolute, try relative
-            if not points:
-                points, _ = self.vector_store_client.scroll_points(
-                    filter_conditions={
-                        "must": [
-                            {"key": "type", "match": {"value": "content"}},
-                            {"key": "path", "match": {"value": file_path}},
-                        ]
-                    },
-                    limit=1,
-                    collection_name=collection_name,
-                )
-
-            if not points:
-                return None
-
-            # Issue #1505: reuse the shared derivation helper so this method
-            # stays consistent with the batched-path identity scheme
-            # (blob-hash-first, commit-hash fallback) instead of duplicating
-            # the formatting logic.
-            return self._derive_db_content_id_from_point(file_path, points[0])
-
-        except Exception as e:
-            logger.warning(f"Failed to get content ID for {file_path}: {e}")
-            return None
 
     def _cleanup_multiple_visible_content_points(
         self,
@@ -4215,6 +4128,66 @@ class SmartIndexer(HighThroughputProcessor):
                     0, 0, Path(""), info=f"Deletion detection failed: {e}"
                 )
 
+    def _working_dir_file_racily_modified(self, relative_path: str) -> bool:
+        """Racy-timestamp rule (Issue #2013), as git applies to its index.
+
+        An mtime/size-identified file whose int-second mtime and size match
+        its stored id is trusted as unchanged ONLY when that mtime second is
+        strictly older than the second the file's content was READ in
+        (`indexed_timestamp`, recorded by `FileIdentifier.get_file_metadata`
+        just before hashing). Otherwise a same-size rewrite within that
+        second is indistinguishable by mtime/size, so the whole-file sha256
+        stored in the payload (`file_hash`) is compared. Only such files pay
+        a content read; points without an `indexed_timestamp` are
+        hash-checked on every reconcile. The mtime must be more than
+        `_RACY_MTIME_CLOCK_SKEW_MARGIN_SECONDS` older than the read second,
+        since it comes from the filesystem's clock and the read time from
+        this host's clock.
+
+        Raises OSError when the file cannot be read for the check, so the
+        caller records a failed analysis instead of treating it as changed.
+        """
+        entry = self._reconcile_working_dir_index.get(relative_path)
+        if entry is None:
+            return False
+        earliest_read_ts, stored_hash = entry
+        full_path = Path(self.config.codebase_dir) / relative_path
+        trusted_before_second = (
+            int(earliest_read_ts) - _RACY_MTIME_CLOCK_SKEW_MARGIN_SECONDS
+        )
+        if int(full_path.stat().st_mtime) < trusted_before_second:
+            return False
+        current_hash = self.file_identifier._get_file_content_hash(full_path)
+        if current_hash.startswith(_CONTENT_HASH_READ_ERROR_PREFIX):
+            raise OSError(
+                f"could not read {relative_path} to verify its content "
+                "(modified in the second it was read)"
+            )
+        return bool(current_hash != stored_hash)
+
+    def _disk_working_dir_content_id(self, file_path: str) -> str:
+        """Disk-side mtime/size content id for reconcile.
+
+        Issue #2013: built by the SAME helper as the stored-payload side
+        (`_derive_db_content_id_from_point`), with the integer mtime the
+        indexer stores -- otherwise no file ever compares equal and every
+        non-git reconcile deletes and re-embeds the whole repository. A file
+        that cannot be stat'ed gets an id that never matches, so it is
+        re-indexed (and the failure is logged).
+        """
+        try:
+            file_stat = (Path(self.config.codebase_dir) / file_path).stat()
+        except OSError as e:
+            logger.warning(
+                "Reconcile could not stat %s (%s); it will be re-indexed",
+                file_path,
+                e,
+            )
+            return f"{file_path}:working_dir_error"
+        return working_dir_content_id(
+            file_path, int(file_stat.st_mtime), file_stat.st_size
+        )
+
     def _get_effective_content_id_for_reconcile(self, file_path: str) -> str:
         """Get content ID that represents current working directory state.
 
@@ -4223,26 +4196,10 @@ class SmartIndexer(HighThroughputProcessor):
         # Check if this is a git repository
         is_git_repo = self.git_topology_service.is_git_available()
 
-        if not is_git_repo:
-            # For non-git projects, always use timestamp-based content IDs for consistency
-            try:
-                file_stat = (Path(self.config.codebase_dir) / file_path).stat()
-                commit = f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                return f"{file_path}:{commit}"
-            except Exception:
-                # Fallback if stat fails
-                return f"{file_path}:working_dir_error"
-
-        # For git repositories, use the git-aware logic
-        if self._file_differs_from_committed_version(file_path):
-            # File has working directory changes - use mtime/size based ID
-            try:
-                file_stat = (Path(self.config.codebase_dir) / file_path).stat()
-                commit = f"working_dir_{file_stat.st_mtime}_{file_stat.st_size}"
-                return f"{file_path}:{commit}"
-            except Exception:
-                # Fallback if stat fails
-                return f"{file_path}:working_dir_error"
+        # Non-git projects always use mtime/size content ids; in a git
+        # repository so does a file with working directory changes.
+        if not is_git_repo or self._file_differs_from_committed_version(file_path):
+            return self._disk_working_dir_content_id(file_path)
         else:
             # File matches committed version - use blob-hash based ID.
             # Issue #1505: prefer the O(1) batched HEAD blob-hash lookup
