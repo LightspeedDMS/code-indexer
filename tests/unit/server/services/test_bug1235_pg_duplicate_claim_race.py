@@ -373,63 +373,71 @@ class TestRealPgConcurrencyBarrier:
         with MigrationRunner(dsn) as runner:
             runner.run()
 
-        pool = ConnectionPool(dsn, min_size=1, max_size=4, name="bug1235-test")
-        backend = BackgroundJobsPostgresBackend(pool)
-        results: List[Any] = []
-        errors: List[Exception] = []
-        barrier = threading.Barrier(2)
+        # Everything after CREATE DATABASE runs in try/finally. The first
+        # version placed teardown at the end of the body and called it
+        # best-effort -- but as placed it ran ONLY on the passing path,
+        # which is the one case where leaking costs nothing. Any assertion
+        # below (the failures this test exists to catch) exits the function
+        # first, stranding bug1235_<hex> and an open pool with live worker
+        # threads on the SHARED CI server -- and repeated red smoke runs are
+        # exactly the situation this MR is trying to get out of.
+        try:
+            pool = ConnectionPool(dsn, min_size=1, max_size=4, name="bug1235-test")
+            backend = BackgroundJobsPostgresBackend(pool)
+            results: List[Any] = []
+            errors: List[Exception] = []
+            barrier = threading.Barrier(2)
 
-        def claim(worker_id: str) -> None:
-            try:
-                job_id = f"race-{worker_id}-{uuid.uuid4().hex[:8]}"
-                tracker = _make_backend_tracker(
-                    _FakeBackend(inject_violation=False, blocking_job_id=None)
-                )
-                tracker._backend = backend
-                job = _make_job(job_id)
-                barrier.wait()
-                tracker._atomic_insert_or_raise(job)
-                results.append(("success", job_id))
-            except DuplicateJobError as e:
-                results.append(("duplicate", e))
-            except Exception as e:
-                errors.append(e)
-
-        ITERATIONS = 20
-        for _ in range(ITERATIONS):
-            results.clear()
-            errors.clear()
-
-            threads = [
-                threading.Thread(target=claim, args=(f"w{i}",)) for i in range(2)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10)
-
-            with backend._pool.connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM background_jobs WHERE operation_type = %s AND repo_alias = %s",
-                        ("data_retention_cleanup", "server"),
+            def claim(worker_id: str) -> None:
+                try:
+                    job_id = f"race-{worker_id}-{uuid.uuid4().hex[:8]}"
+                    tracker = _make_backend_tracker(
+                        _FakeBackend(inject_violation=False, blocking_job_id=None)
                     )
+                    tracker._backend = backend
+                    job = _make_job(job_id)
+                    barrier.wait()
+                    tracker._atomic_insert_or_raise(job)
+                    results.append(("success", job_id))
+                except DuplicateJobError as e:
+                    results.append(("duplicate", e))
+                except Exception as e:
+                    errors.append(e)
 
-            assert not errors, f"Unexpected exceptions in iteration: {errors}"
-            assert len([r for r in results if r[0] == "success"]) == 1
-            assert len([r for r in results if r[0] == "duplicate"]) == 1
+            ITERATIONS = 20
+            for _ in range(ITERATIONS):
+                results.clear()
+                errors.clear()
 
-        # Drop the scratch database. Best-effort: a leaked test DB is untidy,
-        # not a failure, and raising here would mask the assertions above.
-        try:
-            pool.close()
-        except Exception:  # noqa: BLE001 -- teardown must not fail the test
-            pass
-        try:
-            with psycopg.connect(admin_dsn, autocommit=True) as admin:
-                admin.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        except Exception:  # noqa: BLE001 -- see above
-            pass
+                threads = [
+                    threading.Thread(target=claim, args=(f"w{i}",)) for i in range(2)
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+
+                with backend._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM background_jobs WHERE operation_type = %s AND repo_alias = %s",
+                            ("data_retention_cleanup", "server"),
+                        )
+
+                assert not errors, f"Unexpected exceptions in iteration: {errors}"
+                assert len([r for r in results if r[0] == "success"]) == 1
+                assert len([r for r in results if r[0] == "duplicate"]) == 1
+        finally:
+            # Inner try/except stay: teardown must never mask a real failure.
+            try:
+                pool.close()
+            except Exception:  # noqa: BLE001 -- teardown must not fail the test
+                pass
+            try:
+                with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                    admin.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+            except Exception:  # noqa: BLE001 -- see above
+                pass
 
 
 # ---------------------------------------------------------------------------
