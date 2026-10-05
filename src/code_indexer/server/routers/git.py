@@ -50,6 +50,7 @@ from code_indexer.server.routers.git_models import (
     GitBranchDeleteResponse,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.source_text_decoding import decode_source_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -1208,7 +1209,9 @@ def git_cat(
             capture_output=True,
             check=True,
         )
-        content = show_result.stdout.decode("utf-8", errors="replace")
+        # Bug #1991: decode like indexing does (Latin-1/CP1252 files return
+        # their text, not U+FFFD); valid UTF-8 output is unchanged.
+        content = decode_source_bytes(show_result.stdout)
         return {
             "content": content,
             "path": path,

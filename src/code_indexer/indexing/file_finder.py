@@ -8,6 +8,7 @@ import pathspec
 from ..config import Config
 from ..services.override_filter_service import OverrideFilterService
 from ..utils.path_confinement import is_resolved_within_root
+from ..utils.source_text_decoding import decode_source_bytes
 
 
 class FileFinder:
@@ -171,18 +172,11 @@ class FileFinder:
                 if b"\x00" in chunk:
                     return False
 
-                # Try to decode as UTF-8
+                # Same encoding fallback indexing and retrieval use (Bug #1991)
                 try:
-                    chunk.decode("utf-8")
+                    decode_source_bytes(chunk)
                     return True
-                except UnicodeDecodeError:
-                    # Try other common encodings
-                    for encoding in ["latin-1", "cp1252"]:
-                        try:
-                            chunk.decode(encoding)
-                            return True
-                        except UnicodeDecodeError:
-                            continue
+                except ValueError:
                     return False
 
         except (OSError, IOError):

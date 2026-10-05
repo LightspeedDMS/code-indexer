@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 # module-level dedicated audit executor below. A bare ThreadPoolExecutor()
 # does not spawn threads until first submit(), so this stays cheap at
 # CLI-startup import time.
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import numpy as np
@@ -48,6 +49,12 @@ from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
 from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
+from code_indexer.utils.content_availability import CONTENT_UNAVAILABLE_KEY
+from code_indexer.utils.source_text_decoding import (
+    decode_source_text,
+    read_source_text,
+    split_source_lines,
+)
 from code_indexer.storage.shared.hnsw_sync_state import (
     HNSW_SYNC_SCHEMA_VERSION,
     HNSW_SYNC_STATE_FILENAME,
@@ -66,6 +73,58 @@ from code_indexer.storage.shared.chunk_layout import ChunkLayout
 # clear. The schedule has one entry for each retry after the first attempt.
 _CHUNKS_DB_WRITE_MAX_ATTEMPTS = 5
 _CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
+
+
+# Bug #1991: an unreadable file is hit by every query that matches it. Its
+# WARNING is logged once per (repository, path) per process (DEBUG after),
+# remembered in a bounded insertion-ordered set (oldest evicted first).
+# Per-process log de-duplication only -- never cross-request state.
+_UNAVAILABLE_WARNED_MAX = 4096
+_unavailable_warned: "OrderedDict[Tuple[str, str], None]" = OrderedDict()
+_unavailable_warned_lock = threading.Lock()
+
+
+def _first_unavailable_report(key: Tuple[str, str]) -> bool:
+    """True the first time ``key`` is reported (within the bounded memory)."""
+    with _unavailable_warned_lock:
+        if key in _unavailable_warned:
+            return False
+        _unavailable_warned[key] = None
+        while len(_unavailable_warned) > _UNAVAILABLE_WARNED_MAX:
+            _unavailable_warned.popitem(last=False)
+        return True
+
+
+def _content_unavailable(
+    project_root: Path,
+    file_path: str,
+    indicator: str,
+    reason: str,
+    file_error: Optional[BaseException],
+    blob_error: BaseException,
+) -> Tuple[str, Dict[str, Any]]:
+    """Result for a chunk whose content could not be read (Bug #1991).
+
+    The content is EMPTY -- an exception message is never presented as code
+    (it also used to leak absolute server paths). Callers detect the state via
+    ``staleness["content_unavailable"]``; the details go to the log.
+    """
+    first = _first_unavailable_report((str(project_root), file_path))
+    logging.getLogger(__name__).log(
+        logging.WARNING if first else logging.DEBUG,
+        "Chunk content unavailable for %s (%s): file read error=%r, git blob error=%r",
+        file_path,
+        reason,
+        file_error,
+        blob_error,
+    )
+    return "", {
+        "is_stale": True,
+        "staleness_indicator": indicator,
+        "staleness_reason": reason,
+        "hash_mismatch": False,
+        CONTENT_UNAVAILABLE_KEY: True,
+    }
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -7628,8 +7687,14 @@ class FilesystemVectorStore:
                 'is_stale': bool,
                 'staleness_indicator': '⚠️ Modified' | '🗑️ Deleted' | '❌ Error' | None,
                 'staleness_reason': str | None,
-                'hash_mismatch': bool (git repos only)
+                'hash_mismatch': bool (git repos only),
+                'content_unavailable': True (only when no tier could read
+                    the chunk; content is then "" -- Bug #1991)
             }
+
+        File and git-blob content are decoded with the same helper indexing
+        uses (``utils.source_text_decoding``), so non-UTF-8 sources return
+        the exact lines that were indexed.
         """
         # Get payload structure
         payload = vector_data.get("payload", {})
@@ -7668,11 +7733,12 @@ class FilesystemVectorStore:
 
             if full_path.exists():
                 try:
-                    # Read chunk from current file
+                    # Read chunk from current file, decoded exactly as indexing
+                    # decoded it (Bug #1991: a strict UTF-8 read failed on
+                    # Latin-1/CP1252 sources the indexer had accepted).
                     # Note: line_start/line_end are 1-based, convert to 0-based for Python slicing
-                    with open(full_path) as f:
-                        lines = f.readlines()
-                        chunk_content = "".join(lines[(start_line - 1) : end_line])
+                    lines = split_source_lines(read_source_text(full_path))
+                    chunk_content = "".join(lines[(start_line - 1) : end_line])
 
                     # Bug #1181 Perf Fix #3: for immutable versioned snapshots the file
                     # cannot have changed since indexing, so skip the second whole-file
@@ -7723,14 +7789,16 @@ class FilesystemVectorStore:
                             "staleness_reason": "retrieval_failed",
                             "hash_mismatch": False,
                         }
-                    except Exception:
+                    except Exception as blob_error:
                         # Complete failure
-                        return f"[Error retrieving content: {str(e)}]", {
-                            "is_stale": True,
-                            "staleness_indicator": "❌ Error",
-                            "staleness_reason": "retrieval_failed",
-                            "hash_mismatch": False,
-                        }
+                        return _content_unavailable(
+                            self.project_root,
+                            file_path,
+                            "❌ Error",
+                            "retrieval_failed",
+                            e,
+                            blob_error,
+                        )
             else:
                 # File deleted - retrieve from git blob
                 try:
@@ -7744,13 +7812,15 @@ class FilesystemVectorStore:
                         "staleness_reason": "file_deleted",
                         "hash_mismatch": False,
                     }
-                except Exception as e:
-                    return f"[File deleted, cannot retrieve: {str(e)}]", {
-                        "is_stale": True,
-                        "staleness_indicator": "🗑️ Deleted",
-                        "staleness_reason": "file_deleted",
-                        "hash_mismatch": False,
-                    }
+                except Exception as blob_error:
+                    return _content_unavailable(
+                        self.project_root,
+                        file_path,
+                        "🗑️ Deleted",
+                        "file_deleted",
+                        None,
+                        blob_error,
+                    )
 
         # Fallback: no content available
         return "[Content not available]", {
@@ -7798,22 +7868,27 @@ class FilesystemVectorStore:
             RuntimeError: If git operation fails
         """
         try:
-            # Use git cat-file to retrieve blob content
+            # Use git cat-file to retrieve blob content. Capture BYTES and
+            # decode exactly as indexing did (Bug #1991): text=True decoded
+            # strictly as UTF-8 and failed on Latin-1/CP1252 sources.
             result = subprocess.run(
                 ["git", "cat-file", "blob", blob_hash],
                 cwd=self.project_root,
                 capture_output=True,
-                text=True,
                 timeout=5,
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"Git cat-file failed: {result.stderr}")
+                stderr = result.stderr.decode("utf-8", errors="replace")
+                raise RuntimeError(f"Git cat-file failed: {stderr}")
 
             # Extract chunk lines
             # Note: line_start/line_end are 1-based, convert to 0-based for Python slicing
-            # line_end is exclusive (Python slicing convention)
-            lines = result.stdout.splitlines(keepends=True)
+            # line_end is exclusive (Python slicing convention).
+            # Split on "\n" only, matching the chunker's line arithmetic;
+            # str.splitlines() also breaks on \x85, \x0c, U+2028, ... and
+            # shifts every following line.
+            lines = split_source_lines(decode_source_text(result.stdout))
             chunk_content = "".join(lines[(start_line - 1) : end_line])
 
             return chunk_content

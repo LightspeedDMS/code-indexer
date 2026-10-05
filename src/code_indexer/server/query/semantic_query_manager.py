@@ -8,6 +8,10 @@ background job integration, and proper resource management.
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+from code_indexer.utils.content_availability import (
+    CONTENT_UNAVAILABLE_KEY,
+    CONTENT_UNAVAILABLE_MARKER,
+)
 
 import contextvars
 import json
@@ -99,6 +103,8 @@ class QueryResult:
     # Fusion metadata (Story #618 - Score/Provenance Transparency)
     fusion_score: Optional[float] = None
     contributing_providers: Optional[List[str]] = None
+    # Bug #1991: the chunk's content could not be read (code_snippet is "").
+    content_unavailable: bool = False
 
     @classmethod
     def from_search_result(
@@ -139,6 +145,9 @@ class QueryResult:
             result["fusion_score"] = self.fusion_score
         if self.contributing_providers is not None:
             result["contributing_providers"] = self.contributing_providers
+        # Bug #1991: only present when set, so existing responses are unchanged.
+        if self.content_unavailable:
+            result["content_unavailable"] = True
         return result
 
 
@@ -1621,6 +1630,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,
                     source_provider="multimodal",
+                    content_unavailable=item.content_unavailable,
                 )
             )
         merged.sort(key=lambda r: r.similarity_score, reverse=True)
@@ -1858,6 +1868,7 @@ class SemanticQueryManager:
                     chunk_id=f"{r.file_path}:{r.line_number}",
                     repository_alias=r.repository_alias,
                     source_provider=r.source_provider,
+                    metadata={CONTENT_UNAVAILABLE_KEY: r.content_unavailable},
                 )
 
             def _primary_strategy() -> List[StrategyQueryResult]:
@@ -1880,6 +1891,9 @@ class SemanticQueryManager:
                         similarity_score=s.score,
                         repository_alias=s.repository_alias,
                         source_provider=s.source_provider,
+                        content_unavailable=bool(
+                            s.metadata.get(CONTENT_UNAVAILABLE_KEY, False)
+                        ),
                     )
                 )
 
@@ -2267,6 +2281,7 @@ class SemanticQueryManager:
                     chunk_id=f"{r.file_path}:{r.line_number}",
                     repository_alias=r.repository_alias,
                     source_provider=r.source_provider,
+                    metadata={CONTENT_UNAVAILABLE_KEY: r.content_unavailable},
                 )
 
             # Build one original_map keyed by the same key fuse_* uses:
@@ -2325,6 +2340,9 @@ class SemanticQueryManager:
                             source_provider=s.source_provider,
                             fusion_score=s.fusion_score,
                             contributing_providers=s.contributing_providers,
+                            content_unavailable=bool(
+                                s.metadata.get(CONTENT_UNAVAILABLE_KEY, False)
+                            ),
                         )
                     )
 
@@ -2538,6 +2556,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,  # Single repository, no source_repo
                     source_provider=preferred_provider or "primary",
+                    content_unavailable=search_item.content_unavailable,
                 )
                 semantic_results.append(query_result)
 
@@ -2649,6 +2668,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,
                     source_provider=provider_name or "",
+                    content_unavailable=search_item.content_unavailable,
                 )
             )
         return results
@@ -2941,15 +2961,18 @@ class SemanticQueryManager:
 
                 # Combine code snippet
                 code_snippet = "\n".join(code_lines) if code_lines else ""
+                # Bug #1991: the CLI prints a marker for unreadable content.
+                unavailable = code_snippet.strip() == CONTENT_UNAVAILABLE_MARKER
 
                 # Create QueryResult with source_repo populated
                 result = QueryResult(
                     file_path=file_path,
                     line_number=line_start,
-                    code_snippet=code_snippet,
+                    code_snippet="" if unavailable else code_snippet,
                     similarity_score=score,
                     repository_alias=repo_alias,
                     source_repo=source_repo,  # NEW: Extract from file path
+                    content_unavailable=unavailable,
                 )
                 results.append(result)
 
@@ -3407,6 +3430,7 @@ class SemanticQueryManager:
                     similarity_score=rrf_scores[key],
                     repository_alias=result.repository_alias,
                     source_repo=result.source_repo,
+                    content_unavailable=result.content_unavailable,
                 )
                 merged_results.append(merged_result)
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from ..config import IndexingConfig, Config
 from .image_extractor import ImageExtractorFactory
 from ..utils.path_confinement import is_resolved_within_root
+from ..utils.source_text_decoding import read_source_text
 
 
 class FixedSizeChunker:
@@ -312,20 +313,9 @@ class FixedSizeChunker:
             if not is_resolved_within_root(file_path, resolved_root):
                 raise ValueError("file does not resolve inside the codebase root")
 
-        # Try different encodings
-        encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
-        text = None
-
-        for encoding in encodings:
-            try:
-                with open(file_path, "r", encoding=encoding) as f:
-                    text = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if text is None:
-            raise ValueError(f"Could not decode file {file_path}")
+        # Decode through the helper query-time retrieval also uses, so the
+        # line ranges computed here are the ones retrieval slices (Bug #1991).
+        text = read_source_text(file_path)
 
         return self.chunk_text(text, file_path, repo_root)
 

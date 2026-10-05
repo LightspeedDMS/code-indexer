@@ -62,28 +62,18 @@ class TestFixedSizeChunkerCoverage:
         finally:
             temp_path.unlink()
 
-    def test_chunk_file_with_complete_encoding_failure(self, chunker):
-        """Test chunk_file when all encodings fail."""
-        # Since latin-1 can decode any byte sequence, we need to mock
-        # the encoding attempts to all fail
-        temp_file = tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".txt")
-        temp_file.write(b"some content")
-        temp_file.close()
-        temp_path = Path(temp_file.name)
+    def test_chunk_file_decodes_every_byte_value(self, chunker, tmp_path):
+        """latin-1 decodes any byte sequence, so no file fails to decode;
+        the text matches the legacy text-mode latin-1 read (Bug #1991)."""
+        temp_path = tmp_path / "all_bytes.txt"
+        temp_path.write_bytes(bytes(range(256)) * 4)
 
-        try:
-            # Mock all encodings to fail
-            with patch("builtins.open") as mock_open_func:
-                mock_open_func.side_effect = UnicodeDecodeError(
-                    "utf-8", b"", 0, 1, "invalid"
-                )
+        chunks = chunker.chunk_file(temp_path)
 
-                # This should raise ValueError covering lines 161-162
-                with pytest.raises(ValueError, match="Could not decode file"):
-                    chunker.chunk_file(temp_path)
-
-        finally:
-            temp_path.unlink()
+        with open(temp_path, "r", encoding="latin-1") as f:
+            expected_text = f.read()
+        assert "".join(c["text"] for c in chunks).startswith(expected_text[:100])
+        assert chunks == chunker.chunk_text(expected_text, temp_path)
 
     def test_chunk_file_with_permission_error(self, chunker):
         """Test chunk_file when file cannot be opened due to permissions."""

@@ -1030,6 +1030,11 @@ def _display_semantic_results(
         except Exception:
             current_display_branch = "unknown"
 
+    from code_indexer.utils.content_availability import (
+        CONTENT_UNAVAILABLE_MARKER,
+        is_content_unavailable,
+    )
+
     for i, result in enumerate(results, 1):
         payload = result["payload"]
         score = result["score"]
@@ -1038,6 +1043,8 @@ def _display_semantic_results(
         file_path = payload.get("path", "unknown")
         language = payload.get("language", "unknown")
         content = payload.get("content", "")
+        # Bug #1991: content could not be read -- show a marker, never "".
+        unavailable = is_content_unavailable(result)
 
         # Staleness info (if available)
         staleness_info = result.get("staleness", {})
@@ -1064,7 +1071,9 @@ def _display_semantic_results(
                 )
             else:
                 console.print(f"{i}. {score:.3f} {file_path_with_lines}")
-            if content:
+            if unavailable:
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Show full content with line numbers in quiet mode (no truncation)
                 content_lines = content.split("\n")
 
@@ -1135,7 +1144,11 @@ def _display_semantic_results(
             # Note: Fixed-size chunking no longer provides semantic metadata
 
             # Content display with line numbers (full chunk, no truncation)
-            if content:
+            if unavailable:
+                console.print("\n📖 Content:")
+                console.print("─" * 50)
+                console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+            elif content:
                 # Create content header with line range
                 if line_start is not None and line_end is not None:
                     if line_start == line_end:
@@ -5710,7 +5723,12 @@ def _annotate_staleness(
         New list of result dicts with a ``staleness`` key on each entry that
         had a matching enhanced result.  Entries with no match are included
         unchanged (no ``staleness`` key).
+
+        Bug #1991: a result whose store-reported staleness says its content
+        could not be read keeps that staleness (the mtime check cannot see it).
     """
+    from code_indexer.utils.content_availability import staleness_after_local_check
+
     if preserve_order:
         # Reranked path: iterate results in caller order, look up staleness by
         # (path, line_number) composite key so sibling chunks from the same file
@@ -5723,11 +5741,14 @@ def _annotate_staleness(
             enhanced = enhanced_by_chunk.get((path, line_start))
             result_copy = original.copy()
             if enhanced:
-                result_copy["staleness"] = {
-                    "is_stale": enhanced.is_stale,
-                    "staleness_indicator": enhanced.staleness_indicator,
-                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                }
+                result_copy["staleness"] = staleness_after_local_check(
+                    original,
+                    {
+                        "is_stale": enhanced.is_stale,
+                        "staleness_indicator": enhanced.staleness_indicator,
+                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                    },
+                )
             annotated.append(result_copy)
         return annotated
     else:
@@ -5748,11 +5769,14 @@ def _annotate_staleness(
             if matched is None:
                 continue
             result_copy = matched.copy()
-            result_copy["staleness"] = {
-                "is_stale": enhanced.is_stale,
-                "staleness_indicator": enhanced.staleness_indicator,
-                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-            }
+            result_copy["staleness"] = staleness_after_local_check(
+                matched,
+                {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                },
+            )
             annotated.append(result_copy)
         annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
         return annotated
@@ -7029,6 +7053,11 @@ def query(
 
             from .remote.query_execution import execute_remote_query
             from .server.models.api_models import QueryResultItem
+            from .utils.content_availability import (
+                CONTENT_UNAVAILABLE_KEY,
+                CONTENT_UNAVAILABLE_MARKER,
+                is_content_unavailable,
+            )
 
             # NOTE: Remote query API currently supports single language only
             # Use first language from tuple, ignore additional languages for remote mode
@@ -7090,6 +7119,15 @@ def query(
                         ),
                     }
 
+                # Bug #1991: the server could not read this chunk's content.
+                if getattr(result_item, "content_unavailable", False):
+                    existing = converted_result.get("staleness")
+                    staleness: Dict[str, Any] = (
+                        dict(existing) if isinstance(existing, dict) else {}
+                    )
+                    staleness[CONTENT_UNAVAILABLE_KEY] = True
+                    converted_result["staleness"] = staleness
+
                 converted_results.append(converted_result)
 
             # Use existing display logic for local queries
@@ -7133,7 +7171,9 @@ def query(
                         )
                     else:
                         console.print(f"{score:.3f} {file_path_with_lines}")
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                    elif content:
                         # Show content with line numbers
                         content_lines = content.split("\n")
                         if line_start is not None:
@@ -7176,7 +7216,12 @@ def query(
                                 staleness_detail = f"Local file newer by {delta_days}d"
                             console.print(f"Staleness: {staleness_detail}")
 
-                    if content:
+                    if is_content_unavailable(result):
+                        console.print("Content:")
+                        console.print("-" * 40)
+                        console.print(f"  {CONTENT_UNAVAILABLE_MARKER}", markup=False)
+                        console.print("-" * 40)
+                    elif content:
                         if not quiet:
                             console.print(f"Relevance: {score:.3f}/1.0")
                         console.print("Content:")

@@ -7,11 +7,34 @@ Following CLAUDE.md Foundation #1: No mocks - these represent real data structur
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from enum import Enum
 
 
-class QueryResultItem(BaseModel):
+class _OmitFalseContentUnavailable(BaseModel):
+    """Result-model base carrying the Bug #1991 ``content_unavailable`` flag.
+
+    The key is serialized only when true, so ordinary results keep exactly
+    the JSON shape they had before the flag existed.
+    """
+
+    content_unavailable: bool = Field(
+        default=False,
+        description="Present and true only when the matched chunk's content "
+        "could not be read; the snippet/content is then empty (Bug #1991)",
+    )
+
+    # Deliberately NO return annotation: an annotated return type replaces
+    # the model's typed serialization schema (OpenAPI) with that type.
+    @model_serializer(mode="wrap")
+    def _omit_false_content_unavailable(self, handler: SerializerFunctionWrapHandler):
+        data: Dict[str, Any] = handler(self)
+        if not data.get("content_unavailable"):
+            data.pop("content_unavailable", None)
+        return data
+
+
+class QueryResultItem(_OmitFalseContentUnavailable):
     """Individual query result item."""
 
     file_path: str
@@ -318,7 +341,7 @@ class InternalSemanticSearchRequest(SemanticSearchRequest):
     )
 
 
-class SearchResultItem(BaseModel):
+class SearchResultItem(_OmitFalseContentUnavailable):
     """Individual search result."""
 
     score: float = Field(..., description="Relevance score between 0.0 and 1.0")
