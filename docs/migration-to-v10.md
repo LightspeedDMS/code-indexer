@@ -179,7 +179,7 @@ pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v10.0
 sudo systemctl start cidx-server
 
 # 4. Verify
-curl -s http://localhost:8090/docs | head -5
+curl -s http://localhost:8090/healthz
 sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, level, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY timestamp DESC LIMIT 20;"
 ```
 
@@ -222,7 +222,7 @@ curl -X POST http://localhost:8090/api/admin/auto-update/run -H "Authorization: 
 
 ```bash
 # 1. Server health
-curl -s http://localhost:8090/docs | head -5
+curl -s http://localhost:8090/healthz
 curl -s http://localhost:8090/health
 
 # 2. No new ERROR/WARNING since deploy

@@ -60,14 +60,17 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     # ahead of this function), so it is available here at app-wiring time.
     backend_registry = services.get("backend_registry")
 
-    # Create FastAPI app with metadata and lifespan
+    # Create FastAPI app with metadata and lifespan.
+    # API documentation requires an authenticated session or token: the
+    # built-in (open) docs routes are disabled here and /docs, /redoc and
+    # /openapi.json are served by routers/api_docs.py instead.
     app = FastAPI(
         title="CIDX Multi-User Server",
         description="Multi-user semantic code search server with JWT authentication",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
         lifespan=lifespan,
     )
 
@@ -281,6 +284,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         job_tracker=job_tracker,
         secret_key=secret_key,
     )
+
+    # Authenticated API documentation (/docs, /redoc, /openapi.json).
+    from code_indexer.server.routers.api_docs import api_docs_router
+
+    app.include_router(api_docs_router)
 
     # Initialize self-monitoring app.state attributes to None (Bug #87 fix)
     # These will be updated during lifespan startup if self-monitoring is enabled

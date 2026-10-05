@@ -10319,6 +10319,7 @@ def install_server(
     \b
     API DOCUMENTATION:
     Once running, access Swagger UI at: http://localhost:<port>/docs
+    (requires login: sign in to the Web UI first, or send a bearer token)
 
     \b
     EXAMPLES:
@@ -10369,6 +10370,7 @@ def install_server(
                 console.print(
                     f"   http://127.0.0.1:{existing_port}/docs", style="white"
                 )
+                console.print("   (requires login)", style="dim")
                 console.print()
                 console.print("💡 Use --force to reinstall", style="dim yellow")
                 return
@@ -10461,6 +10463,11 @@ def install_server(
         )
         console.print(
             f"   OpenAPI spec: http://127.0.0.1:{allocated_port}/openapi.json",
+            style="dim",
+        )
+        console.print(
+            "   API documentation requires login: sign in to the Web UI first, "
+            "or send a bearer token.",
             style="dim",
         )
         console.print()
@@ -11803,6 +11810,7 @@ def server_start(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except Exception as e:
         console.print(f"❌ Error: {str(e)}", style="red")
@@ -12162,6 +12170,7 @@ def server_restart(ctx, server_dir: Optional[str]):
         console.print()
         console.print("📚 API Documentation:", style="cyan")
         console.print(f"   {result['server_url']}/docs", style="white")
+        console.print("   (requires login)", style="dim")
 
     except KeyboardInterrupt:
         console.print("\n❌ Operation cancelled by user", style="red")

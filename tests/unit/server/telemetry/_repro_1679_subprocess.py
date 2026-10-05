@@ -42,6 +42,14 @@ import json
 import os
 from pathlib import Path
 
+# With telemetry enabled, lifespan shutdown flushes the OTLP exporters, which
+# retry against the deliberately unreachable fake collector before giving up:
+# measured at 15-16 s (about 1.4 s with telemetry disabled), well past
+# asgi_lifespan's default 5 s shutdown timeout. 45 s leaves ample headroom while
+# staying below the launcher's 90 s subprocess timeout, so a genuine shutdown
+# hang still fails the test instead of being waited out.
+_SHUTDOWN_TIMEOUT_SECONDS = 45.0
+
 
 def _run() -> dict:
     import httpx
@@ -56,7 +64,7 @@ def _run() -> dict:
     app = create_app()
 
     async def _drive() -> dict:
-        async with LifespanManager(app):
+        async with LifespanManager(app, shutdown_timeout=_SHUTDOWN_TIMEOUT_SECONDS):
             telemetry_manager = getattr(app.state, "telemetry_manager", None)
             tracer_provider = (
                 telemetry_manager.tracer_provider
@@ -73,7 +81,10 @@ def _run() -> dict:
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver"
             ) as client:
-                response = await client.get("/openapi.json")
+                # Any public (unauthenticated) route works as the probe; the
+                # OAuth discovery document is public by design (API docs
+                # require an authenticated session or token).
+                response = await client.get("/.well-known/oauth-authorization-server")
 
             span_count = 0
             span_names: list = []
