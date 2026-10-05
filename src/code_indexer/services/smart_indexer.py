@@ -755,7 +755,7 @@ class SmartIndexer(HighThroughputProcessor):
                     "Stored resume state is not server-sealed; completing the "
                     "interrupted operation with a reconcile instead of resuming."
                 )
-                return self._do_reconcile_with_database(
+                return self._reconcile_and_verify(
                     batch_size,
                     progress_callback,
                     git_status,
@@ -769,7 +769,7 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Check for reconcile operation
             if reconcile_with_database:
-                reconcile_stats = self._do_reconcile_with_database(
+                reconcile_stats = self._reconcile_and_verify(
                     batch_size,
                     progress_callback,
                     git_status,
@@ -1730,33 +1730,60 @@ class SmartIndexer(HighThroughputProcessor):
         retried_failures, files_to_index = self._merge_recorded_failures(files_to_index)
 
         if not files_to_index and not deleted_files:
-            # SAFETY CHECK: Detect corrupted state before marking as completed
-            # If vector store has data but progressive metadata shows 0 files processed,
-            # this indicates incomplete/corrupted state - don't mark as completed!
+            # SAFETY CHECK (Issue #1975): stored chunks with a zero processed-
+            # file count are ambiguous. `files_processed` is a PER-RUN counter
+            # (start_indexing() resets it), so it is 0 both after a completed
+            # zero-file run and after an interrupted run that left a partial
+            # store -- and "completed" status cannot tell them apart either.
+            # Neither wipe-and-re-embed nor blind trust: reconcile the store
+            # against disk (only missing/changed files are embedded), and
+            # record that verification durably so it runs once.
+            ambiguous_store = False
             try:
                 collection_name = self.vector_store_client.resolve_collection_name(
                     self.config, self.embedding_provider
                 )
                 vector_points = self.vector_store_client.count_points(collection_name)
-                metadata_files = self.progressive_metadata.metadata.get(
-                    "files_processed", 0
+                metadata = self.progressive_metadata.metadata
+                ambiguous_store = (
+                    vector_points > 0
+                    and metadata.get("files_processed", 0) == 0
+                    and not metadata.get("store_verified_by_reconcile", False)
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Index consistency check could not count stored points, "
+                    f"skipping it this run: {e}"
                 )
 
-                if vector_points > 0 and metadata_files == 0:
-                    # CRITICAL: Inconsistent state detected - vector store has data but metadata shows 0 files
-                    if progress_callback:
-                        progress_callback(
-                            0,
-                            0,
-                            Path(""),
-                            info=f"🚨 Inconsistent state detected: {vector_points} chunks in vector store but metadata shows 0 files processed - forcing full reindex",
-                        )
-                    # Clear progressive metadata to force full reindex on next run
-                    self.progressive_metadata.clear()
-                    return ProcessingStats()
-            except Exception:
-                # If safety check fails, proceed with normal logic
-                pass
+            if ambiguous_store:
+                if progress_callback:
+                    progress_callback(
+                        0,
+                        0,
+                        Path(""),
+                        info=f"🔍 {vector_points} stored chunks but no processed files on record - reconciling the index against disk",
+                    )
+                reconcile_stats = self._reconcile_and_verify(
+                    batch_size,
+                    progress_callback,
+                    git_status,
+                    provider_name,
+                    model_name,
+                    None,
+                    quiet,
+                    vector_thread_count,
+                    fts_manager,
+                )
+                if (
+                    not reconcile_stats.cancelled
+                    and git_status.get("git_available", False)
+                    and current_commit
+                ):
+                    self.progressive_metadata.update_commit_watermark(
+                        current_branch, current_commit
+                    )
+                return reconcile_stats
 
             # No changes at all - system is up-to-date, don't touch metadata
             if progress_callback:
@@ -1792,8 +1819,17 @@ class SmartIndexer(HighThroughputProcessor):
             self.config, self.embedding_provider, quiet
         )
 
-        # CRITICAL: Now that we know work is needed, start the indexing session
-        if self.progressive_metadata.metadata["status"] != "in_progress":
+        # Issue #1975: a delete-only run (deletions already applied above, no
+        # file to index) records its completion without starting a fresh
+        # session, which would reset the processed-file counters of the
+        # index it leaves intact. set_files_to_index() below still replaces
+        # any stale work list with the (empty) one, so a completed status
+        # never sits next to a prior run's file tracking.
+        delete_only = not files_to_index
+        if not delete_only and self.progressive_metadata.metadata["status"] != (
+            "in_progress"
+        ):
+            # CRITICAL: Now that we know work is needed, start the indexing session
             self.progressive_metadata.start_fresh_indexing(
                 provider_name, model_name, git_status
             )
@@ -1848,13 +1884,16 @@ class SmartIndexer(HighThroughputProcessor):
             else:
                 resolved_thread_count = vector_thread_count
 
-            high_throughput_stats = self.process_files_high_throughput(
-                files=files_to_index,  # Use absolute paths directly
-                vector_thread_count=resolved_thread_count,
-                batch_size=50,
-                progress_callback=progress_callback,
-                fts_manager=fts_manager,
-            )
+            if delete_only:
+                high_throughput_stats = ProcessingStats()
+            else:
+                high_throughput_stats = self.process_files_high_throughput(
+                    files=files_to_index,  # Use absolute paths directly
+                    vector_thread_count=resolved_thread_count,
+                    batch_size=50,
+                    progress_callback=progress_callback,
+                    fts_manager=fts_manager,
+                )
 
             # Bug #1969 Round 5 (R4-F1): a same-run self-heal escalation
             # triggered while processing the files above may have wiped a
@@ -1983,26 +2022,11 @@ class SmartIndexer(HighThroughputProcessor):
                 Path(""),
                 info="FTS index is new - scanning all files to build full-text index...",
             )
-        codebase = Path(self.config.codebase_dir)
         files = list(self.file_finder.find_files())
         count = 0
         for file_path in files:
             try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-                lines = text.splitlines()
-                rel_path = str(file_path.relative_to(codebase))
-                language = file_path.suffix.lstrip(".") or "txt"
-                fts_manager.add_document(
-                    {
-                        "path": rel_path,
-                        "content": text,
-                        "content_raw": text,
-                        "identifiers": text.split(),
-                        "line_start": 1,
-                        "line_end": max(len(lines), 1),
-                        "language": language,
-                    }
-                )
+                self._add_file_to_fts(fts_manager, file_path)
                 count += 1
             except Exception as e:
                 logger.warning(f"FTS: skipping {file_path}: {e}")
@@ -2010,6 +2034,97 @@ class SmartIndexer(HighThroughputProcessor):
             progress_callback(
                 0, 0, Path(""), info=f"FTS index built from {count} files"
             )
+
+    def _add_file_to_fts(self, fts_manager, file_path: Path) -> None:
+        """Add one file's current content to FTS as a whole-file document
+        (no embedding). Raises on read/add failure; callers decide."""
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        fts_manager.add_document(
+            {
+                "path": str(file_path.relative_to(Path(self.config.codebase_dir))),
+                "content": text,
+                "content_raw": text,
+                "identifiers": text.split(),
+                "line_start": 1,
+                "line_end": max(len(lines), 1),
+                "language": file_path.suffix.lstrip(".") or "txt",
+            }
+        )
+
+    def _reconcile_and_verify(
+        self,
+        batch_size: int,
+        progress_callback: Optional[Callable],
+        git_status: Dict[str, Any],
+        provider_name: str,
+        model_name: str,
+        files_count_to_process: Optional[int],
+        quiet: bool,
+        vector_thread_count: Optional[int],
+        fts_manager: Optional[TantivyIndexManager],
+    ) -> ProcessingStats:
+        """Reconcile, then record that the whole store was verified against
+        disk (Issue #1975) -- only for a run that was neither cancelled nor
+        limited to a subset of files."""
+        stats = self._do_reconcile_with_database(
+            batch_size,
+            progress_callback,
+            git_status,
+            provider_name,
+            model_name,
+            files_count_to_process,
+            quiet,
+            vector_thread_count,
+            fts_manager,
+        )
+        if not stats.cancelled and files_count_to_process is None:
+            self.progressive_metadata.mark_store_verified()
+        return stats
+
+    def _retry_pending_fts_restores(
+        self,
+        fts_manager,
+        disk_files: Set[str],
+        queued: Set[str],
+        branch: str,
+        attempted: Set[str],
+        failed: Set[str],
+    ) -> None:
+        """Retry FTS restores a past reconcile could not complete, and
+        persist what is still owed (this run's failures included). A file
+        no longer on disk/eligible, queued for re-indexing (which writes its
+        FTS documents), or hidden again on the branch is dropped."""
+        pending = self.progressive_metadata.get_fts_restore_pending()
+        still_owed = set(failed)
+        for path in pending:
+            if path in attempted or path not in disk_files or path in queued:
+                continue
+            if branch in self._reconcile_hidden_on_all_points.get(path, set()):
+                continue
+            if not self._restore_file_in_fts(fts_manager, path):
+                still_owed.add(path)
+        if pending or still_owed:
+            self.progressive_metadata.set_fts_restore_pending(sorted(still_owed))
+
+    def _restore_file_in_fts(self, fts_manager, relative_path: str) -> bool:
+        """Re-add an un-hidden file's FTS document from its current content.
+        Any stale document for the path is deleted first (deferred) so the
+        file is never listed twice. Returns False after logging a per-file
+        failure at ERROR (the caller records it for retry); RuntimeError
+        (writer not initialized -- a wiring bug) propagates, as on the
+        per-file indexing path (file_chunking_manager)."""
+        try:
+            fts_manager.delete_document_deferred(relative_path)
+            self._add_file_to_fts(
+                fts_manager, Path(self.config.codebase_dir) / relative_path
+            )
+            return True
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"FTS restore failed for '{relative_path}': {e}")
+            return False
 
     def _do_reconcile_with_database(
         self,
@@ -2047,18 +2162,15 @@ class SmartIndexer(HighThroughputProcessor):
         # Get all files that should be indexed (from disk)
         all_files_to_index = list(self.file_finder.find_files())
 
-        if not all_files_to_index:
-            if progress_callback:
-                # ⚠️  CRITICAL: total=0 makes this show as ℹ️ message in CLI
-                progress_callback(0, 0, Path(""), info="No files found to index")
-            # A reconcile that finds nothing to do
-            # must still mark the operation completed -- otherwise a
-            # lingering "in_progress"/"failed" status (e.g. the
-            # trust_resume_state=False fallback after an interrupted run)
-            # never clears, and every subsequent run re-enters this same
-            # reconcile fallback forever.
-            self.progressive_metadata.complete_indexing()
-            return ProcessingStats()
+        if not all_files_to_index and progress_callback:
+            # ⚠️  CRITICAL: total=0 makes this show as ℹ️ message in CLI
+            progress_callback(0, 0, Path(""), info="No files found to index")
+        # Issue #1999: no early return on an empty scan -- stored files that
+        # a filter now excludes (possibly every file) must still go through
+        # the deletion/hide logic below. The nothing-to-index path further
+        # down still marks the operation completed, so a lingering
+        # "in_progress"/"failed" status (e.g. the trust_resume_state=False
+        # fallback after an interrupted run) is cleared as before.
 
         # Query database to see what files are already indexed with timestamps
         if progress_callback:
@@ -2075,6 +2187,7 @@ class SmartIndexer(HighThroughputProcessor):
         # Codex #1505 review, Finding 1: same defensive default for the
         # hidden_branches map the branch-visibility loop reads.
         self._reconcile_hidden_branches: Dict[str, List[str]] = {}
+        self._reconcile_hidden_on_all_points: Dict[str, Set[str]] = {}
         # Issue #2013: same defensive default for the racy-timestamp index.
         self._reconcile_working_dir_index: Dict[str, Tuple[float, Optional[str]]] = {}
 
@@ -2231,6 +2344,12 @@ class SmartIndexer(HighThroughputProcessor):
             disk_files_set = {
                 str(f.relative_to(self.config.codebase_dir)) for f in all_files_to_index
             }
+            queued_relative_paths = {
+                str(f.relative_to(self.config.codebase_dir)) for f in files_to_index
+            }
+            # Issue #1999: FTS restores of un-hidden files, for retry state.
+            restore_attempted: Set[str] = set()
+            restore_failed: Set[str] = set()
             for indexed_file_path in indexed_files_with_timestamps:
                 # Convert indexed file path to relative string for comparison
                 try:
@@ -2261,6 +2380,29 @@ class SmartIndexer(HighThroughputProcessor):
                             relative_file_path, current_branch, collection_name
                         )
                         files_unhidden += 1
+                        # Issue #1999: hiding dropped the file's FTS document;
+                        # restore it from current content (no embedding).
+                        # A file queued for re-indexing gets its FTS
+                        # documents from that processing instead.
+                        if (
+                            fts_manager is not None
+                            and relative_file_path not in queued_relative_paths
+                        ):
+                            restore_attempted.add(relative_file_path)
+                            if not self._restore_file_in_fts(
+                                fts_manager, relative_file_path
+                            ):
+                                restore_failed.add(relative_file_path)
+
+            if fts_manager is not None:
+                self._retry_pending_fts_restores(
+                    fts_manager,
+                    disk_files_set,
+                    queued_relative_paths,
+                    current_branch,
+                    restore_attempted,
+                    restore_failed,
+                )
 
             if files_unhidden > 0 and progress_callback:
                 progress_callback(
@@ -2306,14 +2448,20 @@ class SmartIndexer(HighThroughputProcessor):
             elif indexed_file_str not in disk_files_set:
                 # CRITICAL: Check if file genuinely deleted from filesystem vs just branch switch
                 if self.is_git_aware():
-                    # For git projects, check if file exists in current working directory
-                    # If it doesn't exist on disk at all, it was genuinely deleted
-                    file_path = self.config.codebase_dir / indexed_file_str
-                    if not file_path.exists():
-                        # File was genuinely deleted from filesystem - safe to remove from database
+                    # Git projects hide (never hard-delete) such a file on the
+                    # current branch: either it was genuinely deleted from
+                    # disk, or (Issue #1999) it is on disk but no longer
+                    # eligible (exclusion filter / extension change) -- branch
+                    # isolation would hide it, but it never runs when nothing
+                    # needs indexing. A path already hidden on this branch (a
+                    # past deletion or exclusion) is skipped, so each one
+                    # costs one hide, once, not one per reconcile. "Hidden"
+                    # means hidden on EVERY point: a path is still visible
+                    # while any of its points is.
+                    if current_branch not in self._reconcile_hidden_on_all_points.get(
+                        indexed_file_str, set()
+                    ):
                         deleted_files.append(indexed_file_str)
-                    # If file exists on disk but not in our scan, it might be excluded by filters
-                    # In that case, branch isolation will handle visibility
                 else:
                     # File exists in database but not on disk - was deleted (non-git projects)
                     deleted_files.append(indexed_file_str)
@@ -2328,13 +2476,24 @@ class SmartIndexer(HighThroughputProcessor):
                 self.delete_file_branch_aware(
                     deleted_file, collection_name, watch_mode=False
                 )
+                # Issue #1999: branch isolation (which also drops hidden files'
+                # FTS documents) does not run when nothing needs indexing, so
+                # the full-text side is cleaned here too. Deferred: the single
+                # commit happens in smart_index()'s finally.
+                if fts_manager is not None:
+                    try:
+                        fts_manager.delete_document_deferred(deleted_file)
+                    except Exception as e:
+                        logger.warning(
+                            f"FTS delete failed for '{deleted_file}' during reconcile: {e}"
+                        )
 
             if progress_callback:
                 progress_callback(
                     0,
                     0,
                     Path(""),
-                    info=f"🗑️  Cleaned up {len(deleted_files)} deleted files from database",
+                    info=f"🗑️  Cleaned up {len(deleted_files)} deleted or no longer indexed files from database",
                 )
 
         # Bug #1969 Round 5 (R4-F1): fold in any durably pending self-heal
@@ -3582,6 +3741,7 @@ class SmartIndexer(HighThroughputProcessor):
         # `hidden_branches` via an in-memory dict lookup instead of issuing
         # a fresh `scroll_points` query PER indexed file.
         db_hidden_branches: Dict[str, List[str]] = {}
+        db_hidden_on_all_points: Dict[str, Set[str]] = {}
         # Issue #2013: relative path -> (earliest indexed_timestamp, stored
         # file_hash) for mtime/size-identified points (racy-timestamp check).
         db_working_dir_index: Dict[str, Tuple[float, Optional[str]]] = {}
@@ -3648,6 +3808,13 @@ class SmartIndexer(HighThroughputProcessor):
                     db_hidden_branches[relative_key] = payload.get(
                         "hidden_branches", []
                     )
+                # Issue #1999 review: branches hidden on EVERY point of the
+                # path -- a path is visible on a branch while ANY point is.
+                point_hidden = set(payload.get("hidden_branches") or [])
+                if relative_key in db_hidden_on_all_points:
+                    db_hidden_on_all_points[relative_key] &= point_hidden
+                else:
+                    db_hidden_on_all_points[relative_key] = point_hidden
 
                 # Issue #2013 (racy timestamp): for an mtime/size-identified
                 # point keep the file's EARLIEST content-read time
@@ -3684,10 +3851,12 @@ class SmartIndexer(HighThroughputProcessor):
             indexed_files_with_timestamps = {}
             db_content_ids = {}
             db_hidden_branches = {}
+            db_hidden_on_all_points = {}
             db_working_dir_index = {}
 
         self._reconcile_db_content_ids = db_content_ids
         self._reconcile_hidden_branches = db_hidden_branches
+        self._reconcile_hidden_on_all_points = db_hidden_on_all_points
         self._reconcile_working_dir_index = db_working_dir_index
         return indexed_files_with_timestamps
 
@@ -3898,9 +4067,11 @@ class SmartIndexer(HighThroughputProcessor):
                                 }
                             )
 
-                    # Apply the updates
+                    # Apply the updates. Payload-only: _batch_update_points
+                    # upserts point by point and each upsert drops the
+                    # file's other chunk points as orphans.
                     if points_to_update:
-                        success = self.vector_store_client._batch_update_points(
+                        success = self.vector_store_client._batch_update_payload_only(
                             points_to_update,
                             collection_name,
                         )

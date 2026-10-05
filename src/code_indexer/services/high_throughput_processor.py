@@ -1392,16 +1392,17 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 logger.warning(f"Git rev-parse failed: {e}")
                 return False
 
-    def _hide_file_in_branch_thread_safe(
-        self, file_path: str, branch: str, collection_name: str
-    ):
-        """Thread-safe version of hiding file in branch."""
-
-        # Use shared lock to ensure thread safety for visibility updates
-        with self._visibility_lock:
-            # Get all content points for this file with error handling
+    def _fetch_file_content_points(
+        self, file_path: str, collection_name: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Every content point of one file, paged (a file can have more
+        points than one page). None when any page cannot be fetched, so a
+        caller never reports success after updating only part of a file."""
+        content_points: List[Dict[str, Any]] = []
+        offset = None
+        while True:
             try:
-                content_points, _ = self.vector_store_client.scroll_points(
+                page, next_offset = self.vector_store_client.scroll_points(
                     filter_conditions={
                         "must": [
                             {"key": "type", "match": {"value": "content"}},
@@ -1409,6 +1410,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         ]
                     },
                     limit=1000,
+                    offset=offset,
                     collection_name=collection_name,
                     # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
                     # path (it mutates hidden_branches on these points, or
@@ -1418,13 +1420,34 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     # untouched.
                     self_heal=True,
                 )
-                if not isinstance(content_points, list):
-                    logger.error(
-                        f"Unexpected scroll_points return type: {type(content_points)}"
-                    )
-                    return False
             except Exception as e:
                 logger.error(f"Failed to get content points for {file_path}: {e}")
+                return None
+            if not isinstance(page, list):
+                logger.error(f"Unexpected scroll_points return type: {type(page)}")
+                return None
+            content_points.extend(page)
+            if next_offset is None or not page:
+                return content_points
+            # Termination: a store that hands back the offset it was given
+            # would loop forever -- fail loudly instead.
+            if next_offset == offset:
+                logger.error(
+                    f"Pagination stuck at offset {offset} for {file_path}; "
+                    "visibility update aborted"
+                )
+                return None
+            offset = next_offset
+
+    def _hide_file_in_branch_thread_safe(
+        self, file_path: str, branch: str, collection_name: str
+    ):
+        """Thread-safe version of hiding file in branch."""
+
+        # Use shared lock to ensure thread safety for visibility updates
+        with self._visibility_lock:
+            content_points = self._fetch_file_content_points(file_path, collection_name)
+            if content_points is None:
                 return False
 
             # Update each content point to add branch to hidden_branches if not already present
@@ -1437,9 +1460,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         {"id": point["id"], "payload": {"hidden_branches": new_hidden}}
                     )
 
-            # Batch update the points with new hidden_branches arrays
+            # Batch update the points with new hidden_branches arrays.
+            # Payload-only: _batch_update_points upserts point by point, and
+            # each upsert drops the file's OTHER chunk points as orphans, so a
+            # multi-chunk file would collapse to one point.
             if points_to_update:
-                return self.vector_store_client._batch_update_points(
+                return self.vector_store_client._batch_update_payload_only(
                     points_to_update, collection_name
                 )
 
@@ -1569,32 +1595,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
     ):
         """Thread-safe version of ensuring file is visible in branch."""
         with self._visibility_lock:
-            # Get all content points for this file with error handling
-            try:
-                content_points, _ = self.vector_store_client.scroll_points(
-                    filter_conditions={
-                        "must": [
-                            {"key": "type", "match": {"value": "content"}},
-                            {"key": "path", "match": {"value": file_path}},
-                        ]
-                    },
-                    limit=1000,
-                    collection_name=collection_name,
-                    # Bug #1969 Round 5 (R4-F2): this is a write-adjacent
-                    # path (it mutates hidden_branches on these points, or
-                    # is invoked as part of deleting the file) -- it must
-                    # self-heal a corrupt id_index.bin rather than
-                    # silently giving up and leaving the file's records
-                    # untouched.
-                    self_heal=True,
-                )
-                if not isinstance(content_points, list):
-                    logger.error(
-                        f"Unexpected scroll_points return type: {type(content_points)}"
-                    )
-                    return False
-            except Exception as e:
-                logger.error(f"Failed to get content points for {file_path}: {e}")
+            content_points = self._fetch_file_content_points(file_path, collection_name)
+            if content_points is None:
                 return False
 
             # Update each content point to remove branch from hidden_branches if present
@@ -1608,8 +1610,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
 
             # Batch update the points with new hidden_branches arrays
+            # (payload-only, see _hide_file_in_branch_thread_safe).
             if points_to_update:
-                return self.vector_store_client._batch_update_points(
+                return self.vector_store_client._batch_update_payload_only(
                     points_to_update, collection_name
                 )
 

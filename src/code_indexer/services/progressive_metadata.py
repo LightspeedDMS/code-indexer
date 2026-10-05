@@ -61,6 +61,9 @@ class ProgressiveMetadata:
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},  # Per-branch last indexed commit: {branch: commit_hash}
             "last_commit_check_timestamp": 0.0,  # When we last checked for git changes
+            # Issue #1975: a completed reconcile verified the stored points
+            # against disk; cleared whenever a new run starts from zero.
+            "store_verified_by_reconcile": False,
         }
 
         if self.metadata_path.exists():
@@ -183,8 +186,28 @@ class ProgressiveMetadata:
                 "files_processed": 0,
                 "chunks_indexed": 0,
                 "failed_files": 0,
+                "store_verified_by_reconcile": False,
             }
         )
+        self._save_metadata()
+
+    def get_fts_restore_pending(self) -> List[str]:
+        """Un-hidden files whose full-text document could not be restored;
+        a later reconcile retries them (Issue #1999)."""
+        return [str(p) for p in self.metadata.get("fts_restore_pending") or []]
+
+    def set_fts_restore_pending(self, paths: List[str]) -> None:
+        """Replace the list of files whose FTS restore is still owed."""
+        self.metadata["fts_restore_pending"] = list(
+            dict.fromkeys(str(p) for p in paths)
+        )
+        self._save_metadata()
+
+    def mark_store_verified(self) -> None:
+        """Record that a completed reconcile verified the stored points
+        against disk, so a zero processed-file count is no longer ambiguous
+        (Issue #1975)."""
+        self.metadata["store_verified_by_reconcile"] = True
         self._save_metadata()
 
     def start_fresh_indexing(
@@ -355,6 +378,7 @@ class ProgressiveMetadata:
             # Git commit watermark tracking for incremental indexing
             "branch_commit_watermarks": {},
             "last_commit_check_timestamp": 0.0,
+            "store_verified_by_reconcile": False,
         }
         self._save_metadata()
 
