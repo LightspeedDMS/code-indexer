@@ -1975,17 +1975,25 @@ class RegexSearchService:
         parsing is independent of the path's own characters. ``--null`` is
         the long form accepted by both GNU and BSD grep (BSD's ``-Z`` means
         decompress).
+
+        The pattern is passed through ``-e`` and ``file_list`` (the recursive
+        search root or a batch of repo-relative files) follows a ``--``
+        end-of-options marker, so both are always read as operands, matching
+        the ripgrep command builder. Every option, including the recursive
+        mode's CIDX internal-directory excludes (Bug #158), precedes ``--``.
         """
         cmd = ["grep", "-E", "-H", "--null"]
         if recursive:
             cmd.append("-rn")
+            cmd.extend(["--exclude-dir", ".code-indexer"])
+            cmd.extend(["--exclude-dir", ".git"])
         else:
             cmd.append("-n")
         if not case_sensitive:
             cmd.append("-i")
         if context_lines > 0:
             cmd.extend(["-C", str(context_lines)])
-        cmd.append(pattern)
+        cmd.extend(["-e", pattern, "--"])
         if file_list:
             cmd.extend(file_list)
         return cmd
@@ -2589,11 +2597,11 @@ class RegexSearchService:
             return all_matches[:max_results], total
 
         # No glob filters: preserve grep's direct recursive fast path.
-        cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
-        # Always exclude CIDX internal directories (Bug #158)
-        cmd.extend(["--exclude-dir", ".code-indexer"])
-        cmd.extend(["--exclude-dir", ".git"])
-        cmd.append(str(search_path))
+        # The builder adds the CIDX internal-directory excludes (Bug #158)
+        # before the ``--`` that precedes the search root operand.
+        cmd = self._build_grep_command(
+            pattern, case_sensitive, context_lines, True, [str(search_path)]
+        )
 
         (
             matches,
