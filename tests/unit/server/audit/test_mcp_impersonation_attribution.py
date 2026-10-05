@@ -16,8 +16,10 @@ off at both read points.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -207,34 +209,237 @@ class TestActorDuringImpersonation:
         assert created["success"] is True, created
         assert env.rows("api_key_created") == [(_ADMIN, _SUBJECT, "mcp")]
 
-    def test_rejected_call_clears_an_earlier_calls_principal(self, env) -> None:
-        """A JSON-RPC batch shares one holder: a call refused before dispatch
-        must not leave an earlier call's impersonation on it."""
+    def test_no_call_leaves_its_principal_behind(self, env) -> None:
+        """The calls of one JSON-RPC batch run in one context: the principal a
+        call binds ends with it, whether it ran or was refused."""
         from code_indexer.server.mcp.protocol import handle_tools_call
         from code_indexer.server.middleware.audit_request_context import (
-            current_audit_request_context,
-            note_mcp_principal,
+            current_mcp_principal,
         )
+
+        env.call("set_session_impersonation", {"username": _SUBJECT})
+
+        async def batch() -> List[Any]:
+            seen = []
+            await handle_tools_call(
+                {"name": "create_api_key", "arguments": {"description": "key"}},
+                env.admin,
+                session_id=env.session_id,
+            )
+            seen.append(current_mcp_principal())
+            with pytest.raises(ValueError, match="Unknown tool"):
+                await handle_tools_call(
+                    {"name": "no_such_tool"}, env.admin, session_id=env.session_id
+                )
+            seen.append(current_mcp_principal())
+            return seen
 
         token = bind_audit_request_context(build_request_context("/mcp", "127.0.0.1"))
         try:
-            note_mcp_principal(_ADMIN, _SUBJECT)
-            with pytest.raises(ValueError, match="Unknown tool"):
-                asyncio.run(handle_tools_call({"name": "no_such_tool"}, env.admin))
-            holder = current_audit_request_context()
-            assert holder is not None
-            assert (holder.authenticated_actor, holder.impersonated_user) == (
-                None,
-                None,
-            )
+            assert asyncio.run(batch()) == [None, None]
         finally:
             reset_audit_request_context(token)
+        assert env.rows("api_key_created") == [(_ADMIN, _SUBJECT, "mcp")]
 
     def test_without_impersonation_subject_is_null(self, env) -> None:
         created = env.call("create_api_key", {"description": "example key"})
 
         assert created["success"] is True, created
         assert env.rows("api_key_created") == [(_ADMIN, None, "mcp")]
+
+
+def _tool_request(request_id: int, tool: str, arguments: Dict[str, Any]) -> Any:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+
+
+def _batch_with_held_first_call(
+    env: _Env, monkeypatch, later_call: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Run a JSON-RPC batch on the admin's session: ``create_api_key`` (held
+    past its handler timeout, so its worker thread is abandoned), then
+    ``set_session_impersonation(later_call)``, whose payload is returned,
+    then an ordinary call made under the session's new state.  The held call
+    is released only after the whole batch has returned, and runs to
+    completion before this helper returns."""
+    from code_indexer.server.mcp import protocol
+    from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+
+    real = HANDLER_REGISTRY["create_api_key"]
+    release = threading.Event()
+
+    @functools.wraps(real)
+    def held(*args: Any, **kwargs: Any) -> Any:
+        if not release.wait(timeout=30):
+            raise AssertionError("held call was never released")
+        return real(*args, **kwargs)
+
+    resolve_timeout = protocol._resolve_handler_timeout
+    monkeypatch.setitem(HANDLER_REGISTRY, "create_api_key", held)
+    monkeypatch.setattr(
+        protocol,
+        "_resolve_handler_timeout",
+        lambda name: 0.2 if name == "create_api_key" else resolve_timeout(name),
+    )
+    loop = asyncio.new_event_loop()
+    token = bind_audit_request_context(build_request_context("/mcp", "127.0.0.1"))
+    try:
+        responses = loop.run_until_complete(
+            protocol.process_batch_request(
+                [
+                    _tool_request(1, "create_api_key", {"description": "example"}),
+                    _tool_request(2, "set_session_impersonation", later_call),
+                    _tool_request(3, "get_tool_categories", {}),
+                ],
+                env.admin,
+                session_id=env.session_id,
+            )
+        )
+    finally:
+        reset_audit_request_context(token)
+        release.set()
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            loop.close()
+    # A timed-out call's result is the dispatcher's own error dict.
+    assert "timed out" in responses[0]["result"]["error"], responses[0]
+    assert "content" in responses[2].get("result", {}), responses[2]
+    later: Dict[str, Any] = json.loads(responses[1]["result"]["content"][0]["text"])
+    return later
+
+
+class TestPerCallAttribution:
+    """Audit attribution is fixed per tool call: a call's worker thread that
+    outlives its timeout writes its rows with ITS principal, whatever later
+    calls of the same JSON-RPC batch change."""
+
+    def test_timed_out_call_keeps_its_principal_after_a_later_call_clears_impersonation(
+        self, env, monkeypatch
+    ) -> None:
+        env.call("set_session_impersonation", {"username": _SUBJECT})
+
+        later = _batch_with_held_first_call(env, monkeypatch, {})
+
+        assert later == {"status": "ok", "impersonating": None}
+        assert env.rows("api_key_created") == [(_ADMIN, _SUBJECT, "mcp")]
+
+    def test_timed_out_call_does_not_pick_up_a_later_calls_subject(
+        self, env, monkeypatch
+    ) -> None:
+        later = _batch_with_held_first_call(env, monkeypatch, {"username": _SUBJECT})
+
+        assert later == {"status": "ok", "impersonating": _SUBJECT}
+        assert env.rows("api_key_created") == [(_ADMIN, None, "mcp")]
+
+
+_CONCURRENT_CALLS = 1000
+
+
+class TestOneEffectiveUserPerCall:
+    """A call's audit principal and the user its handler runs as come from
+    ONE read of the session, so a concurrent impersonation change can never
+    split them."""
+
+    @staticmethod
+    def _recording_handler(monkeypatch) -> List[Tuple[Optional[str], str]]:
+        """Replace the ``create_api_key`` handler with one recording, per
+        call, the bound principal's subject and the user it received."""
+        from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+        from code_indexer.server.middleware.audit_request_context import (
+            current_mcp_principal,
+        )
+
+        seen: List[Tuple[Optional[str], str]] = []
+
+        async def recorder(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+            principal = current_mcp_principal()
+            subject = None if principal is None else principal.impersonated_user
+            seen.append((subject, user.username))
+            return {"success": True}
+
+        monkeypatch.setitem(HANDLER_REGISTRY, "create_api_key", recorder)
+        return seen
+
+    @staticmethod
+    def _split(seen: List[Tuple[Optional[str], str]]) -> List[Any]:
+        """Calls whose bound subject is not the user they ran as."""
+        return [
+            (subject, ran_as)
+            for subject, ran_as in seen
+            if subject != (None if ran_as == _ADMIN else ran_as)
+        ]
+
+    def test_switch_right_after_the_session_read_cannot_split_the_call(
+        self, env, monkeypatch
+    ) -> None:
+        from code_indexer.server.auth.mcp_session_state import MCPSessionState
+        from code_indexer.server.mcp.protocol import handle_tools_call
+
+        class ClearedRightAfterFirstRead(MCPSessionState):
+            """A concurrent clear lands right after the dispatcher's read."""
+
+            @property
+            def effective_user(self) -> User:
+                current = super().effective_user
+                self.clear_impersonation()
+                return current
+
+        session = ClearedRightAfterFirstRead("example-session-split", env.admin)
+        session.set_impersonation(env.subject)
+        seen = self._recording_handler(monkeypatch)
+
+        asyncio.run(
+            handle_tools_call(
+                {"name": "create_api_key", "arguments": {}},
+                env.admin,
+                session_state=session,
+            )
+        )
+
+        assert seen == [(_SUBJECT, _SUBJECT)]
+
+    def test_concurrent_switching_never_splits_a_call(self, env, monkeypatch) -> None:
+        import sys
+
+        from code_indexer.server.auth.mcp_session_state import MCPSessionState
+        from code_indexer.server.mcp.protocol import handle_tools_call
+
+        session = MCPSessionState("example-session-concurrent", env.admin)
+        seen = self._recording_handler(monkeypatch)
+        stop = threading.Event()
+
+        def toggle() -> None:
+            while not stop.is_set():
+                session.set_impersonation(env.subject)
+                session.clear_impersonation()
+
+        async def dispatch() -> None:
+            for _ in range(_CONCURRENT_CALLS):
+                await handle_tools_call(
+                    {"name": "create_api_key", "arguments": {}},
+                    env.admin,
+                    session_state=session,
+                )
+
+        previous_interval = sys.getswitchinterval()
+        toggler = threading.Thread(target=toggle, daemon=True)
+        sys.setswitchinterval(1e-6)
+        toggler.start()
+        try:
+            asyncio.run(dispatch())
+        finally:
+            stop.set()
+            toggler.join(timeout=10)
+            sys.setswitchinterval(previous_interval)
+
+        assert not toggler.is_alive()
+        assert len(seen) == _CONCURRENT_CALLS
+        assert self._split(seen) == []
 
 
 _DEMOTED = "example-demoted"
@@ -327,6 +532,52 @@ class TestSessionBinding:
         assert hashlib.sha256(session_id.encode()).hexdigest()[:12] in message
         for identity in (session_id, _ADMIN, _OTHER):
             assert identity not in message
+
+    @pytest.mark.parametrize("as_batch", [False, True], ids=["single", "batch"])
+    def test_session_taken_over_after_the_owner_check_is_refused_as_not_found(
+        self, env, monkeypatch, as_batch: bool
+    ) -> None:
+        """The session is evicted and recreated by another account between
+        the endpoint's owner check and the dispatcher's session lookup: the
+        request is refused exactly as the endpoint's own check refuses it."""
+        from code_indexer.server.mcp.session_registry import get_session_registry
+
+        other = env.stack.user_manager.create_user(
+            _OTHER, _PASSWORD, UserRole.NORMAL_USER
+        )
+        session_id = f"example-session-{uuid.uuid4()}"
+        env.session_ids.add(session_id)
+        registry = get_session_registry()
+        real_lookup = registry.get_or_create_session
+        lookups: List[str] = []
+
+        def taken_over_after_owner_check(sid: str, authenticated_user: Any) -> Any:
+            if sid == session_id:
+                lookups.append(sid)
+                if len(lookups) == 2:
+                    registry.remove_session(sid)
+                    real_lookup(sid, other)
+            return real_lookup(sid, authenticated_user)
+
+        monkeypatch.setattr(
+            registry, "get_or_create_session", taken_over_after_owner_check
+        )
+        token, _jti = env.stack.bearer(env.admin)
+        request = _tool_request(1, "create_api_key", {})
+
+        response = env.client.post(
+            "/mcp",
+            json=[request] if as_batch else request,
+            headers={"Authorization": f"Bearer {token}", "Mcp-Session-Id": session_id},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error"] == {
+            "code": -32001,
+            "message": "Session not found",
+        }
+        assert len(lookups) == 2
+        assert env.rows("api_key_created") == []
 
     def test_same_user_reconnecting_keeps_its_session(self, env) -> None:
         session_id = f"example-session-{uuid.uuid4()}"
@@ -455,9 +706,52 @@ class TestClearingImpersonation:
 
         assert cleared == {"status": "ok", "impersonating": None}
         assert env.rows("impersonation_denied") == []
-        assert env.rows("impersonation_cleared") == [(_ADMIN, _SUBJECT, "mcp")]
+        assert env.rows("impersonation_cleared") == [(_ADMIN, None, "mcp")]
         env.call("create_api_key", {"description": "example key"})
         assert env.rows("api_key_created") == [(_ADMIN, None, "mcp")]
+
+    def test_clear_racing_a_concurrent_clear_still_succeeds(self, env) -> None:
+        from code_indexer.server.auth.mcp_session_state import MCPSessionState
+        from code_indexer.server.mcp.handlers.admin import (
+            handle_set_session_impersonation,
+        )
+
+        class ClearedRightAfterCheck(MCPSessionState):
+            """A concurrent clear lands right after the session is checked."""
+
+            @property
+            def is_impersonating(self) -> bool:
+                current = super().is_impersonating
+                self.clear_impersonation()
+                return current
+
+        session = ClearedRightAfterCheck("example-session-clear", env.admin)
+        session.set_impersonation(env.subject)
+
+        result = handle_set_session_impersonation({}, env.admin, session_state=session)
+
+        assert json.loads(result["content"][0]["text"]) == {
+            "status": "ok",
+            "impersonating": None,
+        }
+        assert session.impersonated_user is None
+
+    def test_switching_impersonation_records_the_admin_without_a_subject(
+        self, env
+    ) -> None:
+        """set_session_impersonation is authorized for, and performed by, the
+        authenticated administrator, so its rows never carry the subject the
+        session impersonated before the call."""
+        env.stack.user_manager.create_user(_OTHER, _PASSWORD, UserRole.NORMAL_USER)
+        env.call("set_session_impersonation", {"username": _SUBJECT})
+
+        switched = env.call("set_session_impersonation", {"username": _OTHER})
+
+        assert switched == {"status": "ok", "impersonating": _OTHER}
+        assert env.rows("impersonation_set") == [
+            (_ADMIN, None, "mcp"),
+            (_ADMIN, None, "mcp"),
+        ]
 
     def test_admin_clears_impersonation_of_user_whose_group_lacks_the_tool(
         self, env
@@ -472,7 +766,7 @@ class TestClearingImpersonation:
         cleared = env.call("set_session_impersonation", {})
 
         assert cleared == {"status": "ok", "impersonating": None}
-        assert env.rows("impersonation_cleared") == [(_ADMIN, _SUBJECT, "mcp")]
+        assert env.rows("impersonation_cleared") == [(_ADMIN, None, "mcp")]
 
     def test_impersonated_user_group_still_governs_other_tools(self, env) -> None:
         _enforce_group_tool_access(

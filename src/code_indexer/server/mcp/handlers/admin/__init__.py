@@ -889,12 +889,15 @@ def handle_set_session_impersonation(
 
     # Handle clearing impersonation
     if username is None:
-        if session_state and session_state.is_impersonating:
-            previous_target = session_state.impersonated_user.username
+        # Read the impersonated user ONCE: another call on the same session
+        # may clear it concurrently (no lock is held across a check and a
+        # second read).
+        previous = session_state.impersonated_user if session_state else None
+        if previous is not None:
             session_state.clear_impersonation()
             password_audit_logger.log_impersonation_cleared(
                 actor_username=principal.username,
-                previous_target=previous_target,
+                previous_target=previous.username,
                 session_id=session_state.session_id,
                 ip_address="unknown",
             )

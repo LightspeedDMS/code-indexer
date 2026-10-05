@@ -13,6 +13,13 @@ middleware already placed in the var is visible everywhere the request's
 context was copied to.  Code other than the middleware must never re-set the
 var; it may only mutate the holder's fields.
 
+Who acts in an MCP tool call is NOT on the holder: it is per CALL, not per
+request (a JSON-RPC batch carries several calls, and a timed-out sync call's
+worker thread may outlive the calls after it).  The MCP dispatcher binds an
+immutable :class:`McpPrincipal` in its own ``ContextVar`` for the duration of
+one call; the context copied into that call's worker thread keeps that value
+whatever later calls bind.
+
 The holder is per-request state carried by the request's own context; it is
 never shared across requests or nodes.
 
@@ -57,21 +64,43 @@ class AuditRequestContext:
     source: str
     client_ip: Optional[str] = None
     auth_method: Optional[str] = None
-    # Set by the MCP dispatcher for each tool call made while the session
-    # impersonates another user: the authenticated administrator (recorded as
-    # the actor) and the impersonated user (recorded as the subject).
-    authenticated_actor: Optional[str] = None
-    impersonated_user: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class McpPrincipal:
+    """Who acts in one MCP tool call made under impersonation: the
+    authenticated administrator (recorded as the actor) and the impersonated
+    user (recorded as the subject).  Immutable, bound per call."""
+
+    authenticated_actor: str
+    impersonated_user: str
+
+
+@dataclass(frozen=True)
+class AuditContextToken:
+    """What :func:`bind_audit_request_context` set, for the reset."""
+
+    request: Token[Optional[AuditRequestContext]]
+    principal: Token[Optional[McpPrincipal]]
 
 
 _audit_request_context: ContextVar[Optional[AuditRequestContext]] = ContextVar(
     "cidx_audit_request_context", default=None
+)
+_mcp_principal: ContextVar[Optional[McpPrincipal]] = ContextVar(
+    "cidx_mcp_principal", default=None
 )
 
 
 def current_audit_request_context() -> Optional[AuditRequestContext]:
     """Return the holder bound to the current request, or None outside one."""
     return _audit_request_context.get()
+
+
+def current_mcp_principal() -> Optional[McpPrincipal]:
+    """Return the principal bound to the current MCP tool call, or None when
+    the call is not made under impersonation (or outside any call)."""
+    return _mcp_principal.get()
 
 
 def note_auth_method(method: str) -> None:
@@ -88,39 +117,39 @@ def note_auth_method(method: str) -> None:
 
 def note_mcp_principal(
     authenticated_actor: str, impersonated_user: Optional[str]
-) -> None:
-    """Record who acts in the current MCP tool call.
+) -> Token[Optional[McpPrincipal]]:
+    """Bind who acts in the current MCP tool call; return the reset token.
 
-    Called by the MCP dispatcher before every tool call.  With
-    *impersonated_user* set, audit events built during the call name
+    With *impersonated_user* set, audit events built during the call name
     *authenticated_actor* as the actor and *impersonated_user* as the
-    subject; with it None, any earlier call's impersonation is cleared (a
-    JSON-RPC batch shares one holder).  Mutates the request's holder (never
-    re-sets the var); outside a request it does nothing.
+    subject; with it None, the call is not attributed to anyone else.  The
+    caller undoes the binding with :func:`reset_mcp_principal` when the call
+    ends; a context copied during the call keeps the value.
     """
-    ctx = _audit_request_context.get()
-    if ctx is None:
-        return
     if impersonated_user is None:
-        ctx.authenticated_actor = None
-        ctx.impersonated_user = None
-        return
-    ctx.authenticated_actor = authenticated_actor
-    ctx.impersonated_user = impersonated_user
+        return _mcp_principal.set(None)
+    return _mcp_principal.set(McpPrincipal(authenticated_actor, impersonated_user))
 
 
-def bind_audit_request_context(
-    ctx: AuditRequestContext,
-) -> Token[Optional[AuditRequestContext]]:
-    """Place *ctx* in the context var; return the token for the reset."""
-    return _audit_request_context.set(ctx)
+def reset_mcp_principal(token: Token[Optional[McpPrincipal]]) -> None:
+    """Undo a previous :func:`note_mcp_principal`."""
+    _mcp_principal.reset(token)
 
 
-def reset_audit_request_context(
-    token: Token[Optional[AuditRequestContext]],
-) -> None:
-    """Undo a previous :func:`bind_audit_request_context`."""
-    _audit_request_context.reset(token)
+def bind_audit_request_context(ctx: AuditRequestContext) -> AuditContextToken:
+    """Place *ctx* in the context var, with no MCP principal bound yet;
+    return the token for the reset."""
+    return AuditContextToken(
+        request=_audit_request_context.set(ctx),
+        principal=_mcp_principal.set(None),
+    )
+
+
+def reset_audit_request_context(token: AuditContextToken) -> None:
+    """Undo a previous :func:`bind_audit_request_context`, including any MCP
+    principal bound since."""
+    _mcp_principal.reset(token.principal)
+    _audit_request_context.reset(token.request)
 
 
 def classify_source(path: str) -> str:

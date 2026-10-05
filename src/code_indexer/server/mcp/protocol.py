@@ -27,7 +27,10 @@ import json
 import logging
 from code_indexer import __version__
 from .tool_access import ToolAccessMemo, resolve_effective_user
-from code_indexer.server.middleware.audit_request_context import note_mcp_principal
+from code_indexer.server.middleware.audit_request_context import (
+    note_mcp_principal,
+    reset_mcp_principal,
+)
 from .session_registry import MCPSessionOwnerMismatch
 
 logger = logging.getLogger(__name__)
@@ -803,14 +806,7 @@ async def handle_tools_call(
     Raises:
         ValueError: If required parameters are missing or tool not found
     """
-    from .handlers import HANDLER_REGISTRY
     from .tools import TOOL_REGISTRY
-    from code_indexer.server.services.langfuse_service import get_langfuse_service
-
-    # First: no earlier call's impersonation may remain on the request's
-    # audit holder (a JSON-RPC batch shares one), even if this call is
-    # refused below.  Set again once the session is resolved.
-    note_mcp_principal(user.username, None)
 
     # Validate required 'name' parameter
     if "name" not in params:
@@ -827,20 +823,61 @@ async def handle_tools_call(
     if session_state is None:
         session_state = _get_session_state(session_id, user)
 
-    # Audit records written during MCP impersonation name the authenticated
-    # administrator as the actor and the impersonated user as the subject.
-    # Recorded (or cleared) per call: a JSON-RPC batch shares one holder.
-    impersonated = resolve_effective_user(user, session_state)
-    note_mcp_principal(
-        user.username,
-        impersonated.username if impersonated is not user else None,
-    )
-
-    # Determine effective user for permission checks (CRITICAL 2 fix)
-    # When impersonating, use the impersonated user's permissions -- except
-    # for the tools that manage impersonation itself, which are authorized
-    # for the authenticated principal.
+    # Who the call runs as: the impersonated user while the session
+    # impersonates one, except for the tools that manage impersonation
+    # itself, which run as the authenticated administrator.  Read ONCE.
+    #
+    # Each call's audit principal is fixed when the call starts, from the
+    # same effective user it runs as: the authenticated administrator is the
+    # actor and the impersonated user, if any, the subject.  The value is
+    # immutable and bound for this call only; the context copied into the
+    # call's worker thread keeps it.
     effective_user = resolve_effective_user(user, session_state, tool_name)
+    principal_token = note_mcp_principal(
+        user.username,
+        effective_user.username if effective_user.username != user.username else None,
+    )
+    try:
+        return await _dispatch_tool_call(
+            tool_name,
+            arguments,
+            user,
+            effective_user,
+            session_state,
+            session_id=session_id,
+            elevation_key=elevation_key,
+            http_request=http_request,
+            http_response=http_response,
+            tool_access_memo=tool_access_memo,
+        )
+    finally:
+        reset_mcp_principal(principal_token)
+
+
+async def _dispatch_tool_call(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    user: User,
+    effective_user: User,
+    session_state: Any,
+    *,
+    session_id: Optional[str],
+    elevation_key: Optional[str],
+    http_request: Optional[Request],
+    http_response: Optional[Response],
+    tool_access_memo: Optional[ToolAccessMemo],
+) -> Dict[str, Any]:
+    """Authorize and run one ``tools/call`` for :func:`handle_tools_call`,
+    which has resolved the session, read *effective_user* from it once and
+    bound the call's audit principal from that same user."""
+    from .handlers import HANDLER_REGISTRY
+    from .tools import TOOL_REGISTRY
+    from code_indexer.server.services.langfuse_service import get_langfuse_service
+
+    # Permission checks and the handler use *effective_user* (CRITICAL 2
+    # fix): the impersonated user's permissions while impersonating, except
+    # for the tools that manage impersonation itself.  Never re-read from
+    # the session here: the audit principal was bound from this value.
 
     if tool_access_memo is None:
         tool_access_memo = _new_tool_access_memo()
@@ -1204,6 +1241,16 @@ async def process_batch_request(
     return responses
 
 
+def _session_not_found_response() -> Response:
+    """The refusal of a session id bound to another account: HTTP 404, which
+    makes a spec-compliant MCP client start a new session."""
+    return Response(
+        status_code=404,
+        content=json.dumps(create_jsonrpc_error(-32001, "Session not found", None)),
+        media_type="application/json",
+    )
+
+
 @mcp_router.post("/mcp", response_model=None)
 async def mcp_endpoint(
     request: Request,
@@ -1249,11 +1296,7 @@ async def mcp_endpoint(
     try:
         _get_session_state(session_id, current_user)
     except MCPSessionOwnerMismatch:
-        return Response(
-            status_code=404,
-            content=json.dumps(create_jsonrpc_error(-32001, "Session not found", None)),
-            media_type="application/json",
-        )
+        return _session_not_found_response()
 
     # Extract JWT jti for TOTP elevation window lookup.
     # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.
@@ -1282,35 +1325,42 @@ async def mcp_endpoint(
         # Parse error - return JSON-RPC error
         return create_jsonrpc_error(-32700, "Parse error: Invalid JSON", None)
 
-    # Check if batch request (array) or single request (object)
-    if isinstance(body, list):
-        return await process_batch_request(
-            body,
-            current_user,
-            session_id=session_id,
-            elevation_key=elevation_key,
-            http_request=request,
-            http_response=response,
-        )
-    elif isinstance(body, dict):
-        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
-        # Still process internally for side effects (e.g. notifications/initialized state).
-        is_notification = "id" not in body
-        jsonrpc_result = await process_jsonrpc_request(
-            body,
-            current_user,
-            session_id=session_id,
-            elevation_key=elevation_key,
-            http_request=request,
-            http_response=response,
-        )
-        if is_notification:
-            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
-        return jsonrpc_result
-    else:
-        return create_jsonrpc_error(
-            -32600, "Invalid Request: body must be object or array", None
-        )
+    # Check if batch request (array) or single request (object).  The
+    # dispatcher looks the session up again: should another account have
+    # taken the session id over since the check above (evicted and
+    # recreated), the request is refused the same way.
+    try:
+        if isinstance(body, list):
+            return await process_batch_request(
+                body,
+                current_user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                http_request=request,
+                http_response=response,
+            )
+        elif isinstance(body, dict):
+            # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+            # Still process internally for side effects (e.g. notifications/initialized state).
+            is_notification = "id" not in body
+            jsonrpc_result = await process_jsonrpc_request(
+                body,
+                current_user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                http_request=request,
+                http_response=response,
+            )
+            if is_notification:
+                return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+            return jsonrpc_result
+        else:
+            return create_jsonrpc_error(
+                -32600, "Invalid Request: body must be object or array", None
+            )
+    except MCPSessionOwnerMismatch:
+        # In a batch, calls before the refused one may already have run.
+        return _session_not_found_response()
 
 
 async def sse_event_generator():
