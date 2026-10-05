@@ -81,6 +81,10 @@ _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
 # platform added to _resolve_provider is covered automatically.
 _OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN = ("_discovery",)
 
+# Bug #1964: /health counts only failures this recent -- with 30-day job
+# retention, an all-time count kept one old failure 'degraded' for a month.
+HEALTH_FAILED_JOB_WINDOW = "24h"
+
 
 def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
     """Bug #1535: True when `operation_type` is a known, intentional,
@@ -110,8 +114,9 @@ class JobStatus(str, Enum):
     # Bug #1950: a terminal status distinct from FAILED for a job whose
     # worker process was killed by a server restart/shutdown rather than a
     # genuine failure -- /health's degraded computation counts ONLY
-    # status='failed' rows, so this keeps a restart artifact from
-    # poisoning that count forever while a genuine failure still trips it.
+    # status='failed' rows (completed within the last 24h, Bug #1964), so
+    # this keeps a restart artifact out of that count while a genuine
+    # failure still trips it.
     INTERRUPTED = "interrupted"
 
 
@@ -1422,8 +1427,8 @@ class BackgroundJobManager:
                         # still running/pending at startup was orphaned by
                         # this process's own restart, a restart artifact
                         # rather than a genuine failure, so it must not
-                        # poison get_failed_job_count() (which /health
-                        # reads with no time window) forever.
+                        # count toward /health's failed jobs (status=
+                        # 'failed' within the last 24h, Bug #1964).
                         job.status = JobStatus.INTERRUPTED
                         job.completed_at = now
                         job.error = error
@@ -1943,8 +1948,8 @@ class BackgroundJobManager:
                 # BackgroundJobManager.shutdown() itself ever gets a chance
                 # to flag this job cancelled) is a restart artifact, not a
                 # genuine failure -- classify it distinctly so it does not
-                # poison /health's get_failed_job_count() (status='failed'
-                # only, no time window) forever.
+                # count toward /health's failed jobs (status='failed'
+                # within the last 24h, Bug #1964).
                 is_restart_interruption = is_restart_interruption_error(error_msg)
 
                 with self._lock:
@@ -2212,6 +2217,15 @@ class BackgroundJobManager:
             return sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.FAILED
             )
+
+    def get_recent_failed_job_count(self) -> int:
+        """Count failed jobs completed within HEALTH_FAILED_JOB_WINDOW.
+
+        Bug #1964: this -- not the all-time get_failed_job_count() -- is what
+        /health reads to decide 'degraded'. Both job backends answer it with
+        one time-filtered query over the (completed_at, status) index.
+        """
+        return self.get_job_stats_with_filter(HEALTH_FAILED_JOB_WINDOW)["failed"]
 
     def get_running_job_count(self) -> int:
         """

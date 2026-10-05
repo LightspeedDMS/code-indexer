@@ -35,6 +35,7 @@ from ..logging_utils import format_error_log
 from ..services import audit_capture
 from ..services.health_service import health_service
 from ..services.maintenance_service import get_maintenance_state
+from ..repositories.background_jobs import HEALTH_FAILED_JOB_WINDOW
 from ..app_helpers import (
     get_server_uptime,
     get_server_start_time,
@@ -180,9 +181,10 @@ def register_misc_routes(
             except Exception:
                 pending_jobs = 0
 
+            # Bug #1964: only failures within HEALTH_FAILED_JOB_WINDOW count.
             try:
                 failed_jobs = (
-                    background_job_manager.get_failed_job_count()
+                    background_job_manager.get_recent_failed_job_count()
                     if background_job_manager
                     else 0
                 )
@@ -217,7 +219,8 @@ def register_misc_routes(
             if failed_jobs > 0:
                 health_status = "degraded"
                 message = (
-                    f"CIDX Server is running but {failed_jobs} failed jobs detected"
+                    f"CIDX Server is running but {failed_jobs} failed jobs "
+                    f"detected in the last {HEALTH_FAILED_JOB_WINDOW}"
                 )
             elif pending_jobs > 8:  # High pending job threshold
                 health_status = "warning"
@@ -232,6 +235,7 @@ def register_misc_routes(
                     "active_jobs": active_jobs,
                     "pending_jobs": pending_jobs,
                     "failed_jobs": failed_jobs,
+                    "failed_jobs_window": HEALTH_FAILED_JOB_WINDOW,
                 },
                 "started_at": get_server_start_time(),
                 "maintenance_mode": get_maintenance_state().is_maintenance_mode(),

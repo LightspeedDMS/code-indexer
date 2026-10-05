@@ -468,8 +468,8 @@ class BackgroundJobsSqliteBackend:
         Bug #1950: writes status='interrupted' (not 'failed') -- a row
         still running/pending at startup was orphaned by this process's
         own restart, a restart artifact rather than a genuine failure, so
-        it must not poison /health's get_failed_job_count() (which counts
-        ONLY status='failed', with no time window) forever.
+        it must not count toward /health's failed jobs (status='failed'
+        rows completed within the last 24h, Bug #1964).
         """
         from datetime import datetime, timezone
 
@@ -775,10 +775,13 @@ class BackgroundJobsSqliteBackend:
         cutoff_iso = cutoff.isoformat()
 
         conn = self._conn_manager.get_connection()
+        # Bug #1964: "+status" keeps the planner from walking every row via
+        # the status index for GROUP BY order; it range-searches the
+        # covering (completed_at, status) index instead (/health runs this).
         cursor = conn.execute(
             """SELECT status, COUNT(*) FROM background_jobs
                WHERE completed_at IS NOT NULL AND completed_at >= ?
-               GROUP BY status""",
+               GROUP BY +status""",
             (cutoff_iso,),
         )
 
@@ -847,9 +850,8 @@ class BackgroundJobsSqliteBackend:
             # Bug #1950: status='interrupted' (not 'failed') -- a row
             # whose owning worker process is provably gone was orphaned by
             # a restart, a restart artifact rather than a genuine failure,
-            # so it must not poison /health's get_failed_job_count()
-            # (which counts ONLY status='failed', with no time window)
-            # forever.
+            # so it must not count toward /health's failed jobs
+            # (status='failed' rows completed within the last 24h, #1964).
             placeholders = ", ".join("?" for _ in job_ids_to_fail)
             cursor = conn.execute(
                 f"""UPDATE background_jobs
