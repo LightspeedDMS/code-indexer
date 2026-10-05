@@ -51,46 +51,57 @@ _DIRECTORY_ARG_SUFFIX = "/"
 _NEGATING_OPTIONS = ("--deselect", "--ignore")
 
 
-def _pytest_test_tokens(job: str) -> Set[str]:
-    """Test-path arguments actually passed to pytest by `job`.
+def _tokens_from_script(entries: "list[str]") -> Set[str]:
+    """Test-path arguments a job's ``script`` entries actually pass to pytest.
 
-    Parsed from the YAML and shlex-split, NOT substring-matched against the raw
-    file. The first version of this did ``rel in ci_file_text`` and review showed
-    it failing open in precisely the way this module's docstring forbids: the
-    commit that added the guard also added a .gitlab-ci.yml COMMENT naming the
-    guard's own path, so the guard's membership check passed on that comment.
-    Removing it from the pytest args would have stopped it running in CI with
-    nothing reporting the loss -- a guard that cannot notice its own removal.
+    Separated from the file read so tests can drive THIS function with synthetic
+    YAML. Review caught the previous negation test re-implementing this loop in
+    the test body and asserting on its own copy -- it could not fail when the
+    real parser broke, and could not notice the two drifting apart. Same
+    "tested something adjacent to what ships" family as the pass-1 finding.
 
     Values of --deselect/--ignore are dropped: they are test paths that mean the
     opposite of "run this".
     """
     import shlex
 
-    import yaml
-
-    config = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    entries = (config.get(job) or {}).get("script") or []
     tokens: Set[str] = set()
     for entry in entries:
         if "pytest" not in entry:
             continue
-        parts = shlex.split(entry)
         skip_next = False
-        for part in parts:
+        for part in shlex.split(entry):
             if skip_next:
                 skip_next = False
                 continue
             if part in _NEGATING_OPTIONS:
                 skip_next = True
                 continue
-            if part.startswith("--") and "=" in part:
-                opt = part.split("=", 1)[0]
-                if opt in _NEGATING_OPTIONS:
-                    continue
+            # No branch for the `--ignore=path` form on purpose: shlex keeps it
+            # as ONE token starting with "--", so it can never satisfy the
+            # startswith("tests/") test below. An earlier version had such a
+            # branch; mutation testing showed deleting it changed nothing, i.e.
+            # it was dead code dressed as a safeguard.
             if part.startswith("tests/"):
                 tokens.add(part)
     return tokens
+
+
+def _pytest_test_tokens(job: str) -> Set[str]:
+    """Test-path arguments actually passed to pytest by `job`.
+
+    Parsed from the YAML, NOT substring-matched against the raw file. The first
+    version did ``rel in ci_file_text`` and review showed it failing open in
+    precisely the way this module's docstring forbids: the commit that added the
+    guard also added a .gitlab-ci.yml COMMENT naming the guard's own path, so
+    the membership check passed on that comment. Removing it from the pytest
+    args would have stopped it running in CI with nothing reporting the loss --
+    a guard that cannot notice its own removal.
+    """
+    import yaml
+
+    config = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    return _tokens_from_script((config.get(job) or {}).get("script") or [])
 
 
 def _covered_tokens() -> Set[str]:
@@ -171,44 +182,108 @@ def test_membership_requires_a_real_pytest_argument() -> None:
     )
 
 
-def test_a_deselected_path_does_not_count_as_covered() -> None:
-    """--deselect/--ignore name test paths that mean the OPPOSITE of 'run it'."""
-    import textwrap
-
-    fake = textwrap.dedent(
-        """
-        smoke:
-          script:
-            - >
-              python -m pytest tests/unit/a.py
-              --deselect tests/unit/b.py
-              --ignore=tests/unit/c.py
-        """
-    )
-    import shlex
-
+def _parse(yaml_text: str, job: str = "smoke") -> Set[str]:
+    """Run the PRODUCTION parser over synthetic CI YAML."""
     import yaml
 
-    cfg = yaml.safe_load(fake)
-    entry = next(e for e in cfg["smoke"]["script"] if "pytest" in e)
-    parts = shlex.split(entry)
-    skip = False
-    got = set()
-    for part in parts:
-        if skip:
-            skip = False
-            continue
-        if part in _NEGATING_OPTIONS:
-            skip = True
-            continue
-        if part.startswith("--") and "=" in part:
-            if part.split("=", 1)[0] in _NEGATING_OPTIONS:
-                continue
-        if part.startswith("tests/"):
-            got.add(part)
+    cfg = yaml.safe_load(yaml_text)
+    return _tokens_from_script((cfg.get(job) or {}).get("script") or [])
+
+
+def test_a_deselected_path_does_not_count_as_covered() -> None:
+    """--deselect/--ignore name test paths that mean the OPPOSITE of 'run it'.
+
+    Drives ``_tokens_from_script`` itself. The first version copy-pasted the
+    parsing loop into the test body and asserted on its own copy, so deleting
+    the _NEGATING_OPTIONS handling from the real parser left it green.
+    """
+    import textwrap
+
+    got = _parse(
+        textwrap.dedent(
+            """
+            smoke:
+              script:
+                - >
+                  python -m pytest tests/unit/a.py
+                  --deselect tests/unit/b.py
+                  --ignore=tests/unit/c.py
+            """
+        )
+    )
     assert got == {"tests/unit/a.py"}, (
         f"deselect/ignore values leaked into the covered set: {sorted(got)}"
     )
+
+
+def test_a_path_only_in_a_yaml_comment_does_not_count_as_covered() -> None:
+    """The pass-1 failure mode, as a negative test against the real parser."""
+    import textwrap
+
+    got = _parse(
+        textwrap.dedent(
+            """
+            smoke:
+              script:
+                # runs tests/unit/only_in_a_comment.py eventually
+                - >
+                  python -m pytest tests/unit/really_run.py
+            """
+        )
+    )
+    assert got == {"tests/unit/really_run.py"}, (
+        f"a commented path leaked into the covered set: {sorted(got)}"
+    )
+
+
+def test_the_file_reading_path_also_rejects_a_comment_only_mention(
+    tmp_path, monkeypatch
+) -> None:
+    """Drive ``_pytest_test_tokens`` -- the function that reads the real file.
+
+    The sibling negative tests call ``_tokens_from_script`` with synthetic YAML,
+    which leaves ``_pytest_test_tokens`` itself untested: mutation showed it
+    could be reverted to the original regex-over-raw-text implementation (the
+    pass-1 bug) with every test still green. This closes that by pointing the
+    module's _CI at a file whose only mention of a path is a comment.
+    """
+    import textwrap
+
+    fake = tmp_path / "fake-ci.yml"
+    fake.write_text(
+        textwrap.dedent(
+            """
+            smoke:
+              script:
+                # tests/unit/only_in_a_comment.py is handled elsewhere
+                - >
+                  python -m pytest tests/unit/really_run.py
+                  --deselect tests/unit/deselected.py
+            """
+        ),
+        encoding="utf-8",
+    )
+    import sys
+
+    monkeypatch.setattr(sys.modules[__name__], "_CI", fake, raising=True)
+    assert _pytest_test_tokens("smoke") == {"tests/unit/really_run.py"}
+
+
+def test_a_non_pytest_script_entry_contributes_nothing() -> None:
+    """Only the pytest invocation counts -- not a `cp tests/unit/x.py ...`."""
+    import textwrap
+
+    got = _parse(
+        textwrap.dedent(
+            """
+            smoke:
+              script:
+                - cp tests/unit/decoy.py /tmp/decoy.py
+                - python -m pytest tests/unit/real.py
+            """
+        )
+    )
+    assert got == {"tests/unit/real.py"}
 
 
 def test_the_invariant_scan_finds_something() -> None:
