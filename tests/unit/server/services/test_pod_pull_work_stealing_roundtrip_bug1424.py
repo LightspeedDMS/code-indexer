@@ -234,7 +234,13 @@ class TestPodPullRoundTrip:
         assert loop._process_one_job() is True
 
         # Reconstructed from metadata.
-        assert seen == {"alias": "repoA"}
+        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # metadata so executors can thread it to
+        # build_embedding_stats_child_env for per-job VoyageAI cost
+        # correlation. These assertions predate that and were comparing
+        # against the pre-injection shape. They had been failing on master
+        # unnoticed because no CI job collected this file.
+        assert seen == {"alias": "repoA", "job_id": "j1"}
         # Row transitioned pending -> completed with the result + progress
         # written mid-flight to the SHARED row.
         assert row["status"] == "completed"
@@ -283,7 +289,13 @@ class TestPodPullRoundTrip:
             node_id="node-2",
         )
         assert loop._process_one_job() is True
-        assert ran == [{"alias": "repoA"}]
+        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # metadata so executors can thread it to
+        # build_embedding_stats_child_env for per-job VoyageAI cost
+        # correlation. These assertions predate that and were comparing
+        # against the pre-injection shape. They had been failing on master
+        # unnoticed because no CI job collected this file.
+        assert ran == [{"alias": "repoA", "job_id": "j1"}]
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
 
@@ -449,7 +461,14 @@ class TestPodPullRoundTripRealSubmitBug1430:
             "`executing_node IS NULL` claim predicate and hangs PENDING "
             "forever."
         )
-        assert seen == {"alias": "repoA"}
+        # EVO-66105: IndexJobClaimLoop injects the claimed row's job_id into
+        # metadata so executors can thread it to
+        # build_embedding_stats_child_env for per-job VoyageAI cost
+        # correlation. These assertions predate that and were comparing
+        # against the pre-injection shape. They had been failing on master
+        # unnoticed because no CI job collected this file.
+        assert seen["alias"] == "repoA"
+        assert seen["job_id"] == row["job_id"]
         assert row["status"] == "completed"
         assert row["executing_node"] == "node-2"
 

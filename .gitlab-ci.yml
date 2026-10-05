@@ -81,6 +81,18 @@ smoke:
     # previously referenced by no CI job, no pre-commit hook and no automation
     # script, while fast-automation.sh passes --ignore=tests/unit/server/. It
     # runs in seconds and build:image is already gated on this stage.
+    #
+    # BOTH CI jobs are curated allowlists: this one names files, and
+    # build:image's in-image step runs tests/unit/xray/ plus six MCP files.
+    # Anything not explicitly named is never COLLECTED -- so unlike a gated test
+    # it does not even show up as a skip, and there is no number anywhere that
+    # goes down when coverage is lost. The background-work audit's five changes
+    # (leader gating, per-process budgets, pod-pull refresh, catch-up
+    # single-flight, HNSW sweep gating) all merged green with none of their tests
+    # ever collected. The block below closes that, and
+    # tests/unit/ci/test_smoke_covers_fleet_invariants.py keeps it closed: it
+    # derives the required set from what the tests IMPORT, so a new one is not
+    # silently left out of this list.
     - >
       python -m pytest
       tests/unit/server/storage/test_factory.py
@@ -95,6 +107,67 @@ smoke:
       tests/unit/server/storage/test_windowed_cache_metrics_backends_1294.py
       tests/unit/server/mcp/test_query_audit_logs_shared_read.py
       tests/unit/server/auth/test_token_bucket_pg_atomic_concurrency_1334.py
+      tests/unit/server/startup/test_leader_gate.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_leader_gate.py
+      tests/unit/server/services/test_scheduled_catchup_single_flight.py
+      tests/unit/server/repositories/test_background_jobs_worker_budget.py
+      tests/unit/server/repositories/test_background_jobs_pod_pull_submit.py
+      tests/unit/server/repositories/test_background_jobs_concurrency.py
+      tests/unit/global_repos/test_refresh_pod_pull_migration.py
+      tests/unit/global_repos/test_refresh_budget_worker_share.py
+      tests/unit/global_repos/test_refresh_scheduler_yields_under_pressure.py
+      tests/unit/global_repos/test_refresh_scheduler_background_jobs.py
+      tests/unit/utils/test_worker_budget.py
+      tests/unit/ci/test_smoke_covers_fleet_invariants.py
+      tests/unit/global_repos/test_cleanup_manager_cluster_dedup_1844.py
+      tests/unit/global_repos/test_cleanup_manager_live_reader_cross_node_1845.py
+      tests/unit/global_repos/test_refresh_scheduler_activation_coordination_1393.py
+      tests/unit/global_repos/test_refresh_scheduler_double_registration_64385.py
+      tests/unit/server/mcp/test_xray_multi_repo_bug1074.py
+      tests/unit/server/repositories/test_background_job_manager_tracker.py
+      tests/unit/server/repositories/test_background_jobs_pod_pull_status_readthrough_bug1424.py
+      tests/unit/server/repositories/test_background_jobs_temporal_query_no_warning_1535.py
+      tests/unit/server/repositories/test_golden_repo_manager_lifecycle_hook.py
+      tests/unit/server/repositories/test_submit_job_atomic_dedup.py
+      tests/unit/server/services/dep_map_tracking/test_conflict.py
+      tests/unit/server/services/fleet_migration/test_scheduler_1458.py
+      tests/unit/server/services/fleet_migration/test_scheduler_canary_gate_1461.py
+      tests/unit/server/services/hnsw_orphan_sweep/test_scheduler_1360.py
+      tests/unit/server/services/semantic_backfill/test_policy.py
+      tests/unit/server/services/test_bug1235_pg_duplicate_claim_race.py
+      tests/unit/server/services/test_cross_worker_dedup_1184.py
+      tests/unit/server/services/test_dep_map_927_manual_no_auto_repair.py
+      tests/unit/server/services/test_dep_map_927_scheduler_helpers.py
+      tests/unit/server/services/test_dependency_map_lifecycle_gate.py
+      tests/unit/server/services/test_dependency_map_service_cancel.py
+      tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py
+      tests/unit/server/services/test_description_refresh_integration_1094.py
+      tests/unit/server/services/test_description_refresh_scheduler_bug1089.py
+      tests/unit/server/services/test_description_refresh_scheduler_lifecycle_backfill.py
+      tests/unit/server/services/test_distributed_job_claimer.py
+      tests/unit/server/services/test_distributed_job_claimer_concurrency.py
+      tests/unit/server/services/test_distributed_job_claimer_memory_gate.py
+      tests/unit/server/services/test_distributed_job_claimer_metadata.py
+      tests/unit/server/services/test_distributed_job_claimer_progress.py
+      tests/unit/server/services/test_distributed_job_worker.py
+      tests/unit/server/services/test_distributed_job_worker_claimed_refresh_1839.py
+      tests/unit/server/services/test_golden_repo_reconciler_bug1317.py
+      tests/unit/server/services/test_index_dispatch_coverage_bug1424.py
+      tests/unit/server/services/test_index_job_claim_loop.py
+      tests/unit/server/services/test_job_tracker_atomic_register.py
+      tests/unit/server/services/test_job_tracker_blocking_lookup_1220.py
+      tests/unit/server/services/test_job_tracker_node_scoped_orphan_cleanup_1400.py
+      tests/unit/server/services/test_job_tracker_terminal_revert_1348.py
+      tests/unit/server/services/test_job_tracker_update_dedup_1256.py
+      tests/unit/server/services/test_pod_pull_executing_node_bug1430.py
+      tests/unit/server/services/test_pod_pull_work_stealing_roundtrip_bug1424.py
+      tests/unit/server/services/test_versioned_snapshot_reconciler_1567.py
+      tests/unit/server/startup/test_lifespan_cancel_handler_wiring_1153.py
+      tests/unit/server/storage/postgres/test_background_jobs_backend_duplicate_log_level_1565.py
+      tests/unit/server/storage/postgres/test_background_jobs_postgres.py
+      tests/unit/server/storage/postgres/test_null_executing_node_orphan_1512.py
+      tests/unit/server/storage/test_background_jobs_active_unique_index.py
+      tests/unit/server/utils/test_cluster_node_id_resolver.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
   rules:
