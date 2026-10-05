@@ -268,6 +268,82 @@ def test_argv_ignores_a_nonsense_value(tmp_path):
     assert read_argv_workers(proc_root=root2, pid="7") is None
 
 
+@pytest.mark.parametrize(
+    "argv,expected,why",
+    [
+        (
+            ["python", "-m", "code_indexer.server.main", "--workers", "2"],
+            2,
+            "pod launcher",
+        ),
+        (
+            ["uvicorn", "code_indexer.server.app:app", "--workers", "4"],
+            4,
+            "uvicorn form",
+        ),
+        (
+            [
+                "python",
+                "/usr/lib/python3/site-packages/code_indexer/server/main.py",
+                "--workers",
+                "2",
+            ],
+            2,
+            "installed script path",
+        ),
+        (
+            ["pytest", "/home/me/code_indexer/tests", "--workers", "4"],
+            None,
+            "pytest run inside a directory named code_indexer",
+        ),
+        (
+            [
+                "uvicorn",
+                "other.app:app",
+                "--workers",
+                "8",
+                "--reload-dir",
+                "/src/code_indexer",
+            ],
+            None,
+            "unrelated uvicorn that merely mentions the path",
+        ),
+        (
+            ["python", "/tmp/x/code_indexer_server_main.py", "--workers", "3"],
+            None,
+            "a script NAMED like the server but not it",
+        ),
+        (["/usr/bin/supervisord", "--workers", "8"], None, "supervisor"),
+        # Pins the prefix to the SERVER package, not the whole distribution: a
+        # mutation widening it to "code_indexer" survived until this case
+        # existed. Another cidx module is still not the thing whose --workers
+        # sizes the server's pools.
+        (
+            ["python", "-m", "code_indexer.cli", "--workers", "4"],
+            None,
+            "a different code_indexer module",
+        ),
+        (
+            ["python", "-m", "code_indexer.server_tools", "--workers", "4"],
+            None,
+            "a module that merely prefixes code_indexer.server",
+        ),
+    ],
+)
+def test_only_a_real_server_launch_supplies_the_worker_count(
+    tmp_path, argv, expected, why
+):
+    """Matched as a module or script PATH, never as a bare substring.
+
+    A substring test on "code_indexer" accepts any command line that merely
+    mentions it, including anything run from a directory with that name. The
+    cases below are the ones that distinguish the two, and the second-to-last
+    was previously produced by this file's own end-to-end test.
+    """
+    root = _fake_proc(tmp_path, {"7": (argv, "1")})
+    assert read_argv_workers(proc_root=root, pid="7") == expected, why
+
+
 def test_an_unrelated_ancestors_workers_flag_is_ignored(tmp_path):
     """The walk must not take the first --workers it meets.
 
@@ -363,7 +439,13 @@ def test_end_to_end_against_a_real_process_tree(tmp_path):
         "from code_indexer.utils.worker_budget import read_argv_workers\n"
         "print(read_argv_workers())\n"
     )
-    parent = tmp_path / "code_indexer_server_main.py"
+    # A real launcher path: .../code_indexer/server/main.py. The earlier
+    # version used a script merely NAMED code_indexer_server_main.py, which
+    # the substring marker accepted -- the exact false positive this
+    # discriminator now rejects, sitting in its own test.
+    server_dir = tmp_path / "code_indexer" / "server"
+    server_dir.mkdir(parents=True)
+    parent = server_dir / "main.py"
     parent.write_text(
         "import subprocess, sys\n"
         f"out = subprocess.run([sys.executable, {str(child)!r}],\n"
@@ -371,8 +453,6 @@ def test_end_to_end_against_a_real_process_tree(tmp_path):
         "sys.stdout.write(out.stdout)\n"
         "sys.stderr.write(out.stderr)\n"
     )
-    # Path names the module, as every real launcher does -- the argv rung
-    # ignores a --workers that is not ours.
     res = subprocess.run(
         [sys.executable, str(parent), "--workers", "3"],
         capture_output=True,

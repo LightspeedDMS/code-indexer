@@ -123,23 +123,44 @@ def _ppid_of(pid: str, proc_root: Path) -> Optional[str]:
     return None
 
 
-#: An ancestor's ``--workers`` only counts if that same command line is OUR
-#: server. Without this the walk takes the first ``--workers`` it meets, so an
-#: unrelated ancestor carrying one -- a supervisor, a CI runner, an editor's
-#: terminal under some other --workers service -- would silently set the budget
-#: for a cidx process beneath it. Every real launcher names the module:
-#: ``python -m code_indexer.server.main --workers N`` in the pod, and the VM
-#: path has its own systemd rung and does not rely on this one.
-_SERVER_ARGV_MARKER = "code_indexer"
+#: Token shapes that mean "this command line LAUNCHED the cidx server".
+#:
+#: Checked as a module path or a script path, never as a bare substring. A
+#: substring test on "code_indexer" matches any command line that merely
+#: mentions it -- ``pytest /src/code_indexer/tests --workers 4``,
+#: ``uvicorn other.app --workers 8 --reload-dir /src/code_indexer``, or anything
+#: run from a directory with that name. The end-to-end test in this repo was
+#: itself such a false positive: a script called ``code_indexer_server_main.py``
+#: that is not a server at all.
+#:
+#: Covers every real launcher:
+#:   python -m code_indexer.server.main --workers N      (the pod)
+#:   uvicorn code_indexer.server.app:app --workers N
+#:   python /…/site-packages/code_indexer/server/main.py --workers N
+_SERVER_MODULE_PREFIX = "code_indexer.server."
+_SERVER_SCRIPT_SUFFIXES = (
+    "code_indexer/server/main.py",
+    "code_indexer\\server\\main.py",
+)
+
+
+def _is_server_argv(argv: list) -> bool:
+    """Whether this command line actually invokes the cidx server."""
+    for part in argv:
+        if part.startswith(_SERVER_MODULE_PREFIX):
+            return True
+        if part.endswith(_SERVER_SCRIPT_SUFFIXES):
+            return True
+    return False
 
 
 def _workers_in_argv(argv: list) -> Optional[int]:
     """``--workers N`` or ``--workers=N`` from one command line, else None.
 
-    Returns None for a command line that carries the flag but is not ours --
-    see :data:`_SERVER_ARGV_MARKER`.
+    Returns None for a command line that carries the flag but did not launch
+    our server -- see :data:`_SERVER_MODULE_PREFIX`.
     """
-    if not any(_SERVER_ARGV_MARKER in part for part in argv):
+    if not _is_server_argv(argv):
         return None
     for i, part in enumerate(argv):
         if part == "--workers" and i + 1 < len(argv):
@@ -178,9 +199,11 @@ def read_argv_workers(
     The command line cannot drift from reality the way a parallel config key
     can, because it IS what launched the process.
 
-    Only a command line that names the cidx server counts: the walk would
-    otherwise take the first ``--workers`` it met, so an unrelated ancestor
-    carrying one would set the budget for a cidx process beneath it.
+    Only a command line that actually INVOKES the cidx server counts (module
+    or script path, not a substring): the walk would otherwise take the first
+    ``--workers`` it met, so an unrelated ancestor carrying one -- or any
+    process run from a directory named code_indexer -- would set the budget
+    for a cidx process beneath it.
 
     The parent walk is required, not defensive: uvicorn spawns its workers
     through multiprocessing, so a worker's OWN argv is
