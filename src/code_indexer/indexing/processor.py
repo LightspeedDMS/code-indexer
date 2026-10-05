@@ -37,6 +37,10 @@ class ProcessingStats:
     #: internal executor error) -- callers must treat that as "some
     #: failure is unattributed" rather than assuming completeness.
     failed_paths: FrozenSet[str] = frozenset()
+    #: Index entries the run changed without processing a file: deleted or
+    #: hidden paths, un-hidden paths, restored full-text documents. With
+    #: `files_processed`, tells a run that changed nothing apart.
+    index_entries_changed: int = 0
 
     @property
     def duration(self) -> float:

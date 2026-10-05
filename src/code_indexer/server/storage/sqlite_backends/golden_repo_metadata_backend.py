@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..database_manager import DatabaseConnectionManager
+from ._forced_reconcile_state_mixin import (
+    _ForcedReconcileStateSqliteMixin,
+    create_forced_reconcile_state_table,
+    delete_forced_reconcile_state_for_repo,
+)
 from ._golden_repo_metadata_extra_mixin import _GoldenRepoMetadataExtraMixin
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffSqliteMixin,
@@ -28,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 class GoldenRepoMetadataSqliteBackend(
-    _GoldenRepoMetadataExtraMixin, _RefreshFailureBackoffSqliteMixin
+    _GoldenRepoMetadataExtraMixin,
+    _RefreshFailureBackoffSqliteMixin,
+    _ForcedReconcileStateSqliteMixin,
 ):
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -435,6 +442,7 @@ class GoldenRepoMetadataSqliteBackend(
             )
             deleted_row = cursor.rowcount > 0
             delete_refresh_failure_backoff_for_repo(conn, alias)
+            delete_forced_reconcile_state_for_repo(conn, alias)
             return deleted_row
 
         deleted: bool = self._conn_manager.execute_atomic(operation)
@@ -871,3 +879,4 @@ def _create_golden_repo_metadata_support_tables(conn: sqlite3.Connection) -> Non
     _create_cidx_meta_conflict_table(conn)
     _create_cleanup_pending_deletion_table(conn)
     create_refresh_failure_backoff_table(conn)
+    create_forced_reconcile_state_table(conn)

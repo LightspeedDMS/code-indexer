@@ -141,6 +141,10 @@ class RollingAverage:
 class SmartIndexer(HighThroughputProcessor):
     """Smart indexer with progressive metadata and resumability using high-throughput queue-based processing."""
 
+    #: Set by each smart_index() run: it created or rebuilt the FTS index,
+    #: so it changed the index even if it processed no file (_finish_run).
+    _run_rebuilt_fts: bool = False
+
     def __init__(
         self,
         config: Config,
@@ -577,6 +581,8 @@ class SmartIndexer(HighThroughputProcessor):
                     # Continue without FTS - graceful degradation
                     fts_manager = None
 
+            self._run_rebuilt_fts = fts_manager is not None and create_new_fts
+
             # Ensure git hook is installed for branch change detection
             try:
                 self.git_hook_manager.ensure_hook_installed()
@@ -714,15 +720,18 @@ class SmartIndexer(HighThroughputProcessor):
                 # the post-filesystem-check count, which is the accurate number.
                 # We intentionally do NOT emit it here to avoid the duplicate that
                 # previously appeared in `cidx index` output on resume runs.
-                return self._do_resume_interrupted(
-                    batch_size,
-                    progress_callback,
+                return self._finish_run(
+                    self._do_resume_interrupted(
+                        batch_size,
+                        progress_callback,
+                        git_status,
+                        provider_name,
+                        model_name,
+                        quiet,
+                        vector_thread_count,
+                        fts_manager,
+                    ),
                     git_status,
-                    provider_name,
-                    model_name,
-                    quiet,
-                    vector_thread_count,
-                    fts_manager,
                 )
 
             # Untrusted (unsealed) resume state after a genuinely
@@ -755,16 +764,19 @@ class SmartIndexer(HighThroughputProcessor):
                     "Stored resume state is not server-sealed; completing the "
                     "interrupted operation with a reconcile instead of resuming."
                 )
-                return self._reconcile_and_verify(
-                    batch_size,
-                    progress_callback,
+                return self._finish_run(
+                    self._reconcile_and_verify(
+                        batch_size,
+                        progress_callback,
+                        git_status,
+                        provider_name,
+                        model_name,
+                        files_count_to_process,
+                        quiet,
+                        vector_thread_count,
+                        fts_manager,
+                    ),
                     git_status,
-                    provider_name,
-                    model_name,
-                    files_count_to_process,
-                    quiet,
-                    vector_thread_count,
-                    fts_manager,
                 )
 
             # Check for reconcile operation
@@ -806,7 +818,7 @@ class SmartIndexer(HighThroughputProcessor):
                             _p14_collection_name,
                             quarantine_path,
                         )
-                return reconcile_stats
+                return self._finish_run(reconcile_stats, git_status)
 
             # Handle deletion detection for standard indexing (when not doing reconcile)
             # PERFORMANCE FIX (Bug 3): Skip deletion detection for git-aware projects
@@ -824,15 +836,18 @@ class SmartIndexer(HighThroughputProcessor):
                 # CRITICAL: Clear progressive metadata immediately when force_full=True (--clear flag)
                 # This ensures that even if indexing is cancelled, stale metadata is cleared
                 self.progressive_metadata.clear()
-                return self._do_full_index(
-                    batch_size,
-                    progress_callback,
+                return self._finish_run(
+                    self._do_full_index(
+                        batch_size,
+                        progress_callback,
+                        git_status,
+                        provider_name,
+                        model_name,
+                        quiet,
+                        vector_thread_count,
+                        fts_manager,
+                    ),
                     git_status,
-                    provider_name,
-                    model_name,
-                    quiet,
-                    vector_thread_count,
-                    fts_manager,
                 )
 
             # Check if we need to force full index due to configuration changes
@@ -853,29 +868,35 @@ class SmartIndexer(HighThroughputProcessor):
                     )
                 # Clear progressive metadata for configuration-triggered full index
                 self.progressive_metadata.clear()
-                return self._do_full_index(
+                return self._finish_run(
+                    self._do_full_index(
+                        batch_size,
+                        progress_callback,
+                        git_status,
+                        provider_name,
+                        model_name,
+                        quiet,
+                        vector_thread_count,
+                        fts_manager,
+                    ),
+                    git_status,
+                )
+
+            # Try incremental indexing
+            return self._finish_run(
+                self._do_incremental_index(
                     batch_size,
                     progress_callback,
                     git_status,
                     provider_name,
                     model_name,
+                    safety_buffer_seconds,
                     quiet,
                     vector_thread_count,
                     fts_manager,
-                )
-
-            # Try incremental indexing
-            return self._do_incremental_index(
-                batch_size,
-                progress_callback,
+                    trust_resume_state=resume_state_trusted,
+                ),
                 git_status,
-                provider_name,
-                model_name,
-                safety_buffer_seconds,
-                quiet,
-                vector_thread_count,
-                fts_manager,
-                trust_resume_state=resume_state_trusted,
             )
 
         except KeyboardInterrupt:
@@ -918,6 +939,25 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Always release the lock, even on exception
             indexing_lock.release()
+
+    def _finish_run(
+        self, stats: ProcessingStats, git_status: Dict[str, Any]
+    ) -> ProcessingStats:
+        """Every strategy's finished run records its outcome: the HEAD it
+        indexed (so the refresh scheduler's drift signal clears even when
+        the run found nothing to index; ignored unless the run is left
+        completed) and whether it changed the index at all (processed
+        files, hidden/deleted/un-hidden paths, a rebuilt full-text index)."""
+        if not stats.cancelled:
+            changed = (
+                stats.files_processed > 0
+                or stats.index_entries_changed > 0
+                or self._run_rebuilt_fts
+            )
+            self.progressive_metadata.record_finished_run(
+                git_status.get("current_commit"), changed
+            )
+        return stats
 
     def _clear_current_provider_multimodal_collection(self, provider_name: str) -> None:
         """Bug #1979 P1: a `--clear` full run must clear THIS run's
@@ -1372,9 +1412,14 @@ class SmartIndexer(HighThroughputProcessor):
             f.flush()
 
         if not files_to_index:
+            # An empty repository (no eligible file) is "completed, nothing
+            # to index", never a failure: a failed status would make the
+            # refresh scheduler force a reconcile on every cycle. No session
+            # is started for zero files.
             self.progressive_metadata.complete_indexing()
-            # Don't start session if no files to index
-            raise ValueError("No files found to index")
+            if progress_callback:
+                progress_callback(0, 0, Path(""), info="No files found to index")
+            return ProcessingStats()
 
         # Store file list for resumability
         self.progressive_metadata.set_files_to_index(files_to_index)
@@ -2011,6 +2056,8 @@ class SmartIndexer(HighThroughputProcessor):
             stats,
         )
 
+        # Git-delta deletions applied above changed the index too.
+        stats.index_entries_changed += len(deleted_files)
         return stats
 
     def _populate_fts_from_all_files(self, fts_manager, progress_callback=None):
@@ -2090,22 +2137,27 @@ class SmartIndexer(HighThroughputProcessor):
         branch: str,
         attempted: Set[str],
         failed: Set[str],
-    ) -> None:
+    ) -> int:
         """Retry FTS restores a past reconcile could not complete, and
         persist what is still owed (this run's failures included). A file
         no longer on disk/eligible, queued for re-indexing (which writes its
-        FTS documents), or hidden again on the branch is dropped."""
+        FTS documents), or hidden again on the branch is dropped. Returns
+        the number of restores completed by this call."""
         pending = self.progressive_metadata.get_fts_restore_pending()
         still_owed = set(failed)
+        restored = 0
         for path in pending:
             if path in attempted or path not in disk_files or path in queued:
                 continue
             if branch in self._reconcile_hidden_on_all_points.get(path, set()):
                 continue
-            if not self._restore_file_in_fts(fts_manager, path):
+            if self._restore_file_in_fts(fts_manager, path):
+                restored += 1
+            else:
                 still_owed.add(path)
         if pending or still_owed:
             self.progressive_metadata.set_fts_restore_pending(sorted(still_owed))
+        return restored
 
     def _restore_file_in_fts(self, fts_manager, relative_path: str) -> bool:
         """Re-add an un-hidden file's FTS document from its current content.
@@ -2336,6 +2388,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # NEW: For git projects, unhide files that should be visible in current branch
         files_unhidden = 0  # Initialize for all code paths
+        fts_restores_retried = 0
 
         if self.git_topology_service.is_git_available():
             # CRITICAL FIX: Check ALL files in database for unhiding, not just files_to_index
@@ -2395,7 +2448,7 @@ class SmartIndexer(HighThroughputProcessor):
                                 restore_failed.add(relative_file_path)
 
             if fts_manager is not None:
-                self._retry_pending_fts_restores(
+                fts_restores_retried = self._retry_pending_fts_restores(
                     fts_manager,
                     disk_files_set,
                     queued_relative_paths,
@@ -2508,6 +2561,9 @@ class SmartIndexer(HighThroughputProcessor):
             self._fold_in_pending_self_heal_paths(collection_name, files_to_index)
         )
 
+        # Index entries changed without processing a file (see _finish_run).
+        visibility_changes = files_unhidden + fts_restores_retried + len(deleted_files)
+
         if not files_to_index:
             if progress_callback:
                 progress_callback(
@@ -2533,7 +2589,9 @@ class SmartIndexer(HighThroughputProcessor):
                     analysis_failed_paths, failed_count=len(analysis_failed_paths)
                 )
                 self.progressive_metadata.complete_indexing()
-                return self._analysis_failure_stats(analysis_failed_paths)
+                failure_stats = self._analysis_failure_stats(analysis_failed_paths)
+                failure_stats.index_entries_changed = visibility_changes
+                return failure_stats
             # Same as the "no files on disk" early
             # return above -- finding nothing to reconcile must still mark
             # the operation completed. Every file was verified, so no
@@ -2547,7 +2605,7 @@ class SmartIndexer(HighThroughputProcessor):
             self._clear_self_heal_reprocess_paths_if_safe(
                 collection_name, pending_self_heal_reconcile, ProcessingStats()
             )
-            return ProcessingStats()
+            return ProcessingStats(index_entries_changed=visibility_changes)
 
         # Apply files count limit if specified (for testing)
         if files_count_to_process is not None and files_to_index:
@@ -2800,6 +2858,7 @@ class SmartIndexer(HighThroughputProcessor):
             collection_name, pending_self_heal_reconcile, stats
         )
 
+        stats.index_entries_changed += visibility_changes
         return stats
 
     @staticmethod

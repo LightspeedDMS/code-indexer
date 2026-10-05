@@ -2749,13 +2749,6 @@ class GoldenRepoManager:
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
-                # Check for "No files found" — acceptable for golden repo registration
-                combined = "".join(_popen_stdout) + "".join(_popen_stderr)
-                if "No files found to index" in combined:
-                    logging.warning(
-                        "PATH A: Repository has no indexable files — acceptable for golden repo registration"
-                    )
-                    return
                 raise GitOperationError(str(e)) from e
 
         try:

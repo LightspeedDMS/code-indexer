@@ -124,6 +124,16 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Consecutive forced reconciles that left the same stale-index signal
+    # unchanged, so the refresh scheduler stops forcing after a bound.
+    def record_forced_reconcile(self, golden_alias: str, signal: str) -> int: ...
+
+    def get_forced_reconcile_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def clear_forced_reconcile_state(self, golden_alias: str) -> None: ...
+
     # Bug #2022: per-repo refresh failure backoff for repeated failures the
     # self-heal cannot repair (refresh_scheduler.py).
     def record_refresh_failure_backoff(self, golden_alias: str, detail: str) -> int: ...

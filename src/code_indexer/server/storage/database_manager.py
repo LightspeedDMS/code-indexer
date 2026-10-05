@@ -814,6 +814,12 @@ class DatabaseSchema:
             )
 
             create_refresh_failure_backoff_table(conn)
+            # remove_repo also deletes from the forced-reconcile state table.
+            from code_indexer.server.storage.sqlite_backends._forced_reconcile_state_mixin import (
+                create_forced_reconcile_state_table,
+            )
+
+            create_forced_reconcile_state_table(conn)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)

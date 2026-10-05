@@ -9,7 +9,7 @@ Two independent producers write metadata.json's `current_commit` field:
   - config_fixer.py's GitStateDetector.detect_git_state() -> used to call
     `git rev-parse --short HEAD` -> abbreviated 7-char SHA.
 
-The consumer, refresh_scheduler.py's _check_stale_index_metadata(), reads
+The consumer, refresh_scheduler.py's _stale_index_signal(), reads
 this field as if it always holds a full SHA. Even with Bug #1591's
 prefix-tolerant comparison fix, having two producers disagree on format is
 an avoidable footgun -- this test locks GitStateDetector to the same

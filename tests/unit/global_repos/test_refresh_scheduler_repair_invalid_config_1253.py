@@ -144,7 +144,7 @@ class TestMissingConfigJsonIsSelfHealed:
 
         # Bug #1561: count only the `cidx init` calls, not every subprocess
         # invoked in this code path. The stale-index check (Bug #1508,
-        # refresh_scheduler.py's `_check_stale_index_metadata`) can also run
+        # refresh_scheduler.py's `_stale_index_signal`) can also run
         # `git rev-parse HEAD` when real on-disk index metadata carrying a
         # `current_commit` is present; a bare "total subprocess count"
         # assertion would then break on activity unrelated to this AC.

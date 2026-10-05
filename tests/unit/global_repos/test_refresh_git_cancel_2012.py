@@ -250,7 +250,7 @@ def test_stale_metadata_git_rev_parse_is_cancelled(
     install_fake_git(tmp_path, monkeypatch, pid_file, hang_on="rev-parse")
 
     expect_cancelled(
-        lambda: scheduler._check_stale_index_metadata(
+        lambda: scheduler._stale_index_signal(
             str(master), ALIAS, cancel_check=child_started(pid_file)
         ),
         pid_file,

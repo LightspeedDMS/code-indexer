@@ -3,8 +3,6 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from code_indexer.services.progressive_metadata import ProgressiveMetadata
 from code_indexer.services.smart_indexer import SmartIndexer
 from code_indexer.services.high_throughput_processor import BranchIndexingResult
@@ -102,14 +100,15 @@ def test_no_files_path_does_not_persist_previous_file_lists(tmp_path, monkeypatc
         raising=False,
     )
 
-    with pytest.raises(ValueError, match="No files found to index"):
-        indexer._do_full_index(
-            batch_size=50,
-            progress_callback=None,
-            git_status={"git_available": True, "current_branch": "main"},
-            provider_name="provider",
-            model_name="model",
-        )
+    # An empty repository completes (nothing to index) instead of raising.
+    stats = indexer._do_full_index(
+        batch_size=50,
+        progress_callback=None,
+        git_status={"git_available": True, "current_branch": "main"},
+        provider_name="provider",
+        model_name="model",
+    )
+    assert stats.files_processed == 0
 
     reloaded = _fresh_metadata(metadata_path)
     assert reloaded.metadata["status"] == "completed"
