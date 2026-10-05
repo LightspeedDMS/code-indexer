@@ -29,10 +29,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
 
 from code_indexer.server.middleware.audit_request_context import (
     SOURCE_SYSTEM,
+    AuditRequestContext,
     current_audit_request_context,
 )
 
@@ -518,6 +519,9 @@ class AuditEvent:
     node_id: Optional[str]
     auth_method: Optional[str]
     details_json: Optional[str]
+    # The user an administrator was impersonating over MCP when the action
+    # was performed (the subject); ``actor`` is then the administrator.
+    impersonated_user: Optional[str] = None
 
 
 # Column order of an ``audit_logs`` INSERT, shared by both backends.
@@ -536,6 +540,7 @@ AUDIT_ROW_COLUMNS = (
     "auth_method",
     "actor_is_system",
     "event_uuid",
+    "impersonated_user",
 )
 
 
@@ -556,6 +561,7 @@ def event_row_values(event: AuditEvent) -> tuple:
         event.auth_method,
         1 if event.actor_is_system else 0,
         event.event_uuid,
+        event.impersonated_user,
     )
 
 
@@ -585,6 +591,28 @@ def _ambient_correlation_id() -> str:
 
     correlation_id = get_correlation_id()
     return correlation_id if correlation_id else f"evt-{uuid.uuid4()}"
+
+
+def _impersonation_attribution(
+    actor: str, ctx: Optional[AuditRequestContext]
+) -> Tuple[str, Optional[str]]:
+    """``(actor, impersonated_user)`` for an event built under *ctx*.
+
+    During MCP impersonation (the dispatcher recorded both names on the
+    request holder), the authenticated administrator is the actor and the
+    impersonated user is the subject.  A handler acting under impersonation
+    names the impersonated user as its caller; that name is replaced by the
+    administrator's.  Outside impersonation the actor is unchanged and the
+    subject is None.
+    """
+    if ctx is None or ctx.impersonated_user is None:
+        return actor, None
+    authenticated = ctx.authenticated_actor
+    if authenticated is None:
+        raise AssertionError("impersonation recorded without the authenticated actor")
+    if actor == ctx.impersonated_user:
+        actor = authenticated
+    return actor, ctx.impersonated_user
 
 
 def _reportable_field_name(key: Any) -> str:
@@ -688,6 +716,7 @@ def build_event(
     ctx = current_audit_request_context()
     if auth_method is None and ctx is not None:
         auth_method = ctx.auth_method
+    actor, impersonated_user = _impersonation_attribution(actor, ctx)
     return AuditEvent(
         event_uuid=str(uuid.uuid4()),
         occurred_at=_now_iso(),
@@ -703,6 +732,7 @@ def build_event(
         node_id=_process_node_id,
         auth_method=auth_method,
         details_json=details_json,
+        impersonated_user=impersonated_user,
     )
 
 
@@ -789,6 +819,7 @@ def build_legacy_event(
         _require_outcome(outcome, str(action_type)[:_MAX_REPORTED_FIELD_NAME])
     details_json = restrict_legacy_details(action_type, details_json)
     ctx = current_audit_request_context()
+    actor, impersonated_user = _impersonation_attribution(actor, ctx)
     return AuditEvent(
         event_uuid=str(uuid.uuid4()),
         occurred_at=occurred_at if occurred_at is not None else _now_iso(),
@@ -804,4 +835,5 @@ def build_legacy_event(
         node_id=_process_node_id,
         auth_method=ctx.auth_method if ctx is not None else None,
         details_json=details_json,
+        impersonated_user=impersonated_user,
     )

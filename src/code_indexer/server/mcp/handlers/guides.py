@@ -228,17 +228,17 @@ def quick_reference(
     try:
         from ..tools import TOOL_REGISTRY, tool_passes_config_gate
         from ..tool_doc_loader import _get_tool_doc_loader
-        from ..tool_access import ToolAccessMemo, resolve_effective_user
+        from ..tool_access import ToolAccessMemo, principal_for_tool
 
         if tool_access_memo is None:
             tool_access_memo = ToolAccessMemo()
-        effective_user = resolve_effective_user(user, session_state)
 
         category_filter = params.get("category")
 
         # Story #987 AC6: 'tool' parameter takes precedence over 'category'
         requested_tool = params.get("tool")
         if requested_tool:
+            effective_user = principal_for_tool(user, session_state, requested_tool)
             decision = tool_access_memo.is_allowed(requested_tool, effective_user)
             tool_def = TOOL_REGISTRY.get(requested_tool)
             if decision is False or (
@@ -278,7 +278,8 @@ def quick_reference(
         config = get_config_service().get_config()
 
         for tool_name, tool_def in TOOL_REGISTRY.items():
-            # Check permission
+            # Check permission (the same principal tools/list uses per tool)
+            effective_user = principal_for_tool(user, session_state, tool_name)
             decision = tool_access_memo.is_allowed(tool_name, effective_user)
             required_permission = tool_def.get("required_permission", "query_repos")
             if decision is False or (
@@ -507,11 +508,10 @@ def get_tool_categories(
     """
     from ..tool_doc_loader import _get_tool_doc_loader
     from ..tools import TOOL_REGISTRY
-    from ..tool_access import ToolAccessMemo, resolve_effective_user
+    from ..tool_access import ToolAccessMemo, principal_for_tool
 
     if tool_access_memo is None:
         tool_access_memo = ToolAccessMemo()
-    effective_user = resolve_effective_user(user, session_state)
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -527,6 +527,8 @@ def get_tool_categories(
         category_tools = []
         for tool_info in tools:
             tool_name = tool_info["name"]
+            # The same principal tools/list uses for this tool.
+            effective_user = principal_for_tool(user, session_state, tool_name)
             decision = tool_access_memo.is_allowed(tool_name, effective_user)
             tool_def = TOOL_REGISTRY.get(tool_name, {})
             if decision is False or (

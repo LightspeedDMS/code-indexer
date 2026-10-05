@@ -57,6 +57,11 @@ class AuditRequestContext:
     source: str
     client_ip: Optional[str] = None
     auth_method: Optional[str] = None
+    # Set by the MCP dispatcher for each tool call made while the session
+    # impersonates another user: the authenticated administrator (recorded as
+    # the actor) and the impersonated user (recorded as the subject).
+    authenticated_actor: Optional[str] = None
+    impersonated_user: Optional[str] = None
 
 
 _audit_request_context: ContextVar[Optional[AuditRequestContext]] = ContextVar(
@@ -79,6 +84,29 @@ def note_auth_method(method: str) -> None:
     ctx = _audit_request_context.get()
     if ctx is not None:
         ctx.auth_method = method
+
+
+def note_mcp_principal(
+    authenticated_actor: str, impersonated_user: Optional[str]
+) -> None:
+    """Record who acts in the current MCP tool call.
+
+    Called by the MCP dispatcher before every tool call.  With
+    *impersonated_user* set, audit events built during the call name
+    *authenticated_actor* as the actor and *impersonated_user* as the
+    subject; with it None, any earlier call's impersonation is cleared (a
+    JSON-RPC batch shares one holder).  Mutates the request's holder (never
+    re-sets the var); outside a request it does nothing.
+    """
+    ctx = _audit_request_context.get()
+    if ctx is None:
+        return
+    if impersonated_user is None:
+        ctx.authenticated_actor = None
+        ctx.impersonated_user = None
+        return
+    ctx.authenticated_actor = authenticated_actor
+    ctx.impersonated_user = impersonated_user
 
 
 def bind_audit_request_context(

@@ -867,10 +867,17 @@ def handle_set_session_impersonation(
 
     username = args.get("username")
 
-    # Check if user is ADMIN
-    if user.role != UserRole.ADMIN:
+    # Impersonation is managed by the AUTHENTICATED principal, never by the
+    # user currently impersonated: an administrator can always clear or
+    # change it, whatever the impersonated user's own role.  The dispatcher
+    # passes the CURRENT authenticated caller for this tool
+    # (tool_access.AUTHENTICATED_PRINCIPAL_TOOLS), loaded for this request --
+    # never a user snapshot stored when the session was created.
+    principal = user
+
+    if principal.role != UserRole.ADMIN:
         password_audit_logger.log_impersonation_denied(
-            actor_username=user.username,
+            actor_username=principal.username,
             target_username=username or "(clear)",
             reason="Impersonation requires ADMIN role",
             session_id=session_state.session_id if session_state else "unknown",
@@ -886,7 +893,7 @@ def handle_set_session_impersonation(
             previous_target = session_state.impersonated_user.username
             session_state.clear_impersonation()
             password_audit_logger.log_impersonation_cleared(
-                actor_username=user.username,
+                actor_username=principal.username,
                 previous_target=previous_target,
                 session_id=session_state.session_id,
                 ip_address="unknown",
@@ -919,7 +926,7 @@ def handle_set_session_impersonation(
 
         session_state.set_impersonation(target_user)
         password_audit_logger.log_impersonation_set(
-            actor_username=user.username,
+            actor_username=principal.username,
             target_username=username,
             session_id=session_state.session_id,
             ip_address="unknown",

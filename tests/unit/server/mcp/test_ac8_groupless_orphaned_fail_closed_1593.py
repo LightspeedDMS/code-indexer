@@ -155,6 +155,7 @@ def _impersonating_admin(group_manager):
     class Session:
         is_impersonating = True
         effective_user = effective
+        authenticated_user = admin
 
     return admin, Session()
 

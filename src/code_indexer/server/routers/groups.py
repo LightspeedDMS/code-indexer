@@ -231,6 +231,8 @@ class AuditLogResponse(BaseModel):
     actor_is_authenticated: Optional[bool] = None
     pairing_state: Optional[str] = None
     submitted_only: Optional[bool] = None
+    # The user an administrator was impersonating over MCP (the subject).
+    impersonated_user: Optional[str] = None
 
 
 class AuditAggregateGroupResponse(BaseModel):

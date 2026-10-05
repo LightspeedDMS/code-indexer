@@ -27,6 +27,8 @@ import json
 import logging
 from code_indexer import __version__
 from .tool_access import ToolAccessMemo, resolve_effective_user
+from code_indexer.server.middleware.audit_request_context import note_mcp_principal
+from .session_registry import MCPSessionOwnerMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +807,11 @@ async def handle_tools_call(
     from .tools import TOOL_REGISTRY
     from code_indexer.server.services.langfuse_service import get_langfuse_service
 
+    # First: no earlier call's impersonation may remain on the request's
+    # audit holder (a JSON-RPC batch shares one), even if this call is
+    # refused below.  Set again once the session is resolved.
+    note_mcp_principal(user.username, None)
+
     # Validate required 'name' parameter
     if "name" not in params:
         raise ValueError("Missing required parameter: name")
@@ -820,9 +827,20 @@ async def handle_tools_call(
     if session_state is None:
         session_state = _get_session_state(session_id, user)
 
+    # Audit records written during MCP impersonation name the authenticated
+    # administrator as the actor and the impersonated user as the subject.
+    # Recorded (or cleared) per call: a JSON-RPC batch shares one holder.
+    impersonated = resolve_effective_user(user, session_state)
+    note_mcp_principal(
+        user.username,
+        impersonated.username if impersonated is not user else None,
+    )
+
     # Determine effective user for permission checks (CRITICAL 2 fix)
-    # When impersonating, use the impersonated user's permissions
-    effective_user = resolve_effective_user(user, session_state)
+    # When impersonating, use the impersonated user's permissions -- except
+    # for the tools that manage impersonation itself, which are authorized
+    # for the authenticated principal.
+    effective_user = resolve_effective_user(user, session_state, tool_name)
 
     if tool_access_memo is None:
         tool_access_memo = _new_tool_access_memo()
@@ -1224,6 +1242,18 @@ async def mcp_endpoint(
     if not session_id:
         session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
+
+    # A session id is bound to the user it was created for: another user's
+    # session (and any impersonation it holds) is never inherited.  HTTP 404
+    # makes a spec-compliant client start a new session.
+    try:
+        _get_session_state(session_id, current_user)
+    except MCPSessionOwnerMismatch:
+        return Response(
+            status_code=404,
+            content=json.dumps(create_jsonrpc_error(-32001, "Session not found", None)),
+            media_type="application/json",
+        )
 
     # Extract JWT jti for TOTP elevation window lookup.
     # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.

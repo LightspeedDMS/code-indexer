@@ -131,10 +131,12 @@ def filter_tools_by_role(
 
     if tool_access_memo is None:
         tool_access_memo = ToolAccessMemo()
-    effective_user = resolve_effective_user(user, session_state)
     filtered_tools = []
 
     for tool_name, tool_def in TOOL_REGISTRY.items():
+        # The impersonated user's view, except for the tools that manage
+        # impersonation itself (authorized for the authenticated principal).
+        effective_user = resolve_effective_user(user, session_state, tool_name)
         required_permission = tool_def["required_permission"]
         group_decision = (
             True
