@@ -125,6 +125,35 @@ Worker count is detected from two sources, larger wins: `get_applied_worker_coun
 in the ConfigMap-seeded `config.json`. Unknown means **1**, i.e. no division and
 today's behaviour. Nothing in that module raises; it runs at import in xray.
 
+### Reading the worker count
+
+Three sources, largest wins, unknown means 1 (no division):
+
+| rung | in a pod | on a VM/laptop |
+|---|---|---|
+| `--workers N` from `/proc` | **works** | works |
+| `get_applied_worker_count()` (systemd) | answers 1 | works |
+| `workers` in `config.json` | **absent** | if the operator sets it |
+
+The argv rung exists because the other two fail in the cluster, which is the
+deployment the division was written for. This module once claimed config.json
+was "the rung that works inside a Kubernetes pod, whose `workers` the overlay
+keeps in lockstep with the `--workers` it passes in the container args". That
+was never true: checked on a live pod, the container args say `--workers 2`
+while `/data/config.json` has no `workers` key, so every budget divided by 1.
+It shipped that way and the canary is what surfaced it -- every unit test
+injected `detect_worker_count`, so none of them exercised the real detector.
+
+The command line cannot drift from a parallel config key, because it *is* what
+launched the process.
+
+**The parent walk is required, not defensive.** uvicorn spawns workers through
+multiprocessing, so a worker's own argv is
+`python -B -c from multiprocessing.spawn import spawn_main; ...` and the flag
+lives on the master. Observed live on pod-5: master pid 7 carries `--workers 2`;
+workers pid 9 and 10 carry `spawn_main`, and reading only `/proc/self/cmdline`
+returns None for both -- the processes that actually size the pools.
+
 ### Divided today
 
 | Budget | Where |

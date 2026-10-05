@@ -156,6 +156,57 @@ def test_unreadable_config_json_is_not_an_import_time_crash(
     assert rust_backend._read_config_json_workers() is None
 
 
+def test_the_argv_alias_actually_delegates(monkeypatch) -> None:
+    """The alias must call the shared reader, not merely exist.
+
+    Every other test here monkeypatches `_read_argv_workers`, so its real body
+    is never run: mutation showed it could be replaced with `return None` and
+    all of them stayed green, which would put xray back at 4 compiles per
+    process in a pod. Pins the delegation itself.
+    """
+    monkeypatch.setattr(rust_backend, "read_argv_workers", lambda *a, **k: 7)
+    assert rust_backend._read_argv_workers() == 7
+
+
+def test_the_argv_rung_reaches_the_compile_budget(monkeypatch) -> None:
+    """THE pod case, and the one this module silently missed.
+
+    _detect_worker_count passes an explicit `sources` tuple, so a rung added to
+    the shared helper's DEFAULTS does not reach here. When read_argv_workers was
+    added as a default, every caller using the defaults picked it up and this
+    one did not: in a pod the applied resolver answers 1 and config.json has no
+    `workers` key, so the compile budget stayed at 4 per process -- 8 per pod,
+    the exact oversubscription the per-node budget exists to prevent -- while
+    the MR adding the rung claimed it was fixed.
+
+    Driven through _detect_worker_count(), not the shared helper, because the
+    gap was in this function's argument list and nothing else would see it.
+    """
+    monkeypatch.setattr(rust_backend, "_read_applied_worker_count", lambda: 1)
+    monkeypatch.setattr(rust_backend, "_read_config_json_workers", lambda: None)
+    monkeypatch.setattr(rust_backend, "_read_argv_workers", lambda: 2)
+
+    assert rust_backend._detect_worker_count() == 2
+    assert (
+        rust_backend._per_process_compile_limit(
+            rust_backend._XRAY_COMPILE_BUDGET_PER_NODE, 2
+        )
+        == 2
+    )
+
+
+def test_the_compile_budget_is_resolved_through_the_argv_rung_end_to_end(
+    monkeypatch,
+) -> None:
+    """The budget actually shipped, not just the worker count."""
+    monkeypatch.setattr(rust_backend, "_read_applied_worker_count", lambda: 1)
+    monkeypatch.setattr(rust_backend, "_read_config_json_workers", lambda: None)
+    monkeypatch.setattr(rust_backend, "_read_argv_workers", lambda: 2)
+    monkeypatch.delenv(rust_backend._MAX_CONCURRENT_COMPILES_ENV, raising=False)
+
+    assert rust_backend._resolve_max_concurrent_compiles() == 2
+
+
 def test_detect_worker_count_takes_the_larger_of_its_sources(monkeypatch) -> None:
     """Two sources can disagree (an admin saved workers=4 but the running
     unit was launched with 2, or vice versa). Dividing by the LARGER count

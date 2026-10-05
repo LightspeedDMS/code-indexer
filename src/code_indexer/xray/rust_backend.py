@@ -54,6 +54,7 @@ from code_indexer.utils.worker_budget import (
     detect_worker_count,
     per_process_budget,
     read_applied_worker_count,
+    read_argv_workers,
     read_config_json_workers,
 )
 
@@ -138,16 +139,36 @@ def _read_applied_worker_count() -> Optional[int]:
     return read_applied_worker_count()
 
 
+def _read_argv_workers() -> Optional[int]:
+    """``--workers N`` from this process's command line, or an ancestor's.
+
+    Aliased here, like the two readers above, so it stays substitutable in this
+    module's tests rather than being reached through the shared module.
+    """
+    return read_argv_workers()
+
+
 def _detect_worker_count() -> int:
     """Worker processes sharing this node's compile budget.
 
-    Passes the two module-level readers above as the sources rather than letting
-    the shared helper use its defaults, so the lookup happens through THIS
-    module's globals -- which is what keeps the xray-specific config.json
-    location in play, and what keeps these two substitutable in tests.
+    Passes the module-level readers above as the sources rather than letting the
+    shared helper use its defaults, so the lookup happens through THIS module's
+    globals -- which is what keeps the xray-specific config.json location in
+    play, and what keeps them substitutable in tests.
+
+    Supplying an explicit `sources` tuple means a rung added to the shared
+    helper's DEFAULTS is not picked up here. That is exactly what happened with
+    the argv rung: it was added as a default, every caller using the defaults
+    got it, and this one silently stayed at 4 compiles per process (8 per pod)
+    while the MR adding it claimed otherwise. Any new rung must be added here
+    too.
     """
     return detect_worker_count(
-        sources=(_read_applied_worker_count, _read_config_json_workers)
+        sources=(
+            _read_argv_workers,
+            _read_applied_worker_count,
+            _read_config_json_workers,
+        )
     )
 
 
