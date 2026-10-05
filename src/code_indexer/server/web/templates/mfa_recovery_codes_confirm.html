@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Recovery Codes - CIDX</title>
+<style>
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}
+.c{max-width:500px;margin:40px auto;background:#16213e;border-radius:12px;padding:30px}
+h1{color:#00d4ff;font-size:1.4em}
+.warn{background:#2a2a0a;color:#ffcc00;padding:12px;border-radius:6px;margin:15px 0;border-left:4px solid #ffcc00}
+button{width:100%;padding:12px;margin-top:15px;border:none;border-radius:6px;font-size:1em;cursor:pointer;font-weight:bold}
+a.back{color:#00d4ff;text-decoration:none;display:block;margin-top:20px;text-align:center}
+</style>
+</head>
+<body>
+<div class="c">
+<h1>Recovery Codes</h1>
+<p>Account: <strong>{{ target_user }}</strong></p>
+<div class="warn">Generating new recovery codes replaces the existing set. The old codes stop working.</div>
+{% include "partials/mfa_recovery_codes_form.html" %}
+<a href="{{ back_link }}" class="back">Cancel</a>
+</div>
+</body>
+</html>

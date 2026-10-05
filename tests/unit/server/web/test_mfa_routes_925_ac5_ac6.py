@@ -3,7 +3,7 @@ Tests for mfa_routes.py AC5 and AC6 (Story #925).
 
 AC5: Cross-user TOTP setup requires (a) active elevation + (b) confirm_overwrite=1.
      Self-service setup is unchanged.
-AC6: mfa_disable and mfa_recovery_codes_page require active elevation window.
+AC6: mfa_disable and mfa_recovery_codes_regenerate (POST) require active elevation window.
 
 12 tests:
   - AC5 cross-user overwrite guard (4 standalone)
@@ -14,15 +14,22 @@ AC6: mfa_disable and mfa_recovery_codes_page require active elevation window.
 """
 
 import contextlib
+import re
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
+from code_indexer.server.auth.user_manager import UserManager, UserRole
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.web import auth as web_auth
+from code_indexer.server.web.auth import SessionManager
 from code_indexer.server.web.mfa_routes import mfa_router, set_totp_service
 
 # ---------------------------------------------------------------------------
@@ -59,6 +66,25 @@ def _assert_elevation_required(resp) -> None:
         f"Expected HTML error page for elevation_required, got: {content_type}"
     )
     assert "/admin/" in resp.text, "HTML error page must contain back-link to /admin/"
+    assert "Elevation Required" in resp.text, (
+        "refusal must come from the elevation gate"
+    )
+
+
+_RECOVERY_ROUTE = "/admin/mfa/recovery-codes"
+
+
+def _with_recovery_csrf(client, path: str, req_kwargs: dict) -> dict:
+    """Add the page's Web UI CSRF token to a recovery-code POST's form data."""
+    if path != _RECOVERY_ROUTE:
+        return req_kwargs
+    with _as_admin(_ADMIN):
+        page = client.get(_RECOVERY_ROUTE)
+    match = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert match is not None, page.text
+    data = dict(req_kwargs.get("data", {}))
+    data["csrf_token"] = match.group(1)
+    return {**req_kwargs, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +119,23 @@ def esm(tmp_path):
 
 
 @pytest.fixture
-def app(totp_mock):
-    """Minimal FastAPI app with mfa_router; TOTP service injected."""
+def app(totp_mock, tmp_path, monkeypatch):
+    """Minimal FastAPI app with mfa_router; TOTP service injected.
+
+    A real SessionManager signs the Web UI CSRF cookie and a real SQLite
+    UserManager holds the sample accounts.
+    """
+    monkeypatch.setattr(
+        web_auth,
+        "_session_manager",
+        SessionManager("example-signing-key", SimpleNamespace(host="127.0.0.1")),
+    )
+    users_db = str(tmp_path / "users.db")
+    DatabaseSchema(users_db).initialize_database()
+    users = UserManager(use_sqlite=True, db_path=users_db)
+    for name in (_ADMIN, _OTHER):
+        users.create_user(name, "Example-Passw0rd!x", UserRole.ADMIN)
+    monkeypatch.setattr(dependencies, "user_manager", users)
     _app = FastAPI()
     set_totp_service(totp_mock)
     _app.include_router(mfa_router)
@@ -195,7 +236,7 @@ def test_cross_user_setup_with_elevation_and_confirm_overwrite_succeeds(client, 
     "method,path,req_kwargs",
     [
         ("post", "/admin/mfa/disable", {"data": {"totp_code": _VALID_TOTP}}),
-        ("get", "/admin/mfa/recovery-codes", {}),
+        ("post", "/admin/mfa/recovery-codes", {}),
     ],
     ids=["disable", "recovery-codes"],
 )
@@ -203,6 +244,7 @@ def test_ac6_endpoint_without_elevation_returns_403(
     client, esm, method, path, req_kwargs
 ):
     """Elevation-gated admin endpoints return 403 when no active window."""
+    req_kwargs = _with_recovery_csrf(client, path, req_kwargs)
     with _as_admin(_ADMIN), patch(_ESM_PATH, esm):
         resp = getattr(client, method)(path, **req_kwargs)
     _assert_elevation_required(resp)
@@ -212,7 +254,7 @@ def test_ac6_endpoint_without_elevation_returns_403(
     "method,path,req_kwargs,expected_status",
     [
         ("post", "/admin/mfa/disable", {"data": {"totp_code": _VALID_TOTP}}, 303),
-        ("get", "/admin/mfa/recovery-codes", {}, 200),
+        ("post", "/admin/mfa/recovery-codes", {}, 200),
     ],
     ids=["disable", "recovery-codes"],
 )
@@ -220,6 +262,7 @@ def test_ac6_endpoint_with_totp_repair_elevation_succeeds(
     client, esm, method, path, req_kwargs, expected_status
 ):
     """Elevation-gated admin endpoints succeed with totp_repair-scope elevation."""
+    req_kwargs = _with_recovery_csrf(client, path, req_kwargs)
     session_key = _make_session_key()
     with (
         _as_admin(_ADMIN),
@@ -237,21 +280,26 @@ def test_ac6_endpoint_with_totp_repair_elevation_succeeds(
 
 
 @pytest.mark.parametrize(
-    "method,path",
+    "method,path,req_kwargs",
     [
-        ("get", f"/admin/mfa/setup?user={_OTHER}&confirm_overwrite=1"),
-        ("get", f"/admin/mfa/recovery-codes?user={_OTHER}"),
+        ("get", f"/admin/mfa/setup?user={_OTHER}&confirm_overwrite=1", {}),
+        ("post", "/admin/mfa/recovery-codes", {"data": {"user": _OTHER}}),
     ],
     ids=["cross-user-setup", "cross-user-recovery-codes"],
 )
-def test_ac6_cross_user_with_totp_repair_scope_returns_403(client, esm, method, path):
+def test_ac6_cross_user_with_totp_repair_scope_returns_403(
+    client, esm, method, path, req_kwargs
+):
     """Cross-user TOTP operations with totp_repair scope return 403 (full required)."""
+    req_kwargs = _with_recovery_csrf(client, path, req_kwargs)
     session_key = _make_session_key()
     with (
         _as_admin(_ADMIN),
         _with_elevation(esm, session_key, _ADMIN, scope="totp_repair"),
     ):
-        resp = getattr(client, method)(path, cookies=_elevated_cookies(session_key))
+        resp = getattr(client, method)(
+            path, cookies=_elevated_cookies(session_key), **req_kwargs
+        )
     _assert_elevation_required(resp)
 
 
