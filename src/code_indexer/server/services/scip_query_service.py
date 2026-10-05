@@ -8,9 +8,10 @@ MCP handlers and REST routes, eliminating code duplication.
 
 Key features:
 - Find SCIP index files (.scip.db) across golden repositories
-- Optional access control filtering by username
+- Queries search only repositories the caller may access: the access
+  filtering service and the caller's username are required, and a query
+  without them is refused with AccessFilteringServiceUnavailableError
 - Optional repository alias filtering for specific repository queries
-- Backward compatibility when no username/access control provided
 
 SERVER-ONLY SCOPE:
     This service is designed exclusively for server-side usage (MCP handlers,
@@ -95,7 +96,7 @@ class SCIPQueryService:
     Centralized service for SCIP file discovery (SERVER-ONLY).
 
     Provides unified logic for finding SCIP index files across golden
-    repositories with optional access control filtering.
+    repositories, scoped to the repositories the caller may access.
 
     This is a server-side service that operates on the golden_repos_dir
     configuration. It does not include CLI mode fallback logic - CLI users
@@ -104,12 +105,15 @@ class SCIPQueryService:
     Usage:
         service = SCIPQueryService(
             golden_repos_dir="/data/golden-repos",
-            access_filtering_service=access_service,  # Optional
+            access_filtering_service=access_service,  # Required for queries
         )
         scip_files = service.find_scip_files(
-            username="developer",  # Optional, for access control
+            username="developer",  # Required: the caller's grants scope it
             repository_alias="my-repo",  # Optional, for filtering
         )
+
+    Every query without an access filtering service or a username is refused
+    with AccessFilteringServiceUnavailableError.
     """
 
     def __init__(
@@ -145,25 +149,41 @@ class SCIPQueryService:
         """
         Find all .scip.db files across golden repositories.
 
+        SCIP queries search only repositories the caller may access: every
+        query operation starts here, and without an access filtering service
+        or a caller identity there is nothing to scope by, so the call fails
+        closed before touching the filesystem.
+
         Args:
             repository_alias: Optional repository name to filter results
-            username: Optional username for access control filtering
+            username: The caller whose repository grants scope the search
+                (required)
 
         Returns:
             List of Path objects pointing to .scip.db files
+
+        Raises:
+            AccessFilteringServiceUnavailableError: no access filtering
+                service is configured, or no username was given.
         """
+        from code_indexer.server.services.repo_access_guard import (
+            AccessFilteringServiceUnavailableError,
+        )
+
+        if not username or self.access_filtering_service is None:
+            raise AccessFilteringServiceUnavailableError(
+                "Access control unavailable: SCIP queries require the access "
+                "filtering service and the caller's username"
+            )
+        accessible_repos: Set[str] = self.access_filtering_service.get_accessible_repos(
+            username
+        )
+
         golden_repos_path = self.get_golden_repos_dir()
 
         # Return empty list if golden repos directory doesn't exist
         if not golden_repos_path.exists():
             return []
-
-        # Get accessible repos if username provided and access service exists
-        accessible_repos: Optional[Set[str]] = None
-        if username is not None and self.access_filtering_service is not None:
-            accessible_repos = self.access_filtering_service.get_accessible_repos(
-                username
-            )
 
         scip_files: List[Path] = []
 
@@ -183,10 +203,7 @@ class SCIPQueryService:
         # clone dir appears in the iteration below. This guarantees SCIP reads the
         # alias-pointed version even when the mutable base clone is absent (AC #9).
         if normalized_alias is not None:
-            if (
-                accessible_repos is not None
-                and normalized_alias not in accessible_repos
-            ):
+            if normalized_alias not in accessible_repos:
                 return []
             alias_root = self._resolve_alias_scip_root(normalized_alias)
             if alias_root is not None:
@@ -199,16 +216,17 @@ class SCIPQueryService:
             if not repo_dir.is_dir():
                 continue
 
-            # Skip hidden directories except .versioned
-            if repo_dir.name.startswith(".") and repo_dir.name != ".versioned":
+            # Skip hidden directories (.versioned snapshots are reached
+            # through alias target resolution below, never scanned directly)
+            if repo_dir.name.startswith("."):
                 continue
 
             # Filter by repository_alias if provided
             if normalized_alias is not None and repo_dir.name != normalized_alias:
                 continue
 
-            # Check access control if enabled
-            if accessible_repos is not None and repo_dir.name not in accessible_repos:
+            # Only repositories the caller may access
+            if repo_dir.name not in accessible_repos:
                 continue
 
             # Bug #1084 B2: resolve the alias target_path (the SAME authority
@@ -217,8 +235,8 @@ class SCIPQueryService:
             # snapshot under the daemon mount while the base clone holds an older
             # index -- using the base clone produced cross-index version skew
             # (AC #9). When no alias resolves (e.g. local repos with no alias
-            # JSON, or the synthetic .versioned scan dir), fall back to the
-            # filesystem repo dir (local behavior unchanged).
+            # JSON), fall back to the filesystem repo dir (local behavior
+            # unchanged).
             scip_root = self._resolve_alias_scip_root(repo_dir.name) or repo_dir
 
             # Find .scip.db files in the repository's scip directory
@@ -363,7 +381,9 @@ class SCIPQueryService:
             symbol: Symbol name to search for
             exact: If True, match exact symbol name; if False, match substring
             repository_alias: Optional repository name to filter SCIP indexes
-            username: Optional username for access control filtering
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
 
         Returns:
             List of dictionaries with definition results
@@ -410,7 +430,9 @@ class SCIPQueryService:
             limit: Maximum number of results to return (default 100)
             exact: If True, match exact symbol name; if False, match substring
             repository_alias: Optional repository name to filter SCIP indexes
-            username: Optional username for access control filtering
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
 
         Returns:
             List of dictionaries with reference results
@@ -457,7 +479,9 @@ class SCIPQueryService:
             depth: Depth of transitive dependencies (1 = direct only)
             exact: If True, match exact symbol name; if False, match substring
             repository_alias: Optional repository name to filter SCIP indexes
-            username: Optional username for access control filtering
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
 
         Returns:
             List of dictionaries with dependency results
@@ -504,7 +528,9 @@ class SCIPQueryService:
             depth: Depth of transitive dependents (1 = direct only)
             exact: If True, match exact symbol name; if False, match substring
             repository_alias: Optional repository name to filter SCIP indexes
-            username: Optional username for access control filtering
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
 
         Returns:
             List of dictionaries with dependent results
@@ -554,7 +580,9 @@ class SCIPQueryService:
             repository_alias: Repository to scope the analysis to. When given,
                    only that repo's SCIP indexes are traversed (mirrors the
                    other SCIP endpoints); when None, all golden repos are.
-            username: Username for access-control filtering.
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
 
         Returns:
             Dictionary with impact analysis results
@@ -593,15 +621,16 @@ class SCIPQueryService:
                 "affected_files": [],
             }
 
-        # Point the composite at the project's own ".code-indexer/scip" dir so
-        # its recursive glob crosses only this repo's indexes. When no alias was
-        # requested, fall back to the full golden-repos dir (cross-repo scan).
-        if repository_alias is not None:
-            scip_dir = self._scip_dir_for_files(scip_files)
-        else:
-            scip_dir = self.get_golden_repos_dir()
+        # SCIP impact queries search only repositories the caller may access:
+        # the composite searches exactly the access-filtered scip_files above
+        # and never globs a directory. scip_dir only labels log messages.
+        scip_dir = (
+            self._scip_dir_for_files(scip_files)
+            if repository_alias is not None
+            else self.get_golden_repos_dir()
+        )
 
-        result = analyze_impact(symbol, scip_dir, depth=depth)
+        result = analyze_impact(symbol, scip_dir, depth=depth, scip_files=scip_files)
 
         return {
             "target_symbol": result.target_symbol,
@@ -689,8 +718,11 @@ class SCIPQueryService:
             symbol: Target symbol name
             limit: Maximum files to return (default 20)
             min_score: Minimum relevance score (0.0-1.0)
-            repository_alias: Reserved for future filtering support
-            username: Reserved for future filtering support
+            repository_alias: Repository to scope the query to; when None,
+                every repository the caller may access is searched.
+            username: The caller whose grants scope the query (required; without
+                it or an access filtering service the query is refused with
+                AccessFilteringServiceUnavailableError)
             timeout_seconds: Maximum seconds for the query (default 30).
                 Raises QueryTimeoutError if exceeded.
 
@@ -715,8 +747,14 @@ class SCIPQueryService:
                 "avg_relevance": 0.0,
             }
 
-        # Get the scip directory from golden_repos_dir
-        scip_dir = self.get_golden_repos_dir()
+        # SCIP context queries search only repositories the caller may access:
+        # the composite searches exactly the access-filtered scip_files above
+        # and never globs a directory. scip_dir only labels log messages.
+        scip_dir = (
+            self._scip_dir_for_files(scip_files)
+            if repository_alias is not None
+            else self.get_golden_repos_dir()
+        )
 
         result = get_smart_context(
             symbol,
@@ -724,6 +762,7 @@ class SCIPQueryService:
             limit=limit,
             min_score=min_score,
             timeout_seconds=timeout_seconds,
+            scip_files=scip_files,
         )
 
         return {

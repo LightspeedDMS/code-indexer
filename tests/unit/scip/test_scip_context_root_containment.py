@@ -23,6 +23,7 @@ import pytest
 from code_indexer.scip.database.schema import DatabaseManager
 from code_indexer.scip.query.backends import DatabaseBackend
 from code_indexer.scip.query.primitives import SCIPQueryEngine
+from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 # Full SCIP symbol (language-prefixed) so exact lookup is a plain equality.
 SYMBOL = "python example 1.0 example/ExampleService#"
@@ -235,10 +236,10 @@ class TestServerQueryServiceSurface:
         )
 
         service = SCIPQueryService(
-            golden_repos_dir=golden_repos_dir, access_filtering_service=None
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
         )
         results = service.find_definition(
-            SYMBOL, exact=True, repository_alias="example-repo"
+            SYMBOL, exact=True, repository_alias="example-repo", username=TEST_USER
         )
         assert len(results) == 1
         return results
@@ -269,7 +270,7 @@ def _service(golden_repos_dir: Path):
     from code_indexer.server.services.scip_query_service import SCIPQueryService
 
     return SCIPQueryService(
-        golden_repos_dir=golden_repos_dir, access_filtering_service=None
+        golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
     )
 
 
@@ -317,7 +318,7 @@ class TestConfinementRootIsNotSteerable:
         (repo / ".code-indexer" / "scip").symlink_to(real_scip)
 
         results = _service(golden).find_definition(
-            SYMBOL, exact=True, repository_alias="example-repo"
+            SYMBOL, exact=True, repository_alias="example-repo", username=TEST_USER
         )
 
         assert len(results) == 1
@@ -335,9 +336,11 @@ class TestConfinementRootIsNotSteerable:
 
         with caplog.at_level(logging.WARNING):
             refused = service.find_definition(
-                SYMBOL, exact=True, repository_alias="example-repo"
+                SYMBOL, exact=True, repository_alias="example-repo", username=TEST_USER
             )
-        own = service.find_definition(SYMBOL, exact=True, repository_alias="other-repo")
+        own = service.find_definition(
+            SYMBOL, exact=True, repository_alias="other-repo", username=TEST_USER
+        )
 
         assert refused == []
         assert any(r.levelno == logging.WARNING for r in caplog.records)
@@ -351,11 +354,16 @@ class TestConfinementRootIsNotSteerable:
         service = _service(golden)
 
         with caplog.at_level(logging.WARNING):
-            listed = service.find_scip_files(repository_alias="example-repo")
+            listed = service.find_scip_files(
+                repository_alias="example-repo", username=TEST_USER
+            )
 
         assert listed == []
         assert any(r.levelno == logging.WARNING for r in caplog.records)
-        assert len(service.find_scip_files(repository_alias="other-repo")) == 1
+        own_listed = service.find_scip_files(
+            repository_alias="other-repo", username=TEST_USER
+        )
+        assert len(own_listed) == 1
 
     def test_engine_refuses_index_resolving_outside_its_repository(self, tmp_path):
         golden = tmp_path / "golden-repos"

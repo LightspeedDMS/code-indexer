@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from code_indexer.server.services.scip_query_service import SCIPQueryService
+from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 
 class TestSCIPQueryServiceFindScipFiles:
@@ -37,10 +38,12 @@ class TestSCIPQueryServiceFindScipFiles:
         scip_file2.write_text("mock scip data 2")
 
         # Create service with our test directory
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
 
         # Execute
-        scip_files = service.find_scip_files()
+        scip_files = service.find_scip_files(username=TEST_USER)
 
         # Verify: Should find both .scip.db files from golden repos
         assert len(scip_files) == 2
@@ -55,10 +58,12 @@ class TestSCIPQueryServiceFindScipFiles:
         nonexistent_dir = tmp_path / "nonexistent"
 
         # Create service with nonexistent directory
-        service = SCIPQueryService(golden_repos_dir=nonexistent_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=nonexistent_dir, access_filtering_service=GRANT_ALL
+        )
 
         # Execute
-        scip_files = service.find_scip_files()
+        scip_files = service.find_scip_files(username=TEST_USER)
 
         # Verify: Should return empty list
         assert scip_files == []
@@ -78,10 +83,12 @@ class TestSCIPQueryServiceFindScipFiles:
         scip_file2.write_text("mock scip data 2")
 
         # Create service
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
 
         # Execute
-        scip_files = service.find_scip_files()
+        scip_files = service.find_scip_files(username=TEST_USER)
 
         # Verify: Should find both files
         assert len(scip_files) == 2
@@ -105,10 +112,12 @@ class TestSCIPQueryServiceFindScipFiles:
         scip_file.write_text("mock scip data")
 
         # Create service
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
 
         # Execute
-        scip_files = service.find_scip_files()
+        scip_files = service.find_scip_files(username=TEST_USER)
 
         # Verify: Should only find the one valid .scip.db file
         assert len(scip_files) == 1
@@ -130,10 +139,14 @@ class TestSCIPQueryServiceFindScipFiles:
         scip_file2.write_text("mock scip data 2")
 
         # Create service
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
 
         # Execute: Query with repository_alias="repo1"
-        scip_files = service.find_scip_files(repository_alias="repo1")
+        scip_files = service.find_scip_files(
+            repository_alias="repo1", username=TEST_USER
+        )
 
         # Verify: Should only find repo1's .scip.db file, not repo2's
         assert len(scip_files) == 1
@@ -789,7 +802,9 @@ class TestScipCallchainFilesSearchedRealCount:
         scip_dir.mkdir(parents=True)
         _build_real_scip_db_with_call_chain(scip_dir / "index.scip.db")
 
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
         mock_user = MagicMock()
         mock_user.username = "testuser"
 
@@ -831,7 +846,9 @@ class TestScipCallchainFilesSearchedRealCount:
             scip_dir.mkdir(parents=True)
             _build_real_scip_db_with_call_chain(scip_dir / "index.scip.db")
 
-        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        service = SCIPQueryService(
+            golden_repos_dir=golden_repos_dir, access_filtering_service=GRANT_ALL
+        )
         mock_user = MagicMock()
         mock_user.username = "testuser"
 

@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from code_indexer.server.services.scip_query_service import SCIPQueryService
+from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 
 def _make_alias(aliases_dir: Path, alias_name: str, target: Path) -> None:
@@ -62,10 +63,12 @@ class TestScipResolvesAliasTargetVersion:
         _make_alias(golden / "aliases", "flask-global", snapshot)
 
         service = SCIPQueryService(
-            golden_repos_dir=str(golden), access_filtering_service=None
+            golden_repos_dir=str(golden), access_filtering_service=GRANT_ALL
         )
 
-        files = service.find_scip_files(repository_alias="flask-global")
+        files = service.find_scip_files(
+            repository_alias="flask-global", username=TEST_USER
+        )
 
         assert snapshot_db in files, (
             "SCIP must discover the alias-resolved snapshot index "
@@ -92,10 +95,10 @@ class TestScipResolvesAliasTargetVersion:
         _make_alias(golden / "aliases", "tooling", snapshot)
 
         service = SCIPQueryService(
-            golden_repos_dir=str(golden), access_filtering_service=None
+            golden_repos_dir=str(golden), access_filtering_service=GRANT_ALL
         )
 
-        files = service.find_scip_files(repository_alias="tooling")
+        files = service.find_scip_files(repository_alias="tooling", username=TEST_USER)
         assert snapshot_db in files
 
     def test_bare_alias_promoted_to_global(self, tmp_path):
@@ -111,10 +114,10 @@ class TestScipResolvesAliasTargetVersion:
         _make_alias(golden / "aliases", "flask-global", snapshot)
 
         service = SCIPQueryService(
-            golden_repos_dir=str(golden), access_filtering_service=None
+            golden_repos_dir=str(golden), access_filtering_service=GRANT_ALL
         )
 
-        files = service.find_scip_files(repository_alias="flask")
+        files = service.find_scip_files(repository_alias="flask", username=TEST_USER)
         assert snapshot_db in files
 
 
@@ -128,10 +131,10 @@ class TestLocalUnchangedRegression:
         db_b = _scip_index(golden / "repo-b")
 
         service = SCIPQueryService(
-            golden_repos_dir=str(golden), access_filtering_service=None
+            golden_repos_dir=str(golden), access_filtering_service=GRANT_ALL
         )
 
-        files = service.find_scip_files(username=None)
+        files = service.find_scip_files(username=TEST_USER)
         assert db_a in files
         assert db_b in files
         assert len(files) == 2
@@ -147,8 +150,10 @@ class TestLocalUnchangedRegression:
         _make_alias(golden / "aliases", "flask-global", snapshot)
 
         service = SCIPQueryService(
-            golden_repos_dir=str(golden), access_filtering_service=None
+            golden_repos_dir=str(golden), access_filtering_service=GRANT_ALL
         )
 
-        files = service.find_scip_files(repository_alias="flask-global")
+        files = service.find_scip_files(
+            repository_alias="flask-global", username=TEST_USER
+        )
         assert snapshot_db in files

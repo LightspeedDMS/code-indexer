@@ -243,13 +243,26 @@ def _warn_refused_indexes(refused: int, scip_dir: Path) -> None:
         )
 
 
-def _find_target_definition(
-    symbol: str, scip_dir: Path, confine_to_repo_root: bool = True
-) -> Optional[QueryResult]:
-    """Find the definition location for the target symbol."""
+def _index_files(scip_dir: Path, scip_files: Optional[List[Path]]) -> List[Path]:
+    """The index files a composite query searches: exactly ``scip_files``
+    when the caller supplies them (a server caller passes only the indexes
+    of repositories the user may access), else every ``.scip.db`` under
+    ``scip_dir``."""
+    if scip_files is not None:
+        return list(scip_files)
     # CRITICAL: .scip protobuf files are DELETED after database conversion
     # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    return list(scip_dir.glob("**/*.scip.db"))
+
+
+def _find_target_definition(
+    symbol: str,
+    scip_dir: Path,
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
+) -> Optional[QueryResult]:
+    """Find the definition location for the target symbol."""
+    scip_files = _index_files(scip_dir, scip_files)
 
     found: Optional[QueryResult] = None
     refused = 0
@@ -287,6 +300,7 @@ def _bfs_traverse_dependents(
     include: Optional[str],
     kind: Optional[str],
     confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> List[AffectedSymbol]:
     """Find all affected symbols using database transitive query.
 
@@ -295,9 +309,7 @@ def _bfs_traverse_dependents(
     the need for Python BFS traversal (256-567x faster).
     """
     affected_symbols: List[AffectedSymbol] = []
-    # CRITICAL: .scip protobuf files are DELETED after database conversion
-    # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    scip_files = _index_files(scip_dir, scip_files)
 
     # Query all SCIP files for transitive dependents
     # Database CTE handles the traversal, returning all dependents with depth info
@@ -431,6 +443,7 @@ def analyze_impact(
     include: Optional[str] = None,
     kind: Optional[str] = None,
     confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> ImpactAnalysisResult:
     """
     Analyze impact of changes to a symbol.
@@ -448,6 +461,9 @@ def analyze_impact(
         confine_to_repo_root: True (default) skips index files that do not
             resolve inside their own repository; the local CLI passes False
             (see SCIPQueryEngine).
+        scip_files: When given, exactly these index files are searched and
+            ``scip_dir`` is not globbed (server callers pass only the indexes
+            of repositories the user may access).
 
     Returns:
         ImpactAnalysisResult with affected symbols and file summary
@@ -476,7 +492,10 @@ def analyze_impact(
 
     # Find target definition
     target_location = _find_target_definition(
-        symbol, scip_dir, confine_to_repo_root=confine_to_repo_root
+        symbol,
+        scip_dir,
+        confine_to_repo_root=confine_to_repo_root,
+        scip_files=scip_files,
     )
 
     # Early-out: a symbol with no definition anywhere in the index cannot have
@@ -505,6 +524,7 @@ def analyze_impact(
         include,
         kind,
         confine_to_repo_root=confine_to_repo_root,
+        scip_files=scip_files,
     )
 
     # Aggregate by file
@@ -726,6 +746,7 @@ def get_smart_context(
     project: Optional[str] = None,
     timeout_seconds: int = 30,
     confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> SmartContextResult:
     """
     Get smart context for a symbol - curated file list with relevance scoring.
@@ -744,6 +765,9 @@ def get_smart_context(
         confine_to_repo_root: True (default) skips index files that do not
             resolve inside their own repository; the local CLI passes False
             (see SCIPQueryEngine).
+        scip_files: When given, exactly these index files are searched and
+            ``scip_dir`` is not globbed (server callers pass only the indexes
+            of repositories the user may access).
 
     Returns:
         SmartContextResult with prioritized file list
@@ -767,6 +791,7 @@ def get_smart_context(
                 min_score=min_score,
                 project=project,
                 confine_to_repo_root=confine_to_repo_root,
+                scip_files=scip_files,
             )
         except BaseException as e:
             exc_holder[0] = e
@@ -795,6 +820,7 @@ def _get_smart_context_impl(
     min_score: float = 0.0,
     project: Optional[str] = None,
     confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> SmartContextResult:
     """
     Internal implementation of get_smart_context (no timeout logic).
@@ -803,9 +829,7 @@ def _get_smart_context_impl(
     can abandon this function by letting the daemon thread complete naturally
     while the caller raises QueryTimeoutError.
     """
-    # CRITICAL: .scip protobuf files are DELETED after database conversion
-    # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    scip_files = _index_files(scip_dir, scip_files)
 
     # Collect all related symbols with relationships
     context_data: Dict[
@@ -851,6 +875,7 @@ def _get_smart_context_impl(
             depth=1,
             project=project,
             confine_to_repo_root=confine_to_repo_root,
+            scip_files=scip_files,
         )
         for affected in impact_result.affected_symbols:
             fp = (
