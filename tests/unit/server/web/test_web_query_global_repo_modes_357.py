@@ -497,13 +497,14 @@ class TestQueryFailureLogging:
 
     def _assert_refusal_logged_as_warning(
         self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    ) -> str:
         records = _routes_records(caplog)
         assert [r for r in records if r.levelno >= logging.ERROR] == []
         refusals = [r for r in records if "[STORE-GENERAL-053]" in r.getMessage()]
         assert len(refusals) == 1
         assert refusals[0].levelno == logging.WARNING
         assert refusals[0].exc_info is None
+        return refusals[0].getMessage()
 
     def test_access_refusal_logs_warning_not_error(self, web_app, env, handler, caplog):
         with caplog.at_level(logging.WARNING):
@@ -512,7 +513,11 @@ class TestQueryFailureLogging:
             )
 
         assert _error(html) is not None
-        self._assert_refusal_logged_as_warning(caplog)
+        message = self._assert_refusal_logged_as_warning(caplog)
+        # A repository the user cannot access is refused as not found; that
+        # message names only the repository and the user, so it is logged.
+        assert "SemanticQueryError" in message
+        assert UNGRANTED_GLOBAL in message
 
     def test_invalid_time_range_logs_warning_not_error(
         self, web_app, env, handler, caplog
@@ -528,7 +533,25 @@ class TestQueryFailureLogging:
             )
 
         assert _error(html) is not None
-        self._assert_refusal_logged_as_warning(caplog)
+        message = self._assert_refusal_logged_as_warning(caplog)
+        assert "ValueError" in message
+
+    def test_provider_error_text_is_not_logged_by_the_web_page(
+        self, web_app, env, handler, caplog
+    ):
+        token = "example-secret-token"
+
+        def _provider_outage(_service: Any, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(f"voyage-ai: HTTP 503 (Authorization: Bearer {token})")
+
+        with patch(SEARCH_BOUNDARY, _provider_outage):
+            with caplog.at_level(logging.WARNING):
+                html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
+
+        assert _error(html) is not None
+        message = self._assert_refusal_logged_as_warning(caplog)
+        assert "SemanticQueryError" in message
+        assert token not in message
 
     def test_unexpected_failure_logs_error_with_traceback(
         self, web_app, env, handler, caplog, monkeypatch
@@ -545,6 +568,38 @@ class TestQueryFailureLogging:
 
         assert _error(html) is not None
         errors = [r for r in _routes_records(caplog) if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
+        assert f"[{code}]" in errors[0].getMessage()
+        assert errors[0].exc_info is not None
+
+    def test_unexpected_value_error_in_scip_mode_logs_error_with_traceback(
+        self, web_app, env, handler, caplog, monkeypatch
+    ):
+        # Only the text query's own failures are expected outcomes; a
+        # ValueError anywhere else (here the repository listing a SCIP
+        # query starts from) is a server fault. Only the query's own listing
+        # fails; the full page lists repositories again to render the form.
+        real_listing = web_routes._get_all_activated_repos_for_query
+        calls: List[int] = []
+
+        def _listing_fault(registry: Any = None) -> List[Dict[str, Any]]:
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("unexpected repository listing fault")
+            return list(real_listing(registry))
+
+        monkeypatch.setattr(
+            web_routes, "_get_all_activated_repos_for_query", _listing_fault
+        )
+
+        with caplog.at_level(logging.WARNING):
+            html = _query(web_app, handler, GRANTED_GLOBAL, "Example", "scip")
+
+        assert _error(html) is not None
+        records = _routes_records(caplog)
+        assert [r for r in records if "[STORE-GENERAL-053]" in r.getMessage()] == []
+        errors = [r for r in records if r.levelno >= logging.ERROR]
         assert len(errors) == 1
         code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
         assert f"[{code}]" in errors[0].getMessage()

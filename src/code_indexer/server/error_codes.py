@@ -4517,11 +4517,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     "STORE-GENERAL-053": ErrorDefinition(
         code="STORE-GENERAL-053",
         description=(
-            "Web Query page query refused: the user cannot access the "
-            "repository or a query parameter is invalid"
+            "Web Query page query not completed: the repository was not found "
+            "or not accessible, a query parameter is invalid, or the search "
+            "could not run (e.g. embedding provider outage, timeout, missing "
+            "index). Logged with the exception class; the message is logged "
+            "only for a repository not found. The reason is shown to the user"
         ),
         severity=Severity.WARNING,
-        action="None needed; the refusal is shown to the user on the Query page",
+        action=(
+            "None for a repository not found or an invalid parameter; if "
+            "valid queries keep failing, check embedding provider health and "
+            "the repository's indexes"
+        ),
     ),
     "SVC-GENERAL-015": ErrorDefinition(
         code="SVC-GENERAL-015",

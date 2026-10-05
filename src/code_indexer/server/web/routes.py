@@ -5938,34 +5938,33 @@ def query_submit(
                 error_message = f"Repository '{user_alias}' not found"
             else:
                 # Activated and global repositories: the same mode-aware path.
-                text_rows, warning_message = _execute_text_query(
-                    query_manager,
-                    target_repo,
-                    user_alias,
-                    session.username,
-                    query_text,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language,
-                    path_filter=path_pattern,
-                    search_mode=search_mode,
-                    time_range=time_range,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-                results.extend(text_rows)
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
+                    )
+                except (SemanticQueryError, ValueError) as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # shown to the user; _execute_text_query logged it.
+                    error_message = f"Query failed: {str(e)}"
+                else:
+                    results.extend(text_rows)
 
-    except (SemanticQueryError, ValueError) as e:
-        # Expected refusals (no access to the repository, invalid query
-        # parameters): shown to the user, not a server fault.
-        logger.warning(
-            format_error_log("STORE-GENERAL-053", f"Query refused: {e}"),
-            extra={"correlation_id": get_correlation_id()},
-        )
-        error_message = f"Query failed: {str(e)}"
     except Exception as e:
         logger.error(
             format_error_log("STORE-GENERAL-035", f"Query execution failed: {e}"),
@@ -6272,29 +6271,52 @@ def _execute_text_query(
     MCP use, with every form parameter. A global repository is queried as
     the signed-in user, so the normal per-user repository access narrowing
     applies (a repository the user cannot access is refused like an unknown
-    one); an activated repository is queried as its owner. Failures raise.
+    one); an activated repository is queried as its owner. Failures raise;
+    a query the query layer did not complete (SemanticQueryError, ValueError)
+    is logged here once, at WARNING, before it is re-raised.
     """
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+
     if target_repo.get("is_global"):
         username = session_username
     else:
         username = target_repo.get("username", session_username)
 
-    query_response = query_manager.query_user_repositories(
-        username=username,
-        query_text=query_text.strip(),
-        repository_alias=user_alias,
-        limit=limit,
-        min_score=min_score,
-        language=language if language else None,
-        path_filter=path_filter if path_filter else None,
-        search_mode=search_mode,
-        time_range=time_range if time_range else None,
-        time_range_all=time_range_all,
-        at_commit=at_commit if at_commit else None,
-        case_sensitive=case_sensitive,
-        fuzzy=fuzzy,
-        regex=regex,
-    )
+    try:
+        query_response = query_manager.query_user_repositories(
+            username=username,
+            query_text=query_text.strip(),
+            repository_alias=user_alias,
+            limit=limit,
+            min_score=min_score,
+            language=language if language else None,
+            path_filter=path_filter if path_filter else None,
+            search_mode=search_mode,
+            time_range=time_range if time_range else None,
+            time_range_all=time_range_all,
+            at_commit=at_commit if at_commit else None,
+            case_sensitive=case_sensitive,
+            fuzzy=fuzzy,
+            regex=regex,
+        )
+    except (SemanticQueryError, ValueError) as e:
+        # Only a repository-not-found refusal (also how a repository the user
+        # cannot access is refused) is logged with its message: it names just
+        # the repository and the user. Other messages can carry a provider's
+        # error text, so only the class is logged; the user sees the reason.
+        message = str(e)
+        not_found = (
+            message.startswith("Repository '") and "' not found for user '" in message
+        ) or message.startswith("No activated repositories found for user '")
+        detail = message if not_found else "reason shown to the user, not logged"
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-053",
+                f"Query not completed: {type(e).__name__}: {detail}",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        raise
 
     rows = [
         {
@@ -6440,34 +6462,33 @@ def query_results_partial_post(
                     error_message = scip_error
             else:
                 # Activated and global repositories: the same mode-aware path.
-                text_rows, warning_message = _execute_text_query(
-                    query_manager,
-                    target_repo,
-                    user_alias,
-                    session.username,
-                    query_text,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language,
-                    path_filter=path_pattern,
-                    search_mode=search_mode,
-                    time_range=time_range,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-                results.extend(text_rows)
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
+                    )
+                except (SemanticQueryError, ValueError) as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # shown to the user; _execute_text_query logged it.
+                    error_message = f"Query failed: {str(e)}"
+                else:
+                    results.extend(text_rows)
 
-    except (SemanticQueryError, ValueError) as e:
-        # Expected refusals (no access to the repository, invalid query
-        # parameters): shown to the user, not a server fault.
-        logger.warning(
-            format_error_log("STORE-GENERAL-053", f"Query refused: {e}"),
-            extra={"correlation_id": get_correlation_id()},
-        )
-        error_message = f"Query failed: {str(e)}"
     except Exception as e:
         logger.error(
             format_error_log("STORE-GENERAL-041", f"Query execution failed: {e}"),
