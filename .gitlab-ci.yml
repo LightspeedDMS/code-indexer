@@ -168,6 +168,7 @@ smoke:
       tests/unit/server/storage/postgres/test_null_executing_node_orphan_1512.py
       tests/unit/server/storage/test_background_jobs_active_unique_index.py
       tests/unit/server/utils/test_cluster_node_id_resolver.py
+      tests/unit/xray/test_rust_backend_compile_budget_worker_aware.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
   rules:

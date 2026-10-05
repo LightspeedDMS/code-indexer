@@ -41,19 +41,77 @@ _FLEET_INVARIANT_SEAMS = (
     "register_job_if_no_conflict",  # M4: the race-to-claim single-flight
 )
 
-# Paths CI runs wholesale rather than file-by-file (build:image's in-image step).
-_DIRECTORY_COVERED = ("tests/unit/xray/",)
+# Jobs whose pytest invocation counts as "CI runs this".
+_SMOKE_JOB = "smoke"
+_IMAGE_JOB = "build:image"
+# Directory arguments: a file under one of these is covered by that directory
+# token appearing as a pytest argument. Only build:image passes one today.
+_DIRECTORY_ARG_SUFFIX = "/"
+# pytest options whose VALUE is a test path but means the opposite of "run it".
+_NEGATING_OPTIONS = ("--deselect", "--ignore")
 
 
-def _ci_text() -> str:
-    return _CI.read_text(encoding="utf-8")
+def _pytest_test_tokens(job: str) -> Set[str]:
+    """Test-path arguments actually passed to pytest by `job`.
+
+    Parsed from the YAML and shlex-split, NOT substring-matched against the raw
+    file. The first version of this did ``rel in ci_file_text`` and review showed
+    it failing open in precisely the way this module's docstring forbids: the
+    commit that added the guard also added a .gitlab-ci.yml COMMENT naming the
+    guard's own path, so the guard's membership check passed on that comment.
+    Removing it from the pytest args would have stopped it running in CI with
+    nothing reporting the loss -- a guard that cannot notice its own removal.
+
+    Values of --deselect/--ignore are dropped: they are test paths that mean the
+    opposite of "run this".
+    """
+    import shlex
+
+    import yaml
+
+    config = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    entries = (config.get(job) or {}).get("script") or []
+    tokens: Set[str] = set()
+    for entry in entries:
+        if "pytest" not in entry:
+            continue
+        parts = shlex.split(entry)
+        skip_next = False
+        for part in parts:
+            if skip_next:
+                skip_next = False
+                continue
+            if part in _NEGATING_OPTIONS:
+                skip_next = True
+                continue
+            if part.startswith("--") and "=" in part:
+                opt = part.split("=", 1)[0]
+                if opt in _NEGATING_OPTIONS:
+                    continue
+            if part.startswith("tests/"):
+                tokens.add(part)
+    return tokens
+
+
+def _covered_tokens() -> Set[str]:
+    return _pytest_test_tokens(_SMOKE_JOB) | _pytest_test_tokens(_IMAGE_JOB)
 
 
 def _named_in_ci(rel: str) -> bool:
-    text = _ci_text()
-    if rel in text:
+    """Whether some CI job passes `rel` (or a directory containing it) to pytest.
+
+    NOTE on directory coverage: the only directory argument today is
+    ``tests/unit/xray/`` in ``build:image``, and that job runs on master/web
+    ONLY -- not on merge-request pipelines. So a file covered solely by that
+    directory is not checked before merge. That is weaker than it looks, which
+    is why the one derived file in that position is ALSO named in ``smoke``
+    rather than left to the directory. Accepting directory coverage here keeps
+    the rule honest if a future job runs a whole tree pre-merge.
+    """
+    tokens = _covered_tokens()
+    if rel in tokens:
         return True
-    return any(rel.startswith(d) and d in text for d in _DIRECTORY_COVERED)
+    return any(t.endswith(_DIRECTORY_ARG_SUFFIX) and rel.startswith(t) for t in tokens)
 
 
 def _tests_touching_invariants() -> Set[str]:
@@ -73,12 +131,84 @@ def _tests_touching_invariants() -> Set[str]:
 def test_the_ci_file_is_where_we_think_it_is() -> None:
     """Fail loudly rather than vacuously if the layout moves.
 
-    Every assertion below is of the form "X appears in this file". If the file
-    were missing or empty, they would all pass by doing nothing -- the exact
-    fail-open shape this suite exists to catch elsewhere.
+    Every assertion below asks "is this path a pytest argument". If the file
+    were missing, unparseable, or the job renamed, the answer would be "no" for
+    everything and the suite would fail loudly -- but a scan that returned an
+    EMPTY required set would pass by doing nothing, which is the shape this
+    suite exists to catch elsewhere. Hence this and the next test.
     """
     assert _CI.is_file(), f"{_CI} not found; the checks below would pass vacuously"
-    assert "python -m pytest" in _ci_text(), "no pytest invocation in .gitlab-ci.yml"
+    tokens = _covered_tokens()
+    assert len(tokens) >= 20, (
+        f"only {len(tokens)} pytest test-path arguments found across "
+        f"{_SMOKE_JOB!r} and {_IMAGE_JOB!r}; the YAML shape probably changed and "
+        f"every membership check below would fail or pass by accident"
+    )
+
+
+def test_membership_requires_a_real_pytest_argument() -> None:
+    """A path mentioned only in a COMMENT must not count as covered.
+
+    This is the finding that prompted the rewrite: the original check was
+    ``rel in ci_file_text``, and the very commit adding this guard also added a
+    comment naming the guard's own file -- so the guard could be dropped from
+    the pytest args and still report itself as covered. A guard that cannot
+    notice its own removal is decoration.
+    """
+    import shlex
+
+    import yaml
+
+    config = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    entry = next(e for e in config[_SMOKE_JOB]["script"] if "pytest" in e)
+    args = set(shlex.split(entry))
+    # The guard's own file must be a real argument, not merely mentioned.
+    me = "tests/unit/ci/test_smoke_covers_fleet_invariants.py"
+    assert me in args, (
+        f"{me} is not a pytest argument of the {_SMOKE_JOB!r} job. If it only "
+        f"appears in a comment, this guard does not run in CI and cannot "
+        f"report anything -- including its own absence."
+    )
+
+
+def test_a_deselected_path_does_not_count_as_covered() -> None:
+    """--deselect/--ignore name test paths that mean the OPPOSITE of 'run it'."""
+    import textwrap
+
+    fake = textwrap.dedent(
+        """
+        smoke:
+          script:
+            - >
+              python -m pytest tests/unit/a.py
+              --deselect tests/unit/b.py
+              --ignore=tests/unit/c.py
+        """
+    )
+    import shlex
+
+    import yaml
+
+    cfg = yaml.safe_load(fake)
+    entry = next(e for e in cfg["smoke"]["script"] if "pytest" in e)
+    parts = shlex.split(entry)
+    skip = False
+    got = set()
+    for part in parts:
+        if skip:
+            skip = False
+            continue
+        if part in _NEGATING_OPTIONS:
+            skip = True
+            continue
+        if part.startswith("--") and "=" in part:
+            if part.split("=", 1)[0] in _NEGATING_OPTIONS:
+                continue
+        if part.startswith("tests/"):
+            got.add(part)
+    assert got == {"tests/unit/a.py"}, (
+        f"deselect/ignore values leaked into the covered set: {sorted(got)}"
+    )
 
 
 def test_the_invariant_scan_finds_something() -> None:
@@ -100,4 +230,17 @@ def test_a_fleet_invariant_test_is_named_in_ci(rel: str) -> None:
         f"Add it to the `smoke` job's pytest arguments in .gitlab-ci.yml, or, if "
         f"it genuinely does not belong there, stop importing "
         f"{' / '.join(_FLEET_INVARIANT_SEAMS)}."
+    )
+
+
+def test_derived_files_are_covered_by_a_pre_merge_job() -> None:
+    """Directory coverage via build:image is master-only, so it is not a
+    pre-merge check. Everything derived must be in `smoke`, which runs on every
+    merge request -- otherwise a regression is caught only after it lands.
+    """
+    smoke = _pytest_test_tokens(_SMOKE_JOB)
+    missing = sorted(r for r in _tests_touching_invariants() if r not in smoke)
+    assert not missing, (
+        "covered only by a master-only job, so not checked before merge: "
+        + ", ".join(missing)
     )
