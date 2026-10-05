@@ -220,23 +220,14 @@ class EmbeddingProviderFactory:
         import os
 
         providers: List[str] = []
-        # Check VoyageAI — env var, CLI Config (.voyage_ai), or ServerConfig DB field (.voyageai_api_key)
-        voyage_key = (
-            os.getenv("VOYAGE_API_KEY")
-            or (
-                hasattr(config, "voyage_ai")
-                and config.voyage_ai
-                and config.voyage_ai.api_key  # type: ignore[attr-defined]
-            )  # type: ignore[union-attr]
-            or (hasattr(config, "voyageai_api_key") and config.voyageai_api_key)  # type: ignore[union-attr]
-        )
-        if voyage_key:
+        # Check VoyageAI — the environment is the key's only source of truth
+        # (VoyageAIConfig has no api_key field; the server syncs its stored
+        # key into VOYAGE_API_KEY).
+        if os.getenv("VOYAGE_API_KEY"):
             providers.append("voyage-ai")
-        # Check Cohere — env var, CLI Config (.cohere), or ServerConfig DB field (.cohere_api_key)
-        cohere_key = (
-            os.getenv("CO_API_KEY")
-            or (hasattr(config, "cohere") and config.cohere and config.cohere.api_key)  # type: ignore[union-attr]
-            or (hasattr(config, "cohere_api_key") and config.cohere_api_key)  # type: ignore[union-attr]
+        # Check Cohere — env var or CLI Config (.cohere)
+        cohere_key = os.getenv("CO_API_KEY") or (
+            hasattr(config, "cohere") and config.cohere and config.cohere.api_key  # type: ignore[union-attr]
         )
         if cohere_key:
             providers.append("cohere")
