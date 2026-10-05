@@ -12,6 +12,7 @@ and a detector that must never raise at import time.
 from __future__ import annotations
 
 import json
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from code_indexer.utils.worker_budget import (
     coerce_worker_count,
     detect_worker_count,
     per_process_budget,
+    read_argv_workers,
     read_config_json_workers,
 )
 
@@ -155,3 +157,155 @@ def test_missing_file_is_unknown(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path / "nonexistent-home"))
     assert read_config_json_workers() is None
+
+
+# ───────────────────────────── read_argv_workers ─────────────────────────────
+#
+# The rung that exists because the other two fail in a pod. Found by deploying
+# the canary and asking the running process what it had detected: the answer was
+# 1 while the container args said --workers 2, so every budget divided by 1 --
+# in the one deployment the division was written for.
+#
+# Every !92 test injected detect_worker_count, so all 15 passed while the real
+# detector was wrong. These drive the real thing against a synthetic /proc, and
+# the last one against a real process tree.
+
+
+def _fake_proc(tmp_path, entries):
+    """Build a /proc-shaped tree: {pid: (cmdline_args, ppid)}."""
+    root = tmp_path / "proc"
+    for pid, (argv, ppid) in entries.items():
+        d = root / pid
+        d.mkdir(parents=True)
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (d / "status").write_text(f"Name:\tpython\nPPid:\t{ppid}\n")
+    return root
+
+
+def test_argv_reads_workers_from_this_process(tmp_path):
+    root = _fake_proc(tmp_path, {"7": (["python", "-m", "x", "--workers", "2"], "1")})
+    assert read_argv_workers(proc_root=root, pid="7") == 2
+
+
+def test_argv_accepts_the_equals_form(tmp_path):
+    root = _fake_proc(tmp_path, {"7": (["python", "--workers=4"], "1")})
+    assert read_argv_workers(proc_root=root, pid="7") == 4
+
+
+def test_argv_walks_up_to_the_uvicorn_master(tmp_path):
+    """The case that matters, and the reason a self-only read is not enough.
+
+    uvicorn spawns workers through multiprocessing, so a worker's OWN argv is
+    ``python -B -c from multiprocessing.spawn import spawn_main; ...``. Observed
+    live on the canary: master pid 7 carries --workers 2, workers 9 and 10 carry
+    spawn_main. Reading only /proc/self/cmdline returns None for every worker --
+    which is the process that actually sizes the pools.
+    """
+    root = _fake_proc(
+        tmp_path,
+        {
+            "1": (["/usr/bin/tini", "--", "python", "-m", "x", "--workers", "2"], "0"),
+            "7": (["python", "-m", "x", "--workers", "2"], "1"),
+            "9": (
+                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                "7",
+            ),
+        },
+    )
+    assert read_argv_workers(proc_root=root, pid="9") == 2
+
+
+def test_argv_gives_up_rather_than_looping_on_a_cycle(tmp_path):
+    root = _fake_proc(tmp_path, {"5": (["python"], "5")})
+    assert read_argv_workers(proc_root=root, pid="5") is None
+
+
+def test_argv_stops_at_pid_0(tmp_path):
+    root = _fake_proc(tmp_path, {"1": (["init"], "0")})
+    assert read_argv_workers(proc_root=root, pid="1") is None
+
+
+def test_argv_respects_the_hop_limit(tmp_path):
+    """--workers further up than max_hops is not found, rather than walked forever."""
+    chain = {
+        "4": (["python", "--workers", "8"], "0"),
+        "3": (["python"], "4"),
+        "2": (["python"], "3"),
+        "1": (["python"], "2"),
+    }
+    root = _fake_proc(tmp_path, chain)
+    assert read_argv_workers(proc_root=root, pid="1", max_hops=1) is None
+    assert read_argv_workers(proc_root=root, pid="1", max_hops=3) == 8
+
+
+def test_argv_ignores_a_nonsense_value(tmp_path):
+    root = _fake_proc(tmp_path, {"7": (["python", "--workers", "zero"], "1")})
+    assert read_argv_workers(proc_root=root, pid="7") is None
+    root2 = _fake_proc(tmp_path / "b", {"7": (["python", "--workers", "0"], "1")})
+    assert read_argv_workers(proc_root=root2, pid="7") is None
+
+
+def test_argv_missing_proc_is_unknown_not_fatal(tmp_path):
+    """Runs at import; a non-Linux host must get None, never an exception."""
+    assert read_argv_workers(proc_root=tmp_path / "nope", pid="1") is None
+
+
+def test_argv_is_consulted_by_the_real_default_detector(tmp_path, monkeypatch):
+    """detect_worker_count() must actually USE the new rung.
+
+    A correct read_argv_workers wired into nothing is the shape of the original
+    bug, where the mechanism was right and the deployment still divided by 1.
+    """
+    import code_indexer.utils.worker_budget as wb
+
+    monkeypatch.setattr(wb, "read_applied_worker_count", lambda: 1)
+    monkeypatch.setattr(wb, "read_config_json_workers", lambda *a, **k: None)
+    monkeypatch.setattr(wb, "read_argv_workers", lambda *a, **k: 2)
+    assert wb.detect_worker_count() == 2
+
+
+def test_end_to_end_against_a_real_process_tree(tmp_path):
+    """No synthetic /proc and no injection: a real parent/child pair.
+
+    The parent is launched with ``--workers 3`` in its real argv and starts a
+    CHILD whose own argv does not contain it -- the uvicorn master/worker shape.
+    The child calls read_argv_workers() against the real /proc and must walk up
+    to find it.
+
+    Uses subprocess rather than os.fork(): forking inside a pytest process can
+    deadlock on inherited locks, and an earlier version of this test hung the
+    suite for minutes before being killed.
+    """
+    import subprocess
+    import sys
+
+    if not pathlib.Path("/proc/self/cmdline").exists():
+        pytest.skip("/proc unavailable on this platform")
+
+    src = str(pathlib.Path(__file__).resolve().parents[3] / "src")
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {src!r})\n"
+        "from code_indexer.utils.worker_budget import read_argv_workers\n"
+        "print(read_argv_workers())\n"
+    )
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys\n"
+        f"out = subprocess.run([sys.executable, {str(child)!r}],\n"
+        "                     capture_output=True, text=True, timeout=30)\n"
+        "sys.stdout.write(out.stdout)\n"
+        "sys.stderr.write(out.stderr)\n"
+    )
+    res = subprocess.run(
+        [sys.executable, str(parent), "--workers", "3"],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert res.returncode == 0, res.stderr[-400:]
+    assert res.stdout.strip() == "3", (
+        f"child read {res.stdout.strip()!r} -- it must walk up to the parent, "
+        f"whose argv carries --workers 3"
+    )

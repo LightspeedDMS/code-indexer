@@ -13,10 +13,13 @@ The arithmetic is trivial; the reason this is a shared module is that the
 * ``get_applied_worker_count()`` reads the live systemd ExecStart and then
   applied_launch.json. A Kubernetes pod has neither, so on the cluster -- the one
   deployment where this matters most -- it always answers 1 and divides nothing.
-* ``config.json`` carries ``workers``, seeded into the pod from the ConfigMap,
-  whose value the overlay requires to stay in lockstep with the ``--workers`` it
-  passes in the container args. That is the rung that works in a pod, and the one
-  that does not exist on a developer's laptop.
+* ``config.json`` *may* carry ``workers``. This module used to claim it was
+  "the rung that works inside a Kubernetes pod", which was wrong: the live pod's
+  ``/data/config.json`` has no ``workers`` key, so the lookup returned None and
+  every budget divided by 1. Kept as a source for deployments that do set it.
+* **the process command line** -- ``--workers N``, read from /proc. This is the
+  one that actually works in a pod, because it is what launched the process and
+  so cannot drift from reality.
 
 So both are consulted and the LARGER wins. config.json is the target an admin
 saved; the applied resolver is what the running unit was launched with, and a
@@ -102,6 +105,95 @@ def read_config_json_workers(
     return None
 
 
+#: How far up the parent chain to look for ``--workers``. A uvicorn worker's
+#: parent is the master, so 1 hop suffices; a couple more costs nothing and
+#: survives a wrapper process (tini, a shell) being inserted.
+_ARGV_MAX_PARENT_HOPS = 4
+
+
+def _argv_of(pid: str, proc_root: Path) -> list:
+    raw = (proc_root / pid / "cmdline").read_bytes()
+    return [p for p in raw.decode("utf-8", "replace").split("\0") if p]
+
+
+def _ppid_of(pid: str, proc_root: Path) -> Optional[str]:
+    for line in (proc_root / pid / "status").read_text().splitlines():
+        if line.startswith("PPid:"):
+            return line.split()[1]
+    return None
+
+
+def _workers_in_argv(argv: list) -> Optional[int]:
+    """``--workers N`` or ``--workers=N`` from one command line, else None."""
+    for i, part in enumerate(argv):
+        if part == "--workers" and i + 1 < len(argv):
+            try:
+                return coerce_worker_count(int(argv[i + 1]))
+            except ValueError:
+                return None
+        if part.startswith("--workers="):
+            try:
+                return coerce_worker_count(int(part.split("=", 1)[1]))
+            except ValueError:
+                return None
+    return None
+
+
+def read_argv_workers(
+    proc_root: Path = Path("/proc"),
+    pid: str = "self",
+    max_hops: int = _ARGV_MAX_PARENT_HOPS,
+) -> Optional[int]:
+    """Read ``--workers N`` from this process's command line, or an ancestor's.
+
+    This is the rung that actually works in a pod, and the reason it exists:
+    the other two do not.
+
+    * ``get_applied_worker_count()`` reads systemd/applied_launch.json. A pod has
+      neither, so it answers 1.
+    * ``config.json`` was documented here as "the rung that works inside a
+      Kubernetes pod, whose ``workers`` the overlay keeps in lockstep with the
+      ``--workers`` it passes in the container args". **That was never true.**
+      Checked on a live pod: the container args are
+      ``... --workers 2`` while ``/data/config.json`` has no ``workers`` key at
+      all, so the lookup returned None and every budget divided by 1 -- the
+      cluster being the one deployment the division was written for.
+
+    The command line cannot drift from reality the way a parallel config key
+    can, because it IS what launched the process.
+
+    The parent walk is required, not defensive: uvicorn spawns its workers
+    through multiprocessing, so a worker's OWN argv is
+    ``python -B -c from multiprocessing.spawn import spawn_main; ...`` and the
+    flag lives on the master. Observed live: master pid 7 carries
+    ``--workers 2``; workers pid 9/10 carry ``spawn_main``.
+
+    Linux-only (/proc). Returns None anywhere else, and never raises -- this
+    runs at module import.
+    """
+    try:
+        current: Optional[str] = pid
+        # Bounded by max_hops, which is also what makes a PPid cycle safe: a pid
+        # whose parent is itself simply exhausts the hops and answers None. The
+        # bound is the guard -- an unbounded walk here spins forever on such a
+        # cycle, which is not hypothetical: a leftover mutation turned this into
+        # `while True` and hung the test suite.
+        for _ in range(max_hops + 1):
+            if current is None:
+                return None
+            found = _workers_in_argv(_argv_of(current, proc_root))
+            if found is not None:
+                return found
+            nxt = _ppid_of(current, proc_root)
+            if nxt is None or nxt == "0":
+                return None
+            current = nxt
+        return None
+    except Exception as exc:  # noqa: BLE001 -- unreadable /proc is "unknown"
+        logger.debug("worker_budget: argv worker-count lookup failed: %s", exc)
+        return None
+
+
 def read_applied_worker_count() -> Optional[int]:
     """Read the APPLIED worker count via the repo's existing resolver.
 
@@ -138,7 +230,11 @@ def detect_worker_count(
     today's behaviour -- and never raises.
     """
     if sources is None:
-        sources = (read_applied_worker_count, read_config_json_workers)
+        sources = (
+            read_argv_workers,
+            read_applied_worker_count,
+            read_config_json_workers,
+        )
     counts = []
     for source in sources:
         try:
