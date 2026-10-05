@@ -109,6 +109,23 @@ def _is_regex_state_limit_error(exc: Exception) -> bool:
     return _REGEX_STATE_LIMIT_ERROR_MARKER in str(exc).lower()
 
 
+def _drop_orphaned_bool_ops(tokens: List[str]) -> List[str]:
+    """Remove OR/AND/NOT tokens that are leading, trailing or doubled.
+
+    'foo OR OR bar' -> 'foo OR bar' (the first of a run is kept),
+    'AND foo' -> 'foo', 'foo OR' -> 'foo'.
+    """
+    result: List[str] = []
+    for tok in tokens:
+        if tok in _BOOL_OPS and (not result or result[-1] in _BOOL_OPS):
+            continue
+        result.append(tok)
+    if result and result[-1] in _BOOL_OPS:
+        # The loop never keeps two operators in a row, so at most one trails.
+        result.pop()
+    return result
+
+
 def sanitize_fts_query(query_text: str) -> str:
     """Sanitize an FTS query to prevent Tantivy parse errors.
 
@@ -131,6 +148,17 @@ def sanitize_fts_query(query_text: str) -> str:
           (Tantivy interprets field:value syntax)
         - Parentheses (), brackets [], braces {}: stripped — prevent "Syntax Error" or
           "Unsupported query" ValueError (Tantivy grouping/range syntax)
+
+      Phase 2b - '+'/'-' operators:
+        - Tokens consisting only of '+'/'-' are dropped ("Syntax Error: -").
+        - When a token was dropped, OR/AND/NOT operators it left leading,
+          trailing or doubled are removed ('foo OR -' -> 'foo',
+          'foo OR - OR bar' -> 'foo OR bar').
+        - If the query then has no valid boolean operator, a leading '+'/'-'
+          run is stripped, so '-bar' / '--verbose' search the literal word
+          (per-term parsing rejects '-bar' alone). A valid boolean query keeps
+          its prefixes: parse_query() handles 'foo AND -bar' itself.
+        - Inner and trailing operators ('foo-bar', 'foo+') are kept.
 
       Phase 3 - Bare boolean operators:
         Runs AFTER Phase 2 so boolean validation sees the final token structure
@@ -162,6 +190,26 @@ def sanitize_fts_query(query_text: str) -> str:
     # Parentheses, brackets, braces: cause "Syntax Error" or "Unsupported query" ValueError
     for ch in "()[]{}":
         query_text = query_text.replace(ch, "")
+
+    # Phase 2b: '+'/'-' operators. A token made only of '+'/'-' is always
+    # dropped ("Syntax Error: -"), together with any boolean operator that
+    # removal orphans ('foo OR -'), rather than searching it as a literal word.
+    # A valid boolean query goes whole to parse_query(), which handles
+    # '-term'/'+term' itself, so prefixes are kept there. Every other query is
+    # split into per-term queries where '-bar' alone fails ("Only excluding
+    # terms given"), so a leading run is stripped and the literal word searched.
+    # Inner and trailing operators ('foo-bar', 'foo+') parse fine and are kept.
+    tokens = query_text.split()
+    if any(tok[0] in "+-" for tok in tokens):
+        kept = [tok for tok in tokens if tok.strip("+-")]
+        if len(kept) < len(tokens):
+            kept = _drop_orphaned_bool_ops(kept)
+        if not _contains_valid_boolean_ops(" ".join(kept)):
+            # '-OR' strips to the literal word 'or', never a live operator:
+            # the query was classified as non-boolean above.
+            stripped = (tok.lstrip("+-") for tok in kept)
+            kept = [tok.lower() if tok in _BOOL_OPS else tok for tok in stripped]
+        query_text = " ".join(kept)
 
     # Phase 3: handle bare boolean operators (runs after syntax escaping)
     tokens = query_text.split()
@@ -762,10 +810,13 @@ class TantivyIndexManager:
             TantivyQuery: Tantivy Query class
 
         Returns:
-            Tantivy query object
+            Tantivy query object, or None when the sanitized query has no terms
+            (the caller returns no results).
 
         Raises:
             RuntimeError: If index is not initialized
+            ValueError: If Tantivy rejects the query, or any one term of a
+                multi-word exact query (every term is required)
         """
         if self._index is None:
             raise RuntimeError("Index not initialized")
@@ -775,6 +826,11 @@ class TantivyIndexManager:
 
         # Split query into terms to detect single vs multi-word queries
         query_terms = query_text.split()
+        if not query_terms:
+            # Nothing left to search (e.g. the query was just '-'). Building
+            # a query here would parse an empty string, or fuzzy-match an empty
+            # term against every short token.
+            return None
         is_multi_word = len(query_terms) > 1
 
         # Detect boolean operators: only route if multi-word and has valid boolean ops
@@ -837,12 +893,19 @@ class TantivyIndexManager:
             elif is_multi_word:
                 # Multi-word exact query: Require ALL terms to exist (AND semantics)
                 # Example: "gloc pattern" returns 0 results if "gloc" doesn't exist
-                term_queries = [
-                    self._index.parse_query(
-                        sanitize_fts_query(term), [search_field, "identifiers"]
-                    )
-                    for term in query_terms
-                ]
+                # Every term is required, so a term Tantivy rejects (e.g. '^')
+                # fails the whole query: dropping it would silently broaden the
+                # result. search() turns this into one WARNING and no results.
+                term_queries = []
+                for term in query_terms:
+                    try:
+                        term_queries.append(
+                            self._index.parse_query(
+                                sanitize_fts_query(term), [search_field, "identifiers"]
+                            )
+                        )
+                    except ValueError as e:
+                        raise ValueError(f"unparseable FTS term {term!r}: {e}") from e
 
                 # Combine all term queries with AND semantics (all terms must match)
                 subqueries = [(tantivy.Occur.Must, q) for q in term_queries]
@@ -1254,6 +1317,9 @@ class TantivyIndexManager:
                         "FTS query parse error (returning empty results): %s", e
                     )
                     return []
+                if text_query is None:
+                    # The query sanitized to nothing (e.g. just '-').
+                    return []
 
             # Add language filter to query if specified AND no exclusions present
             # If exclusions present, we do post-processing for correct precedence
@@ -1390,6 +1456,16 @@ class TantivyIndexManager:
                     error_msg = f"Invalid regex pattern '{query_text}': {str(e)}"
                     logger.error(error_msg)
                     raise ValueError(error_msg) from e
+
+            # Non-regex snippet location candidates, most precise first: the raw
+            # query ('HashMap::new' on its own line), the text actually searched
+            # ('--verbose' searched 'verbose'), then each one's first word.
+            searched_text = sanitize_fts_query(query_text)
+            snippet_candidates = [query_text, searched_text] + [
+                words[0]
+                for words in (query_text.split(), searched_text.split())
+                if words
+            ]
 
             # Process results
             docs = []
@@ -1536,27 +1612,22 @@ class TantivyIndexManager:
                     match_text = query_text
                     match_start = _NO_MATCH_POSITION
                 else:
-                    # Non-regex search: use literal string matching
+                    # Non-regex search: literal string matching, most precise
+                    # candidate first (see snippet_candidates).
                     match_text = query_text
-                    if case_sensitive:
-                        match_start = content_raw.find(query_text)
-                    else:
-                        match_start = content_raw.lower().find(query_text.lower())
-
-                    if match_start == -1:
-                        # Try to find first word from query
-                        first_word = query_text.split()[0] if query_text else ""
-                        if case_sensitive:
-                            match_start = content_raw.find(first_word)
-                        else:
-                            match_start = content_raw.lower().find(first_word.lower())
+                    match_start = -1
+                    haystack = content_raw if case_sensitive else content_raw.lower()
+                    for candidate in snippet_candidates:
+                        needle = candidate if case_sensitive else candidate.lower()
+                        match_start = haystack.find(needle)
                         if match_start != -1:
-                            match_text = first_word
+                            match_text = candidate
+                            break
 
                     # If still not found and fuzzy search is enabled, use fuzzy matching
                     if match_start == -1 and edit_distance > 0:
                         fuzzy_start, fuzzy_text = self._find_fuzzy_match(
-                            content_raw, query_text, case_sensitive
+                            content_raw, searched_text, case_sensitive
                         )
                         if fuzzy_start >= 0:
                             match_start = fuzzy_start
