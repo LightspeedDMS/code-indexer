@@ -21,7 +21,7 @@ The arithmetic is trivial; the reason this is a shared module is that the
   one that actually works in a pod, because it is what launched the process and
   so cannot drift from reality.
 
-So both are consulted and the LARGER wins. config.json is the target an admin
+So all three are consulted and the LARGEST wins. config.json is the target an admin
 saved; the applied resolver is what the running unit was launched with, and a
 restart may not have happened yet. The larger count yields the smaller
 per-process bound, which is the only direction that cannot exceed the node's CPU
