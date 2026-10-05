@@ -82,6 +82,13 @@ smoke:
     # script, while fast-automation.sh passes --ignore=tests/unit/server/. It
     # runs in seconds and build:image is already gated on this stage.
     #
+    # MCP response serialization is in this list for the same reason as the
+    # fleet-concurrency files: the datetime fix (#1642) is correct and has
+    # three test files, none of which any CI job collected. A canary
+    # comparison caught the pre-fix image failing query_audit_logs with
+    # "Object of type datetime is not JSON serializable"; nothing would have
+    # caught it coming back.
+    #
     # BOTH CI jobs are curated allowlists: this one names files, and
     # build:image's in-image step runs tests/unit/xray/ plus six MCP files.
     # Anything not explicitly named is never COLLECTED -- so unlike a gated test
@@ -169,6 +176,9 @@ smoke:
       tests/unit/server/storage/test_background_jobs_active_unique_index.py
       tests/unit/server/utils/test_cluster_node_id_resolver.py
       tests/unit/xray/test_rust_backend_compile_budget_worker_aware.py
+      tests/unit/server/mcp/test_query_audit_logs_datetime_serialization_1642.py
+      tests/unit/server/mcp/test_datetime_serialization.py
+      tests/unit/server/mcp/test_json_default_fallback_1645.py
       -v --tb=short
       --deselect tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
   rules:
