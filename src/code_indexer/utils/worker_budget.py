@@ -123,8 +123,24 @@ def _ppid_of(pid: str, proc_root: Path) -> Optional[str]:
     return None
 
 
+#: An ancestor's ``--workers`` only counts if that same command line is OUR
+#: server. Without this the walk takes the first ``--workers`` it meets, so an
+#: unrelated ancestor carrying one -- a supervisor, a CI runner, an editor's
+#: terminal under some other --workers service -- would silently set the budget
+#: for a cidx process beneath it. Every real launcher names the module:
+#: ``python -m code_indexer.server.main --workers N`` in the pod, and the VM
+#: path has its own systemd rung and does not rely on this one.
+_SERVER_ARGV_MARKER = "code_indexer"
+
+
 def _workers_in_argv(argv: list) -> Optional[int]:
-    """``--workers N`` or ``--workers=N`` from one command line, else None."""
+    """``--workers N`` or ``--workers=N`` from one command line, else None.
+
+    Returns None for a command line that carries the flag but is not ours --
+    see :data:`_SERVER_ARGV_MARKER`.
+    """
+    if not any(_SERVER_ARGV_MARKER in part for part in argv):
+        return None
     for i, part in enumerate(argv):
         if part == "--workers" and i + 1 < len(argv):
             try:
@@ -161,6 +177,10 @@ def read_argv_workers(
 
     The command line cannot drift from reality the way a parallel config key
     can, because it IS what launched the process.
+
+    Only a command line that names the cidx server counts: the walk would
+    otherwise take the first ``--workers`` it met, so an unrelated ancestor
+    carrying one would set the budget for a cidx process beneath it.
 
     The parent walk is required, not defensive: uvicorn spawns its workers
     through multiprocessing, so a worker's OWN argv is

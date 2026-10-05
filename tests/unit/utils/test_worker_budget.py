@@ -183,12 +183,18 @@ def _fake_proc(tmp_path, entries):
 
 
 def test_argv_reads_workers_from_this_process(tmp_path):
-    root = _fake_proc(tmp_path, {"7": (["python", "-m", "x", "--workers", "2"], "1")})
+    root = _fake_proc(
+        tmp_path,
+        {"7": (["python", "-m", "code_indexer.server.main", "--workers", "2"], "1")},
+    )
     assert read_argv_workers(proc_root=root, pid="7") == 2
 
 
 def test_argv_accepts_the_equals_form(tmp_path):
-    root = _fake_proc(tmp_path, {"7": (["python", "--workers=4"], "1")})
+    root = _fake_proc(
+        tmp_path,
+        {"7": (["python", "-m", "code_indexer.server.main", "--workers=4"], "1")},
+    )
     assert read_argv_workers(proc_root=root, pid="7") == 4
 
 
@@ -204,8 +210,19 @@ def test_argv_walks_up_to_the_uvicorn_master(tmp_path):
     root = _fake_proc(
         tmp_path,
         {
-            "1": (["/usr/bin/tini", "--", "python", "-m", "x", "--workers", "2"], "0"),
-            "7": (["python", "-m", "x", "--workers", "2"], "1"),
+            "1": (
+                [
+                    "/usr/bin/tini",
+                    "--",
+                    "python",
+                    "-m",
+                    "code_indexer.server.main",
+                    "--workers",
+                    "2",
+                ],
+                "0",
+            ),
+            "7": (["python", "-m", "code_indexer.server.main", "--workers", "2"], "1"),
             "9": (
                 ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
                 "7",
@@ -228,7 +245,7 @@ def test_argv_stops_at_pid_0(tmp_path):
 def test_argv_respects_the_hop_limit(tmp_path):
     """--workers further up than max_hops is not found, rather than walked forever."""
     chain = {
-        "4": (["python", "--workers", "8"], "0"),
+        "4": (["python", "-m", "code_indexer.server.main", "--workers", "8"], "0"),
         "3": (["python"], "4"),
         "2": (["python"], "3"),
         "1": (["python"], "2"),
@@ -239,10 +256,66 @@ def test_argv_respects_the_hop_limit(tmp_path):
 
 
 def test_argv_ignores_a_nonsense_value(tmp_path):
-    root = _fake_proc(tmp_path, {"7": (["python", "--workers", "zero"], "1")})
+    root = _fake_proc(
+        tmp_path,
+        {"7": (["python", "-m", "code_indexer.server.main", "--workers", "zero"], "1")},
+    )
     assert read_argv_workers(proc_root=root, pid="7") is None
-    root2 = _fake_proc(tmp_path / "b", {"7": (["python", "--workers", "0"], "1")})
+    root2 = _fake_proc(
+        tmp_path / "b",
+        {"7": (["python", "-m", "code_indexer.server.main", "--workers", "0"], "1")},
+    )
     assert read_argv_workers(proc_root=root2, pid="7") is None
+
+
+def test_an_unrelated_ancestors_workers_flag_is_ignored(tmp_path):
+    """The walk must not take the first --workers it meets.
+
+    A cidx process can sit under a supervisor, CI runner or terminal that was
+    itself launched with --workers for something else entirely. Taking that
+    number would size cidx's pools from an unrelated service's concurrency --
+    silently, and in the direction of starving ourselves if it is large.
+    """
+    root = _fake_proc(
+        tmp_path,
+        {
+            "1": (["/usr/bin/supervisord", "--workers", "8"], "0"),
+            "7": (
+                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                "1",
+            ),
+        },
+    )
+    assert read_argv_workers(proc_root=root, pid="7") is None
+
+
+def test_our_master_is_found_beneath_an_unrelated_workers_flag(tmp_path):
+    """The discriminator must not be so strict it misses the real master.
+
+    Decoy closer than the real one: the walk passes the supervisor's --workers 8
+    and keeps going to the cidx master's --workers 2.
+    """
+    root = _fake_proc(
+        tmp_path,
+        {
+            "1": (["/usr/bin/supervisord", "--workers", "8"], "0"),
+            "5": (["python", "-m", "code_indexer.server.main", "--workers", "2"], "1"),
+            "9": (
+                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                "5",
+            ),
+        },
+    )
+    assert read_argv_workers(proc_root=root, pid="9") == 2
+
+
+def test_a_uvicorn_style_launch_still_counts(tmp_path):
+    """`uvicorn code_indexer.server.app:app --workers 4` names the module too."""
+    root = _fake_proc(
+        tmp_path,
+        {"7": (["uvicorn", "code_indexer.server.app:app", "--workers", "4"], "1")},
+    )
+    assert read_argv_workers(proc_root=root, pid="7") == 4
 
 
 def test_argv_missing_proc_is_unknown_not_fatal(tmp_path):
@@ -290,7 +363,7 @@ def test_end_to_end_against_a_real_process_tree(tmp_path):
         "from code_indexer.utils.worker_budget import read_argv_workers\n"
         "print(read_argv_workers())\n"
     )
-    parent = tmp_path / "parent.py"
+    parent = tmp_path / "code_indexer_server_main.py"
     parent.write_text(
         "import subprocess, sys\n"
         f"out = subprocess.run([sys.executable, {str(child)!r}],\n"
@@ -298,6 +371,8 @@ def test_end_to_end_against_a_real_process_tree(tmp_path):
         "sys.stdout.write(out.stdout)\n"
         "sys.stderr.write(out.stderr)\n"
     )
+    # Path names the module, as every real launcher does -- the argv rung
+    # ignores a --workers that is not ours.
     res = subprocess.run(
         [sys.executable, str(parent), "--workers", "3"],
         capture_output=True,
