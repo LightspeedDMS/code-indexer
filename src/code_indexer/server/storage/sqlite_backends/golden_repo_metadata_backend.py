@@ -459,6 +459,38 @@ class GoldenRepoMetadataSqliteBackend(
         )
         return cursor.fetchone() is not None
 
+    # Stays well under SQLite's bound-parameter limit (999 on older builds).
+    _EXISTING_ALIASES_CHUNK = 500
+
+    def existing_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        The lookup is bounded to the given names (``WHERE alias IN (...)``,
+        parameterized, chunked), never a listing of every repository.
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        unique = sorted(set(names))
+        if not unique:
+            return set()
+        conn = self._conn_manager.get_connection()
+        found: set[str] = set()
+        for start in range(0, len(unique), self._EXISTING_ALIASES_CHUNK):
+            chunk = unique[start : start + self._EXISTING_ALIASES_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = conn.execute(
+                "SELECT alias FROM golden_repos_metadata "
+                f"WHERE alias IN ({placeholders})",
+                chunk,
+            )
+            found.update(str(row[0]) for row in cursor.fetchall())
+        return found
+
     def update_enable_temporal(self, alias: str, enable: bool) -> bool:
         """
         Update the enable_temporal flag for a golden repository.

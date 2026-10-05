@@ -224,6 +224,31 @@ class GoldenRepoMetadataPostgresBackend(_RefreshFailureBackoffPostgresMixin):
                 )
                 return cur.fetchone() is not None
 
+    def existing_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        The lookup is bounded to the given names (one parameterized
+        ``alias = ANY(%s)`` query), never a listing of every repository.
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        unique = sorted(set(names))
+        if not unique:
+            return set()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alias FROM golden_repos_metadata WHERE alias = ANY(%s)",
+                    (unique,),
+                )
+                rows = cur.fetchall()
+        return {str(row[0]) for row in rows}
+
     # ------------------------------------------------------------------
     # Field update methods
     # ------------------------------------------------------------------

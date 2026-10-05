@@ -1390,7 +1390,12 @@ def make_lifespan(
                 AccessFilteringService,
             )
 
-            access_filtering_service = AccessFilteringService(group_manager)
+            access_filtering_service = AccessFilteringService(
+                group_manager,
+                activated_repo_manager=getattr(
+                    app.state, "activated_repo_manager", None
+                ),
+            )
             app.state.access_filtering_service = access_filtering_service
             logger.info(
                 "AccessFilteringService initialized for query-time access filtering",
@@ -2293,6 +2298,9 @@ def make_lifespan(
                     group_manager,
                     memory_metadata_cache=_memory_metadata_cache,
                     memories_dir=_memories_dir,
+                    activated_repo_manager=getattr(
+                        app.state, "activated_repo_manager", None
+                    ),
                 )
                 app.state.access_filtering_service = (
                     _access_filtering_service_with_cache

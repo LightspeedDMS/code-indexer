@@ -25,6 +25,7 @@ from tests.unit.server.query.query_repo_access_env import (
     GRANTED_REPO,
     GRANTED_REPOS,
     OWN_ACTIVATION,
+    ROWS_PER_REPO,
     USER,
     QueryAccessEnv,
     build_server_db_template,
@@ -112,6 +113,31 @@ class TestSearchCodeWithoutAlias:
 
         assert payload["success"] is True, payload
         assert _repos_of(payload) == {global_alias(r) for r in ALL_REPOS}
+
+
+class TestSearchCodeOwnActivationCustomAlias:
+    """public #1984: a custom-alias activation of a granted repo keeps its rows."""
+
+    async def test_unscoped_search_keeps_custom_alias_activation_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        payload = await _call(
+            env,
+            NON_ADMIN,
+            env.access_service,
+            {"query_text": "find", "limit": ALL_ROWS_LIMIT},
+        )
+
+        assert payload["success"] is True, payload
+        assert _repos_of(payload) == {global_alias(r) for r in GRANTED_REPOS} | {
+            OWN_ACTIVATION
+        }
+        own_rows = [
+            r
+            for r in payload["results"]["results"]
+            if r["repository_alias"] == OWN_ACTIVATION
+        ]
+        assert len(own_rows) == ROWS_PER_REPO
 
 
 class TestSearchCodeMissingAccessService:

@@ -42,6 +42,10 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def repo_exists(self, alias: str) -> bool: ...
 
+    # public #1984: which of *names* are golden aliases, from one lookup
+    # bounded to those names (never a listing of every repository).
+    def existing_aliases(self, names: List[str]) -> set[str]: ...
+
     def update_enable_temporal(self, alias: str, enable: bool) -> bool: ...
 
     # Bug #1414: temporal_options is the Web UI's sole write target

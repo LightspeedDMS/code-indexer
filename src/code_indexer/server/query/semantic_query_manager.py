@@ -103,6 +103,10 @@ class QueryResult:
     # Fusion metadata (Story #618 - Score/Provenance Transparency)
     fusion_score: Optional[float] = None
     contributing_providers: Optional[List[str]] = None
+    # public #1984: golden repos this row's activation was created from. Set
+    # only on rows searched from a user activation; the access filter checks
+    # these grants instead of trusting the row's alias label.
+    activation_source_repos: Optional[List[str]] = None
     # Bug #1991: the chunk's content could not be read (code_snippet is "").
     content_unavailable: bool = False
 
@@ -148,6 +152,9 @@ class QueryResult:
         # Bug #1991: only present when set, so existing responses are unchanged.
         if self.content_unavailable:
             result["content_unavailable"] = True
+        # public #1984: activation provenance, only on activation-derived rows.
+        if self.activation_source_repos is not None:
+            result["activation_source_repos"] = list(self.activation_source_repos)
         return result
 
 
@@ -1444,6 +1451,17 @@ class SemanticQueryManager:
                     query_strategy or "primary_only"
                 ):
                     _effective_strategy = _strat_out[0]
+                if _tracking_alias is not None:
+                    # public #1984: rows from a user activation record the
+                    # golden repos it was created from (empty when unknown).
+                    if repo_info.get("is_composite"):
+                        _sources = list(repo_info.get("golden_repo_aliases") or [])
+                    else:
+                        _single = repo_info.get("golden_repo_alias")
+                        _sources = [_single] if _single else []
+                    for _row in results:
+                        if isinstance(_row, QueryResult):
+                            _row.activation_source_repos = [str(s) for s in _sources]
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:

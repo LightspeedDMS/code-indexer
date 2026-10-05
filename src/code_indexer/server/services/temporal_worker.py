@@ -322,11 +322,31 @@ def _build_ctx(worker_input: TemporalWorkerInput) -> Dict[str, Any]:
     }
 
 
-def _to_dicts(temporal_results: Any, repository_alias: str) -> List[Dict[str, Any]]:
-    return [
-        convert_temporal_result_to_query_result(t, repository_alias).to_dict()
-        for t in temporal_results
-    ]
+def _activation_sources(
+    worker_input: TemporalWorkerInput, golden_alias: Optional[str]
+) -> Optional[List[str]]:
+    """Provenance for rows of this job (public #1984).
+
+    None for a global repo; otherwise the golden repo the activation was
+    created from, or an empty list when that is unknown (which grants
+    nothing when the rows are later access-filtered).
+    """
+    if worker_input.repository_alias.endswith("-global"):
+        return None
+    return [golden_alias] if golden_alias else []
+
+
+def _to_dicts(
+    temporal_results: Any,
+    repository_alias: str,
+    activation_sources: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    rows = []
+    for t in temporal_results:
+        query_result = convert_temporal_result_to_query_result(t, repository_alias)
+        query_result.activation_source_repos = activation_sources
+        rows.append(query_result.to_dict())
+    return rows
 
 
 def _snapshot_payload(
@@ -353,11 +373,13 @@ class _TemporalWorkerCheckpointer:
         job_id: str,
         repository_alias: str,
         ctx: Dict[str, Any],
+        activation_sources: Optional[List[str]],
     ) -> None:
         self._payload_cache = payload_cache
         self._job_id = job_id
         self._repository_alias = repository_alias
         self._ctx = ctx
+        self._activation_sources = activation_sources
         self.shards_total: Optional[int] = None
         self._last_write = 0.0
 
@@ -387,7 +409,7 @@ class _TemporalWorkerCheckpointer:
         ):
             return
         try:
-            qr = _to_dicts(cumulative, self._repository_alias)
+            qr = _to_dicts(cumulative, self._repository_alias, self._activation_sources)
             store_temporal_snapshot(
                 self._payload_cache,
                 self._job_id,
@@ -483,14 +505,17 @@ def run_temporal_worker(
         payload_cache, job_id, _snapshot_payload([], 0, None, ctx), terminal=False
     )
 
+    activation_sources = _activation_sources(worker_input, golden_ctx.alias)
     checkpointer = _TemporalWorkerCheckpointer(
-        payload_cache, job_id, worker_input.repository_alias, ctx
+        payload_cache, job_id, worker_input.repository_alias, ctx, activation_sources
     )
     final = _run_fusion(
         config, index_path, vector_store, worker_input, checkpointer, cancel_check
     )
 
-    qr_final = _to_dicts(final.results, worker_input.repository_alias)
+    qr_final = _to_dicts(
+        final.results, worker_input.repository_alias, activation_sources
+    )
     store_temporal_snapshot(
         payload_cache,
         job_id,
