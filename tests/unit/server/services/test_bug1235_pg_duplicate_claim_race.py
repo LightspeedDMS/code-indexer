@@ -338,9 +338,20 @@ class TestRealPgConcurrencyBarrier:
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.connection_pool import (
+            ConnectionPool,
+        )
 
+        # BackgroundJobsPostgresBackend takes a ConnectionPool, not a DSN. This
+        # passed the raw string, so self._pool was a str and the cleanup below
+        # died with "'str' object has no attribute 'connection'". It never
+        # surfaced because this class is skipped without TEST_POSTGRES_DSN (so
+        # never locally) and the file was not in any CI job's allowlist (so
+        # never there either) -- the test had not run anywhere since the
+        # constructor changed.
         dsn = os.environ["TEST_POSTGRES_DSN"]
-        backend = BackgroundJobsPostgresBackend(dsn)
+        pool = ConnectionPool(dsn, min_size=1, max_size=4, name="bug1235-test")
+        backend = BackgroundJobsPostgresBackend(pool)
         results: List[Any] = []
         errors: List[Exception] = []
         barrier = threading.Barrier(2)
