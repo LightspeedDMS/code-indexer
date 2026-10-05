@@ -64,6 +64,10 @@ _EXEMPT_ROUTES: frozenset = frozenset(
         # guarantee via a different code path that prevents full-scope elevation
         # requirements for TOTP repair operations.
         ("POST", "/admin/mfa/disable"),
+        # Recovery-code regeneration — elevation is enforced inline via
+        # _check_elevation_window (totp_repair scope for the caller's own
+        # codes, full scope cross-user), the same mechanism as MFA disable.
+        ("POST", "/admin/mfa/recovery-codes"),
     ]
 )
 
