@@ -294,6 +294,30 @@ class SemanticSearchRequest(BaseModel):
     )
 
 
+# Hard cap on candidates a single internal search may retrieve. Rerank and
+# access-filter over-fetch raise the retrieval limit above the public
+# per-request cap (100) up to this value. Single source of truth; re-exported
+# by code_indexer.server.mcp.reranking.
+MAX_CANDIDATE_LIMIT = 200
+
+
+class InternalSemanticSearchRequest(SemanticSearchRequest):
+    """Server-internal semantic search request.
+
+    Built by server code (query manager, multi-repo search) from an internal
+    retrieval limit that may include rerank/access-filter over-fetch. Never a
+    public request body: the public SemanticSearchRequest keeps its le=100
+    contract, while this type allows up to MAX_CANDIDATE_LIMIT.
+    """
+
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=MAX_CANDIDATE_LIMIT,
+        description="Maximum number of candidates to retrieve (internal)",
+    )
+
+
 class SearchResultItem(BaseModel):
     """Individual search result."""
 

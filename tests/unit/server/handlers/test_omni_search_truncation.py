@@ -52,6 +52,7 @@ def mock_config_service():
         # Use correct attribute names matching MultiSearchLimitsConfig
         mock_limits.multi_search_max_workers = 4
         mock_limits.multi_search_timeout_seconds = 30
+        mock_limits.omni_max_results_per_repo = 100
         mock_config.multi_search_limits_config = mock_limits
         mock_service.get_config.return_value = mock_config
         mock.return_value = mock_service

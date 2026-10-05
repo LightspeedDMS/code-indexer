@@ -34,6 +34,7 @@ from code_indexer.services.query_strategy import (
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 from .parallel_query_executor import get_global_parallel_query_executor
+from ..models.api_models import MAX_CANDIDATE_LIMIT
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
@@ -410,7 +411,7 @@ class SemanticQueryManager:
         background_job_manager: Optional[BackgroundJobManager] = None,
         query_timeout_seconds: int = 30,
         max_concurrent_queries_per_user: int = 5,
-        max_results_per_query: int = 100,
+        max_results_per_query: int = MAX_CANDIDATE_LIMIT,
     ):
         """
         Initialize semantic query manager.
@@ -421,7 +422,9 @@ class SemanticQueryManager:
             background_job_manager: Background job manager instance
             query_timeout_seconds: Query timeout in seconds
             max_concurrent_queries_per_user: Maximum concurrent queries per user
-            max_results_per_query: Maximum results per query
+            max_results_per_query: Maximum results per query. Defaults to
+                MAX_CANDIDATE_LIMIT so internal rerank/access-filter
+                over-fetch (above the public 100 cap) is not trimmed here.
         """
         if data_dir:
             self.data_dir = data_dir
@@ -2480,13 +2483,15 @@ class SemanticQueryManager:
             # SEMANTIC SEARCH
             # Import SemanticSearchService and related models
             from ..services.search_service import SemanticSearchService
-            from ..models.api_models import SemanticSearchRequest
+            from ..models.api_models import InternalSemanticSearchRequest
 
             # Create search service instance
             search_service = SemanticSearchService()
 
-            # Create search request — Story #375: wire filter params through
-            search_request = SemanticSearchRequest(
+            # Create search request — Story #375: wire filter params through.
+            # Internal type: `limit` may carry rerank/access-filter over-fetch
+            # above the public 100 cap (up to MAX_CANDIDATE_LIMIT).
+            search_request = InternalSemanticSearchRequest(
                 query=query_text,
                 limit=limit,
                 include_source=True,
@@ -2601,10 +2606,11 @@ class SemanticQueryManager:
             List of QueryResult objects from this repository
         """
         from ..services.search_service import SemanticSearchService
-        from ..models.api_models import SemanticSearchRequest
+        from ..models.api_models import InternalSemanticSearchRequest
 
         search_service = SemanticSearchService()
-        search_request = SemanticSearchRequest(
+        # Internal type: `limit` may include over-fetch above the public cap.
+        search_request = InternalSemanticSearchRequest(
             query=query_text,
             limit=limit,
             include_source=True,

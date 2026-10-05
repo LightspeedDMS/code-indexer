@@ -31,12 +31,15 @@ from code_indexer.server.clients.reranker_clients import (
     RerankerSinbinnedException,
     VoyageRerankerClient,
 )
+
+# MAX_CANDIDATE_LIMIT: hard cap on candidates fetched for reranking. Defined
+# once alongside the internal search request type that must accept it, and
+# re-exported from this module.
+from code_indexer.server.models.api_models import MAX_CANDIDATE_LIMIT
 from code_indexer.server.utils.config_manager import RerankConfig
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 logger = logging.getLogger(__name__)
-
-MAX_CANDIDATE_LIMIT = 200  # Hard cap on candidates fetched for reranking
 
 # Bug #1078 Phase 1: seconds to wait for a governor slot before raising GovernorBusyError.
 _GOVERNOR_ACQUIRE_TIMEOUT_SECS: float = 30.0

@@ -33,6 +33,7 @@ from typing import (
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
 from .group_access_manager import GroupAccessManager
 from .memory_io import MemoryFileCorruptError, MemoryFileNotFoundError, read_memory_file
+from ..models.api_models import MAX_CANDIDATE_LIMIT
 
 if TYPE_CHECKING:
     from .memory_metadata_cache import MemoryMetadataCache
@@ -472,7 +473,9 @@ class AccessFilteringService:
         Calculate over-fetch limit for HNSW queries.
 
         To compensate for post-query filtering reducing results,
-        we over-fetch from HNSW by a factor.
+        we over-fetch from HNSW by a factor, bounded by MAX_CANDIDATE_LIMIT
+        (the internal per-search candidate cap). The result is never below
+        requested_limit.
 
         Args:
             requested_limit: Original requested result limit
@@ -480,4 +483,5 @@ class AccessFilteringService:
         Returns:
             Adjusted limit for HNSW query
         """
-        return requested_limit * self.DEFAULT_OVER_FETCH_FACTOR
+        over_fetch = requested_limit * self.DEFAULT_OVER_FETCH_FACTOR
+        return max(requested_limit, min(over_fetch, MAX_CANDIDATE_LIMIT))

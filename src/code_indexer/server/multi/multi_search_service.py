@@ -25,6 +25,7 @@ from typing import Dict, List, Any, Optional
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
 from .models import MultiSearchRequest, MultiSearchResponse, MultiSearchMetadata
+from ..models.api_models import MAX_CANDIDATE_LIMIT, InternalSemanticSearchRequest
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,16 @@ class MultiSearchService:
         # getattr default keeps instances built via __new__ (some tests) safe.
         shard_ownership = getattr(self, "_shard_ownership", None)
         return shard_ownership is not None and shard_ownership.owns(repo_id)
+
+    def _per_repo_limit(self, request: MultiSearchRequest) -> int:
+        """Per-repository retrieval limit for every omni search path.
+
+        Bounded by the request limit, the operator per-repo setting
+        (omni_max_results_per_repo, UI range up to 10000) AND the internal
+        candidate cap, so a raised setting can never fan out thousands of
+        results per repository.
+        """
+        return min(request.limit, self.config.max_results_per_repo, MAX_CANDIDATE_LIMIT)
 
     def search(self, request: MultiSearchRequest) -> MultiSearchResponse:
         """
@@ -337,15 +348,16 @@ class MultiSearchService:
         """
         # Import here to avoid circular dependency
         from ..services.search_service import SemanticSearchService
-        from ..models.api_models import SemanticSearchRequest
 
         # Create search service
         search_service = SemanticSearchService()
 
-        # Create single-repo search request
-        single_repo_request = SemanticSearchRequest(
+        # Create single-repo search request. Internal type: the per-repo limit
+        # may include access-filter over-fetch above the public 100 cap; it is
+        # bounded by the operator per-repo setting AND the candidate cap.
+        single_repo_request = InternalSemanticSearchRequest(
             query=request.query,
-            limit=min(request.limit, self.config.max_results_per_repo),
+            limit=self._per_repo_limit(request),
             include_source=True,  # Must be True to return content in results
             language=request.language,
             path_filter=request.path_filter,
@@ -500,7 +512,7 @@ class MultiSearchService:
             # Execute FTS search
             fts_results = tantivy_manager.search(
                 query_text=request.query,
-                limit=min(request.limit, self.config.max_results_per_repo),
+                limit=self._per_repo_limit(request),
                 languages=languages,
                 path_filters=path_filters,
                 use_regex=False,
@@ -634,7 +646,7 @@ class MultiSearchService:
                 index_path=index_dir,
                 vector_store=vector_store_client,
                 query_text=request.query,
-                limit=min(request.limit, self.config.max_results_per_repo),
+                limit=self._per_repo_limit(request),
                 language=request.language,
                 file_path_filter=request.path_filter,
                 # Story #1108 (S4): forward per-request cache bypass flag
@@ -711,7 +723,7 @@ class MultiSearchService:
                 request.query,
                 "--quiet",
                 "--limit",
-                str(min(request.limit, self.config.max_results_per_repo)),
+                str(self._per_repo_limit(request)),
                 "--fts",
                 "--regex",
             ]
