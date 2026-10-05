@@ -192,7 +192,7 @@ class SCIPQueryService:
             if alias_root is not None:
                 scip_dir = alias_root / ".code-indexer" / "scip"
                 if scip_dir.exists():
-                    return list(scip_dir.glob("**/*.scip.db"))
+                    return self._contained_scip_files(alias_root, scip_dir)
 
         for repo_dir in golden_repos_path.iterdir():
             # Skip non-directories
@@ -224,9 +224,45 @@ class SCIPQueryService:
             # Find .scip.db files in the repository's scip directory
             scip_dir = scip_root / ".code-indexer" / "scip"
             if scip_dir.exists():
-                scip_files.extend(scip_dir.glob("**/*.scip.db"))
+                scip_files.extend(self._contained_scip_files(scip_root, scip_dir))
 
         return scip_files
+
+    @staticmethod
+    def _contained_scip_files(scip_root: Path, scip_dir: Path) -> List[Path]:
+        """Return the ``.scip.db`` files under ``scip_dir`` that resolve
+        inside the selected repository ``scip_root``.
+
+        SCIP index files are read only from within the repository they were
+        found in: a file (or directory) that resolves elsewhere is skipped,
+        and the count of skipped files is logged once at WARNING.
+        """
+        from code_indexer.utils.path_confinement import resolve_if_within_root
+
+        try:
+            resolved_root = scip_root.resolve()
+        except (OSError, RuntimeError):
+            logger.warning(
+                "Skipping SCIP indexes of %s: repository root cannot be resolved",
+                scip_root,
+            )
+            return []
+        contained: List[Path] = []
+        skipped = 0
+        for db_file in scip_dir.glob("**/*.scip.db"):
+            if resolve_if_within_root(db_file, resolved_root) is None:
+                skipped += 1
+                continue
+            contained.append(db_file)
+        if skipped:
+            logger.warning(
+                "Skipped %d SCIP index file(s) under %s that do not resolve "
+                "inside repository %s",
+                skipped,
+                scip_dir,
+                scip_root,
+            )
+        return contained
 
     @staticmethod
     def _scip_dir_for_files(scip_files: List[Path]) -> Path:
