@@ -8,7 +8,6 @@ which both call ``delete_user_audited``, run the purge.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -25,15 +24,23 @@ from tests.unit.server._account_rows import (
 )
 
 
-def test_server_user_manager_purges_account_rows_on_delete() -> None:
-    import code_indexer.server.app as app_module
+def test_server_user_manager_purges_account_rows_on_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Built from a fresh app over its own server directory, so an app built
+    earlier in the process under another directory cannot stand in for it."""
+    from code_indexer.server.app import create_app
 
-    user_manager = app_module.user_manager
+    server_dir = tmp_path / "server"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(server_dir))
+
+    user_manager = create_app().state.user_manager
     assert user_manager is not None
     purger = user_manager.account_data_purger
 
     assert isinstance(purger, SqliteAccountDataPurger)
-    assert purger._server_data_dir == Path(os.environ["CIDX_SERVER_DATA_DIR"])
+    assert purger._server_data_dir == server_dir
 
 
 def test_server_user_manager_wires_account_activations() -> None:

@@ -87,11 +87,15 @@ def mfa_secret(totp: TOTPService) -> str:
 
 
 @pytest.fixture
-def sessions(monkeypatch) -> SessionManager:
+def sessions(monkeypatch, users) -> SessionManager:
+    from code_indexer.server.auth import dependencies
+
     sm = SessionManager(
         "audit-login-test-signing-key", SimpleNamespace(host="127.0.0.1")
     )
     monkeypatch.setattr(web_auth, "_session_manager", sm)
+    # The shared account store start-up wires (MFA completion resolves it).
+    monkeypatch.setattr(dependencies, "user_manager", users)
     return sm
 
 

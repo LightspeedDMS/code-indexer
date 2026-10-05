@@ -7,7 +7,7 @@ Split out of the monolithic sqlite_backends.py module (issue #1935 Part 1).
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..database_manager import DatabaseConnectionManager
 
@@ -194,7 +194,10 @@ class OAuthSqliteBackend:
         state: str,
     ) -> str:
         """Generate a one-time PKCE authorization code."""
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            AUTHORIZATION_CODE_LIFETIME,
+            OAuthError,
+        )
 
         if not code_challenge or code_challenge.strip() == "":
             raise OAuthError("code_challenge required")
@@ -206,7 +209,7 @@ class OAuthSqliteBackend:
             raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
 
         code = self._secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = datetime.now(timezone.utc) + AUTHORIZATION_CODE_LIFETIME
 
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
@@ -225,12 +228,18 @@ class OAuthSqliteBackend:
         return code
 
     def exchange_code_for_token(
-        self, code: str, code_verifier: str, client_id: str
+        self,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        account_check: Optional[Callable[[str, datetime], bool]] = None,
     ) -> Dict[str, Any]:
-        """Exchange a PKCE authorization code for access and refresh tokens."""
+        """Exchange a PKCE authorization code for access and refresh tokens;
+        *account_check* (account name, code issue instant) runs first."""
         from code_indexer.server.auth.oauth.oauth_manager import (
             OAuthError,
             PKCEVerificationError,
+            check_code_account,
         )
 
         token_id = self._secrets.token_urlsafe(32)
@@ -239,37 +248,52 @@ class OAuthSqliteBackend:
         now = datetime.now(timezone.utc)
         hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
 
-        result: Dict[str, Any] = {}
-
-        def _do_exchange(conn: sqlite3.Connection) -> None:
-            cursor = conn.cursor()
+        # 1. Read and validate the code outside any transaction.
+        with self._conn_manager.guarded_connection() as read_conn:
+            cursor = read_conn.cursor()
             cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
                 (code, client_id),
             )
             code_row = cursor.fetchone()
-            if not code_row:
-                raise OAuthError("Invalid authorization code")
-            if code_row["used"]:
-                raise OAuthError("Authorization code already used")
-            expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+        if not code_row:
+            raise OAuthError("Invalid authorization code")
+        if code_row["used"]:
+            raise OAuthError("Authorization code already used")
+        expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+        if datetime.now(timezone.utc) > expires_at_dt:
+            raise OAuthError("Authorization code expired")
+
+        # PKCE verification
+        code_challenge = code_row["code_challenge"]
+        computed_challenge = (
+            self._base64.urlsafe_b64encode(
+                self._hashlib.sha256(code_verifier.encode()).digest()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        if computed_challenge != code_challenge:
+            raise PKCEVerificationError("PKCE verification failed")
+
+        # 2. Account check, holding no lock on the store.
+        check_code_account(account_check, code_row["user_id"], expires_at_dt)
+
+        result: Dict[str, Any] = {}
+
+        # 3. Consume the code (only if still unused) and issue the token in
+        #    one transaction; a code consumed meanwhile mints nothing.
+        def _do_exchange(conn: sqlite3.Connection) -> None:
             if datetime.now(timezone.utc) > expires_at_dt:
                 raise OAuthError("Authorization code expired")
-
-            # PKCE verification
-            code_challenge = code_row["code_challenge"]
-            computed_challenge = (
-                self._base64.urlsafe_b64encode(
-                    self._hashlib.sha256(code_verifier.encode()).digest()
-                )
-                .decode()
-                .rstrip("=")
+            consumed = conn.execute(
+                "UPDATE oauth_codes SET used = 1"
+                " WHERE code = ? AND client_id = ? AND used = 0",
+                (code, client_id),
             )
-            if computed_challenge != code_challenge:
-                raise PKCEVerificationError("PKCE verification failed")
-
-            conn.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
+            if consumed.rowcount != 1:
+                raise OAuthError("Authorization code already used")
 
             token_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
 

@@ -1122,6 +1122,24 @@ def mfa_challenge_verify(
         )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
+    # Only the live account that passed the first factor may be signed in.
+    from ..auth import dependencies
+
+    account = dependencies.resolve_credential_account(
+        dependencies.lookup_live_account,
+        challenge_data.username,
+        challenge_data.created_at,
+    )
+    if account is None:
+        reject_login(
+            challenge_data.username,
+            account_exists=False,
+            method=_CHALLENGE_LOGIN_METHOD,
+            stage="challenge",
+            reason="challenge_invalid_or_expired",
+        )
+        return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
     # Verify TOTP or recovery code
     verified = False
     method = "totp"
@@ -1147,8 +1165,8 @@ def mfa_challenge_verify(
             flow="web_session",
             issue=lambda: session_mgr.create_session(
                 redirect_response,
-                username=challenge_data.username,
-                role=challenge_data.role,
+                username=account.username,
+                role=account.role.value,
             ),
         )
         logger.info(

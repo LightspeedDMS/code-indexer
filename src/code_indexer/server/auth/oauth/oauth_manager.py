@@ -3,11 +3,9 @@
 import os
 import sqlite3
 import secrets
-import hashlib
-import base64
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Callable, Dict, Any, Optional, List, TYPE_CHECKING
 import json
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
@@ -23,6 +21,30 @@ class OAuthError(Exception):
 
 class PKCEVerificationError(OAuthError):
     pass
+
+
+class AuthorizationGrantRefused(OAuthError):
+    """The grant belongs to no current account (RFC 6749 ``invalid_grant``)."""
+
+
+# An authorization code expires this long after it is issued; it is issued
+# when the user authenticates, so expires_at - lifetime is that instant.
+AUTHORIZATION_CODE_LIFETIME = timedelta(minutes=10)
+
+# (account name, instant the code was issued) -> the code may be exchanged.
+CodeAccountCheck = Callable[[str, datetime], bool]
+
+
+def check_code_account(
+    account_check: Optional[CodeAccountCheck], user_id: str, expires_at: datetime
+) -> None:
+    """Refuse a code whose account is gone or newer than the code."""
+    if account_check is None:
+        return
+    if not account_check(user_id, expires_at - AUTHORIZATION_CODE_LIFETIME):
+        raise AuthorizationGrantRefused(
+            "Authorization code does not belong to a current account"
+        )
 
 
 class OAuthManager:
@@ -241,7 +263,7 @@ class OAuthManager:
         if redirect_uri not in client["redirect_uris"]:
             raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
         code = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = datetime.now(timezone.utc) + AUTHORIZATION_CODE_LIFETIME
 
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
@@ -260,84 +282,33 @@ class OAuthManager:
         return code
 
     def exchange_code_for_token(
-        self, code: str, code_verifier: str, client_id: str
+        self,
+        code: str,
+        code_verifier: str,
+        client_id: str,
+        account_check: Optional[CodeAccountCheck] = None,
     ) -> Dict[str, Any]:
+        """Exchange a PKCE code for tokens.  *account_check* (account name,
+        instant the code was issued) runs before anything is minted."""
         if self._backend:
             return self._backend.exchange_code_for_token(  # type: ignore[no-any-return]
-                code=code, code_verifier=code_verifier, client_id=client_id
+                code=code,
+                code_verifier=code_verifier,
+                client_id=client_id,
+                account_check=account_check,
             )
-        # Prepare new token values before entering the atomic block
-        token_id = secrets.token_urlsafe(32)
-        access_token = secrets.token_urlsafe(48)
-        refresh_token = secrets.token_urlsafe(48)
-        now = datetime.now(timezone.utc)
-        hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
+        # No storage backend: the same SQLite store implementation over this
+        # manager's database (one exchange implementation, not two copies).
+        from code_indexer.server.storage.sqlite_backends.oauth_backend import (
+            OAuthSqliteBackend,
+        )
 
-        result: Dict[str, Any] = {}
-
-        def _do_exchange(conn: sqlite3.Connection) -> None:
-            cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-            cursor.execute(
-                "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
-                (code, client_id),
-            )
-            code_row = cursor.fetchone()
-            if not code_row:
-                raise OAuthError("Invalid authorization code")
-            if code_row["used"]:
-                raise OAuthError("Authorization code already used")
-            expires_at_raw = code_row["expires_at"]
-            expires_at_dt = (
-                expires_at_raw
-                if isinstance(expires_at_raw, datetime)
-                else datetime.fromisoformat(expires_at_raw)
-            )
-            if datetime.now(timezone.utc) > expires_at_dt:
-                raise OAuthError("Authorization code expired")
-
-            # PKCE verification
-            code_challenge = code_row["code_challenge"]
-            computed_challenge = (
-                base64.urlsafe_b64encode(
-                    hashlib.sha256(code_verifier.encode()).digest()
-                )
-                .decode()
-                .rstrip("=")
-            )
-            if computed_challenge != code_challenge:
-                raise PKCEVerificationError("PKCE verification failed")
-
-            conn.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
-
-            token_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
-
-            conn.execute(
-                """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
-                   expires_at, created_at, last_activity, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    token_id,
-                    code_row["client_id"],
-                    code_row["user_id"],
-                    access_token,
-                    refresh_token,
-                    token_expires_at.isoformat(),
-                    now.isoformat(),
-                    now.isoformat(),
-                    hard_expires_at.isoformat(),
-                ),
-            )
-            result["access_token"] = access_token
-            result["refresh_token"] = refresh_token
-
-        self._conn_manager.execute_atomic(_do_exchange)  # type: ignore[union-attr]
-
-        return {
-            "access_token": result["access_token"],
-            "token_type": "Bearer",
-            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
-            "refresh_token": result["refresh_token"],
-        }
+        return OAuthSqliteBackend(str(self.db_path)).exchange_code_for_token(
+            code=code,
+            code_verifier=code_verifier,
+            client_id=client_id,
+            account_check=account_check,
+        )
 
     def validate_token(self, access_token: str) -> Optional[Dict[str, Any]]:
         if self._backend:

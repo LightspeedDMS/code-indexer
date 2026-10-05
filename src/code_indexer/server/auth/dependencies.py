@@ -12,7 +12,7 @@ from code_indexer.server.middleware.audit_request_context import (
     AUTH_METHOD_WEB_SESSION,
     note_auth_method,
 )
-from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple, cast
+from typing import Optional, TYPE_CHECKING, Callable, Dict, Any, Tuple, cast
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timezone
@@ -124,11 +124,60 @@ def credential_predates_account(issued_at: Any, user: User) -> bool:
     created = user.account_created_at
     if created is None:
         return False
-    try:
-        issued = float(issued_at)
-    except (TypeError, ValueError):
+    issued = _instant_to_epoch(issued_at)
+    if issued is None:
         return True
     return issued < created.timestamp()
+
+
+def _instant_to_epoch(value: Any) -> Optional[float]:
+    """Epoch seconds of an issue instant: epoch number, datetime or ISO-8601
+    text (naive values are UTC); None when unreadable."""
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def resolve_credential_account(
+    lookup: Callable[[str], Optional[User]], username: Any, issued_at: Any
+) -> Optional[User]:
+    """The live account a credential issued to *username* at *issued_at*
+    authenticates, or None.
+
+    None when the account no longer exists or was created after the
+    credential was issued.  The account is looked up on every call (never
+    cached) so a removal or role change takes effect at once.
+    """
+    if not isinstance(username, str) or not username:
+        return None
+    user = lookup(username)
+    if user is None or credential_predates_account(issued_at, user):
+        return None
+    return user
+
+
+def lookup_live_account(username: str) -> Optional[User]:
+    """The account named *username*, read from the server's account store at
+    call time (never cached).  Raises when no account store is wired."""
+    if user_manager is None:
+        raise RuntimeError("Account store not initialized")
+    return user_manager.get_user(username)
 
 
 def _validate_jwt_and_get_user(token: str) -> User:
@@ -326,7 +375,10 @@ def get_current_user(
             # Valid OAuth token - get user
             username = oauth_result.get("user_id")
             if username:
-                user = user_manager.get_user(username)  # type: ignore[assignment]
+                # Only the live account the token was issued to.
+                user = resolve_credential_account(  # type: ignore[assignment]
+                    user_manager.get_user, username, oauth_result.get("created_at")
+                )
                 if user is None:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,

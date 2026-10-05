@@ -55,15 +55,20 @@ VERIFIED WORKING:
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import base64
 import functools
 
 import anyio
 
-from .oauth_manager import OAuthManager, OAuthError, PKCEVerificationError
+from .oauth_manager import (
+    AuthorizationGrantRefused,
+    OAuthManager,
+    OAuthError,
+    PKCEVerificationError,
+)
 from ..user_manager import User, UserManager
 from ..mcp_credential_manager import MCPCredentialManager
 from ..audit_logger import password_audit_logger
@@ -115,14 +120,14 @@ def get_oauth_manager(request: Request) -> OAuthManager:
     return request.app.state.oauth_manager  # type: ignore[no-any-return]
 
 
-def get_user_manager() -> UserManager:
-    return UserManager()
+def get_user_manager(request: Request) -> UserManager:
+    """The server's account store: OAuth sign-in authenticates live accounts."""
+    return request.app.state.user_manager  # type: ignore[no-any-return]
 
 
-def get_mcp_credential_manager() -> MCPCredentialManager:
-    """Get MCPCredentialManager instance with UserManager injected."""
-    user_manager = get_user_manager()
-    return MCPCredentialManager(user_manager=user_manager)
+def get_mcp_credential_manager(request: Request) -> MCPCredentialManager:
+    """MCPCredentialManager over the server's account store."""
+    return MCPCredentialManager(user_manager=get_user_manager(request))
 
 
 # Pydantic models for request/response
@@ -561,6 +566,7 @@ def oauth_mfa_verify(
     totp_code: Optional[str] = Form(None),
     recovery_code: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
+    user_manager: UserManager = Depends(get_user_manager),
 ):
     """Verify TOTP/recovery code and complete OAuth authorization (Story #562).
 
@@ -604,6 +610,21 @@ def oauth_mfa_verify(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid challenge type for OAuth flow.",
+        )
+
+    # Only the live account that passed the first factor may be authorized.
+    from code_indexer.server.auth.dependencies import resolve_credential_account
+
+    if (
+        resolve_credential_account(
+            user_manager.get_user, challenge.username, challenge.created_at
+        )
+        is None
+    ):
+        _reject_challenge(challenge.username, account_exists=False)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA challenge expired or invalid. Please re-authenticate.",
         )
 
     # Verify TOTP or recovery code
@@ -666,6 +687,42 @@ def oauth_mfa_verify(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+def _deliver_to_live_account(
+    manager: OAuthManager,
+    user_manager: UserManager,
+    result: Dict[str, Any],
+    *,
+    client_id: str,
+    grant_type: str,
+    ip_address: str,
+    user_agent: Optional[str],
+) -> Dict[str, Any]:
+    """Return an issued token only when it belongs to the live account it was
+    issued to; otherwise revoke it so no credential reaches the client."""
+    from code_indexer.server.auth.dependencies import resolve_credential_account
+
+    token_info = manager.validate_token(result["access_token"])
+    account = (
+        resolve_credential_account(
+            user_manager.get_user, token_info["user_id"], token_info["created_at"]
+        )
+        if token_info
+        else None
+    )
+    if account is None:
+        manager.revoke_token(result["access_token"], token_type_hint="access_token")
+        raise AuthorizationGrantRefused("Grant does not belong to a current account")
+    oauth_token_rate_limiter.record_successful_attempt(client_id)
+    password_audit_logger.log_oauth_token_exchange(
+        username=account.username,
+        client_id=client_id,
+        grant_type=grant_type,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    return result
+
+
 @router.post("/token", response_model=TokenResponse)
 def token_endpoint(
     http_request: Request,
@@ -677,6 +734,7 @@ def token_endpoint(
     refresh_token: Optional[str] = Form(None),
     manager: OAuthManager = Depends(get_oauth_manager),
     mcp_credential_manager: MCPCredentialManager = Depends(get_mcp_credential_manager),
+    user_manager: UserManager = Depends(get_user_manager),
 ):
     """Token endpoint for authorization code exchange with rate limiting and audit logging.
 
@@ -723,25 +781,29 @@ def token_endpoint(
                     detail="code and code_verifier required for authorization_code grant",
                 )
 
-            result = manager.exchange_code_for_token(
-                code=code, code_verifier=code_verifier, client_id=client_id
+            from code_indexer.server.auth.dependencies import (
+                resolve_credential_account,
             )
 
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log (extract username from token validation)
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="authorization_code",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
+            # The code's account must be live and not newer than the code.
+            result = manager.exchange_code_for_token(
+                code=code,
+                code_verifier=code_verifier,
+                client_id=client_id,
+                account_check=lambda user_id, issued_at: resolve_credential_account(
+                    user_manager.get_user, user_id, issued_at
                 )
-
-            return result
+                is not None,
+            )
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="authorization_code",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         elif grant_type == "refresh_token":
             if not refresh_token:
@@ -754,22 +816,15 @@ def token_endpoint(
             result = manager.refresh_access_token(
                 refresh_token=refresh_token, client_id=client_id
             )
-
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="refresh_token",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
-                )
-
-            return result
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="refresh_token",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         elif grant_type == "client_credentials":
             if not client_secret:
@@ -785,22 +840,15 @@ def token_endpoint(
                 scope=None,
                 mcp_credential_manager=mcp_credential_manager,
             )
-
-            # Record success
-            oauth_token_rate_limiter.record_successful_attempt(client_id)
-
-            # Audit log
-            token_info = manager.validate_token(result["access_token"])
-            if token_info:
-                password_audit_logger.log_oauth_token_exchange(
-                    username=token_info["user_id"],
-                    client_id=client_id,
-                    grant_type="client_credentials",
-                    ip_address=ip_address,
-                    user_agent=user_agent,
-                )
-
-            return result
+            return _deliver_to_live_account(
+                manager,
+                user_manager,
+                result,
+                client_id=client_id,
+                grant_type="client_credentials",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         else:
             oauth_token_rate_limiter.record_failed_attempt(client_id)
@@ -808,6 +856,13 @@ def token_endpoint(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported grant_type: {grant_type}",
             )
+    except AuthorizationGrantRefused as e:
+        oauth_token_rate_limiter.record_failed_attempt(client_id)
+        # RFC 6749 section 5.2: error fields at the top level of the body.
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "invalid_grant", "error_description": str(e)},
+        )
     except PKCEVerificationError as e:
         oauth_token_rate_limiter.record_failed_attempt(client_id)
         raise HTTPException(

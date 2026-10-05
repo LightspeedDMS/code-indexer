@@ -2004,7 +2004,7 @@ async def delete_user(
     """Delete a user (PRG: redirects to /admin/users with status query)."""
     from urllib.parse import quote
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2833,7 +2833,7 @@ async def grant_repo_access(
 
     Supports both AJAX (JSON) and form POST requests (Story #199).
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2910,7 +2910,7 @@ async def revoke_repo_access(
         CidxMetaCannotBeRevokedError,
     )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -4013,7 +4013,7 @@ async def change_golden_repo_branch(
     alias: str,
 ):
     """Change the active branch of a golden repository async (Story #308)."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Authentication required"},
@@ -8629,11 +8629,11 @@ async def discovery_start(
     Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
     Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    provider, err = _resolve_provider(request, platform)
+    provider, err = await asyncio.to_thread(_resolve_provider, request, platform)
     if err is not None:
         return err
     if not provider.is_configured():
@@ -8702,7 +8702,7 @@ async def discovery_result(
     Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
     Auth required.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
@@ -8749,7 +8749,7 @@ async def discovery_enrich(
     Accepts JSON body: {"clone_urls": ["https://..."]}
     Returns a dict mapping each clone_url to its commit info.
     """
-    provider, error = _resolve_provider(request, platform)
+    provider, error = await asyncio.to_thread(_resolve_provider, request, platform)
     if error is not None:
         return error
 
@@ -8966,7 +8966,7 @@ async def _validate_discovery_hide_request(
     Returns (error_response, repo_identifier). If error_response is not None,
     the caller should return it immediately.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=status.HTTP_401_UNAUTHORIZED), ""
 
@@ -9065,7 +9065,7 @@ async def fetch_discovery_branches(request: Request):
         }
     """
     # Require admin authentication
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             status_code=401,
@@ -9352,7 +9352,7 @@ async def update_langfuse_pull_config(
         get_config_service,
     )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9461,7 +9461,7 @@ async def update_cidx_meta_backup_config(
     from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
     from ..services.config_service import get_config_service
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9606,7 +9606,7 @@ async def set_siem_delivery_credential(request: Request):
     from ..services.siem_delivery.config_view import credential_text_from_inputs
     from ..services.siem_delivery.credential import MAX_CREDENTIAL_JSON_BYTES
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
@@ -9648,7 +9648,7 @@ async def remove_siem_delivery_credential(request: Request):
     """Remove the stored SecOps service-account key."""
     from ..services.siem_delivery.admin import remove_credential
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
@@ -9718,7 +9718,7 @@ async def set_siem_delivery_trusted_ca(request: Request):
     from ..services.siem_delivery.config_view import ca_text_from_inputs
     from ..services.siem_delivery.trust import MAX_CA_PEM_BYTES, set_trusted_ca
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
@@ -9760,7 +9760,7 @@ async def remove_siem_delivery_trusted_ca(request: Request):
     """Remove the additional trusted CA (back to the default trust only)."""
     from ..services.siem_delivery.trust import remove_trusted_ca
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
@@ -9850,7 +9850,7 @@ async def update_config_section(
     """Update configuration for a specific section."""
     from ..services.config_service import get_config_service
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -10583,7 +10583,7 @@ def _build_git_credential_manager() -> Any:
 )
 async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -10915,7 +10915,7 @@ async def user_git_credentials_add(request: Request):
     Requires TOTP plus the caller's own elevation window when enforcement is
     on, matching the admin route and the MCP twin configure_git_credential.
     """
-    session = _require_authenticated_session(request)
+    session = await asyncio.to_thread(_require_authenticated_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -12396,7 +12396,7 @@ async def save_self_monitoring_config(
 
     Requires authenticated admin session and valid CSRF token.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -12514,7 +12514,7 @@ async def trigger_manual_scan(
     """
     logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Entry - endpoint called")
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: No admin session found")
         raise HTTPException(

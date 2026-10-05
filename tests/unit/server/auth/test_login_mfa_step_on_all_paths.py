@@ -352,6 +352,12 @@ def _build_oidc_oauth_app(tmp: Path):
     app.include_router(oauth_routes.router)
     app.state.oauth_manager = oauth_mgr
     app.dependency_overrides[oauth_routes.get_oauth_manager] = lambda: oauth_mgr
+    # The server's account store, holding the SSO-linked account.
+    from code_indexer.server.auth.user_manager import UserManager, UserRole
+
+    accounts = UserManager(users_file_path=str(tmp / "users.json"))
+    accounts.create_user(username, "Str0ng!Passw0rd#Xyz1", UserRole.NORMAL_USER)
+    app.state.user_manager = accounts
 
     return app, state_token, username
 
