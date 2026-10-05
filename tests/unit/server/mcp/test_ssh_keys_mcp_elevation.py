@@ -4,10 +4,10 @@ MCP elevation parity for manage_ssh_key.
 The REST route ``POST /{name}/hosts`` (and the create/delete routes) carry
 ``require_elevation()``; the MCP tool performing the identical mutation must
 require elevation too, so an admin JWT with no live TOTP cannot assign a host
-via MCP when the REST/web path would be blocked. The MCP tool gates the same
-mutating actions
-REST gates: create, delete, assign_host. show_public and list_ssh_keys stay
-UNGATED (read-only, matching REST's GET /{name}/public which has no
+via MCP when the REST/web path would be blocked. The MCP tools gate what
+REST gates: create, delete, assign_host, and listing (list_ssh_keys, whose
+REST twin GET /api/ssh-keys carries ``require_elevation()``). show_public
+stays UNGATED (read-only, matching REST's GET /{name}/public which has no
 elevation dependency).
 
 Discriminating RED: modeled directly on
@@ -171,21 +171,64 @@ def test_show_public_action_not_gated(admin_user, manager, totp_enabled):
     )
 
 
-def test_list_ssh_keys_not_gated(admin_user, manager, totp_enabled):
+# ---------------------------------------------------------------------------
+# list_ssh_keys is gated, like its REST twin GET /api/ssh-keys.
+# ---------------------------------------------------------------------------
+
+
+def _empty_key_manager() -> MagicMock:
     mock_manager = MagicMock()
     mock_result = MagicMock()
     mock_result.managed = []
     mock_result.unmanaged = []
     mock_manager.list_keys.return_value = mock_result
+    return mock_manager
+
+
+def test_list_ssh_keys_is_gated(admin_user, manager, totp_enabled):
+    key_manager = _empty_key_manager()
     with (
         _patch_all(manager, totp_enabled),
         patch(
             "code_indexer.server.mcp.handlers.ssh_keys.get_ssh_key_manager",
-            return_value=mock_manager,
+            return_value=key_manager,
         ),
     ):
-        result = ssh_keys_handlers.handle_list_ssh_keys({}, admin_user)
+        result = ssh_keys_handlers.handle_list_ssh_keys(
+            {}, admin_user, session_key=_SESSION_KEY
+        )
     parsed = _parse_mcp_response(result)
-    assert parsed.get("error") != "elevation_required", (
-        f"list_ssh_keys must not be elevation-gated: {result}"
+    assert parsed.get("error") == "elevation_required", (
+        f"list_ssh_keys must be elevation-gated: {result}"
     )
+    key_manager.list_keys.assert_not_called()
+
+
+def test_list_ssh_keys_declares_session_key_marker():
+    """protocol.py injects the elevation key only into handlers carrying it."""
+    assert (
+        getattr(
+            ssh_keys_handlers.handle_list_ssh_keys,
+            "__mcp_requires_session_key__",
+            False,
+        )
+        is True
+    )
+
+
+def test_list_ssh_keys_kill_switch_off_passes_through(admin_user, manager):
+    key_manager = _empty_key_manager()
+    with (
+        patch(_ENFORCEMENT_PATH, return_value=False),
+        patch(_ESM_PATH, manager),
+        patch(
+            "code_indexer.server.mcp.handlers.ssh_keys.get_ssh_key_manager",
+            return_value=key_manager,
+        ),
+    ):
+        result = ssh_keys_handlers.handle_list_ssh_keys(
+            {}, admin_user, session_key=_SESSION_KEY
+        )
+    parsed = _parse_mcp_response(result)
+    assert parsed.get("success") is True, result
+    key_manager.list_keys.assert_called_once()

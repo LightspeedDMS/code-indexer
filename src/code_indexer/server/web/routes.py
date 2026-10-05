@@ -10996,10 +10996,27 @@ def user_logout(request: Request):
 # SSH Keys Management Page
 @web_router.get("/ssh-keys", response_class=HTMLResponse)
 def ssh_keys_page(request: Request):
-    """SSH Keys management page - view migration status and manage SSH keys."""
+    """SSH Keys management page - view migration status and manage SSH keys.
+
+    Listing key metadata requires the caller's own elevation window, like
+    the REST twin ``GET /api/ssh-keys`` (``require_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards. Enforcement off passes through.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+
+    if dependencies._is_elevation_enforcement_enabled():
+        from . import mfa_routes
+
+        # Error dict when no valid window exists; None when the window is valid.
+        elev_err = mfa_routes._check_elevation_window(request, session.username)
+        if elev_err is not None:
+            return RedirectResponse(
+                f"{mfa_routes._ELEVATE_PAGE}?next={quote(request.url.path, safe='')}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
 
     # Generate fresh CSRF token
     csrf_token = generate_csrf_token()

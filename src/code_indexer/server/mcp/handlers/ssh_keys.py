@@ -331,8 +331,8 @@ def handle_manage_ssh_key(
 
     Admin role required in the handler (``_admin_role_first``), like every
     REST ``/api/ssh-keys`` twin, however the call was admitted.
-    Elevation: create/delete/assign_host are decorated with
-    @require_mcp_elevation() individually
+    Elevation: create/delete/assign_host (and the separate list_ssh_keys
+    tool) are decorated with @require_mcp_elevation() individually
     (Story #992 pattern -- inner handlers own the decorator, not this
     dispatcher). **kwargs is forwarded so a caller-supplied session_key
     reaches those decorators; this function itself declares
@@ -368,6 +368,7 @@ handle_manage_ssh_key.__mcp_requires_session_key__ = True  # type: ignore[attr-d
 
 
 @_admin_role_first
+@require_mcp_elevation()
 def handle_list_ssh_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     List all managed and unmanaged SSH keys (Story #992).
@@ -375,6 +376,9 @@ def handle_list_ssh_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     Simple rename wrapper over _list — same signature, same response shape.
     Admin role required in the handler (``_admin_role_first``), like the
     REST ``GET /api/ssh-keys`` twin, however the call was admitted.
+    Elevation-gated like that twin (``require_elevation()``): key metadata
+    is not listed without an active elevation window. The decorator sets
+    __mcp_requires_session_key__, so protocol.py injects the session_key.
     """
     return _list(args, user)
 
