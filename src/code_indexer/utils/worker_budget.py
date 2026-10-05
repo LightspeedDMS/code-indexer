@@ -144,6 +144,12 @@ _SERVER_SCRIPT_SUFFIXES = (
 )
 
 
+#: How a multiprocessing spawn child identifies itself in its own argv. uvicorn
+#: only forks workers when ``--workers`` is 2 or more (a single worker runs
+#: in-process), so seeing this means we ARE one of several workers.
+_SPAWN_CHILD_MARKER = "multiprocessing.spawn"
+
+
 def _is_server_argv(argv: list) -> bool:
     """Whether this command line actually invokes the cidx server."""
     for part in argv:
@@ -152,6 +158,10 @@ def _is_server_argv(argv: list) -> bool:
         if part.endswith(_SERVER_SCRIPT_SUFFIXES):
             return True
     return False
+
+
+def _looks_like_a_spawned_worker(argv: list) -> bool:
+    return any(_SPAWN_CHILD_MARKER in part for part in argv)
 
 
 def _workers_in_argv(argv: list) -> Optional[int]:
@@ -229,8 +239,35 @@ def read_argv_workers(
                 return found
             nxt = _ppid_of(current, proc_root)
             if nxt is None or nxt == "0":
-                return None
+                break
             current = nxt
+
+        # Walked the whole chain without finding a launch we recognise.
+        #
+        # If WE are a multiprocessing spawn child, there are >= 2 workers (a
+        # single uvicorn worker runs in-process and forks nothing) -- so the
+        # count matters here and we just failed to read it. Every budget will
+        # divide by 1 and silently oversubscribe the node, which is precisely
+        # the failure this rung was added to fix, and it was invisible for
+        # exactly as long as nothing said so.
+        #
+        # The live gap this guards: a console-script launcher. Today the only
+        # entry points are `cidx` and `code-indexer`, both of which run the CLI,
+        # and the server is started as `python -m code_indexer.server.main`. A
+        # future `cidx-server` script would name neither the module nor
+        # server/main.py, and this rung would quietly stop working.
+        try:
+            if _looks_like_a_spawned_worker(_argv_of(pid, proc_root)):
+                logger.warning(
+                    "worker_budget: this process is a spawned worker but no cidx "
+                    "server launch was found within %d parents, so the worker "
+                    "count is unknown and per-node budgets will NOT be divided. "
+                    "If the server is started by a console script, add its shape "
+                    "to _SERVER_MODULE_PREFIX / _SERVER_SCRIPT_SUFFIXES.",
+                    max_hops,
+                )
+        except Exception:  # noqa: BLE001 -- diagnosis must never break the lookup
+            pass
         return None
     except Exception as exc:  # noqa: BLE001 -- unreadable /proc is "unknown"
         logger.debug("worker_budget: argv worker-count lookup failed: %s", exc)

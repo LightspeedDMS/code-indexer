@@ -394,6 +394,69 @@ def test_a_uvicorn_style_launch_still_counts(tmp_path):
     assert read_argv_workers(proc_root=root, pid="7") == 4
 
 
+def test_a_worker_that_cannot_find_its_launcher_says_so(tmp_path, caplog):
+    """A console-script launcher is the live gap in this rung, so it must be loud.
+
+    Today's entry points (`cidx`, `code-indexer`) both run the CLI, and the
+    server starts as `python -m code_indexer.server.main` -- so nothing hits
+    this. A future `cidx-server` script would name neither the module nor
+    server/main.py and the rung would quietly stop working, every budget would
+    divide by 1, and the node would be oversubscribed with no signal. That is
+    exactly how the original defect survived: silently.
+
+    Only a SPAWNED worker warns. Seeing multiprocessing.spawn in our own argv
+    means uvicorn forked us, which it only does for >= 2 workers -- so the count
+    genuinely matters here and we failed to read it.
+    """
+    root = _fake_proc(
+        tmp_path,
+        {
+            "1": (["/usr/local/bin/cidx-server", "--workers", "2"], "0"),
+            "9": (
+                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                "1",
+            ),
+        },
+    )
+    with caplog.at_level("WARNING"):
+        assert read_argv_workers(proc_root=root, pid="9") is None
+    assert any(
+        "no cidx server launch was found" in r.message for r in caplog.records
+    ), "a spawned worker that cannot resolve its worker count must say so"
+
+
+def test_an_ordinary_process_that_finds_nothing_stays_quiet(tmp_path, caplog):
+    """The CLI, a test runner, a shell -- none of them are workers.
+
+    Warning there would train everyone to ignore the message, which is the same
+    as not having it.
+    """
+    root = _fake_proc(
+        tmp_path,
+        {"1": (["bash"], "0"), "5": (["python", "-c", "print(1)"], "1")},
+    )
+    with caplog.at_level("WARNING"):
+        assert read_argv_workers(proc_root=root, pid="5") is None
+    assert not [r for r in caplog.records if "no cidx server launch" in r.message]
+
+
+def test_a_worker_that_DOES_find_its_launcher_stays_quiet(tmp_path, caplog):
+    """The normal pod case must not warn."""
+    root = _fake_proc(
+        tmp_path,
+        {
+            "7": (["python", "-m", "code_indexer.server.main", "--workers", "2"], "1"),
+            "9": (
+                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                "7",
+            ),
+        },
+    )
+    with caplog.at_level("WARNING"):
+        assert read_argv_workers(proc_root=root, pid="9") == 2
+    assert not [r for r in caplog.records if "no cidx server launch" in r.message]
+
+
 def test_argv_missing_proc_is_unknown_not_fatal(tmp_path):
     """Runs at import; a non-Linux host must get None, never an exception."""
     assert read_argv_workers(proc_root=tmp_path / "nope", pid="1") is None
