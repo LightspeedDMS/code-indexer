@@ -36,7 +36,14 @@ def doors(tmp_path: Path, monkeypatch) -> Iterator[SimpleNamespace]:
     from code_indexer.server.routers import maintenance_router
     from code_indexer.server.services import maintenance_service
 
+    from code_indexer.server.auth.user_manager import UserRole
+
     for env in front_door_env(tmp_path, monkeypatch):
+        # Memberships are only written for existing accounts; the unaudited
+        # primitive adds the member without an audit row of its own.
+        env.stack.user_manager.create_user(
+            _MEMBER, "Quiet-Harbor-Lantern-42!", UserRole.NORMAL_USER
+        )
         app: Any = env.client.app
         activated = ActivatedRepoManager(
             data_dir=str(tmp_path / "activated-data"),

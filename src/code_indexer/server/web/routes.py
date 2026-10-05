@@ -2026,42 +2026,17 @@ async def delete_user(
         )
 
     try:
-        # Account write plus its durable audit row: off the event loop.
+        # Account write plus its durable audit row: off the event loop.  The
+        # shared deletion step deletes the account row first, then removes
+        # every row keyed to the name (group membership, SSO links, MFA,
+        # tokens, credentials) in the configured store and submits removal of
+        # the account's repositories.
         deleted = await asyncio.to_thread(
             user_manager.delete_user_audited, username, actor=session.username
         )
         if not deleted:
-            # Nothing was deleted: no identity-link or membership cleanup.
             return RedirectResponse(
                 url="/admin/users?error=user_not_found", status_code=303
-            )
-
-        # Clean up OIDC identity link if OIDC manager exists
-        from ..auth.oidc import routes as oidc_routes
-
-        if oidc_routes.oidc_manager:
-            import aiosqlite
-
-            async with aiosqlite.connect(oidc_routes.oidc_manager.db_path) as db:
-                await db.execute(
-                    "DELETE FROM oidc_identity_links WHERE username = ?", (username,)
-                )
-                await db.commit()
-
-        # Clean up group membership (Bug fix: prevent orphaned group memberships)
-        try:
-            group_manager = _get_group_manager()
-            # Synchronous group store work: off the event loop.
-            await asyncio.to_thread(
-                _remove_deleted_user_membership, group_manager, username
-            )
-        except RuntimeError:
-            # group_manager not available - skip cleanup
-            logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-041",
-                    f"group_manager not available, skipped group cleanup for: {username}",
-                )
             )
 
         return RedirectResponse(
@@ -2070,14 +2045,6 @@ async def delete_user(
         )
     except ValueError:
         return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
-
-
-def _remove_deleted_user_membership(group_manager: Any, username: str) -> None:
-    """Remove a deleted user's group membership (synchronous store work)."""
-    user_group = group_manager.get_user_group(username)
-    if user_group:
-        group_manager.remove_user_from_group(username, user_group.id)
-        logger.info(f"Cleaned up group membership for deleted user: {username}")
 
 
 @web_router.get(
@@ -2528,13 +2495,35 @@ def assign_user_to_group(
             request, session, active_tab="users", error_message="Invalid CSRF token"
         )
 
-    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+    from code_indexer.server.services.group_access_manager import (
+        GroupNotFoundError,
+        UnknownAccountError,
+    )
+
+    user_manager = dependencies.user_manager
+    if user_manager is None:
+        return _create_groups_page_response(
+            request,
+            session,
+            active_tab="users",
+            error_message="User manager not available",
+        )
 
     try:
         group_manager = _get_group_manager()
         try:
             new_group = group_manager.assign_user_to_group_audited(
-                user_id, group_id, actor=session.username
+                user_id,
+                group_id,
+                actor=session.username,
+                account_exists=lambda name: user_manager.get_user(name) is not None,
+            )
+        except UnknownAccountError:
+            return _create_groups_page_response(
+                request,
+                session,
+                active_tab="users",
+                error_message=f"User '{user_id}' not found",
             )
         except GroupNotFoundError:
             return _create_groups_page_response(

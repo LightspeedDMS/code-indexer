@@ -171,6 +171,7 @@ class TestGetUser:
             "2024-01-01T00:00:00+00:00",
             None,
             None,
+            None,
         )
         cursor.fetchall.return_value = []
         backend = _make_backend(pool)
@@ -183,6 +184,7 @@ class TestGetUser:
         assert result["role"] == "user"
         assert result["email"] == "alice@example.com"
         assert result["oidc_identity"] is None
+        assert result["account_created_at"] is None
         assert "api_keys" in result
         assert "mcp_credentials" in result
 
@@ -196,6 +198,7 @@ class TestGetUser:
             None,
             "2024-01-01T00:00:00+00:00",
             json.dumps(oidc_data),
+            None,
             None,
         )
         cursor.fetchall.return_value = []
@@ -286,6 +289,7 @@ class TestUpdateUser:
             "2024-01-01T00:00:00+00:00",
             None,
             None,
+            None,
         )
         cursor.fetchall.return_value = []
         cursor.rowcount = 1
@@ -301,6 +305,7 @@ class TestUpdateUser:
             "user",
             None,
             "2024-01-01T00:00:00+00:00",
+            None,
             None,
             None,
         )

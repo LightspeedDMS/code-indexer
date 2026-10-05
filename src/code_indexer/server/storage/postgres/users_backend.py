@@ -62,10 +62,11 @@ class UsersPostgresBackend:
             conn.execute(
                 """
                 INSERT INTO users
-                (username, password_hash, role, email, created_at, password_changed_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (username, password_hash, role, email, created_at,
+                 password_changed_at, account_created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (username, password_hash, role, email, now, now),
+                (username, password_hash, role, email, now, now, now),
             )
             conn.commit()
 
@@ -77,7 +78,7 @@ class UsersPostgresBackend:
             row = conn.execute(
                 """
                 SELECT username, password_hash, role, email, created_at,
-                       oidc_identity, password_changed_at
+                       oidc_identity, password_changed_at, account_created_at
                 FROM users
                 WHERE username = %s
                 """,
@@ -99,6 +100,7 @@ class UsersPostgresBackend:
                 "created_at": row[4],
                 "oidc_identity": self._parse_json(row[5]),
                 "password_changed_at": row[6],
+                "account_created_at": row[7],
                 "api_keys": api_keys,
                 "mcp_credentials": mcp_credentials,
             }

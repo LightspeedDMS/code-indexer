@@ -1199,14 +1199,25 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 @require_mcp_elevation()
 def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
-    """Assign a user to a group (inner handler — Story #992)."""
-    from ....services.group_access_manager import GroupNotFoundError
+    """Assign a user to a group (inner handler — Story #992).
+
+    A membership is only written for a name that has an account.
+    """
+    from ....services.group_access_manager import (
+        GroupNotFoundError,
+        UnknownAccountError,
+    )
 
     try:
         group_manager = _get_group_manager()
         if not group_manager:
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
+            )
+        user_manager = dependencies.user_manager
+        if user_manager is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {"success": False, "error": "User manager not configured"}
             )
 
         group_id, error = _parse_group_id(args)
@@ -1221,7 +1232,14 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
 
         try:
             group_manager.assign_user_to_group_audited(
-                user_id, group_id, actor=user.username
+                user_id,
+                group_id,
+                actor=user.username,
+                account_exists=lambda name: user_manager.get_user(name) is not None,
+            )
+        except UnknownAccountError:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {"success": False, "error": f"User not found: {user_id}"}
             )
         except GroupNotFoundError:
             return _group_not_found(group_id)

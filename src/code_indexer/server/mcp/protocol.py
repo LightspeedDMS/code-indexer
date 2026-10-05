@@ -1619,17 +1619,18 @@ async def mcp_public_endpoint(
     """Public MCP endpoint (no OAuth challenge)."""
     session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
-    # Sliding expiration for cookie-authenticated sessions
+    # Full cookie validation first (signature, revocation, live account,
+    # account creation instant); the sliding refresh is only for a cookie
+    # that authenticated a user.
+    user = get_optional_user_from_cookie(request)
     token = request.cookies.get("cidx_session")
-    if token and auth_deps.jwt_manager is not None:
+    if user is not None and token and auth_deps.jwt_manager is not None:
         try:
             payload = auth_deps.jwt_manager.validate_token(token)
             if _should_refresh_token(payload):
                 _refresh_jwt_cookie(response, payload)
         except Exception as e:
             logger.debug("mcp_public cookie refresh error: %s", e)
-
-    user = get_optional_user_from_cookie(request)
 
     # Extract JWT jti for TOTP elevation window lookup (Web UI cookie-auth path).
     # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.

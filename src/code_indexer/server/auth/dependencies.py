@@ -112,6 +112,25 @@ def _check_non_sso_api_restriction(user: User) -> None:
         )
 
 
+def credential_predates_account(issued_at: Any, user: User) -> bool:
+    """True when a credential was issued before *user*'s account was created.
+
+    Such a credential (JWT ``iat``, Web session ``created_at``) belongs to an
+    earlier, deleted account with the same name and must not authenticate
+    this one.  An account with no recorded creation instant (created before
+    the instant was recorded) carries no restriction.  When the account has
+    one, a credential whose issue time is missing or unreadable is refused.
+    """
+    created = user.account_created_at
+    if created is None:
+        return False
+    try:
+        issued = float(issued_at)
+    except (TypeError, ValueError):
+        return True
+    return issued < created.timestamp()
+
+
 def _validate_jwt_and_get_user(token: str) -> User:
     """Validate JWT token and return User object or raise HTTPException 401."""
     if not jwt_manager or not user_manager:
@@ -147,6 +166,14 @@ def _validate_jwt_and_get_user(token: str) -> User:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
+                headers={"WWW-Authenticate": _build_www_authenticate_header()},
+            )
+        from code_indexer.server.auth.jwt_manager import original_auth_time
+
+        if credential_predates_account(original_auth_time(payload), user):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token predates account",
                 headers={"WWW-Authenticate": _build_www_authenticate_header()},
             )
 
@@ -204,11 +231,16 @@ def _refresh_jwt_cookie(response: Response, payload: Dict[str, Any]) -> None:
 
         blacklist_token(old_jti)
 
+    from code_indexer.server.auth.jwt_manager import original_auth_time
+
+    # The refreshed cookie continues the same authentication: it keeps the
+    # original auth_time, so the account check cannot be reset by refresh.
     new_token = jwt_manager.create_token(
         {
             "username": payload.get("username"),
             "role": payload.get("role"),
             "created_at": payload.get("created_at"),
+            "auth_time": original_auth_time(payload),
         }
     )
 
@@ -605,7 +637,9 @@ def get_current_user_web_or_api(
             if session_data:
                 # Valid web session - get User object
                 user = user_manager.get_user(session_data.username)
-                if user:
+                if user and not credential_predates_account(
+                    session_data.issued_at, user
+                ):
                     # Elevation windows opened through the Web UI (e.g.
                     # /admin/elevate) are keyed by the raw "session" cookie
                     # value -- the same value _hybrid_auth_impl's web-session
@@ -869,6 +903,12 @@ def _hybrid_auth_impl(
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"User '{session.username}' not found in user database",
+                )
+            if credential_predates_account(session.issued_at, user):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session predates account",
+                    headers={"WWW-Authenticate": _build_www_authenticate_header()},
                 )
 
             # Check admin requirement using DATABASE role, not session role

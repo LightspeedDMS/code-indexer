@@ -739,8 +739,12 @@ def register_auth_routes(
         try:
             # Use the refresh token manager to validate and create new tokens
             result = refresh_token_manager.validate_and_rotate_refresh_token(
-                refresh_token=refresh_request.refresh_token, client_ip="unknown"
+                refresh_token=refresh_request.refresh_token,
+                client_ip="unknown",
+                user_manager=user_manager,
             )
+            if not result["valid"]:
+                raise ValueError(result.get("error", "Invalid refresh token"))
 
             return LoginResponse(
                 access_token=result["new_access_token"],

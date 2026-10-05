@@ -38,6 +38,8 @@ class SessionData:
     csrf_token: str
     created_at: float
     session_timeout: int = SESSION_TIMEOUT_SECONDS
+    # Instant of the original sign-in; sliding refreshes never change it.
+    issued_at: Optional[float] = None
 
 
 class SessionManager:
@@ -101,6 +103,7 @@ class SessionManager:
             "role": role,
             "csrf_token": csrf_token,
             "created_at": created_at,
+            "issued_at": created_at,
             "session_timeout": session_timeout,
         }
 
@@ -156,6 +159,8 @@ class SessionManager:
                 csrf_token=data["csrf_token"],
                 created_at=data["created_at"],
                 session_timeout=int(max_age),
+                # Sessions created before issued_at existed: their created_at.
+                issued_at=data.get("issued_at", data["created_at"]),
             )
 
         except SignatureExpired:
@@ -215,6 +220,8 @@ class SessionManager:
                 "role": session.role,
                 "csrf_token": session.csrf_token,
                 "created_at": time.time(),
+                # The refresh continues the same sign-in.
+                "issued_at": session.issued_at,
                 "session_timeout": session.session_timeout,
             }
             signed_value = self._serializer.dumps(session_data, salt=self._salt)

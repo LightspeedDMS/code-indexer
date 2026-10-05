@@ -679,8 +679,21 @@ class TestManageGroupMembersHandler:
 
         return GroupAccessManager(temp_groups_db)
 
-    def test_add_member_succeeds(self, admin_user, mock_group_manager, tmp_path):
-        """manage_group_members add action succeeds for valid inputs."""
+    @pytest.fixture
+    def accounts(self, tmp_path, monkeypatch):
+        """Real SQLite account store holding the account ``test_user``."""
+        from code_indexer.server.auth import dependencies
+        from tests.unit.server._account_rows import PASSWORD, build_stores
+
+        stores = build_stores(tmp_path / "accounts")
+        stores.user_manager.create_user("test_user", PASSWORD, UserRole.NORMAL_USER)
+        monkeypatch.setattr(dependencies, "user_manager", stores.user_manager)
+        return stores
+
+    def test_add_member_succeeds(
+        self, admin_user, mock_group_manager, accounts, tmp_path
+    ):
+        """manage_group_members add action succeeds for an existing account."""
         with (
             patch(
                 "code_indexer.server.mcp.handlers.admin._get_group_manager",
@@ -699,6 +712,32 @@ class TestManageGroupMembersHandler:
             )
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
+            assert mock_group_manager.get_user_group("test_user") is not None
+
+    def test_add_member_refuses_name_without_account(
+        self, admin_user, mock_group_manager, accounts, tmp_path
+    ):
+        """manage_group_members add writes no membership for a name with no account."""
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
+        ):
+            admins = mock_group_manager.get_group_by_name("admins")
+
+            handler = HANDLER_REGISTRY["manage_group_members"]
+            result = handler(
+                {"action": "add", "group_id": str(admins.id), "user_id": "ghost"},
+                admin_user,
+                session_key=session_key,
+            )
+            content = json.loads(result["content"][0]["text"])
+            assert content["success"] is False
+            assert "ghost" in content["error"]
+            assert "not found" in content["error"].lower()
+            assert mock_group_manager.get_user_group("ghost") is None
 
     def test_remove_member_succeeds(self, admin_user, mock_group_manager, tmp_path):
         """manage_group_members remove action succeeds for valid inputs."""
