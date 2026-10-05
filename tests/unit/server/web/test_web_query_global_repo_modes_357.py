@@ -15,6 +15,7 @@ and records which repository paths it searched.
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 import shutil
 from http.cookies import SimpleCookie
@@ -27,6 +28,7 @@ import pytest
 from fastapi import Response
 from fastapi.testclient import TestClient
 
+from code_indexer.config import ConfigManager
 from code_indexer.server.auth.user_manager import UserRole
 from code_indexer.server.services import config_service as config_service_module
 from code_indexer.server.web import auth as web_auth
@@ -142,8 +144,6 @@ def env(
 ) -> Iterator[QueryAccessEnv]:
     monkeypatch.delenv("CO_API_KEY", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    # The server data dir whose data/golden-repos holds the env's aliases.
-    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
     # QueryAccessEnv installs its own config service; put the app's back.
     monkeypatch.setattr(
         config_service_module,
@@ -152,6 +152,11 @@ def env(
     )
     e = QueryAccessEnv(tmp_path, server_db_template)
     for repo in ALL_REPOS:
+        # Every indexed repository carries its own config.json; the temporal
+        # path verifies it before looking for a temporal index.
+        ConfigManager(
+            e.repo_paths[repo] / ".code-indexer" / "config.json"
+        ).create_default_config(codebase_dir=e.repo_paths[repo])
         shutil.copytree(
             fts_index_template / repo,
             e.repo_paths[repo] / ".code-indexer" / "tantivy_index",
@@ -244,6 +249,11 @@ def _error(html: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _warning(html: str) -> Optional[str]:
+    match = re.search(r"<strong>Warning:</strong>\s*(.*?)\s*</div>", html, re.S)
+    return match.group(1) if match else None
+
+
 @pytest.mark.parametrize("handler", HANDLERS)
 class TestGlobalRepoModes:
     def test_fts_returns_fts_rows_and_fts_badge(self, web_app, env, handler):
@@ -325,6 +335,26 @@ class TestGlobalRepoModes:
         assert env.searched_paths == []
         assert _semantic_row_path(GRANTED_REPO) not in html
 
+    def test_temporal_query_without_index_shows_the_warning(
+        self, web_app, env, handler
+    ):
+        html = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "find",
+            "temporal",
+            time_range="2024-01-01..2024-12-31",
+        )
+
+        # The query layer's own warning (REST and MCP return it too),
+        # rendered through the template's autoescape.
+        assert _error(html) is None
+        warning = _warning(html)
+        assert warning is not None
+        assert "Temporal index not available for this repository" in warning
+        assert "&#39;cidx index --index-commits&#39;" in warning
+
     def test_invalid_time_range_is_validated_by_the_temporal_path(
         self, web_app, env, handler
     ):
@@ -350,6 +380,94 @@ class TestGlobalRepoModes:
 
 
 @pytest.mark.parametrize("handler", HANDLERS)
+class TestGlobalRepoFilters:
+    """Each Web form filter reaches the query layer for a global repo."""
+
+    def test_language_reaches_the_query(self, web_app, env, handler):
+        python = _query(
+            web_app, handler, GRANTED_GLOBAL, "authenticate", "fts", language="python"
+        )
+        javascript = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "authenticate",
+            "fts",
+            language="javascript",
+        )
+
+        assert _error(python) is None
+        assert _auth_path(GRANTED_REPO) in python
+        assert _error(javascript) is None
+        assert _auth_path(GRANTED_REPO) not in javascript
+
+    def test_path_filter_reaches_the_query(self, web_app, env, handler):
+        matching = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "authenticate",
+            "fts",
+            path_pattern="*_auth.py",
+        )
+        other = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "authenticate",
+            "fts",
+            path_pattern="*_legacy.py",
+        )
+
+        assert _error(matching) is None
+        assert _auth_path(GRANTED_REPO) in matching
+        assert _error(other) is None
+        assert _auth_path(GRANTED_REPO) not in other
+
+    def test_at_commit_reaches_the_temporal_path(self, web_app, env, handler):
+        unknown = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "find",
+            "temporal",
+            at_commit="no-such-ref-example",
+        )
+        known = _query(
+            web_app, handler, GRANTED_GLOBAL, "find", "temporal", at_commit="main"
+        )
+
+        # The temporal path resolves the ref against the repository's git.
+        error = _error(unknown)
+        assert error is not None
+        assert "no-such-ref-example" in error
+        assert _error(known) is None
+        assert _warning(known) is not None
+        assert env.searched_paths == []
+
+    def test_time_range_all_runs_the_temporal_path(self, web_app, env, handler):
+        plain = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
+        assert _semantic_row_path(GRANTED_REPO) in plain
+        env.searched_paths.clear()
+
+        all_history = _query(
+            web_app,
+            handler,
+            GRANTED_GLOBAL,
+            "find",
+            "semantic",
+            time_range_all=True,
+        )
+
+        # time_range_all routes even a semantic-mode query to the temporal
+        # index (absent here): no semantic search, the temporal warning.
+        assert env.searched_paths == []
+        assert _semantic_row_path(GRANTED_REPO) not in all_history
+        assert _error(all_history) is None
+        assert "Temporal index not available" in (_warning(all_history) or "")
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
 class TestGlobalRepoAccess:
     def test_user_without_access_is_refused(self, web_app, env, handler):
         html = _query(
@@ -369,6 +487,70 @@ class TestGlobalRepoAccess:
         assert _auth_path(GRANTED_REPO) in html
 
 
+def _routes_records(caplog: pytest.LogCaptureFixture) -> List[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == web_routes.logger.name]
+
+
+@pytest.mark.parametrize("handler", HANDLERS)
+class TestQueryFailureLogging:
+    """Expected refusals log WARNING (no traceback); the unexpected, ERROR."""
+
+    def _assert_refusal_logged_as_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        records = _routes_records(caplog)
+        assert [r for r in records if r.levelno >= logging.ERROR] == []
+        refusals = [r for r in records if "[STORE-GENERAL-053]" in r.getMessage()]
+        assert len(refusals) == 1
+        assert refusals[0].levelno == logging.WARNING
+        assert refusals[0].exc_info is None
+
+    def test_access_refusal_logs_warning_not_error(self, web_app, env, handler, caplog):
+        with caplog.at_level(logging.WARNING):
+            html = _query(
+                web_app, handler, UNGRANTED_GLOBAL, "find", "semantic", username=USER
+            )
+
+        assert _error(html) is not None
+        self._assert_refusal_logged_as_warning(caplog)
+
+    def test_invalid_time_range_logs_warning_not_error(
+        self, web_app, env, handler, caplog
+    ):
+        with caplog.at_level(logging.WARNING):
+            html = _query(
+                web_app,
+                handler,
+                GRANTED_GLOBAL,
+                "find",
+                "temporal",
+                time_range="not-a-range",
+            )
+
+        assert _error(html) is not None
+        self._assert_refusal_logged_as_warning(caplog)
+
+    def test_unexpected_failure_logs_error_with_traceback(
+        self, web_app, env, handler, caplog, monkeypatch
+    ):
+        # A process whose access filtering service is not wired must fail
+        # closed: a wiring fault, not a refusal of this user.
+        app_module = importlib.import_module("code_indexer.server.app")
+        monkeypatch.setattr(
+            vars(app_module)["app"].state, "access_filtering_service", None
+        )
+
+        with caplog.at_level(logging.WARNING):
+            html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
+
+        assert _error(html) is not None
+        errors = [r for r in _routes_records(caplog) if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        code = "STORE-GENERAL-041" if handler == PARTIAL else "STORE-GENERAL-035"
+        assert f"[{code}]" in errors[0].getMessage()
+        assert errors[0].exc_info is not None
+
+
 @pytest.mark.parametrize("handler", HANDLERS)
 class TestUnchangedPaths:
     def test_activated_repo_semantic_query(self, web_app, env, handler):
@@ -379,6 +561,21 @@ class TestUnchangedPaths:
         assert _error(html) is None
         assert _semantic_row_path(OWN_ACTIVATION) in html
         assert _badge(html) == "semantic"
+
+    def test_query_service_unavailable_is_reported(self, web_app, env, handler):
+        # Restored by hand: the env fixture restores the app module's names
+        # on teardown, so a monkeypatch undo would run after it and leave
+        # this test's manager behind.
+        namespace = vars(importlib.import_module("code_indexer.server.app"))
+        installed = namespace["semantic_query_manager"]
+        namespace["semantic_query_manager"] = None
+        try:
+            html = _query(web_app, handler, GRANTED_GLOBAL, "find", "semantic")
+        finally:
+            namespace["semantic_query_manager"] = installed
+
+        assert _error(html) == "Query service not available"
+        assert env.searched_paths == []
 
     def test_scip_on_global_repo_without_index(self, web_app, env, handler):
         html = _query(web_app, handler, GRANTED_GLOBAL, "Example", "scip")

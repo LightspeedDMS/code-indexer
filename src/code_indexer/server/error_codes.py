@@ -4412,12 +4412,6 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
-    "STORE-GENERAL-034": ErrorDefinition(
-        code="STORE-GENERAL-034",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
     "STORE-GENERAL-035": ErrorDefinition(
         code="STORE-GENERAL-035",
         description="TODO",
@@ -4444,12 +4438,6 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "STORE-GENERAL-039": ErrorDefinition(
         code="STORE-GENERAL-039",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
-    "STORE-GENERAL-040": ErrorDefinition(
-        code="STORE-GENERAL-040",
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
@@ -4525,6 +4513,15 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "STORE-GENERAL-053": ErrorDefinition(
+        code="STORE-GENERAL-053",
+        description=(
+            "Web Query page query refused: the user cannot access the "
+            "repository or a query parameter is invalid"
+        ),
+        severity=Severity.WARNING,
+        action="None needed; the refusal is shown to the user on the Query page",
     ),
     "SVC-GENERAL-015": ErrorDefinition(
         code="SVC-GENERAL-015",

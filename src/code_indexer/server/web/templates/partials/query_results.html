@@ -1,3 +1,9 @@
+{% if warning_message and not error_message %}
+<div class="message-warning">
+    <strong>Warning:</strong> {{ warning_message }}
+</div>
+{% endif %}
+
 {% if error_message %}
 <div class="message-error">
     <strong>Error:</strong> {{ error_message }}
@@ -96,6 +102,14 @@
 {% endif %}
 
 <style>
+.message-warning {
+    background-color: #fff3cd;
+    color: #664d03;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
 .search-mode-badge {
     display: inline-block;
     padding: 2px 8px;

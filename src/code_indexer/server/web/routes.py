@@ -5508,6 +5508,7 @@ def _create_query_page_response(
     regex: bool = False,
     scip_query_type: str = "definition",
     scip_exact: bool = False,
+    warning_message: Optional[str] = None,
 ) -> HTMLResponse:
     """Create query page response with all necessary context."""
     csrf_token = generate_csrf_token()
@@ -5536,6 +5537,7 @@ def _create_query_page_response(
             "results": results,
             "query_executed": query_executed,
             "error_message": error_message,
+            "warning_message": warning_message,
             "success_message": success_message,
             "time_range_all": time_range_all,
             "time_range": time_range,
@@ -5675,8 +5677,11 @@ def query_submit(
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
+
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
     try:
         # Handle SCIP query mode
@@ -5933,27 +5938,34 @@ def query_submit(
                 error_message = f"Repository '{user_alias}' not found"
             else:
                 # Activated and global repositories: the same mode-aware path.
-                results.extend(
-                    _execute_text_query(
-                        query_manager,
-                        target_repo,
-                        user_alias,
-                        session.username,
-                        query_text,
-                        limit=limit,
-                        min_score=parsed_min_score,
-                        language=language,
-                        path_filter=path_pattern,
-                        search_mode=search_mode,
-                        time_range=time_range,
-                        time_range_all=time_range_all,
-                        at_commit=at_commit,
-                        case_sensitive=case_sensitive,
-                        fuzzy=fuzzy,
-                        regex=regex,
-                    )
+                text_rows, warning_message = _execute_text_query(
+                    query_manager,
+                    target_repo,
+                    user_alias,
+                    session.username,
+                    query_text,
+                    limit=limit,
+                    min_score=parsed_min_score,
+                    language=language,
+                    path_filter=path_pattern,
+                    search_mode=search_mode,
+                    time_range=time_range,
+                    time_range_all=time_range_all,
+                    at_commit=at_commit,
+                    case_sensitive=case_sensitive,
+                    fuzzy=fuzzy,
+                    regex=regex,
                 )
+                results.extend(text_rows)
 
+    except (SemanticQueryError, ValueError) as e:
+        # Expected refusals (no access to the repository, invalid query
+        # parameters): shown to the user, not a server fault.
+        logger.warning(
+            format_error_log("STORE-GENERAL-053", f"Query refused: {e}"),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        error_message = f"Query failed: {str(e)}"
     except Exception as e:
         logger.error(
             format_error_log("STORE-GENERAL-035", f"Query execution failed: {e}"),
@@ -5983,6 +5995,7 @@ def query_submit(
         regex=regex,
         scip_query_type=scip_query_type,
         scip_exact=scip_exact,
+        warning_message=warning_message,
     )
 
 
@@ -6248,8 +6261,11 @@ def _execute_text_query(
     case_sensitive: bool,
     fuzzy: bool,
     regex: bool,
-) -> List[Dict[str, Any]]:
-    """Run a semantic/FTS/hybrid/temporal Web query; return template rows.
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Run a semantic/FTS/hybrid/temporal Web query.
+
+    Returns ``(template rows, warning)``; the warning is the query layer's
+    own (e.g. no temporal index), the same text REST and MCP return.
 
     Shared by both Web query handlers. Activated and global repositories go
     through the same mode-aware ``query_user_repositories`` path REST and
@@ -6280,7 +6296,7 @@ def _execute_text_query(
         regex=regex,
     )
 
-    return [
+    rows = [
         {
             "file_path": result.get("file_path", ""),
             "line_numbers": f"{result.get('line_number', 1)}",
@@ -6294,6 +6310,7 @@ def _execute_text_query(
         }
         for result in query_response.get("results", [])
     ]
+    return rows, query_response.get("warning")
 
 
 @web_router.post("/partials/query-results", response_class=HTMLResponse)
@@ -6381,7 +6398,10 @@ def query_results_partial_post(
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
+
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
     try:
         query_manager = _get_semantic_query_manager()
@@ -6420,27 +6440,34 @@ def query_results_partial_post(
                     error_message = scip_error
             else:
                 # Activated and global repositories: the same mode-aware path.
-                results.extend(
-                    _execute_text_query(
-                        query_manager,
-                        target_repo,
-                        user_alias,
-                        session.username,
-                        query_text,
-                        limit=limit,
-                        min_score=parsed_min_score,
-                        language=language,
-                        path_filter=path_pattern,
-                        search_mode=search_mode,
-                        time_range=time_range,
-                        time_range_all=time_range_all,
-                        at_commit=at_commit,
-                        case_sensitive=case_sensitive,
-                        fuzzy=fuzzy,
-                        regex=regex,
-                    )
+                text_rows, warning_message = _execute_text_query(
+                    query_manager,
+                    target_repo,
+                    user_alias,
+                    session.username,
+                    query_text,
+                    limit=limit,
+                    min_score=parsed_min_score,
+                    language=language,
+                    path_filter=path_pattern,
+                    search_mode=search_mode,
+                    time_range=time_range,
+                    time_range_all=time_range_all,
+                    at_commit=at_commit,
+                    case_sensitive=case_sensitive,
+                    fuzzy=fuzzy,
+                    regex=regex,
                 )
+                results.extend(text_rows)
 
+    except (SemanticQueryError, ValueError) as e:
+        # Expected refusals (no access to the repository, invalid query
+        # parameters): shown to the user, not a server fault.
+        logger.warning(
+            format_error_log("STORE-GENERAL-053", f"Query refused: {e}"),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        error_message = f"Query failed: {str(e)}"
     except Exception as e:
         logger.error(
             format_error_log("STORE-GENERAL-041", f"Query execution failed: {e}"),
@@ -6459,6 +6486,7 @@ def query_results_partial_post(
             "query_executed": query_executed,
             "query_text": query_text,
             "error_message": error_message,
+            "warning_message": warning_message,
             "search_mode": search_mode,
         },
     )
