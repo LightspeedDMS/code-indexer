@@ -7,6 +7,10 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.config import write_json_atomic
+from code_indexer.utils.credential_redaction import (
+    is_display_mask,
+    mask_stored_secret,
+)
 
 import copy
 import json
@@ -720,20 +724,22 @@ class ConfigService:
             },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
+                # Stored keys: at most the last 4 characters (finding 058).
                 "anthropic_api_key": (
-                    config.claude_integration_config.anthropic_api_key[:10] + "***"
-                    if config.claude_integration_config.anthropic_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.anthropic_api_key
+                    )
+                    or None
                 ),
                 "voyageai_api_key": (
-                    config.claude_integration_config.voyageai_api_key[:6] + "***"
-                    if config.claude_integration_config.voyageai_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.voyageai_api_key
+                    )
+                    or None
                 ),
                 "cohere_api_key": (
-                    config.claude_integration_config.cohere_api_key[:6] + "***"
-                    if config.claude_integration_config.cohere_api_key
-                    else None
+                    mask_stored_secret(config.claude_integration_config.cohere_api_key)
+                    or None
                 ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
@@ -751,10 +757,10 @@ class ConfigService:
                 "claude_auth_mode": config.claude_integration_config.claude_auth_mode,
                 "llm_creds_provider_url": config.claude_integration_config.llm_creds_provider_url,
                 "llm_creds_provider_api_key": (
-                    config.claude_integration_config.llm_creds_provider_api_key[:6]
-                    + "***"
-                    if config.claude_integration_config.llm_creds_provider_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.llm_creds_provider_api_key
+                    )
+                    or None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
                 "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
@@ -1113,7 +1119,7 @@ class ConfigService:
         settings["codex_integration"] = {
             "enabled": cx_cfg.enabled,
             "credential_mode": cx_cfg.credential_mode,
-            "api_key": (cx_cfg.api_key[:6] + "***" if cx_cfg.api_key else None),
+            "api_key": mask_stored_secret(cx_cfg.api_key) or None,
             "lcp_url": cx_cfg.lcp_url,
             "lcp_vendor": cx_cfg.lcp_vendor,
             "codex_weight": cx_cfg.codex_weight,
@@ -2600,8 +2606,8 @@ class ConfigService:
         """Update a Codex CLI integration setting (Story #844).
 
         Mirrors _update_claude_cli_setting but scoped to CodexIntegrationConfig.
-        api_key is preserved when the submitted value is a masked placeholder
-        (contains '***') to prevent UI re-saves from wiping the stored key.
+        api_key is write-only: a blank value or the exact display mask that
+        get_all_settings() returns keeps the stored key (finding 058).
         """
         from code_indexer.server.utils.config_manager import CodexIntegrationConfig
 
@@ -2620,11 +2626,10 @@ class ConfigService:
                 )
             cx.credential_mode = str_val
         elif key == "api_key":
-            # Preserve existing key when the submitted value is a masked placeholder
-            str_val = str(value) if value else ""
-            if "***" not in str_val:
-                cx.api_key = str_val if str_val else None
-            # else: placeholder submitted — do not overwrite the stored key
+            # Write-only secret: the form never pre-fills it, so a blank value
+            # (or a re-submitted display mask) means "keep the stored key".
+            if value and not is_display_mask(value):
+                cx.api_key = str(value)
         elif key == "lcp_url":
             cx.lcp_url = str(value) if value else None
         elif key == "lcp_vendor":

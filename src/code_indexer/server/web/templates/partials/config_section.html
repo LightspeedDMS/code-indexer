@@ -3862,7 +3862,7 @@ function saveLlmCredsConfig() {
                     {% if github_token_data %}
                     <tr>
                         <td class="config-label">Token</td>
-                        <td class="config-value">{{ github_token_data.token[:10] ~ ('*' * 26) }}</td>
+                        <td class="config-value">{{ github_token_data.masked_token }}</td>
                         <td class="config-note"><small>Personal Access Token (classic) or Fine-grained PAT</small></td>
                     </tr>
                     {% endif %}
@@ -3921,7 +3921,7 @@ function saveLlmCredsConfig() {
                     {% if gitlab_token_data %}
                     <tr>
                         <td class="config-label">Token</td>
-                        <td class="config-value">{{ gitlab_token_data.token[:10] ~ ('*' * 26) }}</td>
+                        <td class="config-value">{{ gitlab_token_data.masked_token }}</td>
                         <td class="config-note"><small>Personal Access Token or Project Access Token</small></td>
                     </tr>
                     <tr>

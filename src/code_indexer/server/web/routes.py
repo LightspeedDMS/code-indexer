@@ -54,7 +54,11 @@ from .auth import (
     get_session_manager,
     SessionData,
 )
-from ..services.ci_token_manager import CITokenManager, TokenValidationError
+from ..services.ci_token_manager import (
+    CITokenManager,
+    TokenData,
+    TokenValidationError,
+)
 from ..services.config_service import (
     BootstrapFileNotWritten,
     ConfigChangeConflict,
@@ -336,6 +340,22 @@ def _get_token_manager() -> CITokenManager:
         storage_backend=storage_backend,
         storage_mode=storage_mode,
     )
+
+
+def _ci_token_display(
+    token_data: Optional[TokenData],
+) -> Optional[Dict[str, Optional[str]]]:
+    """What the Config page may show of a stored CI token: the masked token
+    (at most its last 4 characters) and the base URL. The raw token never
+    enters the template context. None when no token is stored."""
+    if token_data is None:
+        return None
+    from code_indexer.utils.credential_redaction import mask_stored_secret
+
+    return {
+        "masked_token": mask_stored_secret(token_data.token),
+        "base_url": token_data.base_url,
+    }
 
 
 def _get_ssh_key_manager():
@@ -8309,9 +8329,9 @@ def _create_config_page_response(
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
 
-    # Get token data for masking in template
-    github_token_data = token_manager.get_token("github")
-    gitlab_token_data = token_manager.get_token("gitlab")
+    # Only the masked display form reaches the template (finding 058)
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
     response = templates.TemplateResponse(
         request,
@@ -10079,8 +10099,8 @@ def config_section_partial(
     # Load API keys status
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
-    github_token_data = token_manager.get_token("github")
-    gitlab_token_data = token_manager.get_token("gitlab")
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
     response = templates.TemplateResponse(
         request,

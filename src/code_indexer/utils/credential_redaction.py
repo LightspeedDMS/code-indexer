@@ -34,6 +34,49 @@ _SECRET_NAME_RE = re.compile(
 # e.g. a 3-char value would garble unrelated words.
 _MIN_OUTPUT_SECRET_CHARS = 6
 
+# Display masking of a STORED secret (tokens, API keys): reveal at most its
+# last _DISPLAY_TAIL_CHARS characters, and only when the secret is at least
+# _DISPLAY_TAIL_MIN_CHARS long (a shorter one would leave too little hidden).
+DISPLAY_MASK_CHAR = "•"
+_DISPLAY_MASK = DISPLAY_MASK_CHAR * 8
+_DISPLAY_TAIL_CHARS = 4
+_DISPLAY_TAIL_MIN_CHARS = 20
+_DISPLAY_SHORT_SECRET = "configured"
+
+
+def stored_secret_tail(value: Any) -> str:
+    """The most of a stored secret that may ever be shown: its last 4
+    characters when it is 20+ characters long, otherwise ``""``."""
+    secret = str(value) if value else ""
+    if len(secret) < _DISPLAY_TAIL_MIN_CHARS:
+        return ""
+    return secret[-_DISPLAY_TAIL_CHARS:]
+
+
+def mask_stored_secret(value: Any) -> str:
+    """Display form of a stored secret: ``"••••••••abcd"`` (last 4 only) for
+    a secret of 20+ characters, ``"configured"`` for a shorter one, and
+    ``""`` when nothing is stored. Never reveals a leading character (the
+    provider prefix plus entropy is what screenshots and exports leak)."""
+    if not value:
+        return ""
+    tail = stored_secret_tail(value)
+    return _DISPLAY_MASK + tail if tail else _DISPLAY_SHORT_SECRET
+
+
+def is_display_mask(value: Any) -> bool:
+    """True only for an EXACT display form produced by mask_stored_secret
+    (``"configured"`` or the 8-character mask plus a 4-character tail), so a
+    setter can treat a re-submitted display value as "keep the stored
+    secret" without mistaking a real key that merely contains ``*``/``•``."""
+    if not isinstance(value, str):
+        return False
+    if value == _DISPLAY_SHORT_SECRET:
+        return True
+    return len(value) == len(_DISPLAY_MASK) + _DISPLAY_TAIL_CHARS and value.startswith(
+        _DISPLAY_MASK
+    )
+
 
 def mask_url_credentials(url: Any) -> Any:
     """Strip embedded credentials from a git/HTTP URL for safe exposure.

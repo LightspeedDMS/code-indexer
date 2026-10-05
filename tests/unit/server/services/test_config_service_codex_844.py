@@ -70,7 +70,7 @@ def test_codex_integration_default(config_service, key, default):
 _UPDATE_SPECS = [
     ("enabled", True, bool),
     ("credential_mode", "api_key", str),
-    # api_key excluded: get_all_settings() masks it (first 6 chars + "***"),
+    # api_key excluded: get_all_settings() masks it (last 4 chars only),
     # so a generic roundtrip cannot compare the stored vs returned values.
     # api_key behaviour is covered by test_codex_api_key_stored_and_returned_masked
     # and test_api_key_masked_placeholder_preserved below.
@@ -103,14 +103,14 @@ def test_codex_integration_update_roundtrip(
 
 
 def test_codex_api_key_stored_and_returned_masked(config_service):
-    """get_all_settings() must return a masked api_key (first 6 chars + '***'),
-    not the raw stored value."""
+    """get_all_settings() must return a masked api_key revealing at most the
+    last 4 characters (finding 058), not the raw stored value."""
     config_service.update_setting(
         "codex_integration", "api_key", "dummy-api-key-not-real"
     )
     settings = config_service.get_all_settings()
-    assert settings["codex_integration"]["api_key"] == "dummy-***", (
-        "Expected masked api_key 'dummy-***' from get_all_settings(), "
+    assert settings["codex_integration"]["api_key"] == "•" * 8 + "real", (
+        "Expected masked api_key (8 bullets + last 4) from get_all_settings(), "
         f"got: {settings['codex_integration']['api_key']!r}"
     )
 
@@ -131,20 +131,74 @@ def test_invalid_credential_mode_rejected(config_service):
 # ---------------------------------------------------------------------------
 
 
-def test_api_key_masked_placeholder_preserved(config_service):
-    """When the submitted api_key contains '***' (masked placeholder),
-    the existing stored value must be preserved — not overwritten with the mask."""
-    # First store a real (dummy) key
-    config_service.update_setting("codex_integration", "api_key", "dummy-real-key")
-    # Now submit a masked placeholder (as the UI would when re-saving without editing)
-    config_service.update_setting("codex_integration", "api_key", _MASKED_PLACEHOLDER)
-    # The raw stored key must still be "dummy-real-key", not the placeholder
+def _stored_codex_key(config_service):
     config = config_service.get_config()
     assert config.codex_integration_config is not None
-    stored_key = config.codex_integration_config.api_key
-    assert stored_key == "dummy-real-key", (
-        f"Masked placeholder overwrote the real key. Got: {stored_key!r}"
+    return config.codex_integration_config.api_key
+
+
+@pytest.mark.parametrize(
+    "stored_key",
+    ["dummy-real-key-not-real-0000", "dummy-short"],
+    ids=["masked-tail", "configured"],
+)
+def test_api_key_display_mask_preserved(config_service, stored_key):
+    """Re-submitting the exact display form get_all_settings() returned
+    ("••••••••tail" or "configured") keeps the stored key."""
+    config_service.update_setting("codex_integration", "api_key", stored_key)
+    shown = config_service.get_all_settings()["codex_integration"]["api_key"]
+
+    config_service.update_setting("codex_integration", "api_key", shown)
+
+    assert _stored_codex_key(config_service) == stored_key
+
+
+@pytest.mark.parametrize("blank", ["", None])
+def test_blank_api_key_keeps_stored_key(config_service, blank):
+    """The key is write-only: a blank value means "keep" (as for A6's
+    Langfuse secret_key and OIDC client_secret)."""
+    config_service.update_setting("codex_integration", "api_key", "dummy-real-key")
+
+    config_service.update_setting("codex_integration", "api_key", blank)
+
+    assert _stored_codex_key(config_service) == "dummy-real-key"
+
+
+def test_section_save_with_blank_api_key_keeps_stored_key(config_service):
+    """The Codex form posts every field, api_key blank (its input is never
+    pre-filled): saving only a new codex_weight must not wipe the key."""
+    config_service.update_setting("codex_integration", "api_key", "dummy-real-key")
+
+    config_service.update_settings_audited(
+        [
+            ("codex_integration", "enabled", "true"),
+            ("codex_integration", "credential_mode", "api_key"),
+            ("codex_integration", "api_key", ""),
+            ("codex_integration", "lcp_url", ""),
+            ("codex_integration", "lcp_vendor", "openai"),
+            ("codex_integration", "codex_weight", "0.7"),
+        ],
+        actor="example-admin",
     )
+
+    assert _stored_codex_key(config_service) == "dummy-real-key"
+    codex = config_service.get_config().codex_integration_config
+    assert codex.codex_weight == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize(
+    "new_key",
+    [_MASKED_PLACEHOLDER, "•" * 8 + "abcd-and-more-characters"],
+    ids=["contains-stars", "starts-with-mask-chars"],
+)
+def test_key_merely_containing_mask_characters_is_stored(config_service, new_key):
+    """Only the EXACT display forms are placeholders; any other non-blank
+    value is a new key and is stored."""
+    config_service.update_setting("codex_integration", "api_key", "dummy-real-key")
+
+    config_service.update_setting("codex_integration", "api_key", new_key)
+
+    assert _stored_codex_key(config_service) == new_key
 
 
 # ---------------------------------------------------------------------------
