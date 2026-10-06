@@ -781,9 +781,11 @@ class TestStepUpEdgeCases:
         self, enrolled, store
     ):
         from code_indexer.server.auth.elevation_step_up import StepUpOutcome
+        from code_indexer.server.auth.login_rate_limiter import SCOPE_STEP_UP
 
         _svc, secret, limiter = enrolled
-        limiter.record_failure(f"192.0.2.10:{_USER}")
+        key = _USER  # the step-up throttle is keyed by the username only
+        limiter.begin_attempt(key, scope=SCOPE_STEP_UP)
 
         result = self._step_up(
             enrolled, _UnreadableWindows(), totp_code=_next_step_code(secret)
@@ -795,7 +797,11 @@ class TestStepUpEdgeCases:
         assert [(r.action_type, r.outcome) for r in rows] == [
             ("elevation_failed", "failure")
         ]
-        assert len(limiter._failures[f"192.0.2.10:{_USER}"]) == 1
+        # The history was kept (not cleared): the seeded attempt plus the
+        # step-up's own reserved attempt make 2, so with the default
+        # threshold of 5 the third further reservation starts the throttle.
+        more = [limiter.begin_attempt(key, scope=SCOPE_STEP_UP) for _ in range(3)]
+        assert [o.throttle_started for o in more] == [False, False, True]
 
     def test_window_creation_error_records_failure_and_propagates(
         self, enrolled, store
@@ -816,10 +822,13 @@ class TestStepUpEdgeCases:
     def test_failure_history_reset_error_still_records_the_granted_window(
         self, enrolled, store, tmp_path
     ):
-        from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
+        from code_indexer.server.auth.login_rate_limiter import (
+            SCOPE_LOGIN,
+            LoginRateLimiter,
+        )
 
         class _ResetFails(LoginRateLimiter):
-            def record_success(self, username: str) -> None:
+            def record_success(self, subject: str, *, scope: str = SCOPE_LOGIN) -> None:
                 raise RuntimeError("limiter store unavailable")
 
         windows = ElevatedSessionManager(
@@ -920,8 +929,7 @@ _ELEVATION_DOOR_MODULES = (
 _STEP_UP_ONLY_CALLS = (
     "verify_enabled_code(",
     "verify_recovery_code(",
-    "check_and_record_failure(",
-    "record_failure(",
+    "begin_attempt(",
     "record_success(",
     ".create(",
 )

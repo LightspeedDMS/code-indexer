@@ -60,6 +60,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import base64
 import functools
+import math
 
 import anyio
 
@@ -89,17 +90,57 @@ def _authenticate_or_reject(
 ) -> Optional[User]:
     """Check the password; record the refused attempt when it fails.
 
-    The typed name is recorded only when it names an existing account.
+    Runs off the event loop.  The attempt is first RESERVED in the
+    per-username progressive throttle shared with REST and Web logins (one
+    row-locked transaction, so concurrent requests cannot slip past it);
+    while the backoff window runs it is refused with 429 before the password
+    is checked (no audit row).  The typed name is recorded only when it
+    names an existing account.
     """
-    user = user_manager.authenticate_user(username, password)
+    from .. import login_rate_limiter as _login_throttle
+
+    throttle = _login_throttle.login_rate_limiter
+    try:
+        attempt = throttle.begin_attempt(username)
+    except _login_throttle.ThrottleStoreBusy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Login is busy, try again shortly.",
+            headers={"Retry-After": "1"},
+        )
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many attempts, try again in {wait} seconds.",
+            headers={"Retry-After": str(wait)},
+        )
+    try:
+        username.encode("utf-8")
+        storable = True
+    except UnicodeEncodeError:
+        # A JSON body can carry a lone surrogate: no account can have such a
+        # name (and the user store cannot even look it up), so it is an
+        # ordinary refused login for an unknown account.
+        storable = False
+    user = user_manager.authenticate_user(username, password) if storable else None
     if user is None:
+        account_exists = storable and user_manager.get_user(username) is not None
+        if not account_exists:
+            # An unknown name costs one password hash too (same helper as
+            # REST), so response time does not reveal whether it exists.
+            from ..auth_error_handler import auth_error_handler
+
+            auth_error_handler.perform_dummy_password_work()
         reject_login(
             username,
-            account_exists=user_manager.get_user(username) is not None,
+            account_exists=account_exists,
             method=_PASSWORD_LOGIN_METHOD,
             stage="credentials",
-            reason="bad_credentials",
+            reason=_login_throttle.failure_reason(attempt),
         )
+    else:
+        throttle.record_success(username)
     return user
 
 

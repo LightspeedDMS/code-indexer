@@ -90,17 +90,21 @@ def totp_svc():
 
 @pytest.fixture
 def rate_limiter_unlocked():
-    """Mock rate limiter: not locked."""
+    """Mock rate limiter: every attempt admitted (not throttled)."""
+    from code_indexer.server.auth.login_rate_limiter import AttemptOutcome
+
     rl = MagicMock()
-    rl.is_locked.return_value = (False, 0)
+    rl.begin_attempt.return_value = AttemptOutcome(True, 0.0, False)
     return rl
 
 
 @pytest.fixture
 def rate_limiter_locked():
-    """Mock rate limiter: locked."""
+    """Mock rate limiter: throttled, attempt refused."""
+    from code_indexer.server.auth.login_rate_limiter import AttemptOutcome
+
     rl = MagicMock()
-    rl.is_locked.return_value = (True, 30)
+    rl.begin_attempt.return_value = AttemptOutcome(False, 30.0, False)
     return rl
 
 
@@ -315,6 +319,24 @@ def test_rate_limited_returns_rate_limited(
     assert result.get("error") == "rate_limited"
 
 
+def test_busy_store_returns_busy(admin_user, manager, totp_svc):
+    from code_indexer.server.auth.login_rate_limiter import ThrottleStoreBusy
+
+    rl = MagicMock()
+    rl.begin_attempt.side_effect = ThrottleStoreBusy("database is locked")
+    result = _call_elevate(
+        {"totp_code": _VALID_TOTP},
+        admin_user,
+        _SESSION_KEY,
+        manager,
+        totp_svc,
+        rl,
+    )
+    assert result.get("error") == "busy"
+    assert result.get("message") == "Elevation is busy, try again shortly."
+    totp_svc.verify_enabled_code.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # A request without a session key is refused before any code is verified
 # ---------------------------------------------------------------------------
@@ -333,7 +355,7 @@ def test_missing_session_key_does_not_consume_code(
     )
     assert result.get("error") == "missing_session_key"
     totp_svc.verify_enabled_code.assert_not_called()
-    rate_limiter_unlocked.check_and_record_failure.assert_not_called()
+    rate_limiter_unlocked.begin_attempt.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

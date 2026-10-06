@@ -268,6 +268,13 @@ def initialize_services() -> Dict[str, Any]:
 
     elevated_session_manager.set_sqlite_path(str(db_path))
 
+    # Login throttle: keep per-username failure/backoff state in the shared
+    # cidx_server.db so every worker on the node sees it (lifespan switches
+    # it to PostgreSQL in cluster mode).
+    from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
+
+    login_rate_limiter.set_sqlite_path(str(db_path))
+
     # Bug #1224: Configure OIDC StateManager default SQLite path so all
     # StateManager() instances subsequently constructed in lifespan.py
     # (and late-init cluster paths) automatically use the shared cidx_server.db

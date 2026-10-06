@@ -11724,20 +11724,10 @@ def unified_login_submit(
             detail="User manager not available",
         )
 
-    # Authenticate user (any role accepted)
-    user = user_manager.authenticate_user(username, password)
-
-    if user is None:
-        # The attempt's one outcome row; the typed name is recorded only
-        # when it names an existing account.
-        reject_login(
-            username,
-            account_exists=user_manager.get_user(username) is not None,
-            method=_WEB_LOGIN_METHOD,
-            stage="credentials",
-            reason="bad_credentials",
-        )
-        # Invalid credentials - show error with new CSRF token
+    def _form_error(
+        message: str, status_code: int = 200, headers: Optional[dict] = None
+    ) -> Response:
+        # Re-render the form with the error and a new CSRF token.
         new_csrf_token = generate_csrf_token()
 
         # Check if OIDC is enabled
@@ -11754,13 +11744,66 @@ def unified_login_submit(
                 "request": request,
                 "csrf_token": new_csrf_token,
                 "redirect_to": redirect_to,
-                "error": "Invalid username or password",
+                "error": message,
                 "sso_enabled": sso_enabled,
             },
-            status_code=200,
+            status_code=status_code,
+            headers=headers,
         )
         set_csrf_cookie(error_response, new_csrf_token, path="/")
         return error_response
+
+    # Per-username progressive throttle, shared with REST /auth/login and
+    # OAuth authorize.  The attempt is RESERVED before the password is
+    # checked (one row-locked transaction), so concurrent requests cannot
+    # slip past it; while the backoff window runs every attempt -- a correct
+    # password included -- is refused (no audit row, so refusals cannot
+    # flood the store).  There is no lock state, but the key is the
+    # username, so someone sending wrong passwords can keep it throttled.
+    import math
+
+    from ..auth import login_rate_limiter as _login_throttle
+
+    throttle = _login_throttle.login_rate_limiter
+    try:
+        attempt = throttle.begin_attempt(username)
+    except _login_throttle.ThrottleStoreBusy:
+        return _form_error(
+            "Login is busy, try again shortly.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {"Retry-After": "1"},
+        )
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        return _form_error(
+            f"Too many attempts, try again in {wait} seconds",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            {"Retry-After": str(wait)},
+        )
+
+    # Authenticate user (any role accepted)
+    user = user_manager.authenticate_user(username, password)
+
+    if user is None:
+        account_exists = user_manager.get_user(username) is not None
+        if not account_exists:
+            # An unknown name costs one password hash too (same helper as
+            # REST), so response time does not reveal whether it exists.
+            from ..auth.auth_error_handler import auth_error_handler
+
+            auth_error_handler.perform_dummy_password_work()
+        # The attempt's one outcome row (the attempt is already counted);
+        # the typed name is recorded only when it names an existing account.
+        reject_login(
+            username,
+            account_exists=account_exists,
+            method=_WEB_LOGIN_METHOD,
+            stage="credentials",
+            reason=_login_throttle.failure_reason(attempt),
+        )
+        return _form_error("Invalid username or password")
+
+    throttle.record_success(username)
 
     # Story #565: Password expiry check -- before session creation
     config_svc = get_config_service()

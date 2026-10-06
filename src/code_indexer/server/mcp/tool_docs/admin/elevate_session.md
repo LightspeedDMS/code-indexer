@@ -65,5 +65,6 @@ ERRORS:
 - totp_setup_required: TOTP is not enrolled for this account (setup_url provided)
 - elevation_failed: the code is wrong or already used
 - rate_limited: too many failed attempts, try again later
+- busy: the elevation throttle store is momentarily locked; nothing was checked, retry shortly
 - missing_session_key: this credential type cannot hold an elevation window
 - elevation_enforcement_disabled: step-up elevation is turned off by the operator, so no tool requires it

@@ -54,6 +54,7 @@ from ..auth.login_outcome import complete_login, reject_login
 from ..services.audit_events import SystemComponent
 from ..auth.login_rate_limiter import (
     LoginRateLimiter,
+    failure_reason,
     login_rate_limiter as _default_login_rate_limiter,
 )
 
@@ -164,14 +165,29 @@ def register_auth_routes(
                 headers={"Retry-After": str(math.ceil(retry_after))},
             )
 
-        # Story #557: Account lockout check (complementary to token-bucket above).
-        # Token bucket handles burst; this handles sustained failures (>= 5 in window).
-        is_locked, lockout_remaining = _lockout_limiter.is_locked(login_data.username)
-        if is_locked:
+        # Per-username progressive throttle (complementary to the token bucket
+        # above).  The attempt is RESERVED before the password is checked, in
+        # one row-locked transaction, so concurrent requests cannot slip
+        # past it; while the backoff window runs every attempt -- a correct
+        # password included -- is refused.  There is no lock state, but the
+        # key is the username, so someone sending wrong passwords can keep it
+        # throttled.  Unknown usernames are throttled identically.
+        from ..auth.login_rate_limiter import ThrottleStoreBusy
+
+        try:
+            attempt = _lockout_limiter.begin_attempt(login_data.username)
+        except ThrottleStoreBusy:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Login is busy, try again shortly.",
+                headers={"Retry-After": "1"},
+            )
+        if not attempt.admitted:
+            wait = math.ceil(attempt.retry_after_seconds)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"account_locked: Too many failed attempts. Try again in {int(lockout_remaining)} seconds.",
-                headers={"Retry-After": str(int(lockout_remaining))},
+                detail=f"Too many attempts, try again in {wait} seconds.",
+                headers={"Retry-After": str(wait)},
             )
 
         def authenticate_with_security():
@@ -181,28 +197,23 @@ def register_auth_routes(
             )
 
             if user is None:
-                # Perform dummy password work to prevent timing-based user enumeration
-                auth_error_handler.perform_dummy_password_work()
-
-                # Story #557: Record failure in lockout limiter (audit-logs internally)
-                failure = _lockout_limiter.record_failure(login_data.username)
+                account_exists = user_manager.get_user(login_data.username) is not None
+                if not account_exists:
+                    # An unknown name costs one (dummy) hash, like the real
+                    # check of a known one: no timing-based enumeration.
+                    auth_error_handler.perform_dummy_password_work()
 
                 # The attempt's one outcome row (inside the constant-time
                 # window); the error handler only shapes the response.  The
-                # failure that locks the account is recorded as the lockout.
-                # The typed name is recorded only if it is a real account.
+                # attempt (already counted) that started the throttle is
+                # recorded as rate_limited.  The typed name is recorded only
+                # if it is a real account.
                 reject_login(
                     login_data.username,
-                    account_exists=(
-                        user_manager.get_user(login_data.username) is not None
-                    ),
+                    account_exists=account_exists,
                     method=_PASSWORD_METHOD,
                     stage="credentials",
-                    reason=(
-                        "account_locked"
-                        if failure.lockout_started
-                        else "bad_credentials"
-                    ),
+                    reason=failure_reason(attempt),
                 )
                 error_response = auth_error_handler.create_error_response(
                     AuthErrorType.INVALID_CREDENTIALS,

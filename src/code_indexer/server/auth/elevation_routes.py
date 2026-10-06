@@ -116,6 +116,15 @@ def _require_totp_service():
 
 def _step_up_error(result: StepUpResult) -> HTTPException:
     """This door's error for a step-up that did not grant a window."""
+    if result.outcome is StepUpOutcome.BUSY:
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "busy",
+                "message": "Elevation is busy, try again shortly.",
+            },
+            headers=result.retry_after_header(),
+        )
     if result.outcome is StepUpOutcome.LOCKED_OUT:
         return HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -123,6 +132,7 @@ def _step_up_error(result: StepUpResult) -> HTTPException:
                 "error": "rate_limited",
                 "message": "Too many elevation attempts. Try again later.",
             },
+            headers=result.retry_after_header(),
         )
     if result.outcome is StepUpOutcome.INVALID_CODE:
         message = (
