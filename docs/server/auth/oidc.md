@@ -1,671 +1,171 @@
-# OIDC/SSO Setup and Configuration Guide
+# OIDC Single Sign-On
 
-## Overview
+How to connect a CIDX Server to an OpenID Connect (OIDC) identity provider so users sign in with SSO, and how SSO
+sign-ins map to CIDX accounts and groups.
 
-CIDX Server supports OpenID Connect (OIDC) authentication, enabling Single Sign-On (SSO) integration with enterprise identity providers. This guide covers setup with any OIDC-compliant provider and explains all available configuration options.
+Code: `src/code_indexer/server/auth/oidc/` (provider, manager, callback route), `/login/sso` in
+`src/code_indexer/server/web/routes.py`, group assignment in
+`src/code_indexer/server/services/sso_provisioning_hook.py`.
 
-## Table of Contents
+## Prerequisites
 
-- [Quick Start](#quick-start)
-- [Configuration Reference](#configuration-reference)
-- [Provider Setup Instructions](#provider-setup-instructions)
-- [Email-Based Account Linking](#email-based-account-linking)
-- [Just-In-Time (JIT) User Provisioning](#just-in-time-jit-user-provisioning)
-- [Security Considerations](#security-considerations)
-- [Troubleshooting](#troubleshooting)
+- A running CIDX Server reachable by users at a stable URL, normally HTTPS behind a reverse proxy
+  ([Deployment](../deployment.md#ports-and-network)).
+- An administrator account on the server and permission to register a client application at the identity provider.
+- The provider publishes a discovery document at `<issuer URL>/.well-known/openid-configuration` containing
+  `issuer`, `authorization_endpoint` and `token_endpoint`.
 
-## Quick Start
+## Register CIDX at the identity provider
 
-### Prerequisites
+Create a confidential web client with:
 
-- CIDX Server installed and running
-- Admin access to your identity provider (Keycloak, Azure AD, etc.)
-- HTTPS-enabled deployment (required for OIDC security)
+| Item | Value |
+|------|-------|
+| Grant type | Authorization code |
+| Redirect URI | `<public server URL>/auth/sso/callback` |
+| PKCE | S256. The server always sends a PKCE challenge |
+| Client authentication | Client secret, sent in the token request body (`client_id`, `client_secret` form fields) |
+| Scopes | At least `openid`, plus whatever makes the claims below appear (commonly `profile`, `email`) |
 
-### Basic Setup Steps
+The server reads user information from the **ID token** returned by the token endpoint (it does not call the
+userinfo endpoint), so the provider must put these claims in the ID token:
 
-1. **Configure your Identity Provider:**
-   - Create a new OIDC/OAuth 2.0 client application
-   - Set the redirect URI to: `https://your-cidx-server.com/auth/sso/callback`
-   - Enable Authorization Code flow with PKCE
-   - Request scopes: `openid`, `profile`, `email`
-   - Note your client ID, client secret, and issuer URL
+| Claim | Used for |
+|-------|----------|
+| `sub` | Stable identity of the user (required) |
+| the email claim (default `email`) and `email_verified` | Linking to an existing CIDX account and recording the email of a new one |
+| the username claim (default `preferred_username`) | The username of an account created on first sign-in |
+| the groups claim (default `groups`), a list | Initial group assignment through group mappings |
 
-2. **Configure CIDX Server:**
-   - Edit `~/.cidx-server/config.json`
-   - Add the `oidc_provider_config` section (see [Configuration Reference](#configuration-reference))
-   - Restart CIDX Server
+### The redirect URI the server uses
 
-3. **Test the Integration:**
-   - Navigate to the login page
-   - Click "Sign in with SSO"
-   - Complete authentication at your identity provider
-   - Verify you're redirected back and logged in
+The server builds the redirect URI from the `CIDX_ISSUER_URL` environment variable of the `cidx-server` systemd unit
+when it is set (`<CIDX_ISSUER_URL>/auth/sso/callback`), otherwise from the URL of the incoming request. Behind a
+reverse proxy, set `CIDX_ISSUER_URL` to the public URL (see [Deployment](../deployment.md#systemd-units)); the
+value registered at the provider must match it exactly, including scheme and any trailing slash.
 
-## Configuration Reference
+## Configure the server
 
-### Configuration File Location
+OIDC settings are runtime settings stored in the server database, not in `config.json`. Edit them in the Web UI:
+Configuration, Authentication and Security, **SSO Authentication** (section `oidc`, saved to
+`/admin/config/oidc`).
 
-OIDC configuration is stored in `~/.cidx-server/config.json` under the `oidc_provider_config` key.
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `enabled` | `false` | Master switch |
+| `issuer_url` | empty | Issuer URL; the discovery document is fetched from `<issuer_url>/.well-known/openid-configuration` |
+| `client_id` | empty | Client identifier from the provider |
+| `client_secret` | empty | Client secret. The form never displays it; leave the field empty to keep the stored secret |
+| `scopes` | `openid profile email` | Space-separated scopes requested at sign-in |
+| `email_claim` | `email` | ID-token claim holding the email address |
+| `username_claim` | `preferred_username` | ID-token claim used as the username of an account created on first sign-in |
+| `groups_claim` | `groups` | ID-token claim holding the user's groups |
+| `group_mappings` | `[]` | External group to CIDX group mappings (see [Group mapping](#group-mapping)) |
+| `require_email_verification` | `true` | Link or create accounts only when `email_verified` is true |
+| `enable_jit_provisioning` | `true` | Create an account on first sign-in when none matches |
+| `default_role` | `normal_user` | Role of an account created on first sign-in (`normal_user` or `admin`) |
+| `use_pkce` | `true` | Stored and shown in the form; the server sends a PKCE (S256) challenge regardless |
 
-### Complete Configuration Schema
+Saving the section applies it as one audited change. The server first builds the SSO components for the new values;
+if that fails the page shows `Invalid OIDC configuration: ... Changes not saved.` (HTTP 400) and nothing changes.
+The new values take effect at once in the server process that handled the save. Restart the server (every node in a
+cluster) so that all worker processes use them.
+
+The provider's discovery document is fetched at the first SSO sign-in after a start or a save, not when saving. A
+wrong or unreachable issuer therefore shows up at sign-in (see [Troubleshooting](#troubleshooting)).
+
+## The sign-in flow
+
+1. The user selects SSO on the login page, which calls `GET /login/sso` (optionally with `redirect_to`, a local
+   path to return to).
+2. The server redirects to the provider's authorization endpoint with a state token and a PKCE challenge.
+3. The provider redirects back to `/auth/sso/callback`. The server validates the state token, exchanges the code
+   for tokens and reads the claims from the ID token.
+4. The server matches or creates the CIDX account (next section).
+5. If that account has TOTP MFA enabled, the user gets the MFA challenge page before any session is issued (see
+   [Login and Elevation](login-and-elevation.md#sso-plus-mfa)). Codes answered at a challenge started by SSO are
+   throttled under their own key, separate from the account's password attempts.
+6. Otherwise a Web UI session starts and the browser goes to `redirect_to` if given, else `/admin/` for
+   administrators and `/user/api-keys` for other roles.
+
+When the sign-in started from the OAuth authorization flow (`/oauth/authorize`, used by MCP clients that connect with
+OAuth), step 6 issues an OAuth authorization code to the client instead of a Web UI session; the MFA challenge, if
+any, completes at `/oauth/mfa/verify`.
+
+## Account matching
+
+On each SSO sign-in the server looks for the account in this order:
+
+1. **Existing SSO link.** If the provider subject (`sub`) is already linked to an account, that account signs in.
+   A link whose account no longer exists is removed and matching continues.
+2. **Email link.** If the ID token has an email, and either `email_verified` is true or
+   `require_email_verification` is `false`, an existing account with the same email (case-insensitive) is linked to
+   the subject and signs in. Its role and password are unchanged.
+3. **Creation on first sign-in (JIT).** If `enable_jit_provisioning` is `true`, a new account is created when:
+   - `email_verified` is true, or `require_email_verification` is `false`;
+   - the username claim is present;
+   - no account with that username exists already;
+   - the username passes the server's username validation.
+
+   The account gets `default_role`, the email from the token, the SSO link, and no password known to the user.
+
+If none of these applies, the sign-in is refused with HTTP 403 `User not authorized. Please contact
+administrator.` A username collision is logged (`AUTH-OIDC-001`) and is never resolved by renaming: link the
+existing account instead, for example by giving it the user's email so step 2 matches.
+
+Keep `require_email_verification` on unless the provider only issues addresses it has verified: with it off, the
+server links an existing account by email without the provider's confirmation that the address is verified.
+
+SSO links are stored in the server's OAuth store (`oauth.db` on a standalone server, PostgreSQL in a cluster).
+Deleting an account removes its SSO link. See [Accounts and Access](accounts-and-access.md) for roles and groups.
+
+## Group mapping
+
+Every SSO sign-in checks the account's group membership. If the account already belongs to a group, SSO never
+changes it. If it belongs to none (normally the first sign-in), the server assigns one:
+
+- the CIDX group mapped to the first value of the groups claim that equals some mapping's `external_group_id`
+  (the order of the claim's values decides, not the order of the mappings);
+- `users` when no mapping matches, the claim is empty, or the mapped CIDX group does not exist.
+
+A failure while assigning the group is logged and does not block the sign-in.
+
+`group_mappings` is a JSON list:
 
 ```json
-{
-  "oidc_provider_config": {
-    "enabled": true,
-    "provider_name": "Company SSO",
-    "issuer_url": "https://idp.example.com/realms/main",
-    "client_id": "cidx-server",
-    "client_secret": "your-client-secret-here",
-    "scopes": ["openid", "profile", "email"],
-    "email_claim": "email",
-    "username_claim": "preferred_username",
-    "groups_claim": "groups",
-    "group_mappings": [],
-    "use_pkce": true,
-    "require_email_verification": true,
-    "enable_jit_provisioning": true,
-    "default_role": "normal_user"
-  }
-}
+[
+  {"external_group_id": "00000000-0000-0000-0000-000000000001", "external_group_name": "Platform team", "cidx_group": "powerusers"},
+  {"external_group_id": "engineering", "cidx_group": "users"}
+]
 ```
 
-### Configuration Field Reference
-
-#### Core Settings
-
-**`enabled`** (boolean, default: `false`)
-- Master switch for OIDC authentication
-- When `false`, SSO login button is hidden and all OIDC endpoints return 404
-- Set to `true` to enable SSO integration
-
-**`provider_name`** (string, default: `"SSO"`)
-- Display name shown on the login page SSO button
-- Examples: "Company SSO", "Keycloak", "Azure AD"
-- Visible to end users in the login UI
-
-**`issuer_url`** (string, required)
-- OIDC issuer URL (base URL of your identity provider)
-- Used for automatic discovery of provider metadata via `.well-known/openid-configuration`
-- Examples:
-  - Keycloak: `https://keycloak.example.com/realms/myrealm`
-  - Azure AD: `https://login.microsoftonline.com/{tenant-id}/v2.0`
-
-**`client_id`** (string, required)
-- OAuth 2.0 client identifier provided by your identity provider
-- Obtained when registering CIDX Server as a client application
-
-**`client_secret`** (string, required)
-- OAuth 2.0 client secret provided by your identity provider
-- Keep this secure and never commit to version control
-- Used for token exchange during authentication
-
-#### Claims and Scopes
-
-**`scopes`** (array of strings, default: `["openid", "profile", "email"]`)
-- OAuth 2.0 scopes requested during authentication
-- `openid` is required for OIDC
-- `profile` provides username/name claims
-- `email` provides email address (required for account linking)
-- Add custom scopes as needed: `["openid", "profile", "email", "groups"]`
-
-**`email_claim`** (string, default: `"email"`)
-- Name of the claim containing user's email address
-- Standard OIDC uses `email`, but some providers use different names
-- Examples: `email`, `mail`, `emailAddress`
-
-**`username_claim`** (string, default: `"preferred_username"`)
-- Name of the claim to use for username during JIT provisioning
-- Falls back to email prefix if claim is missing or invalid
-- Common options: `preferred_username`, `username`, `login`, `email`
-
-**`groups_claim`** (string, default: `"groups"`)
-- Name of the claim containing user's group memberships from the OIDC provider
-- Used for automatic group assignment via group mappings
-- Standard OIDC uses `groups`, but some providers use different names
-- Examples: `groups`, `roles`, `memberOf`
-- The claim value should be a list/array of group identifiers or names
-
-**`group_mappings`** (array of objects, default: `[]`)
-- Maps external OIDC provider groups to CIDX internal groups
-- Enables automatic group assignment based on SSO group membership
-- Each mapping object has the structure:
-  ```json
-  {
-    "external_group_id": "guid-or-identifier",
-    "external_group_name": "Display Name (optional)",
-    "cidx_group": "target-cidx-group-name"
-  }
-  ```
-- First matched external group determines the CIDX group assignment
-- If no mappings match, user is assigned to default "users" group
-- Example configuration:
-  ```json
-  "group_mappings": [
-    {
-      "external_group_id": "admin-guid-1234",
-      "external_group_name": "Administrators",
-      "cidx_group": "admins"
-    },
-    {
-      "external_group_id": "developers-guid-5678",
-      "external_group_name": "Developers",
-      "cidx_group": "developers"
-    }
-  ]
-  ```
-
-#### Security Settings
-
-**`use_pkce`** (boolean, default: `true`)
-- Enable Proof Key for Code Exchange (PKCE) for enhanced security
-- Strongly recommended to keep enabled (prevents authorization code interception)
-- Uses S256 challenge method
-
-**`require_email_verification`** (boolean, default: `true`)
-- Only auto-link accounts when provider confirms email is verified
-- Checks `email_verified` claim from provider
-- Prevents account takeover via unverified email addresses
-- **Security critical:** Keep enabled unless you trust all emails from provider
-
-#### User Provisioning
-
-**`enable_jit_provisioning`** (boolean, default: `true`)
-- Enable Just-In-Time (JIT) user provisioning
-- When `true`: New users are automatically created on first login
-- When `false`: Only existing CIDX users can login via SSO
-- See [JIT User Provisioning](#just-in-time-jit-user-provisioning) for details
-
-**`default_role`** (string, default: `"normal_user"`)
-- Role assigned to JIT-provisioned users
-- Valid values: `"normal_user"`, `"admin"`
-- Does not affect existing users or email-linked accounts (they keep their existing role)
-
-## Provider Setup Instructions
-
-### Generic OIDC Provider Setup
-
-These steps work for any OIDC-compliant identity provider:
-
-1. **Create Client Application:**
-   - Access your identity provider's admin console
-   - Create a new "OAuth 2.0 / OIDC Client" or "Application"
-   - Application type: "Web Application" or "Confidential Client"
-
-2. **Configure Client Settings:**
-   - **Redirect URI:** `https://your-cidx-server.com/auth/sso/callback` (exact URL)
-   - **Grant Type:** Authorization Code
-   - **PKCE:** Required (S256)
-   - **Scopes:** `openid`, `profile`, `email` (minimum required)
-   - **Client Authentication:** Client Secret (confidential client)
-
-3. **Obtain Credentials:**
-   - Copy the Client ID
-   - Copy the Client Secret
-   - Note the Issuer URL (usually shown in provider metadata or discovery URL)
-
-4. **Configure Email Claims:**
-   - Ensure `email` claim is included in ID token or userinfo response
-   - Ensure `email_verified` claim is included and accurate
-   - Map provider's email attribute to standard `email` claim
-
-5. **Add to CIDX Config:**
-   - Update `~/.cidx-server/config.json` with your provider details
-   - Restart CIDX Server
-
-### Keycloak Setup
-
-1. **Create Realm (if needed):**
-   ```
-   Admin Console → Add Realm → Name: "cidx" → Create
-   ```
-
-2. **Create Client:**
-   ```
-   Clients → Create → Client ID: "cidx-server" → Save
-   Settings Tab:
-   - Access Type: confidential
-   - Valid Redirect URIs: https://your-cidx-server.com/auth/sso/callback
-   - Web Origins: https://your-cidx-server.com
-   → Save
-   ```
-
-3. **Get Client Secret:**
-   ```
-   Credentials Tab → Copy "Secret"
-   ```
-
-4. **Configure Mappers (optional):**
-   ```
-   Mappers Tab → Add Builtin → Select: email, email verified, username → Add
-   ```
-
-5. **CIDX Configuration:**
-   ```json
-   {
-     "oidc_provider_config": {
-       "enabled": true,
-       "provider_name": "Keycloak",
-       "issuer_url": "https://keycloak.example.com/realms/cidx",
-       "client_id": "cidx-server",
-       "client_secret": "paste-secret-here"
-     }
-   }
-   ```
-
-### Azure AD / Microsoft Entra ID Setup
-
-1. **Register Application:**
-   ```
-   Azure Portal → Microsoft Entra ID → App registrations → New registration
-   Name: CIDX Server
-   Supported account types: Accounts in this organizational directory only
-   Redirect URI: Web → https://your-cidx-server.com/auth/sso/callback
-   → Register
-   ```
-
-2. **Create Client Secret:**
-   ```
-   Certificates & secrets → New client secret → Add
-   Copy the secret value immediately (shown only once)
-   ```
-
-3. **Configure API Permissions:**
-   ```
-   API permissions → Add a permission → Microsoft Graph → Delegated permissions
-   → Select: openid, profile, email, User.Read → Add permissions
-   ```
-
-4. **Get Credentials:**
-   ```
-   Overview page:
-   - Application (client) ID
-   - Directory (tenant) ID
-   ```
-
-5. **CIDX Configuration:**
-   ```json
-   {
-     "oidc_provider_config": {
-       "enabled": true,
-       "provider_name": "Azure AD",
-       "issuer_url": "https://login.microsoftonline.com/{tenant-id}/v2.0",
-       "client_id": "your-application-id",
-       "client_secret": "your-client-secret"
-     }
-   }
-   ```
-
-## Email-Based Account Linking
-
-### How It Works
-
-When a user logs in via SSO, CIDX automatically links their SSO identity to an existing CIDX account if:
-
-1. **Email match found:** User's SSO email matches an existing CIDX user's email
-2. **Email is verified:** Provider confirms email is verified (`email_verified: true`)
-3. **Unique match:** Only one CIDX account has that email address
-
-This allows existing CIDX users to seamlessly transition to SSO authentication without creating duplicate accounts.
-
-### Email Matching Algorithm
-
-```
-1. Extract email and email_verified from SSO provider
-2. If email_verified is false:
-   → Skip auto-linking (security protection)
-   → Continue to JIT provisioning or error
-3. Normalize email (lowercase, trim whitespace)
-4. Search all CIDX users for matching email (case-insensitive)
-5. If exactly one match found:
-   → Link SSO identity to existing user
-   → User retains existing role and permissions
-   → Future logins use SSO
-6. If zero or multiple matches:
-   → Skip auto-linking
-   → Continue to JIT provisioning or error
-```
-
-### User Data Storage
-
-When an SSO identity is linked, CIDX stores:
-
-**In `~/.cidx-server/oauth.db`:**
-```sql
--- Fast lookup table for SSO subject → username mapping
-INSERT INTO oidc_identity_links
-  (username, subject, email, linked_at, last_login)
-VALUES
-  ('john', 'oidc-user-id-12345', 'john@example.com', '2025-01-15T10:30:00Z', '2025-01-20T14:22:00Z');
-```
-
-### Security Considerations
-
-**Email Verification Requirement:**
-- CIDX only auto-links accounts when `email_verified` is `true`
-- This prevents account takeover via unverified email addresses
-- Configure `require_email_verification: true` (default and recommended)
-
-**Multiple Email Matches:**
-- If multiple CIDX users share the same email, auto-linking is skipped
-- This prevents ambiguous account linking
-- Admin must manually resolve duplicate emails before SSO will work
-
-**Existing Password Login:**
-- After SSO linking, users can still use password login (if password is set)
-- Password is NOT removed when SSO is linked
-- Users with SSO-only accounts (JIT provisioned) have no password set
-
-## Just-In-Time (JIT) User Provisioning
-
-### Overview
-
-JIT provisioning automatically creates new CIDX user accounts when someone logs in via SSO for the first time. This enables frictionless onboarding for organizations using SSO.
-
-### When JIT Provisioning Triggers
-
-JIT provisioning occurs when:
-1. `enable_jit_provisioning: true` in config
-2. User completes SSO authentication successfully
-3. No existing CIDX user matches their email
-4. No existing SSO identity link for their subject ID
-
-### Username Generation
-
-CIDX generates usernames using this priority order:
-
-1. **`preferred_username` claim:** If present and valid (alphanumeric + underscores, not already taken)
-2. **Email prefix:** Extract part before `@` symbol, sanitize, ensure uniqueness
-3. **Subject claim:** Use SSO subject ID, sanitize, ensure uniqueness
-4. **Fallback:** Generate `sso_user_<random>` if all else fails
-
-**Username Conflict Resolution:**
-- If username exists, append `_2`, `_3`, etc. until unique
-- Example: `john` → `john_2` → `john_3`
-
-### User Role Assignment
-
-JIT-provisioned users receive the role specified in `default_role` config:
-- `"normal_user"` (default): Standard user access
-- `"admin"`: Full administrative access (use cautiously)
-
-**Important:** Email-linked accounts (users who existed before SSO) keep their existing role. JIT provisioning role only applies to newly created users.
-
-### JIT Provisioned User Characteristics
-
-Users created via JIT provisioning have:
-- **No password:** Cannot login with password until admin sets one
-- **Email address:** From SSO provider
-- **SSO identity linked:** Immediate SSO access on creation
-- **Default role:** As specified in config
-- **Standard user record:** Identical to manually created users otherwise
-
-### Disabling JIT Provisioning
-
-To restrict SSO to existing users only:
-
-```json
-{
-  "oidc_provider_config": {
-    "enable_jit_provisioning": false
-  }
-}
-```
-
-When disabled:
-- Only users with existing CIDX accounts can login via SSO
-- Email-based auto-linking still works
-- New SSO users receive an error message directing them to contact admin
-
-### Example: Complete Authentication Flow
-
-**Scenario:** User `alice@example.com` logs in via SSO for the first time.
-
-```
-1. Alice clicks "Sign in with SSO" on login page
-2. Redirected to identity provider (e.g., Keycloak)
-3. Alice authenticates with Keycloak credentials
-4. Keycloak redirects back with authorization code
-5. CIDX exchanges code for access token
-6. CIDX retrieves user info from Keycloak:
-   {
-     "sub": "keycloak-12345",
-     "email": "alice@example.com",
-     "email_verified": true,
-     "preferred_username": "alice"
-   }
-7. CIDX checks for existing account:
-   - No user with email "alice@example.com" found
-   - No SSO identity link for subject "keycloak-12345" found
-8. JIT provisioning triggers:
-   - Generate username: "alice" (from preferred_username)
-   - Check uniqueness: "alice" is available
-   - Create user with role "normal_user"
-   - Link SSO identity to new user
-9. Create JWT session token
-10. Set cidx_session cookie
-11. Redirect Alice to dashboard
-12. Alice is now logged in with username "alice"
-```
-
-## Security Considerations
-
-### HTTPS Requirement
-
-OIDC requires HTTPS for security. Running CIDX Server over plain HTTP will:
-- Expose client secrets in transit
-- Expose session cookies to interception
-- Violate OAuth 2.0 security best practices
-- Cause some providers to reject redirect URIs
-
-**Recommendation:** Always deploy CIDX Server behind HTTPS (use reverse proxy with TLS certificate).
-
-### Client Secret Protection
-
-The `client_secret` in your config is sensitive:
-- Never commit config files with secrets to version control
-- Use file permissions to restrict access: `chmod 600 ~/.cidx-server/config.json`
-- Rotate secrets periodically (update in both provider and CIDX config)
-- Use environment-specific secrets (dev, staging, prod)
-
-### Email Verification Enforcement
-
-Keep `require_email_verification: true` unless you have a specific reason to disable it:
-
-**Why this matters:**
-- Prevents account takeover via unverified emails
-- Ensures user actually controls the email address
-- Standard security practice for SSO implementations
-
-**When to disable:**
-- Your identity provider doesn't provide `email_verified` claim
-- You trust all email addresses from your provider implicitly
-- You're using a custom email validation process
-
-### PKCE (Proof Key for Code Exchange)
-
-PKCE protects against authorization code interception attacks:
-- Always keep `use_pkce: true` (default)
-- Uses S256 challenge method (SHA-256)
-- Required by OAuth 2.0 security best practices
-- Supported by all modern identity providers
-
-### Cookie Security
-
-CIDX sets secure cookies for sessions:
-- `HttpOnly`: Prevents JavaScript access (XSS protection)
-- `Secure`: Only sent over HTTPS
-- `SameSite=Lax`: CSRF protection
-
-### Session Management
-
-After SSO authentication:
-- CIDX issues standard JWT session tokens (same as password login)
-- No ongoing communication with identity provider
-- Session expiration: 10 hours (configurable)
-- User logged out when JWT expires
-- SSO re-authentication required on next login
+`external_group_name` is optional and informational. An older object form (`{"<external id>": "<cidx group>"}`)
+is accepted and converted to the list form. Later changes to a user's group are made by an administrator in the
+Groups page (see [Accounts and Access](accounts-and-access.md#groups-and-repository-access)).
+
+Group mapping assigns a group, not a role. The role of an account created on first sign-in is `default_role`.
 
 ## Troubleshooting
 
-### SSO Button Not Appearing
+| Symptom | Cause and fix |
+|---------|---------------|
+| `/login/sso` answers HTTP 400 `SSO is not enabled on this server` | `enabled` is off, or the process serving the request has not loaded the new settings; restart the server |
+| HTTP 503 `SSO provider is currently unavailable` | The discovery document could not be fetched. Check `issuer_url` and that the server can reach `<issuer_url>/.well-known/openid-configuration`; the error is logged as `AUTH-GENERAL-004` |
+| Provider shows a redirect URI mismatch | The registered redirect URI differs from the one the server sends. Set `CIDX_ISSUER_URL` to the public URL and register `<CIDX_ISSUER_URL>/auth/sso/callback` |
+| HTTP 400 `Invalid state` on the callback | The state token expired or the callback did not come from a sign-in this server started; start again from the login page |
+| HTTP 500 `ID token not returned by provider` | Include the `openid` scope |
+| HTTP 403 `User not authorized. Please contact administrator.` | No account matched and none could be created: email not verified, username claim missing, username already taken (`AUTH-OIDC-001`), username rejected (`AUTH-OIDC-002`), or JIT provisioning off |
+| New user lands in `users` instead of a mapped group | The groups claim is missing from the ID token, its values do not equal any `external_group_id`, or the account already had a group |
 
-**Symptom:** Login page shows only username/password form, no SSO button.
+Server logs: Web UI `/admin/logs` (filter on `oidc` or `SSO`), or on a standalone node:
 
-**Causes and Solutions:**
-
-1. **OIDC not enabled:**
-   - Check `oidc_provider_config.enabled` is `true` in config.json
-   - Restart CIDX Server after config changes
-
-2. **Config syntax error:**
-   - Validate JSON syntax: `python3 -m json.tool ~/.cidx-server/config.json`
-   - Check logs for config parsing errors
-
-3. **Server initialization failed:**
-   - Check server logs for OIDC initialization errors
-   - Verify `issuer_url` is accessible from server
-
-### Invalid Redirect URI Error
-
-**Symptom:** Provider shows "Invalid redirect URI" or "Redirect URI mismatch" error.
-
-**Causes and Solutions:**
-
-1. **Mismatch between provider and CIDX:**
-   - Provider expects: `https://cidx.example.com/auth/sso/callback`
-   - CIDX uses: `https://cidx.example.com/auth/sso/callback`
-   - Ensure exact match (including https vs http, trailing slash)
-
-2. **Localhost vs production URL:**
-   - Development: Register `http://localhost:8090/auth/sso/callback`
-   - Production: Register `https://your-domain.com/auth/sso/callback`
-   - Many providers require separate clients for dev/prod
-
-3. **Multiple server instances:**
-   - If running multiple CIDX servers, register all redirect URIs
-   - Or use a single canonical URL with load balancer
-
-### Authentication Completes But Login Fails
-
-**Symptom:** SSO authentication succeeds at provider, but CIDX shows error or doesn't log in.
-
-**Causes and Solutions:**
-
-1. **Email not verified:**
-   - Check provider sends `email_verified: true` claim
-   - Temporarily disable: `require_email_verification: false` (testing only)
-   - Configure provider to mark emails as verified
-
-2. **Missing email claim:**
-   - Provider might use non-standard claim name
-   - Check provider documentation for email claim name
-   - Update config: `"email_claim": "mail"` or `"email_claim": "emailAddress"`
-
-3. **JIT provisioning disabled and no existing account:**
-   - Enable JIT: `"enable_jit_provisioning": true`
-   - Or create CIDX account manually first, then SSO will auto-link
-
-4. **Username generation failed:**
-   - Check logs for username generation errors
-   - Ensure `preferred_username` claim exists or email is valid
-
-### Discovery Endpoint Unreachable
-
-**Symptom:** Server logs show "Failed to discover OIDC metadata" or connection timeout.
-
-**Causes and Solutions:**
-
-1. **Incorrect issuer URL:**
-   - Verify issuer URL is correct (check provider documentation)
-   - Test manually: `curl https://your-issuer/.well-known/openid-configuration`
-
-2. **Network connectivity:**
-   - Ensure CIDX Server can reach provider (check firewall, proxy)
-   - Test from server: `wget https://your-issuer/.well-known/openid-configuration`
-
-3. **Provider doesn't support discovery:**
-   - CIDX requires providers that support `.well-known/openid-configuration`
-   - Verify your provider is OIDC-compliant
-   - Most modern providers (Keycloak, Azure AD, etc.) support automatic discovery
-
-### Token Exchange Failed
-
-**Symptom:** Logs show "Failed to exchange authorization code for tokens" or 400/401 errors.
-
-**Causes and Solutions:**
-
-1. **Invalid client secret:**
-   - Verify client secret is correct (copy-paste errors common)
-   - Check if secret was rotated at provider
-   - Regenerate secret and update config
-
-2. **Client not configured for Authorization Code flow:**
-   - Check provider client settings allow "Authorization Code" grant type
-   - Ensure client is "Confidential" not "Public"
-
-3. **PKCE not supported or misconfigured:**
-   - Some older providers don't support PKCE
-   - Try disabling: `"use_pkce": false` (not recommended)
-   - Or configure provider to require PKCE
-
-### User Provisioned But Wrong Username
-
-**Symptom:** JIT provisioning creates user with unexpected username like `sso_user_123`.
-
-**Causes and Solutions:**
-
-1. **Missing preferred_username claim:**
-   - Check provider sends `preferred_username` in ID token or userinfo
-   - Configure claim mapper at provider
-   - Or accept email-based usernames
-
-2. **Custom username claim:**
-   - Provider uses different claim (e.g., `username`, `login`)
-   - Update config: `"username_claim": "login"`
-
-3. **Username conflicts:**
-   - Generated username already taken, CIDX appended suffix
-   - This is expected behavior for uniqueness
-
-### Testing and Debugging Tips
-
-**Enable Debug Logging:**
 ```bash
-# Edit config.json
-{
-  "log_level": "DEBUG"
-}
-# Restart server and check logs
-sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE message LIKE '%oidc%' ORDER BY id DESC LIMIT 50;"
+sqlite3 ~/.cidx-server/logs.db \
+  "SELECT timestamp, level, message FROM logs WHERE message LIKE '%SSO%' OR message LIKE '%OIDC%' ORDER BY id DESC LIMIT 50"
 ```
 
-**Test Provider Metadata Discovery:**
+To inspect the provider's discovery document from the server host:
+
 ```bash
-curl -s https://your-issuer/.well-known/openid-configuration | jq
+curl -s https://idp.example.com/.well-known/openid-configuration | jq '.authorization_endpoint, .token_endpoint'
 ```
-
-**Verify JWT Tokens:**
-Use [jwt.io](https://jwt.io) to decode ID tokens and inspect claims (do not paste production tokens into public sites).
-
-**Check Database State:**
-```bash
-sqlite3 ~/.cidx-server/oauth.db "SELECT * FROM oidc_identity_links;"
-```
-
-**Test Email Verification:**
-```bash
-# Check if provider sends email_verified claim
-# Look in server logs during authentication for user info response
-```
-
-## Support and Additional Resources
-
-- **OIDC Specification:** https://openid.net/specs/openid-connect-core-1_0.html
-- **OAuth 2.0 Best Practices:** https://tools.ietf.org/html/draft-ietf-oauth-security-topics
-- **PKCE Specification:** https://tools.ietf.org/html/rfc7636
-
-For CIDX-specific issues:
-- Query server logs: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs ORDER BY id DESC LIMIT 100;"`
-- Report issues on the project repository issue tracker

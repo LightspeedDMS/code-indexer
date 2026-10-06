@@ -1,486 +1,197 @@
-# Fault Injection Operator Guide
+# Fault Injection
 
----
+The fault-injection harness lets an operator of a **non-production** CIDX Server make outbound provider calls fail
+on purpose (HTTP errors, timeouts, DNS and TLS failures, malformed bodies, truncated streams, redirect loops, added
+latency) to test how the server behaves, without waiting for a real provider outage.
 
-## Overview
+Code: `src/code_indexer/server/fault_injection/` (`startup.py` gate, `router.py` endpoints, `fault_profile.py`
+profiles and matching, `fault_injection_service.py` counters and history). The e2e suite's fault-injection phase
+uses the same harness (`./e2e-automation.sh --phase 5`).
 
-The CIDX server includes an optional fault injection harness that intercepts outbound HTTP calls to external providers (VoyageAI embeddings, Voyage rerank, Cohere rerank) at the httpx transport layer. It lets operators exercise deterministic failure scenarios -- HTTP errors, timeouts, DNS failures, TLS errors, malformed responses, stream disconnects -- against a running server without waiting for an actual provider outage.
+## What it intercepts
 
-The harness is controlled via admin-only REST endpoints under `/admin/fault-injection/`. Every injected fault is logged to the server logs database (`~/.cidx-server/logs.db`) with `source='fault_injection'` for post-test audit correlation.
+Outbound HTTP calls that the server makes through the harness-aware `HttpClientFactory` it creates at startup. The
+VoyageAI and Cohere embedding and reranking clients accept that factory; a client constructed without it uses a
+factory that injects nothing. Each call is matched against the registered profiles by the hostname of its URL; a matching profile
+decides, at random according to its rates, whether to inject a fault.
 
----
+## Enabling it
 
-## Safety Posture
+The harness is controlled by two bootstrap keys in `~/.cidx-server/config.json`, read only at server start:
 
-The harness has hard safety guards that prevent accidental use in production.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `fault_injection_enabled` | `false` | Master switch |
+| `fault_injection_nonprod_ack` | `false` | Explicit confirmation that this server is not production |
 
-### Bootstrap Gate
-
-The harness is controlled by two keys in `config.json` that require a server restart to take effect.
-
-Both keys must be explicitly set. Neither defaults to true.
-
-If `fault_injection_enabled=true` is set on a server whose `telemetry_config.deployment_environment` is `"production"`, the server refuses to start and calls `sys.exit(1)` with a CRITICAL log. There is no override.
-
-If `fault_injection_enabled=true` is set without `fault_injection_nonprod_ack=true`, the server also refuses to start.
-
-### Four Startup Scenarios
-
-| Scenario | config.json state | Server behavior |
-|----------|------------------|-----------------|
-| 1 (default) | `fault_injection_enabled=false` | Harness inactive. Endpoints return 404. |
-| 2 (ack missing) | `fault_injection_enabled=true`, `fault_injection_nonprod_ack=false` | CRITICAL log + `sys.exit(1)` |
-| 3 (production) | `fault_injection_enabled=true`, `deployment_environment=production` | CRITICAL log + `sys.exit(1)` |
-| 4 (live) | Both true, non-production | Harness active. WARNING logged on startup. |
-
----
-
-## Configuration
-
-Edit `~/.cidx-server/config.json` and restart the server.
-
-Minimum configuration to enable the harness on a non-production server:
+Add both to the existing `config.json` (keep its other keys) and restart the server:
 
 ```json
 {
-  "server_dir": "~/.cidx-server",
-  "host": "127.0.0.1",
-  "port": 8090,
   "fault_injection_enabled": true,
   "fault_injection_nonprod_ack": true
 }
 ```
 
-To verify the harness is active after restart:
+Startup outcomes:
+
+| Configuration | Result |
+|---------------|--------|
+| `fault_injection_enabled` false or absent | Harness off. The `/admin/fault-injection/*` routes are not registered (HTTP 404) |
+| Enabled, and the runtime OpenTelemetry setting `deployment_environment` is `production` | CRITICAL log, the server exits (status 1) |
+| Enabled without `fault_injection_nonprod_ack` | CRITICAL log, the server exits (status 1) |
+| Enabled, acknowledged, not production | Harness on; WARNING `FAULT INJECTION HARNESS ACTIVE (non-prod mode)` at startup |
+
+`deployment_environment` is a runtime setting (Web UI, Configuration, OpenTelemetry Export; default `development`;
+see [Observability](observability.md#opentelemetry)). The harness starts with no profiles, so nothing is injected
+until one is registered.
+
+To confirm it is on:
 
 ```bash
-sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE message LIKE '%FAULT INJECTION HARNESS ACTIVE%' ORDER BY id DESC LIMIT 10;"
+sqlite3 ~/.cidx-server/logs.db \
+  "SELECT timestamp, message FROM logs WHERE message LIKE '%FAULT INJECTION HARNESS ACTIVE%' ORDER BY id DESC LIMIT 5"
 ```
 
-### Bootstrap Keys Reference
+To turn it off, set `fault_injection_enabled` to `false` (or remove both keys) and restart.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `fault_injection_enabled` | bool | `false` | Master switch. Restart required. Must be `false` on production. |
-| `fault_injection_nonprod_ack` | bool | `false` | Explicit non-prod acknowledgment. Required when enabled. |
+## Fault profiles
 
----
+A profile targets one hostname pattern. Fields (all rates are probabilities from 0.0 to 1.0):
 
-## Failure Modes
+### Terminating faults
 
-The harness supports 13 configurable fault modes per target.
+At most one terminating fault applies to a request; the sum of these rates must not exceed 1.0.
 
-### Terminating Modes
+| Rate field | Fault recorded as | Effect | Related fields |
+|------------|-------------------|--------|----------------|
+| `error_rate` | `http_error` | Synthetic HTTP error response | `error_codes` (required when `error_rate` > 0), `retry_after_sec_range` (default `[1, 5]`) adds `Retry-After` |
+| `connect_timeout_rate` | `connect_timeout` | Raises `httpx.ConnectTimeout` | |
+| `read_timeout_rate` | `read_timeout` | Raises `httpx.ReadTimeout` | |
+| `write_timeout_rate` | `write_timeout` | Raises `httpx.WriteTimeout` | |
+| `pool_timeout_rate` | `pool_timeout` | Raises `httpx.PoolTimeout` | |
+| `connect_error_rate` | `connect_error` | Raises `httpx.ConnectError` | |
+| `dns_failure_rate` | `dns_failure` | `httpx.ConnectError` caused by a name-resolution error | |
+| `tls_error_rate` | `tls_error` | `httpx.ConnectError` caused by an SSL error | |
+| `malformed_rate` | `malformed_json` | HTTP 200 with a corrupted body | `corruption_modes` (required when `malformed_rate` > 0): `truncate`, `invalid_utf8`, `wrong_schema`, `empty` |
+| `stream_disconnect_rate` | `stream_disconnect` | The real response, cut off mid-body | `truncate_after_bytes_range` (default `[50, 200]`) |
+| `redirect_loop_rate` | `redirect_loop` | HTTP 302 back to the same URL | |
 
-These modes replace the real HTTP response with a synthetic error. Their rates are mutually exclusive and must sum to at most 1.0.
+### Additive faults
 
-| fault_type | Rate field | Description |
-|------------|------------|-------------|
-| `http_error` | `error_rate` | Return an HTTP error response (4xx/5xx). `error_codes` list is required. Optional `retry_after_sec_range` adds Retry-After header. |
-| `connect_timeout` | `connect_timeout_rate` | Raise `httpx.ConnectTimeout` immediately. |
-| `read_timeout` | `read_timeout_rate` | Raise `httpx.ReadTimeout` immediately. |
-| `write_timeout` | `write_timeout_rate` | Raise `httpx.WriteTimeout` immediately. |
-| `pool_timeout` | `pool_timeout_rate` | Raise `httpx.PoolTimeout` immediately. |
-| `connect_error` | `connect_error_rate` | Raise `httpx.ConnectError` immediately. |
-| `dns_failure` | `dns_failure_rate` | Raise `httpx.ConnectError` caused by `socket.gaierror` (DNS resolution failure). |
-| `tls_error` | `tls_error_rate` | Raise `httpx.ConnectError` caused by `ssl.SSLError`. |
-| `malformed_json` | `malformed_rate` | Return HTTP 200 with a corrupted JSON body. `corruption_modes` list required. |
-| `stream_disconnect` | `stream_disconnect_rate` | Fetch the real response then truncate the stream mid-body. |
-| `redirect_loop` | `redirect_loop_rate` | Return HTTP 302 whose Location points back to the original URL. |
+Independent of the terminating fault and of each other; they delay the response.
 
-### Additive Modes
+| Rate field | Fault recorded as | Related field |
+|------------|-------------------|---------------|
+| `latency_rate` | `latency` | `latency_ms_range` (default `[100, 500]`) |
+| `slow_tail_rate` | `slow_tail` | `slow_tail_ms_range` (default `[1000, 5000]`) |
 
-These modes add latency without replacing the response. They are independent of the terminating mode and of each other.
+Ranges are `[min, max]` pairs with `0 <= min <= max`. A profile also has `enabled` (default `true`); a disabled
+profile never matches. An invalid profile is rejected with HTTP 400.
 
-| fault_type | Rate field | Description |
-|------------|------------|-------------|
-| `latency` | `latency_rate` | Add a uniform random delay before the response (range in ms). |
-| `slow_tail` | `slow_tail_rate` | Add a second larger latency injection simulating slow-tail requests. |
+### Target matching
 
-### Corruption Modes (for `malformed_json`)
+- A plain target (`api.voyageai.com`) matches that hostname exactly, case-insensitively.
+- A `*.` target (`*.voyageai.com`) matches every subdomain and the domain itself.
+- Substrings never match: `voyage` does not match `api.voyageai.com`.
+- Matching uses only the hostname. VoyageAI embedding and reranking both call `api.voyageai.com`, and Cohere
+  embedding and reranking both call `api.cohere.com`, so a profile affects both kinds of call to that provider.
 
-| Mode | Description |
-|------|-------------|
-| `truncate` | Valid JSON prefix, truncated mid-token. |
-| `invalid_utf8` | Raw bytes that are not valid UTF-8. |
-| `wrong_schema` | Valid JSON object with unexpected structure. |
-| `empty` | Empty body. |
+## REST endpoints
 
----
+All under `/admin/fault-injection`, admin role required (`Authorization: Bearer <token>` from `POST /auth/login`).
+They do not require step-up elevation. While the harness is off they answer HTTP 404.
 
-## REST API Reference
+| Method and path | Purpose | Response |
+|-----------------|---------|----------|
+| `GET /status` | Harness state | `enabled`, `profile_count`, `counters` (keys `<target>:<fault type>`), `docs_url` |
+| `GET /profiles` | All profiles | `{"profiles": [...]}` |
+| `GET /profiles/{target}` | One profile | the profile, or 404 |
+| `PUT /profiles/{target}` | Create or replace. The body must contain `target`; the path value wins | the stored profile |
+| `PATCH /profiles/{target}` | Change only the fields sent | the profile, or 404 when absent |
+| `DELETE /profiles/{target}` | Remove one profile | `{"deleted": "<target>"}` |
+| `DELETE /profiles` | Remove all profiles; keeps counters and history | `{"cleared": <count>}` |
+| `POST /reset` | Remove profiles, counters and history | `{"reset": true}` |
+| `POST /preview` with `{"url": "..."}` | Which profile would match, without injecting | `{"matched": <profile or null>}` |
+| `GET /history` | The last 100 injections | `{"history": [{"target", "fault_type", "correlation_id"}, ...]}` |
+| `POST /seed` with `{"seed": <int>}` | Re-seed the random source | `{"seeded": <int>}` |
 
-All endpoints require admin authentication. Pass `Authorization: Bearer <token>` obtained from `POST /auth/login`.
+A target containing `/` is rejected with HTTP 400.
 
-When the harness is inactive (Scenario 1), all endpoints return `404 Not Found`.
+`POST /seed` is accepted, but the live harness uses the operating system's random source, which ignores seeding, so
+it does not make injection sequences reproducible.
 
-### GET /admin/fault-injection/status
+## Tracing an injection
 
-Returns harness status, active profile count, injection counters, and docs URL.
+Each injection gets a UUID correlation id. It appears in `GET /history` and in one log row: `source`
+`fault_injection`, message `fault_injection: target=<target> fault_type=<type> correlation_id=<id>`, with the id
+also in the row's `correlation_id` column. Log rows go to `~/.cidx-server/logs.db` on a standalone server and to
+PostgreSQL in a cluster ([Observability](observability.md#logs)).
 
-```
-GET /admin/fault-injection/status
-Authorization: Bearer <token>
-```
+## Playbooks
 
-Response:
-```json
-{
-  "enabled": true,
-  "profile_count": 1,
-  "counters": {
-    "api.voyageai.com:http_error": 42
-  },
-  "docs_url": "/docs/server/fault-injection.md"
-}
-```
-
-### GET /admin/fault-injection/profiles
-
-Returns all registered fault profiles.
-
-```
-GET /admin/fault-injection/profiles
-Authorization: Bearer <token>
-```
-
-Response: `{"profiles": [<profile>, ...]}`
-
-### GET /admin/fault-injection/profiles/{target}
-
-Returns the fault profile for a single target. Returns 404 if not found.
-
-```
-GET /admin/fault-injection/profiles/api.voyageai.com
-Authorization: Bearer <token>
-```
-
-### PUT /admin/fault-injection/profiles/{target}
-
-Create or replace a fault profile for the given target. The target in the URL path takes precedence over any `target` field in the body.
-
-```
-PUT /admin/fault-injection/profiles/api.voyageai.com
-Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "target": "api.voyageai.com",
-  "error_rate": 1.0,
-  "error_codes": [429],
-  "retry_after_sec_range": [1, 3]
-}
-```
-
-Returns the stored profile.
-
-### PATCH /admin/fault-injection/profiles/{target}
-
-Partial update: merge supplied fields into the existing profile. Omitted fields are preserved. Returns 404 if the profile does not exist.
-
-```
-PATCH /admin/fault-injection/profiles/api.voyageai.com
-Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "error_rate": 0.5
-}
-```
-
-### DELETE /admin/fault-injection/profiles/{target}
-
-Remove a single fault profile by target name.
-
-```
-DELETE /admin/fault-injection/profiles/api.voyageai.com
-Authorization: Bearer <token>
-```
-
-Response: `{"deleted": "api.voyageai.com"}`
-
-### DELETE /admin/fault-injection/profiles
-
-Remove all registered fault profiles. Does not reset counters or history.
-
-```
-DELETE /admin/fault-injection/profiles
-Authorization: Bearer <token>
-```
-
-Response: `{"cleared": 1}`
-
-### POST /admin/fault-injection/reset
-
-Clear all profiles, counters, and history atomically. Use this after each test to return to a clean state.
-
-```
-POST /admin/fault-injection/reset
-Authorization: Bearer <token>
-```
-
-Response: `{"reset": true}`
-
-### POST /admin/fault-injection/preview
-
-Dry-run: return the profile that would match the given URL without recording any event.
-
-```
-POST /admin/fault-injection/preview
-Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "url": "https://api.voyageai.com/v1/embeddings"
-}
-```
-
-Returns `{"matched": <profile>}` or `{"matched": null}` when no profile applies.
-
-### GET /admin/fault-injection/history
-
-Return the bounded ring buffer of the 100 most recent injection events.
-
-```
-GET /admin/fault-injection/history
-Authorization: Bearer <token>
-```
-
-Response: `{"history": [{"target": "...", "fault_type": "...", "correlation_id": "..."}, ...]}`
-
-### POST /admin/fault-injection/seed
-
-Re-seed the internal RNG for deterministic injection sequences. Use this before a test that requires a reproducible fault sequence.
-
-```
-POST /admin/fault-injection/seed
-Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "seed": 42
-}
-```
-
-Response: `{"seeded": 42}`
-
----
-
-## Correlation ID
-
-Every injected fault is assigned a UUID correlation ID at the transport layer. The same ID appears in:
-
-- The in-memory ring buffer (`GET /admin/fault-injection/history`)
-- The SQLite logs database (`source='fault_injection'`, `extra_data` column contains the correlation_id)
-
-Use the correlation ID to cross-reference a specific injection event with the server log entry and the client-side request that triggered it.
-
----
-
-## Target Matching
-
-Profiles are matched against the hostname of the outbound request URL.
-
-Exact match: `"api.voyageai.com"` matches only that hostname.
-
-Wildcard suffix: `"*.voyageai.com"` matches `api.voyageai.com`, `proxy.voyageai.com`, and the apex `voyageai.com`.
-
-Substring matching is never performed. `"voyage"` does not match `api.voyageai.com`.
-
----
-
-## Worked Playbooks
-
-Before running any playbook, obtain a token:
+Get a token first:
 
 ```bash
-export CIDX_URL="http://127.0.0.1:8099"
+export CIDX_URL="http://127.0.0.1:8000"
 TOKEN=$(curl -s -X POST "$CIDX_URL/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<from .local-testing>"}' | jq -r '.access_token')
+  -d '{"username": "admin", "password": "<password>"}' | jq -r '.access_token')
 ```
 
-### Playbook 1: Test Voyage Embed 429 Handling
-
-Verify the server handles Voyage embed 429 responses with Retry-After correctly.
+### Provider rate limiting (HTTP 429 from VoyageAI)
 
 ```bash
-# Step 1: configure 100% 429 on VoyageAI with Retry-After 1-3s
+# 1. Every VoyageAI call answers 429 with Retry-After of 1-3 seconds
 curl -s -X PUT "$CIDX_URL/admin/fault-injection/profiles/api.voyageai.com" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "api.voyageai.com",
-    "error_rate": 1.0,
-    "error_codes": [429],
-    "retry_after_sec_range": [1, 3]
-  }' | jq .
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"target": "api.voyageai.com", "error_rate": 1.0, "error_codes": [429], "retry_after_sec_range": [1, 3]}' | jq .
 
-# Step 2: issue an embed request (via MCP or REST)
-# Observe that the server returns an error or retries appropriately
+# 2. Run a semantic search against a repository indexed with VoyageAI
+curl -s -X POST "$CIDX_URL/mcp" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_code", "arguments": {"query_text": "example query", "repository_alias": "example-repo-global", "limit": 3}}}'
 
-# Step 3: read counters
-curl -s "$CIDX_URL/admin/fault-injection/status" \
-  -H "Authorization: Bearer $TOKEN" | jq '.counters'
-
-# Step 4: read history
-curl -s "$CIDX_URL/admin/fault-injection/history" \
-  -H "Authorization: Bearer $TOKEN" | jq '.history[-5:]'
-
-# Step 5: check logs DB
+# 3. Confirm the injections and read the related log rows
+curl -s "$CIDX_URL/admin/fault-injection/status" -H "Authorization: Bearer $TOKEN" | jq '.counters'
+curl -s "$CIDX_URL/admin/fault-injection/history" -H "Authorization: Bearer $TOKEN" | jq '.history[-5:]'
 sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, level, message FROM logs \
-   WHERE source='fault_injection' ORDER BY timestamp DESC LIMIT 10;"
+  "SELECT timestamp, level, source, message FROM logs WHERE level IN ('WARNING','ERROR') ORDER BY id DESC LIMIT 20"
 
-# Step 6: clean up
-curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" \
-  -H "Authorization: Bearer $TOKEN" | jq .
+# 4. Clean up
+curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
-### Playbook 2: Dual-Provider RRF Fallback Verified
+### DNS outage
 
-Verify that when Voyage rerank returns 503, the server falls back to Cohere rerank.
+Same steps with a DNS-failure profile:
 
 ```bash
-# Step 1: inject 100% 503 on Voyage rerank endpoint
 curl -s -X PUT "$CIDX_URL/admin/fault-injection/profiles/api.voyageai.com" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "api.voyageai.com",
-    "error_rate": 1.0,
-    "error_codes": [503]
-  }' | jq .
-
-# Step 2: no profile on Cohere (real Cohere will be called)
-
-# Step 3: run a search_code MCP call and observe reranked results
-
-# Step 4: verify Voyage 503 was injected
-curl -s "$CIDX_URL/admin/fault-injection/status" \
-  -H "Authorization: Bearer $TOKEN" | jq '.counters'
-
-# Step 5: check server logs for Voyage 503 + Cohere invocation
-sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, level, source, message FROM logs \
-   WHERE level IN ('WARNING','ERROR') ORDER BY timestamp DESC LIMIT 20;"
-
-# Step 6: clean up
-curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" \
-  -H "Authorization: Bearer $TOKEN" | jq .
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"target": "api.voyageai.com", "dns_failure_rate": 1.0}' | jq .
 ```
 
-### Playbook 3: Retry-After Backoff Verification
-
-Verify that the server respects the Retry-After header from a 429 response.
+### Added latency on a fraction of calls
 
 ```bash
-# Step 1: seed RNG for reproducibility
-curl -s -X POST "$CIDX_URL/admin/fault-injection/seed" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"seed": 42}' | jq .
-
-# Step 2: inject 429 with short Retry-After range
-curl -s -X PUT "$CIDX_URL/admin/fault-injection/profiles/api.voyageai.com" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "api.voyageai.com",
-    "error_rate": 1.0,
-    "error_codes": [429],
-    "retry_after_sec_range": [1, 2]
-  }' | jq .
-
-# Step 3: trigger embed request and observe timing
-time curl -s -X POST "$CIDX_URL/mcp" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query_text":"test query","repository_alias":"test-global","limit":3}}}'
-
-# Step 4: read history to see Retry-After values used
-curl -s "$CIDX_URL/admin/fault-injection/history" \
-  -H "Authorization: Bearer $TOKEN" | jq .
-
-# Step 5: clean up
-curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" \
-  -H "Authorization: Bearer $TOKEN" | jq .
+curl -s -X PUT "$CIDX_URL/admin/fault-injection/profiles/api.cohere.com" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"target": "api.cohere.com", "latency_rate": 0.5, "latency_ms_range": [500, 1500]}' | jq .
 ```
 
-### Playbook 4: DNS Outage on VoyageAI
-
-Verify the server returns a meaningful error when DNS resolution fails for VoyageAI.
+## After testing
 
 ```bash
-# Step 1: inject 100% DNS failure on VoyageAI
-curl -s -X PUT "$CIDX_URL/admin/fault-injection/profiles/api.voyageai.com" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "api.voyageai.com",
-    "dns_failure_rate": 1.0
-  }' | jq .
-
-# Step 2: trigger an embed request -- expect connection error
-
-# Step 3: verify DNS failure was injected
-curl -s "$CIDX_URL/admin/fault-injection/status" \
-  -H "Authorization: Bearer $TOKEN" | jq '.counters'
-
-# Step 4: check fault injection logs
-sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, level, message FROM logs \
-   WHERE source='fault_injection' ORDER BY timestamp DESC LIMIT 5;"
-
-# Step 5: clean up
-curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" \
-  -H "Authorization: Bearer $TOKEN" | jq .
-```
-
----
-
-## Post-Test Cleanup
-
-Always reset the harness after each test session to avoid interference with subsequent requests:
-
-```bash
-curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" \
-  -H "Authorization: Bearer $TOKEN" | jq .
-```
-
-Verify the reset was successful:
-
-```bash
-curl -s "$CIDX_URL/admin/fault-injection/status" \
-  -H "Authorization: Bearer $TOKEN" | jq '{profile_count, counters}'
+curl -s -X POST "$CIDX_URL/admin/fault-injection/reset" -H "Authorization: Bearer $TOKEN" | jq .
+curl -s "$CIDX_URL/admin/fault-injection/status" -H "Authorization: Bearer $TOKEN" | jq '{profile_count, counters}'
 # Expected: {"profile_count": 0, "counters": {}}
 ```
 
-After testing, restore the original `config.json` and restart the server to deactivate the harness:
-
-```bash
-cp ~/.cidx-server/config.json.pre-story-746 ~/.cidx-server/config.json
-# Restart the server
-```
-
----
-
-## Logs DB Audit
-
-After any test session, audit the logs database for unexpected errors:
+Then turn the harness off in `config.json` and restart, and review the log store for errors and warnings from the
+test period:
 
 ```bash
 sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, level, source, message FROM logs \
-   WHERE level IN ('ERROR','WARNING') \
-   ORDER BY timestamp DESC LIMIT 100;"
-```
-
-To see only fault injection events:
-
-```bash
-sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, level, message FROM logs \
-   WHERE source='fault_injection' \
-   ORDER BY timestamp DESC LIMIT 50;"
+  "SELECT timestamp, level, source, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 100"
 ```

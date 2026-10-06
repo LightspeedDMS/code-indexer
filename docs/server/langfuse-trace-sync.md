@@ -1,74 +1,105 @@
 # Langfuse Trace Sync
 
-Automatically pull AI conversation traces from Langfuse and make them semantically searchable. CIDX syncs traces in the background, indexes them with the same semantic search engine used for code, and makes them available via MCP tools and CLI queries.
+How a CIDX Server pulls AI conversation traces from Langfuse projects, stores them as files, and indexes them so
+they can be searched like code.
 
-## Table of Contents
+Code: `src/code_indexer/server/services/langfuse_trace_sync_service.py` (sync),
+`src/code_indexer/server/services/langfuse_readme_generator.py` (README files),
+`register_langfuse_golden_repos` in `src/code_indexer/server/startup/bootstrap.py` (registration).
 
-- [Overview](#overview)
-- [How It Works](#how-it-works)
-- [Storage Layout](#storage-layout)
-- [Searching Traces](#searching-traces)
-- [Dashboard Monitoring](#dashboard-monitoring)
-- [Configuration](#configuration)
+Trace **import** (this page) is separate from trace **export**, where the server sends its own traces to Langfuse.
+They have separate settings sections in the Web UI.
 
-## Overview
+## Configure
 
-Langfuse Trace Sync bridges the gap between AI conversation history and code search. Once enabled, CIDX continuously pulls traces from configured Langfuse projects, indexes them alongside your code, and makes the full conversation history -- prompts, responses, tool calls -- semantically searchable.
+Runtime settings, Web UI, Configuration, Observability, **Langfuse Trace Import** (stored in `langfuse_config`):
 
-## How It Works
+| Setting | Default | Allowed | Meaning |
+|---------|---------|---------|---------|
+| `pull_enabled` | `false` | | Master switch for importing |
+| `pull_host` | `https://cloud.langfuse.com` | | Langfuse API host (self-hosted instances too) |
+| `pull_projects` | empty | | One entry per Langfuse project: `public_key` and `secret_key` |
+| `pull_sync_interval_seconds` | `300` | 60 to 3600 (clamped) | Time between sync cycles |
+| `pull_trace_age_days` | `30` | 1 to 365 (clamped) | Oldest traces fetched |
+| `pull_max_concurrent_observations` | `5` | 1 to 20 (clamped) | Parallel observation fetches per project |
 
-1. **Background sync**: Pulls traces from configured Langfuse projects at a configurable interval (default: 5 minutes)
-2. **Smart deduplication**: Overlap window + content hash strategy detects trace mutations without re-downloading unchanged data
-3. **Auto-registration**: New trace folders are automatically registered as golden repos and indexed
-4. **Watch integration**: File system watchers trigger incremental re-indexing as new traces arrive
+Project secrets are write-only: the form never shows them, and a project saved with a blank secret keeps the secret
+already stored for the same public key. A save is refused, with nothing changed, when two projects share a public
+key or a project would end up without a secret key. The project's name is read from Langfuse with its keys.
 
-## Storage Layout
+### When syncing runs
 
-Traces are stored as JSON files organized by project, user, session, and trace ID:
+- **Standalone server:** the sync loop starts at server start when `pull_enabled` is on.
+- **Cluster:** only the leader node syncs. A node that becomes leader starts the loop if `pull_enabled` is on at that
+  moment, and stops it when it loses leadership.
+
+The loop checks `pull_enabled` and the interval before every cycle, so turning import off stops syncing at the next
+cycle. Turning it on while the server runs does not start a loop that was not started: restart the server (or use
+the manual trigger below for a single sync).
+
+## How a sync cycle works
+
+For each configured project:
+
+1. Fetch traces updated since the last sync minus a 2-hour overlap window, never older than `pull_trace_age_days`.
+   The first sync fetches everything inside the age limit.
+2. For each trace, skip it when its `updatedAt` matches the stored state and its file exists. Otherwise fetch its
+   observations and compare a SHA-256 hash of the trace plus observations with the stored hash; write the file only
+   when the content changed or the file is missing.
+3. Trigger a refresh of each repository that received new or changed traces.
+
+After all projects, new trace folders are registered as golden repositories and README files are regenerated for the
+folders that changed. Each cycle appears in the jobs list as a `langfuse_sync` job.
+
+## Storage layout
+
+Under the server data directory (`~/.cidx-server/data/` by default):
 
 ```
 golden-repos/
-  langfuse_<project>_<userId>/
+  langfuse_<project>_<userId>/          one repository per project and Langfuse user
+    README.md                           index of sessions
     <sessionId>/
-      <traceId>.json    # Full trace + observations, chronologically ordered
+      README.md                         session summary
+      001_turn_<last 8 chars of trace id>.json
+      002_subagent-<name>_<...>.json    traces named "subagent:<name>" in Langfuse
+      ...
+  .langfuse_state/
+    langfuse_sync_state_<project>.json  sync position and per-trace hashes
+.langfuse_staging/                      temporary files for new traces
 ```
 
-Each trace file contains the user prompt (`trace.input`), AI response (`trace.output`), metadata, and all observations (tool calls) in chronological order.
+- Traces without a user go to `langfuse_<project>_no_user`, traces without a session to `no_session`.
+- Characters that are not valid in file names are replaced by `_` in project, user and session names.
+- New trace files in a session folder are numbered in trace-timestamp order, continuing after the highest number
+  already in the folder; an updated trace keeps its file name.
+- Each file is JSON with `trace` (the Langfuse trace, including `input` and `output`) and `observations`, ordered
+  by start time.
 
-## Searching Traces
+## Repositories and search
 
-### Via MCP
+Each `langfuse_<project>_<userId>` folder is registered as a golden repository with that alias and indexed like any
+other; it is queried through its global alias `langfuse_<project>_<userId>-global`. Access follows the normal group
+grants ([Accounts and Access](auth/accounts-and-access.md#groups-and-repository-access)).
+
+MCP examples:
 
 ```
-search_code("authentication error handling", repository_alias="langfuse_*")
-search_code("SQL query generation", repository_alias="langfuse_MyProject_*")
+search_code(query_text="authentication error handling", repository_alias="langfuse_*")
+search_code(query_text="SQL query generation", repository_alias="langfuse_ExampleProject_*")
 ```
 
-### Via CLI
+A wildcard pattern is expanded against the global repositories the caller can access. See the
+[Query Guide](../guides/query.md) for search parameters.
 
-```bash
-cidx query "authentication error handling" --repo "langfuse_*"
-```
+## Monitoring and manual sync
 
-The `langfuse_*` wildcard matches all Langfuse trace repositories. Use `langfuse_<project>_*` to scope to a specific project.
+When import is on, the admin dashboard shows a Langfuse Trace Sync card (refreshed every 30 seconds) with:
 
-## Dashboard Monitoring
+- health, last sync time and duration, interval;
+- per project: traces checked, new, updated and unchanged, errors and change rate;
+- storage: total traces, user folders and size;
+- a button for an immediate sync.
 
-The admin dashboard provides real-time sync health monitoring:
-
-- Per-project metrics: traces checked, new, and updated counts
-- Storage statistics: total traces, disk usage
-- Manual sync trigger for on-demand pulls
-- Sync error reporting with last-success timestamps
-
-## Configuration
-
-Enable via the Web UI Config Screen under Langfuse settings. Requires a Langfuse project public/secret key pair.
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `langfuse_sync_enabled` | Enable background trace sync | `false` |
-| `langfuse_sync_interval_seconds` | Seconds between sync cycles | `300` (5 min) |
-| `langfuse_public_key` | Langfuse project public key | -- |
-| `langfuse_secret_key` | Langfuse project secret key | -- |
-| `langfuse_host` | Langfuse API host | `https://cloud.langfuse.com` |
+The button calls `POST /admin/langfuse-sync/trigger` (step-up elevation required when enforcement is on). It answers
+HTTP 409 when a sync is already running and 503 when the sync service is not initialised.

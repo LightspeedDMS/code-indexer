@@ -1,97 +1,55 @@
-# Admin Web UI Mutation Routes — Security Inventory
+# Admin Guide
 
-Bug #956: All POST/PUT/DELETE/PATCH routes registered on `web_router` that perform
-state-changing operations must carry `dependencies=[Depends(dependencies.require_elevation())]`
-to enforce TOTP step-up elevation before any administrative mutation can succeed.
+Starting point for CIDX Server administrators: what each area of the administration Web UI does, where it is
+documented, and which administrative operations require TOTP step-up elevation.
 
-This document is the canonical inventory. The CI gate test
-`tests/unit/server/web/test_admin_elevation_gating_956.py::TestAdminElevationGating::test_ungated_routes_table`
-enforces this list programmatically — any new mutation route added without elevation gating
-will cause that test to fail.
+The administration Web UI is at `/admin` and is available to accounts with the `admin` role. Other users get a
+smaller self-service UI at `/user` (API keys, MCP credentials, git credentials, MFA).
 
----
+## Web UI areas
 
-## Gated Routes (require_elevation)
+| Area (path) | What it is for | Documentation |
+|-------------|----------------|---------------|
+| Dashboard (`/admin/`) | Health, job and node summary; Langfuse sync card when trace pull is on | [Observability](observability.md), [Langfuse Trace Sync](langfuse-trace-sync.md) |
+| Users (`/admin/users`) | Create accounts, change roles, passwords and emails, delete accounts | [Accounts and Access](auth/accounts-and-access.md#accounts) |
+| Groups (`/admin/groups`) | Groups, group membership, repository grants | [Accounts and Access](auth/accounts-and-access.md#groups-and-repository-access) |
+| Golden Repos, Auto-Discovery, Repositories, Repo Categories | Register and refresh shared repositories; view activated repositories | [Repository Lifecycle](../architecture/repository-lifecycle.md) |
+| Jobs (`/admin/jobs`) | Background jobs, cancellation | [Maintenance and Jobs](maintenance-and-jobs.md) |
+| Logs, Audit Logs, Embedding Stats | Application logs, audit events, provider call statistics | [Observability](observability.md) |
+| Diagnostics (`/admin/diagnostics`) | On-demand checks of CLI tools, SDK prerequisites, external APIs, credentials and infrastructure | - |
+| Query (`/admin/query`) | Run searches from the browser | [Query Guide](../guides/query.md) |
+| Dependency Map (`/admin/dependency-map`) | Cross-repository dependency analysis | [Dependency Map](../architecture/dependency-map.md) |
+| Config (`/admin/config`) | Runtime settings stored in the database, including SSO, TOTP elevation, Web Security, OpenTelemetry, Langfuse and SIEM delivery | [Deployment](deployment.md#bootstrap-configuration-configjson), [OIDC](auth/oidc.md), [Login and Elevation](auth/login-and-elevation.md#settings), [SIEM Operations](siem/operations.md) |
+| API Keys, MCP Credentials | The signed-in administrator's own API keys and MCP credentials (the MCP page also lists the server's system credentials) | [Accounts and Access](auth/accounts-and-access.md#api-keys) |
+| Git Credentials, SSH Keys | Credentials the server uses towards git forges | - |
+| Analytics, Self-Monitoring, Research Assistant | Analytics export, scheduled self-monitoring scans, interactive research sessions | - |
+| MFA (`/admin/mfa/setup`) | Enrol TOTP for the signed-in administrator | [Login and Elevation](auth/login-and-elevation.md#totp-mfa) |
 
-All routes below require a valid TOTP elevation window for the requesting admin session.
-Requests without an active window receive HTTP 403 with `elevation_required`.
+Maintenance mode is not in the Web UI: its write endpoints accept only loopback callers
+([Maintenance and Jobs](maintenance-and-jobs.md#maintenance-mode)). The fault-injection harness exists only on
+non-production servers that enable it ([Fault Injection](fault-injection.md)).
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /users/create | Create a new user account |
-| POST | /users/{username}/role | Change a user's role |
-| POST | /users/{username}/password | Change a user's password |
-| POST | /users/{username}/email | Change a user's email |
-| POST | /users/{username}/delete | Delete a user account |
-| POST | /groups/create | Create a new group |
-| POST | /groups/{group_id}/update | Update a group's name/description |
-| POST | /groups/{group_id}/delete | Delete a group |
-| POST | /groups/users/{user_id:path}/assign | Assign a user to a group |
-| POST | /groups/repo-access/grant | Grant a group access to a repository |
-| POST | /groups/repo-access/revoke | Revoke a group's access to a repository |
-| POST | /golden-repos/add | Add a new golden repository |
-| POST | /golden-repos/batch-create | Batch-add golden repositories |
-| POST | /golden-repos/{alias}/delete | Delete a golden repository |
-| POST | /golden-repos/{alias}/refresh | Trigger a manual refresh of a golden repo |
-| POST | /golden-repos/{alias}/force-resync | Force a full resync of a golden repo |
-| POST | /golden-repos/{alias}/wiki-toggle | Enable or disable wiki for a golden repo |
-| POST | /golden-repos/{alias}/temporal-options | Update temporal indexing options |
-| POST | /golden-repos/{alias}/wiki-refresh | Trigger a wiki refresh |
-| POST | /golden-repos/{alias}/change-branch | Change the tracked branch |
-| POST | /golden-repos/activate | Activate a golden repo for a user |
-| POST | /repos/{username}/{user_alias}/deactivate | Deactivate an activated repository |
-| POST | /activated-repos/{username}/{alias}/wiki-toggle | Toggle wiki for an activated repo |
-| POST | /jobs/{job_id}/cancel | Cancel a background job |
-| POST | /api/discovery/{platform}/enrich | Enrich a discovered repository |
-| POST | /api/discovery/hide | Hide a discovered repository |
-| POST | /api/discovery/unhide | Unhide a previously hidden repository |
-| POST | /api/discovery/branches | Update branch settings for a discovered repo |
-| POST | /config/reset | Reset configuration to defaults |
-| POST | /config/langfuse_pull | Pull Langfuse configuration |
-| POST | /config/cidx_meta_backup | Update cidx-meta backup configuration |
-| POST | /config/{section} | Update a named configuration section |
-| POST | /config/api-keys/{platform} | Add or update an API key |
-| DELETE | /config/api-keys/{platform} | Delete an API key |
-| POST | /git-credentials | Add git credentials |
-| DELETE | /git-credentials/{credential_id} | Delete git credentials |
-| POST | /ssh-keys/create | Generate a new SSH key pair |
-| POST | /ssh-keys/delete | Delete an SSH key |
-| POST | /ssh-keys/assign-host | Assign an SSH key to a host |
-| POST | /self-monitoring | Update self-monitoring configuration |
-| POST | /self-monitoring/run-now | Trigger an immediate self-monitoring check |
-| POST | /restart | Restart the CIDX server process |
-| POST | /config/totp | Update TOTP/elevation configuration |
+## Elevation policy
 
----
+When step-up elevation enforcement is on (runtime setting `elevation_enforcement_enabled`, default off; see
+[Login and Elevation](auth/login-and-elevation.md#step-up-elevation)):
 
-## Exempt Routes (no elevation required)
+- **Web UI writes.** Every `POST`, `PUT`, `DELETE` and `PATCH` route of the administration Web UI requires an open
+  elevation window, with these exceptions:
+  - routes that cannot require it without a deadlock: logout, the elevation page `/admin/elevate`, the TOTP setup
+    activation and the login MFA challenge;
+  - search form submissions (`/admin/query`, the query results partial), which change nothing;
+  - disabling MFA and regenerating recovery codes, which check the window inside the handler and also accept a
+    window opened with a recovery code.
+- **Sensitive Web UI reads.** The SSH Keys and Logs pages send an unelevated administrator to `/admin/elevate`, and
+  the log list and log export require a window.
+- **REST and MCP.** Administrative REST writes carry the same requirement, and so do the MCP tools marked with it in
+  the [MCP tool reference](../reference/mcp-tools/README.md). Self-service credential changes (own API keys, MCP
+  credentials and git credentials) require it for every role.
 
-These mutation-shaped routes are intentionally exempt from elevation gating.
+With enforcement off, all of these run without an elevation check.
 
-| Method | Path | Justification |
-|--------|------|---------------|
-| GET | /logout | Session termination — requires no elevation; blocking a logout would be a security anti-pattern |
-| GET | /elevate | The elevation prompt page itself — must be reachable without elevation to initiate the flow |
-| POST | /query | Search query — read-only semantic operation; no state mutation |
-| POST | /partials/query-results | HTMX partial for search results — read-only; no state mutation |
-
----
-
-## Enforcement
-
-The CI gate test inspects the FastAPI router at import time using:
-
-```python
-from code_indexer.server.web.routes import web_router
-
-for route in web_router.routes:
-    if route.methods & MUTATION_METHODS and route.path not in EXEMPT_PATHS:
-        assert has_require_elevation(route.dependencies), f"Route {route.path} is ungated"
-```
-
-This means adding a new mutation route without `dependencies=[Depends(dependencies.require_elevation())]`
-will fail CI immediately. There is no grace period.
-
-To add an exempt route, update both the decorator (omitting the dependency) and the
-`EXEMPT_PATHS` set in `tests/unit/server/web/test_admin_elevation_gating_956.py`, with a
-comment explaining why elevation is inappropriate for that route.
+The routes themselves are the authority, not this page. The test
+`tests/unit/server/web/test_admin_elevation_gating_956.py` inspects the administration router and fails when a
+mutation route lacks the elevation dependency and is not on its exemption list (`_EXEMPT_ROUTES`), and it pins the
+elevation-gated reads. Adding an exemption means editing that list with a justification.

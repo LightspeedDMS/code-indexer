@@ -1,173 +1,87 @@
-# Memory Retrieval Operator Guide
+# Memory Retrieval
 
-Story #883 — Semantic-Triggered Parallel Memory Retrieval for Hookless MCP Clients
+How the server attaches stored technical memories to semantic search results, which settings control it, and what
+it logs.
 
----
+Code: `src/code_indexer/server/mcp/memory_retrieval_pipeline.py` (filters, ordering, hydration, nudge),
+`src/code_indexer/server/mcp/handlers/search/memory_retrieval.py` (integration with `search_code`),
+`src/code_indexer/server/services/memory_candidate_retriever.py` (HNSW lookup).
 
-## What This Feature Does
+## What it does
 
-When a client calls `search_code` with `search_mode` set to `semantic` or `hybrid`, the server
-runs a parallel memory retrieval pipeline that searches the stored technical memory store for
-entries relevant to the query. The results are injected into the `relevant_memories` field of
-the search response.
+Technical memories are Markdown files created with the MCP tools `create_memory`, `edit_memory` and
+`delete_memory`. They live in the shared memory store of the `cidx-meta` repository
+(`<golden-repos dir>/cidx-meta/memories/<id>.md`) and are indexed in its `memories` collection.
 
-This allows hookless MCP clients (clients that cannot intercept MCP responses to inject memory
-context) to receive relevant historical technical knowledge automatically, without requiring
-any client-side changes.
+When an MCP `search_code` call runs a semantic or hybrid search against a single activated repository, the server
+also looks up memories similar to the query and returns them in `query_metadata.relevant_memories` of the same
+response. Clients get relevant memories without any client-side hook.
 
-The feature is disabled by default. Operators must explicitly enable it via the configuration
-screen.
+It does not run for:
 
----
+- `search_mode` `fts` or `regex`, or temporal queries;
+- searches of a `-global` repository, of several repositories, or of a wildcard pattern;
+- REST `/api/query`.
 
-## Pipeline Execution Order
+The feature is **on by default**.
 
-For each qualifying search request:
+## Pipeline
 
-1. The query vector is computed via VoyageAI using the same `VOYAGE_API_KEY` as code search.
-2. HNSW candidate retrieval runs from the memory store for the authenticated user.
-3. Voyage floor filter: candidates below `memory_voyage_min_score` are dropped.
-4. Relevant memory assembly: candidates are hydrated with context fields.
-5. Ordering: if the Cohere reranker is active, candidates are sorted by rerank score descending;
-   otherwise by HNSW score descending.
-6. Cohere floor filter: candidates below `memory_cohere_min_score` are dropped (only when
-   the reranker is active).
-7. Body hydration: each surviving candidate's full body text is read from disk.
-8. If no candidates survive all filters, a nudge entry is injected prompting the client to
-   use `store_technical_memory` to begin building a memory store.
+For a qualifying request, after the code search and its reranking:
 
----
+1. **Query vector.** The VoyageAI embedding computed for the code search is reused; if none is available, one is
+   computed (same provider and key). If that fails, a WARNING is logged and the response has no
+   `relevant_memories`.
+2. **Candidates.** The `memories` HNSW index returns up to `max(20, limit x memory_retrieval_k_multiplier)`
+   candidates, where `limit` is the search's `limit` parameter.
+3. **Voyage floor.** Candidates with a similarity below `memory_voyage_min_score` are dropped (a candidate at the
+   threshold is kept).
+4. **Ordering.** When the request's reranker status is `disabled`, candidates are sorted by similarity, highest
+   first; otherwise their order is kept.
+5. **Cohere floor.** Unless the reranker status is `disabled`, candidates whose `rerank_score` is below
+   `memory_cohere_min_score` are dropped. Memory candidates are not reranked and carry no
+   `rerank_score`, which counts as 0, so whenever the request's reranker status is not `disabled` every candidate
+   is dropped here and the response carries the nudge entry of step 7.
+6. **Bodies.** Each surviving memory's file is read from disk. A candidate with an invalid id, a path outside the
+   memories directory, or an unreadable file is skipped with a WARNING.
+7. **Empty result.** If nothing survives, `relevant_memories` holds one entry with `memory_id` `__empty_nudge__`,
+   `is_nudge: true`, and a body that suggests recording a memory. The text comes from
+   `src/code_indexer/server/mcp/prompts/memory_empty_nudge.md`.
 
-## Configuration Keys
+Each returned entry carries `memory_id`, `title` (currently always empty), `hnsw_score` and `body`. When the `memories` index does not exist
+yet, the lookup returns no candidates (logged once per process at INFO), so the response carries the nudge entry.
 
-All keys live in the `memory_retrieval_config` object in the server runtime configuration
-(managed via the Web UI Config Screen, not `config.json`).
+Memories come from the shared store; they are not partitioned by user.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `memory_retrieval_enabled` | bool | `false` | Master on/off switch. Set to `true` to activate the pipeline. |
-| `memory_retrieval_limit` | int | `5` | Maximum number of memory candidates passed to HNSW retrieval. |
-| `memory_voyage_min_score` | float | `0.5` | Minimum HNSW similarity score for a memory candidate to survive the first filter. |
-| `memory_cohere_min_score` | float | `0.4` | Minimum Cohere rerank score for a candidate to survive the second filter (only applied when the reranker is active). |
-| `memory_reranker_enabled` | bool | `false` | Whether to apply the Cohere reranker to memory candidates. |
+## Settings
 
----
+Runtime settings in the server database, object `memory_retrieval_config` (not `config.json`):
 
-## Kill Switch
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `memory_retrieval_enabled` | `true` | Master switch. When `false`, no lookup runs and `relevant_memories` is absent |
+| `memory_voyage_min_score` | `0.5` | Similarity floor of step 3 |
+| `memory_cohere_min_score` | `0.4` | Rerank-score floor of step 5 |
+| `memory_retrieval_k_multiplier` | `5` | Candidate pool multiplier of step 2 (positive integer) |
+| `memory_retrieval_max_body_chars` | `2000` | Body length cap (positive integer); stored, but not applied: bodies are returned untruncated |
 
-Set `memory_retrieval_enabled` to `false` in the Web UI Config Screen. The change takes effect
-immediately on the next search request — no server restart required.
+The switch and the floors are read on every request. The Web UI Configuration page has no section for these
+settings, and its save route does not accept the `memory_retrieval` section, so the defaults apply
+unless the stored configuration already carries other values.
 
-When the kill switch is off:
-- The HNSW retrieval step is skipped entirely.
-- No VoyageAI call is made.
-- The `relevant_memories` field is absent from the response.
+### Tuning the floors
 
----
+- Unrelated memories appear: raise `memory_voyage_min_score`.
+- Relevant memories are missing: lower it.
 
-## Floor Tuning
+`memory_cohere_min_score` has an effect only through step 5 above.
 
-### Voyage Floor (`memory_voyage_min_score`)
+## Log messages
 
-Controls how strict the initial HNSW similarity filter is. Higher values mean only very close
-semantic matches survive. Lower values allow more candidates through.
-
-Typical starting range: 0.70 to 0.80. If users report that unrelated memories appear in
-results, raise this value. If relevant memories are being dropped, lower it.
-
-### Cohere Floor (`memory_cohere_min_score`)
-
-Only active when `memory_reranker_enabled` is `true` and the server-level Cohere reranker
-is configured. Controls how strictly reranked candidates are filtered.
-
-Typical starting range: 0.40 to 0.60. Adjust in the same direction as the Voyage floor:
-raise to eliminate noise, lower to recover dropped relevant memories.
-
----
-
-## Empty-State Nudge Behavior
-
-When the pipeline produces zero surviving candidates after all filters, the server injects a
-single synthetic entry into `relevant_memories` with `memory_id` set to `__empty_nudge__`
-and `is_nudge` set to `true`. The body text guides the client to use `store_technical_memory`
-to begin building the memory store.
-
-The nudge text is loaded from:
-
-```
-src/code_indexer/server/mcp/prompts/memory_empty_nudge.md
-```
-
-Operators can edit this file to customize the message without touching Python code. The
-loaded text is cached for the lifetime of the process (one load per process startup).
-
----
-
-## Parallel Execution Notes
-
-The memory retrieval pipeline runs concurrently with the code search query in a thread pool.
-The code search results and memory results are merged before the response is returned.
-
-If the memory pipeline raises an unhandled exception, it is logged as a WARNING and the
-search response is returned without `relevant_memories` rather than failing the entire
-request.
-
-If VoyageAI is unreachable or returns an error when computing the query vector, a WARNING
-is logged and the memory pipeline is skipped for that request (same behavior as kill switch
-off for that request only).
-
----
-
-## Per-User Isolation
-
-Memory candidates are scoped to the authenticated user's `username`. One user's memories are
-never surfaced to another user. This is enforced at the HNSW retrieval step.
-
----
-
-## Rollback Procedure
-
-1. Set `memory_retrieval_enabled` to `false` in the Web UI Config Screen.
-2. No server restart is required.
-3. The feature is fully disabled. No pipeline code runs after the kill switch is off.
-
-If a complete code rollback is needed (for example, due to a bug in the pipeline itself):
-deploy the previous version to the branch and the auto-updater will restart the service.
-No database migrations are involved — this feature uses no new tables.
-
----
-
-## Supported Search Modes
-
-Memory retrieval is triggered only for the following `search_mode` values:
-
-- `semantic`
-- `hybrid`
-
-It is explicitly skipped for `fts` (full-text search) mode, because FTS queries are keyword
-lookups that do not produce a meaningful query vector for HNSW retrieval.
-
----
-
-## Log Messages
-
-| Level | Message Pattern | Meaning |
-|-------|-----------------|---------|
-| WARNING | `Memory retrieval: could not compute query vector` | VoyageAI call failed; pipeline skipped for this request |
-| WARNING | `Memory body hydration: invalid memory_id` | A candidate had a malformed memory_id; candidate skipped |
-| WARNING | `Memory body hydration: path traversal attempt` | A candidate memory_id failed path confinement check; candidate skipped |
-| WARNING | `Memory body hydration: failed to read` | Disk read error for a candidate's file; candidate skipped |
-| INFO | (search response includes `relevant_memories`) | Normal operation |
-
----
-
-## File Locations
-
-| Path | Purpose |
-|------|---------|
-| `src/code_indexer/server/mcp/memory_retrieval_pipeline.py` | Pipeline orchestration, HNSW retrieval, filters, body hydration |
-| `src/code_indexer/server/mcp/handlers/search.py` | Handler integration, `_run_memory_retrieval`, `_compute_memory_query_vector` |
-| `src/code_indexer/server/mcp/prompts/memory_empty_nudge.md` | Nudge text (editable without Python changes) |
-| `tests/unit/server/mcp/test_search_memory_retrieval.py` | Unit test suite (20 tests) |
-
-*Recorded 2026-04-22 (Story #883)*
+| Level | Message begins with | Meaning |
+|-------|---------------------|---------|
+| WARNING | `Memory retrieval: could not compute query vector` | Embedding failed; no `relevant_memories` for this request |
+| WARNING | `Skipping memory with invalid memory_id` | A candidate id is malformed; skipped |
+| WARNING | `Skipping memory '<id>': path escapes memories directory` | A candidate path is outside the memories directory; skipped |
+| WARNING | `Skipping memory '<id>': file error` | The memory file could not be read; skipped |
+| INFO | `Memory HNSW index not found or empty for collection 'memories'` | No memories are indexed yet (once per process) |
