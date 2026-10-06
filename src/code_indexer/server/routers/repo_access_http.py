@@ -46,8 +46,9 @@ def module_app_access_filtering_service() -> Optional[AccessFilteringService]:
     reads it); None when it is not wired, which every guard fails closed on."""
     from code_indexer.server import app as app_module
 
+    server_app = getattr(app_module, "app")
     service: Optional[AccessFilteringService] = getattr(
-        app_module.app.state, "access_filtering_service", None
+        server_app.state, "access_filtering_service", None
     )
     return service
 
