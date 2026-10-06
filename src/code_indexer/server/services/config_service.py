@@ -71,6 +71,12 @@ class BootstrapFileNotWritten(RuntimeError):
 # the attempt from the new row, at most this many times.
 _CHANGE_ATTEMPTS = 10
 
+# claude_cli settings only /api/llm-creds/save-config may change: it reuses
+# the stored provider key only with the provider URL it was saved with.
+_LLM_CREDS_ROUTE_ONLY_KEYS = frozenset(
+    {"claude_auth_mode", "llm_creds_provider_url", "llm_creds_provider_api_key"}
+)
+
 
 class LangfusePullProjectsInvalid(ValueError):
     """A submitted Langfuse pull-project list was refused (a duplicate public
@@ -2268,18 +2274,15 @@ class ConfigService:
             claude_config.refinement_interval_hours = max(1, int(value))
         elif key == "refinement_domains_per_run":
             claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
-        elif key == "claude_auth_mode":
-            allowed = {"api_key", "subscription"}
-            str_value = str(value)
-            if str_value not in allowed:
-                raise ValueError(
-                    f"Invalid claude_auth_mode '{value}': must be one of {sorted(allowed)}"
-                )
-            claude_config.claude_auth_mode = str_value
-        elif key == "llm_creds_provider_url":
-            claude_config.llm_creds_provider_url = str(value) if value else ""
-        elif key == "llm_creds_provider_api_key":
-            claude_config.llm_creds_provider_api_key = str(value) if value else ""
+        elif key in _LLM_CREDS_ROUTE_ONLY_KEYS:
+            # The provider key is reused only with the provider URL it was
+            # saved with; only /api/llm-creds/save-config enforces that, so
+            # no generic save may change the mode, the URL or the key.
+            raise ValueError(
+                f"claude_cli.{key} can be changed only through "
+                "/api/llm-creds/save-config (the LLM credentials provider "
+                "settings), which binds the provider key to its URL"
+            )
         elif key == "llm_creds_provider_consumer_id":
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         elif key == "dep_map_fact_check_enabled":
