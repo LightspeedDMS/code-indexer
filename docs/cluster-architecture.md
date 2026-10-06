@@ -78,7 +78,7 @@ Each node runs independently and handles requests without inter-node communicati
          |
          v
     HAProxy (:8090)
-         |  session-affinity with health check (GET /docs, 5s interval)
+         |  session-affinity with health check (GET /healthz, 5s interval)
          |
     +----+----+
     |         |
