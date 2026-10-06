@@ -92,13 +92,23 @@ class LlmCredsClient:
         self._headers = {"x-api-key": api_key}
         self._timeout = httpx.Timeout(timeout)
         self._transport = transport
+        # A key the HTTP layer would reject -- and quote back, escaped, in its
+        # error -- is refused per request (below), never here: server startup
+        # builds this client outside any error handler.
+        self._key_is_header_safe = all("!" <= char <= "~" for char in api_key)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _client(self) -> httpx.Client:
-        """Build an httpx.Client with the configured headers and transport."""
+        """Build an httpx.Client with the configured headers and transport.
+
+        Every request is built here, so a header-unsafe key is refused before
+        anything is sent, with a fixed message that never carries the key.
+        """
+        if not self._key_is_header_safe:
+            raise LlmCredsProviderError("provider API key must be printable ASCII")
         kwargs: dict = {
             "headers": self._headers,
             "timeout": self._timeout,

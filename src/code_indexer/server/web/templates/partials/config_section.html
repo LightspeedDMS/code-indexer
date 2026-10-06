@@ -404,9 +404,9 @@ function confirmHostPortChange() {
                     <label for="llm-provider-api-key">
                         Provider API Key
                         <input type="password" id="llm-provider-api-key" name="llm_creds_provider_api_key"
-                               value=""
-                               placeholder="Enter provider API key">
-                        <small>API key used to authenticate with the provider</small>
+                               value="" autocomplete="new-password"
+                               placeholder="{{ 'Leave empty to keep current' if config.claude_cli.llm_creds_provider_api_key else 'Enter provider API key' }}">
+                        <small>API key used to authenticate with the provider. {% if config.claude_cli.llm_creds_provider_api_key %}A key is set; leave empty to keep it{% else %}No key is set{% endif %}</small>
                     </label>
                     <label for="llm-consumer-id">
                         Consumer ID
@@ -456,8 +456,9 @@ function testLlmConnection() {
     var url = document.getElementById('llm-provider-url').value;
     var key = document.getElementById('llm-provider-api-key').value;
     var statusEl = document.getElementById('llm-test-status');
-    if (!url || !key) {
-        if (statusEl) { statusEl.textContent = 'Enter URL and API key first'; statusEl.className = 'key-status error'; }
+    // A blank key tests with the stored key (server side).
+    if (!url) {
+        if (statusEl) { statusEl.textContent = 'Enter the provider URL first'; statusEl.className = 'key-status error'; }
         return;
     }
     if (statusEl) { statusEl.textContent = 'Testing...'; statusEl.className = 'key-status'; }
