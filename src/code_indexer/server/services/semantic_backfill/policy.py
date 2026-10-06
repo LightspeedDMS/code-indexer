@@ -131,12 +131,21 @@ def _clone_has_only_empty_files(clone_path: Path) -> bool:
       silent-empty failure this guard exists for, and it must keep failing loud.
 
     The distinction is "files present but empty" vs "files absent", so a vanished clone
-    returns False (no files seen) and still raises. Anything unreadable also returns False:
-    we cannot confirm emptiness, so we err toward fail-loud rather than mask a real failure.
+    returns False (no files seen) and still raises. Anything unreadable also returns False --
+    an unreadable FILE via its own OSError, and an unlistable DIRECTORY via the ``onerror``
+    hook below, since ``os.walk`` would otherwise skip it silently and the subtree would
+    read as "no files here". We cannot confirm emptiness, so we err toward fail-loud rather
+    than mask a real failure.
     """
+
+    def _reraise(err: OSError) -> None:
+        # os.walk SWALLOWS listing errors by default, which would let an unreadable
+        # subtree look like "no files here" and mask a repo that does have content.
+        raise err
+
     seen_file = False
     try:
-        for root, dirs, files in os.walk(clone_path):
+        for root, dirs, files in os.walk(clone_path, onerror=_reraise):
             dirs[:] = [d for d in dirs if d not in _CONTENT_WALK_SKIP]
             for name in files:
                 path = Path(root) / name

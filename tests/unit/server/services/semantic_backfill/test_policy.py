@@ -4,8 +4,10 @@ including the count-based hardening against the silent-empty failure."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, List
+from unittest import mock
 
 import pytest
 
@@ -300,6 +302,35 @@ def test_empty_check_ignores_git_and_cidx_dirs(tmp_path: Path) -> None:
         clone, {"README.md": b"", ".git/config": b"[core]\n", ".code-indexer/x": b"zz"}
     )
     assert _clone_has_only_empty_files(clone) is True
+
+
+def test_empty_check_false_when_a_subdirectory_cannot_be_listed(tmp_path: Path) -> None:
+    # Review finding: os.walk SWALLOWS listing errors by default. A clone with an empty
+    # README plus an unreadable src/ would walk as "only an empty file" -> marked skip,
+    # masking a repo that may well have content. The onerror hook must surface it so the
+    # repo keeps failing loud instead.
+    clone = tmp_path / "locked"
+    _seed_clone(clone, {"README.md": b"", "src/main.py": b"print('x')\n"})
+    locked = clone / "src"
+    os.chmod(locked, 0o000)
+    try:
+        if os.access(locked, os.R_OK):  # running as root: chmod does not restrict
+            pytest.skip("cannot make a directory unreadable as this user")
+        assert _clone_has_only_empty_files(clone) is False
+    finally:
+        os.chmod(locked, 0o755)
+
+
+def test_empty_check_false_when_a_file_cannot_be_read(tmp_path: Path) -> None:
+    # The per-file arm of the same guarantee, driven without relying on filesystem perms.
+    clone = tmp_path / "unreadable"
+    _seed_clone(clone, {"README.md": b""})
+
+    def _boom(self: Path, *a: object, **k: object) -> bytes:
+        raise OSError("nope")
+
+    with mock.patch.object(Path, "read_bytes", _boom):
+        assert _clone_has_only_empty_files(clone) is False
 
 
 def test_empty_check_false_for_absent_clone(tmp_path: Path) -> None:
