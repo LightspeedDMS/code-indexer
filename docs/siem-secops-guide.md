@@ -331,7 +331,7 @@ Do these steps in the Google Cloud project linked to your SecOps instance
    1. Go to the **Create service account** page and select the project.
    2. Enter a name, for example `secops-sa`. The console suggests an ID; it
       cannot be changed later. The account's email becomes
-      `secops-sa@example-secops-project.iam.gserviceaccount.com`.
+      `secops-sa@<project-id>.iam.gserviceaccount.com`.
    3. Click **Create and continue**.
    4. In the role step, choose the custom role from step 2. Click
       **Continue**, then **Done**.

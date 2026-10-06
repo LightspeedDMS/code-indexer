@@ -442,7 +442,7 @@ cidx query "database connection bug" --time-range-all --chunk-type commit_messag
 **3. Author Code Analysis**
 ```bash
 # Find all authentication-related work by specific developer
-cidx query "authentication" --time-range-all --author "sarah@company.com" --quiet
+cidx query "authentication" --time-range-all --author "alice@example.com" --quiet
 ```
 
 **4. Feature Evolution Tracking**

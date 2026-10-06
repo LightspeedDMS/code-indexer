@@ -22,8 +22,8 @@ the single easiest mistake to make.
 | Flags | `relocation_enabled`, `cleanup_authorized` | `enabled`, `tick_interval_minutes`, `canary_gate_enabled` |
 
 **Relocation is not consolidation.** After the temporal migration, shards sit in the correct sister
-location but are still in whatever layout they were in. Verified on staging: `mock-test`'s shards moved
-to `.temporal/mock-test/` and remained `vector_*.json` with no `chunks.db`. They are queryable in that
+location but are still in whatever layout they were in. Verified on staging: `example-repo`'s shards moved
+to `.temporal/example-repo/` and remained `vector_*.json` with no `chunks.db`. They are queryable in that
 state (both layouts are supported readers), but the JSON is only removed later, by consolidation.
 
 ## Answers to the questions operators actually ask

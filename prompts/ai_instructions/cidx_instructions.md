@@ -53,6 +53,6 @@
 **Examples**:
 - When added: `cidx query "JWT auth" --time-range-all --quiet`
 - Bug history: `cidx query "database bug" --time-range-all --chunk-type commit_message --quiet`
-- Author work: `cidx query "refactor" --time-range-all --author "dev@company.com" --quiet`
+- Author work: `cidx query "refactor" --time-range-all --author "dev@example.com" --quiet`
 
 **Indexing Options**: `--all-branches` | `--max-commits N` | `--since-date YYYY-MM-DD`

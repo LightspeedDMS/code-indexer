@@ -93,7 +93,7 @@ cidx index --index-commits --all-branches --since-date 2024-01-01 --max-commits 
 ### Author Filtering
 
 - `--author EMAIL` - Filter by commit author email
-  - Example: `cidx query "refactor" --time-range-all --author "dev@company.com" --quiet`
+  - Example: `cidx query "refactor" --time-range-all --author "dev@example.com" --quiet`
 
 ## Use Cases and Examples
 
@@ -178,13 +178,13 @@ cidx query "implement" --time-range 2024-11-01..2024-11-30 --quiet
 
 ```bash
 # All work by specific author
-cidx query "feature" --time-range-all --author "alice@company.com" --quiet
+cidx query "feature" --time-range-all --author "alice@example.com" --quiet
 
 # Author's refactoring work
-cidx query "refactor" --time-range-all --author "bob@company.com" --quiet
+cidx query "refactor" --time-range-all --author "bob@example.com" --quiet
 
 # Security fixes by author
-cidx query "security" --time-range-all --author "security@company.com" --quiet
+cidx query "security" --time-range-all --author "security@example.com" --quiet
 ```
 
 **Combine with date ranges**:
@@ -192,13 +192,13 @@ cidx query "security" --time-range-all --author "security@company.com" --quiet
 # Author's work in specific period
 cidx query "implement" \
   --time-range 2024-01-01..2024-12-31 \
-  --author "dev@company.com" \
+  --author "dev@example.com" \
   --quiet
 
 # Recent contributions
 cidx query "add" \
   --time-range 2024-11-01..2024-12-31 \
-  --author "alice@company.com" \
+  --author "alice@example.com" \
   --quiet
 ```
 
@@ -262,7 +262,7 @@ cidx query "refactor" \
 cidx query "security fix" \
   --time-range 2024-01-01..2024-12-31 \
   --chunk-type commit_message \
-  --author "security@company.com" \
+  --author "security@example.com" \
   --language python \
   --limit 5 \
   --quiet
@@ -309,21 +309,21 @@ cidx query "authentication fix" --time-range-all --chunk-type commit_diff --quie
 
 ```bash
 # 1. All commits by team member
-cidx query "implement" --time-range-all --author "alice@company.com" --quiet
+cidx query "implement" --time-range-all --author "alice@example.com" --quiet
 
 # 2. Specific feature work
-cidx query "payment" --time-range-all --author "alice@company.com" --quiet
+cidx query "payment" --time-range-all --author "alice@example.com" --quiet
 
 # 3. During specific sprint
 cidx query "feature" \
   --time-range 2024-11-01..2024-11-30 \
-  --author "alice@company.com" \
+  --author "alice@example.com" \
   --quiet
 
 # 4. Focus on commit messages
 cidx query "add" \
   --time-range-all \
-  --author "alice@company.com" \
+  --author "alice@example.com" \
   --chunk-type commit_message \
   --quiet
 ```
@@ -351,7 +351,7 @@ cidx query "feature" --time-range 2024-01-01..2024-12-31 --quiet
 ### 4. Combine with Author for Team Analysis
 ```bash
 # Focus on specific developer's work
-cidx query "refactor" --time-range-all --author "dev@company.com" --quiet
+cidx query "refactor" --time-range-all --author "dev@example.com" --quiet
 ```
 
 ### 5. Use Limits for Large Results
@@ -437,7 +437,7 @@ cidx query "add" --time-range 2024-11-01..2024-12-31 --quiet
 **Add author filter**:
 ```bash
 # Specific developer
-cidx query "implement" --time-range-all --author "dev@company.com" --quiet
+cidx query "implement" --time-range-all --author "dev@example.com" --quiet
 ```
 
 **Use limit**:

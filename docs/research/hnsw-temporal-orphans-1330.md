@@ -15,8 +15,8 @@ indexes and the perf/mechanism numbers were measured. The reasons for the change
 ## TL;DR
 
 `check_hnsw_health` reports ORPHAN elements (HNSW nodes with **0 inbound connections**) on temporal
-shards (e.g. `code-indexer-temporal-voyage_context_4-2025Q2`: "Element 270/271/272/273 has no inbound
-connections (orphan)"), and the maintainer has **also directly observed orphans on REGULAR (non-temporal)
+shards (illustrative: a quarter shard `code-indexer-temporal-<model>-<quarter>` reporting "Element N has
+no inbound connections (orphan)" for a few consecutive element ids), and the maintainer has **also directly observed orphans on REGULAR (non-temporal)
 semantic indexes**. An orphan is unreachable in greedy ANN search unless it happens to be the entry
 point, so that element's vector can silently fail to surface in queries — on the temporal feature AND on
 regular semantic search, which is the core product ("query is everything").

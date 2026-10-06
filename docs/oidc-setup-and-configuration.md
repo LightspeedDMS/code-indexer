@@ -420,7 +420,7 @@ When disabled:
 
 ### Example: Complete Authentication Flow
 
-**Scenario:** User `alice@company.com` logs in via SSO for the first time.
+**Scenario:** User `alice@example.com` logs in via SSO for the first time.
 
 ```
 1. Alice clicks "Sign in with SSO" on login page
@@ -431,12 +431,12 @@ When disabled:
 6. CIDX retrieves user info from Keycloak:
    {
      "sub": "keycloak-12345",
-     "email": "alice@company.com",
+     "email": "alice@example.com",
      "email_verified": true,
      "preferred_username": "alice"
    }
 7. CIDX checks for existing account:
-   - No user with email "alice@company.com" found
+   - No user with email "alice@example.com" found
    - No SSO identity link for subject "keycloak-12345" found
 8. JIT provisioning triggers:
    - Generate username: "alice" (from preferred_username)

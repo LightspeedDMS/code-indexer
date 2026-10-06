@@ -6,7 +6,7 @@ alternatives was rejected. It promotes the working notes from
 `.analysis/embedding-cache-experiment/REPORT.md` into a permanent design record.
 
 All numbers below are quoted from that report's measured results (artifacts:
-`run_experiment.py`, `supplementary.py`, `evolution_hnsw_experiment.py`,
+`run_experiment.py`, `supplementary.py`, `example_repo_hnsw_experiment.py`,
 `anchor_reorder.py`, `anchor_depth.py`, `reorder_realism.py`,
 `semantic_drift.py`, `spotcheck.py`). Where a figure is a sampling-bounded
 estimate, that is noted.
@@ -43,7 +43,7 @@ is still result-faithful.
   `normalize(q)` and serves the first real sibling's vector (never embeds a
   mangled string).
 - A decisive follow-up replaced the cosine proxy with a real HNSW top-k overlap
-  test against the live voyage-code-3 evolution index (about 20,135 vectors).
+  test against the live voyage-code-3 example-repo index (about 20,135 vectors).
 
 ---
 
@@ -63,7 +63,7 @@ results perfectly.
 In cosine terms lowercase+whitespace+punctuation normalization is nearly lossless
 (Voyage 0.998 served cosine, Cohere exactly 1.000; Cohere normalizes
 case/punctuation internally, Voyage is near-invariant). Cosine OVERSTATED
-stability. On the real voyage-code-3 evolution index, lowercase-only still
+stability. On the real voyage-code-3 example-repo index, lowercase-only still
 changed the top-10 substantially:
 
 | metric (top-10 vs RAW) | lowercase-only |
@@ -257,6 +257,6 @@ What shipped (see `docs/query-embedding-cache.md`):
 - The anchor-depth numbers come from small grounded query samples (n as noted per
   row, some rows n=36/60). They establish the monotonic dial and the
   anchor-first-two midpoint, not population-precise rates.
-- The decisive real-HNSW results are Voyage-only (the evolution index is
+- The decisive real-HNSW results are Voyage-only (the example-repo index is
   voyage-code-3). Cohere behaviour was measured in cosine terms only; it degrades
   more, not less, which is why the cache exposes per-provider knobs.

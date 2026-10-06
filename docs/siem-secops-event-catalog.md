@@ -603,7 +603,7 @@ The service-account key was set, replaced or removed. `cidx_details`:
   "principal": {"ip": ["198.51.100.7"], "user": {"userid": "example-admin"}},
   "target": {"resource": {"name": "siem_delivery", "type": "config"}},
   "securityResult": [{"action": ["ALLOW"]}],
-  "additional": {"actor_is_system": false, "auth_method": "web_session", "cidx_details": {"change": "replaced", "client_email": "secops-sa@example-secops-project.iam.gserviceaccount.com", "private_key_id": "0123456789abcdef0123456789abcdef01234567"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "web"}
+  "additional": {"actor_is_system": false, "auth_method": "web_session", "cidx_details": {"change": "replaced", "client_email": "secops-sa@example.com", "private_key_id": "0123456789abcdef0123456789abcdef01234567"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "web"}
 }
 ```
 

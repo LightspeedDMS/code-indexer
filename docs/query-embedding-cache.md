@@ -346,7 +346,7 @@ These are non-negotiable. They are enforced in code and verified against it.
 
 - NEVER lowercase the key. `build_key()` preserves case at every step. Lowercasing
   destroys CamelCase identifier matches, empirically the worst failure mode for a
-  code index (it flips top-1 about 34% of the time on the evolution voyage-code-3
+  code index (it flips top-1 about 34% of the time on the example-repo voyage-code-3
   index). Two queries differing only in case produce different keys.
 - Composite PK is `(cache_key, provider, model, dimension)`. There is NO
   repo/collection column: a query embedding is repo-independent. The composite PK
