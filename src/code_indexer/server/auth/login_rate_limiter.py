@@ -19,14 +19,26 @@ unlock step.  Every door RESERVES the attempt before it checks the password:
   admitted attempt never counts as a failure); attempts older than
   ``window_minutes`` are forgotten.
 
-A throttled username refuses every password attempt until its window ends.
-Because the key is the username alone, someone who keeps sending wrong
-passwords for an account can keep it throttled; its owner then signs in with
-an API key, MCP credentials or SSO instead.
+A login with MFA is two checks on ONE ``SCOPE_LOGIN`` key: the password and
+then each code (TOTP or recovery) answered at its login challenge are
+reserved alike, and only a COMPLETED login (password and code, or password
+alone when no MFA is configured) clears the key, through
+``clear_completed_login`` (a store error there is logged and never fails
+the already-issued login).  A correct password with MFA pending clears
+nothing.  A challenge started by an SSO login instead reserves its codes on
+``SCOPE_SSO_MFA`` (subject = username), and a completed SSO login clears
+only that key: wrong passwords never block an SSO sign-in, and wrong codes
+after SSO are still throttled.  A challenge whose first factor is unknown
+counts as a password challenge.
 
-Keys are domain-separated by scope: ``SCOPE_LOGIN`` (the typed username) and
-``SCOPE_STEP_UP`` (the authenticated username of a TOTP step-up), so a login
-can never throttle someone's step-up, or vice versa.
+A throttled username refuses every password attempt until its window ends.
+A throttled username can still authenticate with an API key, MCP
+credentials or SSO; every window ends on its own (cap 120 s).
+
+Keys are domain-separated by scope: ``SCOPE_LOGIN`` (the typed username),
+``SCOPE_STEP_UP`` (the authenticated username of a TOTP step-up) and
+``SCOPE_SSO_MFA`` (the username of an SSO-started MFA challenge), so no
+scope can ever throttle another's key.
 
 State is DB-backed so every worker and node sees it: PostgreSQL
 (``set_connection_pool``, wired by ``lifespan``) in a cluster; in solo mode
@@ -84,7 +96,9 @@ RESERVATION_BUSY_TIMEOUT_SECONDS = 2.0
 # Throttle key namespaces (closed set; names never contain NUL).
 SCOPE_LOGIN = "login"
 SCOPE_STEP_UP = "stepup"
-_SCOPES = frozenset({SCOPE_LOGIN, SCOPE_STEP_UP})
+# Codes answered at an MFA challenge that an SSO login started.
+SCOPE_SSO_MFA = "sso-mfa"
+_SCOPES = frozenset({SCOPE_LOGIN, SCOPE_STEP_UP, SCOPE_SSO_MFA})
 # Doubling reaches any sane cap long before this; bounds 2**n for huge counts.
 _MAX_BACKOFF_EXPONENT = 32
 # Expired rows deleted per inserting reservation (bounded work per request).
@@ -176,9 +190,14 @@ def throttle_key(subject: str, scope: str = SCOPE_LOGIN) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def failure_reason(outcome: AttemptOutcome) -> str:
-    """Audit reason for a failed admitted check (existing vocabulary)."""
-    return "rate_limited" if outcome.throttle_started else "bad_credentials"
+def failure_reason(outcome: AttemptOutcome, otherwise: str = "bad_credentials") -> str:
+    """Audit reason for a failed admitted check (existing vocabulary).
+
+    *otherwise* is the door's ordinary reason (``mfa_code_invalid`` at an
+    MFA challenge); the attempt that started the throttle is
+    ``rate_limited`` whatever was checked.
+    """
+    return "rate_limited" if outcome.throttle_started else otherwise
 
 
 def _as_row(raw: Any) -> Optional[_Row]:
@@ -498,6 +517,24 @@ class LoginRateLimiter:
             self._current_store().delete(throttle_key(subject, scope))
         except ThrottleStoreBusy:
             self._warn_store_busy("clearing a verified login's attempt count")
+
+    def clear_completed_login(self, subject: str, *, scope: str = SCOPE_LOGIN) -> None:
+        """Clear the key of a login whose token/session is ALREADY issued.
+
+        The issued login must stand whatever the store does: any store error
+        is logged at WARNING (exception type only -- a store message can
+        carry connection details) and the row is left to age out after
+        ``window_minutes``.
+        """
+        try:
+            self.record_success(subject, scope=scope)
+        except Exception as exc:
+            logger.warning(
+                "Login throttle: could not clear the attempt count after a "
+                "completed login (%s); it is forgotten after %.0f idle minutes",
+                type(exc).__name__,
+                self._window_seconds / 60.0,
+            )
 
     def _delay_for(self, attempt_count: int) -> float:
         exponent = min(attempt_count - self._max_attempts, _MAX_BACKOFF_EXPONENT)

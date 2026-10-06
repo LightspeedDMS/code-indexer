@@ -169,9 +169,10 @@ def register_auth_routes(
         # above).  The attempt is RESERVED before the password is checked, in
         # one row-locked transaction, so concurrent requests cannot slip
         # past it; while the backoff window runs every attempt -- a correct
-        # password included -- is refused.  There is no lock state, but the
-        # key is the username, so someone sending wrong passwords can keep it
-        # throttled.  Unknown usernames are throttled identically.
+        # password included -- is refused.  There is no lock state: a
+        # throttled username can still authenticate with an API key, MCP
+        # credentials or SSO, and every window ends on its own (cap 120 s).
+        # Unknown usernames are throttled identically.
         from ..auth.login_rate_limiter import ThrottleStoreBusy
 
         try:
@@ -240,8 +241,10 @@ def register_auth_routes(
         # Story #555: Refund rate limit token on successful authentication.
         rate_limiter.refund(login_data.username)
 
-        # Story #557: Clear lockout failure history on successful login (AC1)
-        _lockout_limiter.record_success(login_data.username)
+        # Every MFA code at a login challenge is reserved on the account's
+        # login throttle key before it is checked; only a completed login
+        # clears the key (below), so a correct password with MFA pending
+        # clears nothing.
 
         # Story #565: Password expiry check -- before JWT token creation.
         # Lazy import to avoid circular imports (same pattern as MFA below).
@@ -303,6 +306,7 @@ def register_auth_routes(
             flow="rest_token",
             issue=_issue_tokens,
         )
+        _lockout_limiter.clear_completed_login(user.username)
 
         return LoginResponse(
             access_token=token_data["access_token"],
@@ -344,6 +348,37 @@ def register_auth_routes(
                 detail="MFA service not available",
             )
 
+        client_ip = request.client.host if request.client else "unknown"
+
+        # The code is an attempt on the account's LOGIN throttle key, reserved
+        # before it is checked, exactly like the password.  Inside a backoff
+        # window it is refused unchecked and the challenge is kept, so it can
+        # be answered once the window ends.
+        from ..auth.login_rate_limiter import ThrottleStoreBusy
+
+        attempt = None
+        pending = _mfa_challenge_mgr.get_challenge(verify_data.mfa_token, client_ip)
+        if pending is not None:
+            try:
+                # The challenge's own key: the password-login key, or an
+                # SSO-started challenge's SSO-MFA key.
+                attempt = _lockout_limiter.begin_attempt(
+                    pending.username, scope=pending.throttle_scope
+                )
+            except ThrottleStoreBusy:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Login is busy, try again shortly.",
+                    headers={"Retry-After": "1"},
+                )
+            if not attempt.admitted:
+                wait = math.ceil(attempt.retry_after_seconds)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many attempts, try again in {wait} seconds.",
+                    headers={"Retry-After": str(wait)},
+                )
+
         # Consume-first: atomically remove token before verifying
         challenge = _mfa_challenge_mgr.consume(verify_data.mfa_token)
         if challenge is None:
@@ -361,12 +396,11 @@ def register_auth_routes(
             )
 
         # Validate client IP matches challenge creation IP
-        client_ip = request.client.host if request.client else "unknown"
         if challenge.client_ip != client_ip:
             reject_login(
                 challenge.username,
-                account_exists=True,  # issued only after a correct password
-                method=_PASSWORD_METHOD,
+                account_exists=True,  # issued only after a successful first factor
+                method=challenge.first_factor,
                 stage="challenge",
                 reason="challenge_invalid_or_expired",
             )
@@ -374,6 +408,11 @@ def register_auth_routes(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired MFA token",
             )
+
+        # A challenge usable here (same IP, consumed) was usable when peeked
+        # above, so its code attempt is reserved; never check one unreserved.
+        if attempt is None:
+            raise RuntimeError("MFA code reached its check without a reservation")
 
         # Verify TOTP or recovery code
         verified = False
@@ -390,9 +429,9 @@ def register_auth_routes(
             reject_login(
                 challenge.username,
                 account_exists=True,
-                method=_PASSWORD_METHOD,
+                method=challenge.first_factor,
                 stage="mfa_code",
-                reason="mfa_code_invalid",
+                reason=failure_reason(attempt, "mfa_code_invalid"),
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -416,10 +455,14 @@ def register_auth_routes(
 
         token_data = complete_login(
             challenge.username,
-            method=_PASSWORD_METHOD,
+            method=challenge.first_factor,
             mfa="recovery_code" if verify_data.recovery_code else "totp",
             flow="rest_token",
             issue=_issue_tokens,
+        )
+        # Both factors passed: the login is complete; clear its own key.
+        _lockout_limiter.clear_completed_login(
+            challenge.username, scope=challenge.throttle_scope
         )
 
         return LoginResponse(

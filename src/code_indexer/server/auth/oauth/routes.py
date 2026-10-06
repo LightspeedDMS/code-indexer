@@ -139,17 +139,35 @@ def _authenticate_or_reject(
             stage="credentials",
             reason=_login_throttle.failure_reason(attempt),
         )
-    else:
-        throttle.record_success(username)
+    # Every MFA code at a login challenge is reserved on its throttle key
+    # before it is checked; a correct password clears nothing here, only a
+    # completed login does (_clear_login_history).
     return user
 
 
-def _reject_challenge(username: Optional[str], *, account_exists: bool) -> None:
-    """Record a login refused because its MFA challenge is unusable."""
+def _clear_login_history(username: str, *, scope: str) -> None:
+    """A login COMPLETED (first factor, plus code when MFA is configured):
+    clear the throttle history of that login's key *scope* only (the
+    password-login key, or an SSO challenge's own key).  A store error is
+    logged and never fails the already-issued login.  Sync; run off the
+    loop."""
+    from .. import login_rate_limiter as _login_throttle
+
+    _login_throttle.login_rate_limiter.clear_completed_login(username, scope=scope)
+
+
+def _reject_challenge(
+    username: Optional[str],
+    *,
+    account_exists: bool,
+    method: str = _PASSWORD_LOGIN_METHOD,
+) -> None:
+    """Record a login refused because its MFA challenge is unusable
+    (*method*: the challenge's first factor when it is known)."""
     reject_login(
         username,
         account_exists=account_exists,
-        method=_PASSWORD_LOGIN_METHOD,
+        method=method,
         stage="challenge",
         reason="challenge_invalid_or_expired",
     )
@@ -571,6 +589,11 @@ async def authorize_endpoint(
                 ),
             )
         )
+        from ..login_rate_limiter import SCOPE_LOGIN
+
+        await anyio.to_thread.run_sync(
+            functools.partial(_clear_login_history, user.username, scope=SCOPE_LOGIN)
+        )
 
         # Audit log
         password_audit_logger.log_oauth_authorization(
@@ -625,6 +648,25 @@ def oauth_mfa_verify(
             detail="MFA service not available",
         )
 
+    client_ip = http_request.client.host if http_request.client else "unknown"
+
+    # The code is an attempt on the account's LOGIN throttle key, reserved
+    # before it is checked; a refusal keeps the challenge for after the
+    # window.
+    from code_indexer.server.web.mfa_routes import (
+        render_oauth_mfa_challenge_page,
+        reserve_challenge_attempt,
+    )
+
+    attempt = None
+    pending = mfa_challenge_manager.get_challenge(challenge_token, client_ip)
+    if pending is not None:
+        attempt, refusal = reserve_challenge_attempt(
+            challenge_token, pending, render_oauth_mfa_challenge_page
+        )
+        if refusal is not None:
+            return refusal
+
     # Consume-first: atomically remove token before verifying
     challenge = mfa_challenge_manager.consume(challenge_token)
     if challenge is None:
@@ -634,11 +676,11 @@ def oauth_mfa_verify(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
         )
+    first_factor = challenge.first_factor
 
     # Validate client IP matches
-    client_ip = http_request.client.host if http_request.client else "unknown"
     if challenge.client_ip != client_ip:
-        _reject_challenge(challenge.username, account_exists=True)
+        _reject_challenge(challenge.username, account_exists=True, method=first_factor)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
@@ -647,7 +689,7 @@ def oauth_mfa_verify(
     # Verify that this is an OAuth challenge (has OAuth context).
     # Note: oauth_state is NOT checked here — state is optional per OAuth 2.1 PKCE (Bug #624).
     if not challenge.oauth_client_id:
-        _reject_challenge(challenge.username, account_exists=True)
+        _reject_challenge(challenge.username, account_exists=True, method=first_factor)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid challenge type for OAuth flow.",
@@ -662,11 +704,16 @@ def oauth_mfa_verify(
         )
         is None
     ):
-        _reject_challenge(challenge.username, account_exists=False)
+        _reject_challenge(challenge.username, account_exists=False, method=first_factor)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="MFA challenge expired or invalid. Please re-authenticate.",
         )
+
+    # A challenge usable here (same IP, consumed) was usable when peeked
+    # above, so its code attempt is reserved; never check one unreserved.
+    if attempt is None:
+        raise RuntimeError("MFA code reached its check without a reservation")
 
     # Verify TOTP or recovery code
     verified = False
@@ -680,12 +727,14 @@ def oauth_mfa_verify(
         verified = totp_svc.verify_code(challenge.username, totp_code)
 
     if not verified:
+        from .. import login_rate_limiter as _login_throttle
+
         reject_login(
             challenge.username,
             account_exists=True,  # issued only after a successful first factor
-            method=_PASSWORD_LOGIN_METHOD,
+            method=first_factor,
             stage="mfa_code",
-            reason="mfa_code_invalid",
+            reason=_login_throttle.failure_reason(attempt, "mfa_code_invalid"),
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -696,7 +745,7 @@ def oauth_mfa_verify(
     try:
         code = complete_login(
             challenge.username,
-            method=_PASSWORD_LOGIN_METHOD,
+            method=first_factor,
             mfa=mfa,
             flow="oauth_code",
             issue=lambda: manager.generate_authorization_code(
@@ -707,6 +756,8 @@ def oauth_mfa_verify(
                 state=challenge.oauth_state,
             ),
         )
+        # Both factors passed: the login is complete; clear its own key.
+        _clear_login_history(challenge.username, scope=challenge.throttle_scope)
 
         # Audit log
         ip_address = http_request.client.host if http_request.client else "unknown"

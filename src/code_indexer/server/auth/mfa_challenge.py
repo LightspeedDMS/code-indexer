@@ -25,10 +25,16 @@ logger = logging.getLogger(__name__)
 _CHALLENGE_TTL_SECONDS = 300  # 5 minutes
 _MAX_ATTEMPTS = 5
 
+# How the challenge's first factor was proven (closed set; values are the
+# audit login-method vocabulary).  Unknown or missing reads as password.
+FIRST_FACTOR_PASSWORD = "password"
+FIRST_FACTOR_SSO = "sso"
+_FIRST_FACTORS = frozenset({FIRST_FACTOR_PASSWORD, FIRST_FACTOR_SSO})
+
 
 @dataclass
 class MfaChallenge:
-    """A pending MFA challenge bound to a password-verified user."""
+    """A pending MFA challenge bound to a user who passed the first factor."""
 
     username: str
     role: str
@@ -43,6 +49,24 @@ class MfaChallenge:
     oauth_redirect_uri: Optional[str] = None
     oauth_code_challenge: Optional[str] = None
     oauth_state: Optional[str] = None
+    first_factor: str = FIRST_FACTOR_PASSWORD
+
+    @property
+    def throttle_scope(self) -> str:
+        """Login-throttle scope its codes count under: an SSO-started
+        challenge has its own key (wrong passwords never block SSO), every
+        other challenge shares the password-login key."""
+        from code_indexer.server.auth.login_rate_limiter import (
+            SCOPE_LOGIN,
+            SCOPE_SSO_MFA,
+        )
+
+        return SCOPE_SSO_MFA if self.first_factor == FIRST_FACTOR_SSO else SCOPE_LOGIN
+
+
+def _read_first_factor(raw: Any) -> str:
+    """A stored first factor; NULL (pre-066 row) or unknown is password."""
+    return raw if raw in _FIRST_FACTORS else FIRST_FACTOR_PASSWORD
 
 
 class MfaChallengeManager:
@@ -92,6 +116,7 @@ class MfaChallengeManager:
             oauth_redirect_uri=row["oauth_redirect_uri"],
             oauth_code_challenge=row["oauth_code_challenge"],
             oauth_state=row["oauth_state"],
+            first_factor=_read_first_factor(row["first_factor"]),
         )
 
     # ------------------------------------------------------------------
@@ -108,13 +133,18 @@ class MfaChallengeManager:
         oauth_redirect_uri: Optional[str] = None,
         oauth_code_challenge: Optional[str] = None,
         oauth_state: Optional[str] = None,
+        first_factor: str = FIRST_FACTOR_PASSWORD,
     ) -> str:
-        """Create a new challenge token for a password-verified user.
+        """Create a new challenge token for a user who passed the first factor.
 
         Returns the opaque token string to embed in the challenge form.
         OAuth parameters are stored when the challenge originates from
-        an OAuth authorization flow (Story #562).
+        an OAuth authorization flow (Story #562).  *first_factor* says how
+        the user got here: ``"password"`` (password doors) or ``"sso"``
+        (the OIDC callback).
         """
+        if first_factor not in _FIRST_FACTORS:
+            raise ValueError(f"unknown first factor: {first_factor!r}")
         token = secrets.token_urlsafe(32)
         now = time.time()
 
@@ -125,8 +155,8 @@ class MfaChallengeManager:
                     "INSERT INTO mfa_challenges "
                     "(token, username, role, client_ip, redirect_url, created_at, "
                     "attempt_count, oauth_client_id, oauth_redirect_uri, "
-                    "oauth_code_challenge, oauth_state) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "oauth_code_challenge, oauth_state, first_factor) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         token,
                         username,
@@ -139,6 +169,7 @@ class MfaChallengeManager:
                         oauth_redirect_uri,
                         oauth_code_challenge,
                         oauth_state,
+                        first_factor,
                     ),
                 )
                 conn.commit()
@@ -153,6 +184,7 @@ class MfaChallengeManager:
                 oauth_redirect_uri=oauth_redirect_uri,
                 oauth_code_challenge=oauth_code_challenge,
                 oauth_state=oauth_state,
+                first_factor=first_factor,
             )
             with self._lock:
                 self._cleanup_expired()

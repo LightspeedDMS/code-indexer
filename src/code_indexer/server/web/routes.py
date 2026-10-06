@@ -8329,7 +8329,7 @@ def _create_config_page_response(
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
 
-    # Only the masked display form reaches the template (finding 058)
+    # Only the masked display form reaches the template.
     github_token_data = _ci_token_display(token_manager.get_token("github"))
     gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
@@ -11758,8 +11758,9 @@ def unified_login_submit(
     # checked (one row-locked transaction), so concurrent requests cannot
     # slip past it; while the backoff window runs every attempt -- a correct
     # password included -- is refused (no audit row, so refusals cannot
-    # flood the store).  There is no lock state, but the key is the
-    # username, so someone sending wrong passwords can keep it throttled.
+    # flood the store).  There is no lock state: a throttled username can
+    # still authenticate with an API key, MCP credentials or SSO, and every
+    # window ends on its own (cap 120 s).
     import math
 
     from ..auth import login_rate_limiter as _login_throttle
@@ -11803,7 +11804,9 @@ def unified_login_submit(
         )
         return _form_error("Invalid username or password")
 
-    throttle.record_success(username)
+    # Every MFA code at a login challenge is reserved on the account's login
+    # throttle key before it is checked; only a completed login clears the
+    # key (below), so a correct password with MFA pending clears nothing.
 
     # Story #565: Password expiry check -- before session creation
     config_svc = get_config_service()
@@ -11848,6 +11851,7 @@ def unified_login_submit(
                 role=user.role.value,
             ),
         )
+        throttle.clear_completed_login(user.username)
         return expiry_response
 
     # Validate redirect_to URL (prevent open redirect)
@@ -11899,6 +11903,7 @@ def unified_login_submit(
             role=user.role.value,
         ),
     )
+    throttle.clear_completed_login(user.username)
 
     return redirect_response
 

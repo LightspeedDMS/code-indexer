@@ -14,8 +14,9 @@ All service return values explicitly null-checked with error responses.
 import base64
 import html as html_module
 import logging
+import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
@@ -32,10 +33,9 @@ from code_indexer.server.auth.login_outcome import complete_login, reject_login
 
 logger = logging.getLogger(__name__)
 
-# First factor recorded for a login completed at the MFA challenge.  The
-# challenge does not carry how the first factor was proven, and the password
-# login is the door that issues it (an SSO login's challenge records the
-# same value).
+# A challenge records how its first factor was proven (``first_factor``:
+# password or sso) and its audit rows use that.  This value labels only a
+# refusal where no challenge is known (unknown or expired token).
 _CHALLENGE_LOGIN_METHOD = "password"
 
 _LOGIN_ROUTE = "/login"
@@ -1072,6 +1072,46 @@ def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse
     return response
 
 
+if TYPE_CHECKING:
+    from code_indexer.server.auth.login_rate_limiter import AttemptOutcome
+    from code_indexer.server.auth.mfa_challenge import MfaChallenge
+
+
+def reserve_challenge_attempt(
+    token: str,
+    challenge: "MfaChallenge",
+    render: Callable[[str, str], HTMLResponse],
+) -> Tuple[Optional["AttemptOutcome"], Optional[HTMLResponse]]:
+    """Reserve a code attempt at a login challenge.
+
+    The code is reserved BEFORE it is checked, under the challenge's
+    ``throttle_scope``: the account's password-login key for a password
+    challenge, its own SSO-MFA key for one an SSO login started.  Returns
+    ``(attempt, None)`` when admitted, or ``(None, page)``: the same
+    challenge re-rendered by *render* with 429 (window running) or 503
+    (store busy) and ``Retry-After``; the code is not checked and the
+    challenge stays usable after the window.
+    """
+    from ..auth import login_rate_limiter as _login_throttle
+
+    try:
+        attempt = _login_throttle.login_rate_limiter.begin_attempt(
+            challenge.username, scope=challenge.throttle_scope
+        )
+    except _login_throttle.ThrottleStoreBusy:
+        page = render(token, "Login is busy, try again shortly.")
+        page.status_code = 503
+        page.headers["Retry-After"] = "1"
+        return None, page
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        page = render(token, f"Too many attempts, try again in {wait} seconds.")
+        page.status_code = 429
+        page.headers["Retry-After"] = str(wait)
+        return None, page
+    return attempt, None
+
+
 @mfa_router.post("/challenge/verify", response_class=HTMLResponse)
 def mfa_challenge_verify(
     request: Request,
@@ -1081,14 +1121,26 @@ def mfa_challenge_verify(
 ):
     """Verify TOTP or recovery code against a pending MFA challenge.
 
-    Uses consume-first pattern to prevent TOCTOU race conditions:
-    the token is atomically consumed before verification. On failure,
-    the user must re-enter their password (token is gone).
+    The code is first reserved on the challenge's throttle key (a refusal
+    keeps the challenge).  Then consume-first prevents TOCTOU races: the
+    token is atomically consumed before verification.  On failure, the user
+    must re-enter their password (token is gone).
     """
+    from ..auth import login_rate_limiter as _login_throttle
     from ..auth.mfa_challenge import mfa_challenge_manager
 
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+
+    client_ip = request.client.host if request.client else "unknown"
+    attempt = None
+    pending = mfa_challenge_manager.get_challenge(challenge_token, client_ip)
+    if pending is not None:
+        attempt, refusal = reserve_challenge_attempt(
+            challenge_token, pending, render_mfa_challenge_page
+        )
+        if refusal is not None:
+            return refusal
 
     # Consume-first: atomically remove token before verifying.
     # This prevents duplicate session creation from concurrent requests.
@@ -1105,7 +1157,6 @@ def mfa_challenge_verify(
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Validate client IP matches the one from password verification
-    client_ip = request.client.host if request.client else "unknown"
     if challenge_data.client_ip != client_ip:
         logger.warning(
             "MFA challenge IP mismatch for %s: expected %s got %s",
@@ -1116,7 +1167,7 @@ def mfa_challenge_verify(
         reject_login(
             challenge_data.username,
             account_exists=True,  # issued only after a successful first factor
-            method=_CHALLENGE_LOGIN_METHOD,
+            method=challenge_data.first_factor,
             stage="challenge",
             reason="challenge_invalid_or_expired",
         )
@@ -1134,11 +1185,16 @@ def mfa_challenge_verify(
         reject_login(
             challenge_data.username,
             account_exists=False,
-            method=_CHALLENGE_LOGIN_METHOD,
+            method=challenge_data.first_factor,
             stage="challenge",
             reason="challenge_invalid_or_expired",
         )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
+    # A challenge usable here (same IP, consumed) was usable when peeked
+    # above, so its code attempt is reserved; never check one unreserved.
+    if attempt is None:
+        raise RuntimeError("MFA code reached its check without a reservation")
 
     # Verify TOTP or recovery code
     verified = False
@@ -1160,7 +1216,7 @@ def mfa_challenge_verify(
         )
         complete_login(
             challenge_data.username,
-            method=_CHALLENGE_LOGIN_METHOD,
+            method=challenge_data.first_factor,
             mfa=method,
             flow="web_session",
             issue=lambda: session_mgr.create_session(
@@ -1168,6 +1224,10 @@ def mfa_challenge_verify(
                 username=account.username,
                 role=account.role.value,
             ),
+        )
+        # Both factors passed: the login is complete; clear its own key.
+        _login_throttle.login_rate_limiter.clear_completed_login(
+            challenge_data.username, scope=challenge_data.throttle_scope
         )
         logger.info(
             "MFA login verified for %s (method=%s)", challenge_data.username, method
@@ -1178,9 +1238,9 @@ def mfa_challenge_verify(
     reject_login(
         challenge_data.username,
         account_exists=True,
-        method=_CHALLENGE_LOGIN_METHOD,
+        method=challenge_data.first_factor,
         stage="mfa_code",
-        reason="mfa_code_invalid",
+        reason=_login_throttle.failure_reason(attempt, "mfa_code_invalid"),
     )
     logger.warning(
         "MFA verification failed for %s (method=%s)", challenge_data.username, method
