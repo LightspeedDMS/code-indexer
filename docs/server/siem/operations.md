@@ -1,383 +1,508 @@
-# SIEM Delivery (Google Security Operations)
+# SIEM Delivery: CIDX Operations
 
-CIDX can deliver pilot security events to Google Security Operations
-(Chronicle `events:import`) as validated UDM events. This guide covers what is
-delivered, the guarantee, configuration, arming, operation and the admin
-actions.
+This guide is for the CIDX server administrator. It covers the CIDX side of
+delivering audit events to Google Security Operations (SecOps, called the
+Chronicle API by Google): configuration, the service-account credential,
+arming, monitoring, halts and recovery, and decommissioning.
 
-For Google SecOps staff (where to find each setting's value in Google, the
-service account, searching and alerting), see
-[secops-guide.md](secops-guide.md). For every delivered event and
-its UDM fields, see [event-catalog.md](event-catalog.md).
+The other SIEM documents:
+
+- [Google SecOps guide](secops-guide.md): the Google tenant side (service
+  account, where to find the destination values, searching and alerting).
+- [curl runbook](curl-runbook.md): every step of this guide as shell
+  commands.
+- [Event catalog](event-catalog.md): every delivered event and its UDM fields.
 
 ## What is delivered
 
-Pilot scope only (a code constant, not a setting):
+CIDX sends selected audit events to the Chronicle API method `events:import`,
+already converted to UDM. The scope is a code constant, not a setting
+(`PILOT_ACTION_TYPES` in `services/siem_delivery/scope.py`):
 
 - logins on every door (REST, MCP, Web), success and failure;
 - MFA changes;
 - group and permission changes;
-- admin actions (user create/delete/password reset, credential and key
-  creation, elevation, impersonation).
+- admin actions: user create, delete and password reset, MCP credential and
+  API key creation, SSH key host assignment, elevation, impersonation.
 
-SIEM delivery also reports on itself. Every change to the `siem_delivery` config section, and every
-SIEM admin action, is delivered with an explicit destination.
+SIEM delivery also reports on itself: every change of the SIEM settings
+section, every change of the service-account credential and every SIEM admin
+action is delivered to the configured destination. These self-reports are
+captured whenever a destination is configured, even before delivery is armed.
 
-## Guarantee
+The event catalog lists every action type and its fields.
 
-Best-effort capture, using a mechanism that is durable when it succeeds,
-followed by at-least-once delivery attempts for what was captured.
+## Delivery guarantee
 
-- The queue row is written in the SAME database transaction as the audit row
-  (a per-row savepoint inside `insert_events`, both backends). If the queue
-  insert fails, the action still proceeds and the audit row still commits. The
-  gap is counted (`siem.capture_failures`), logged at ERROR (rate-limited) and
-  shown as a DEGRADED health reason.
-- Delivery is at-least-once: duplicates are possible and allowed. Group by
-  `metadata.productLogId` (the audit event uuid) for uniqueness. A duplicate
-  RESPONSE from SecOps never counts as delivery (`DUPLICATE_POLICY = HALT`).
-- Nothing is captured while delivery is disabled or not yet armed. After a
-  disable, a process can still capture for at most 90 s (its snapshot age
-  bound). Those rows are counted (`capture_after_boundary`) and delivered.
-  A row captured more than 90 s after a disable, clear, reset or destination
-  change (and before capture legitimately resumes) is a defect, counted as
-  `capture_after_boundary_late`. Each closing interval ends at the next
-  enable of (or change back to) that destination, and it is recounted on
-  every stats refresh until 90 s after it ends, so late-arriving rows are
-  still caught.
+- **Capture is best effort.** When capture of an event fails, the user's
+  action still succeeds and the audit row is still written. The gap is
+  counted, logged at ERROR and shown as a health reason
+  (`SIEM capture failures since boot: <n>`).
+- **Delivery is at least once.** An event can arrive in SecOps more than once.
+  Each event's `metadata.product_log_id` is the CIDX audit event id; use it to
+  remove duplicates.
+- **A duplicate response is never counted as delivered.** If SecOps answers
+  HTTP 409, delivery halts until an admin acknowledges, re-batches or resumes
+  (see [Halts and recovery](#halts-and-recovery)).
+- **Order is not guaranteed.** Batches are built in capture order, but
+  several batches per destination can be open at a time (normally up to
+  three; splitting a rejected batch adds more) and failed batches are retried
+  later. `metadata.event_timestamp` is when the action happened.
+- **Nothing new is captured while delivery is disabled or not armed.** After
+  a disable, a server process can still capture for at most 90 seconds. Those
+  events are counted and delivered. An event captured later than that is a
+  defect, counted and shown as a health reason.
+- **Throttling.** An HTTP 429 from SecOps ends the current delivery cycle for
+  the destination. The batch is retried no sooner than its `Retry-After`
+  (seconds or an HTTP date), capped at one hour. Events stay queued.
+- **Transient failures** (HTTP 500, 502, 503, 504, connection failures and
+  timeouts) are retried with exponential backoff, capped at one hour.
+- One request carries at most `max_batch_events` events and at most
+  2,000,000 bytes. The exception is a single event larger than that (up to the
+  4,000,000-byte per-event ceiling), which is sent alone.
 
-## Configuration (Web UI Config: "SIEM Delivery (Google SecOps)")
+## Configuration
 
-| Field | Notes |
-|-------|-------|
-| `enabled` | Controls capture. Already captured rows keep being delivered. |
-| `region` | One of the SecOps regions documented in Google's [Migrate to Chronicle API](https://docs.cloud.google.com/chronicle/docs/soar/admin-tasks/advanced/api-migration-guide) guide: `us`, `eu`, `africa-south1`, `asia-northeast1`, `asia-south1`, `asia-southeast1`, `asia-southeast2`, `australia-southeast1`, `europe-west2`, `europe-west3`, `europe-west6`, `europe-west9`, `europe-west12`, `me-central1`, `me-central2`, `me-west1`, `northamerica-northeast2`, `southamerica-east1`. The endpoint is derived as `https://chronicle.<region>.rep.googleapis.com`; there is no free URL field. |
-| `api_version` | `v1`, `v1beta` or `v1alpha`. |
-| `project_id`, `location`, `instance_id` | Single path segments (`[A-Za-z0-9][A-Za-z0-9_-]*`). |
-| `max_batch_events` | 1 to 1000. |
-| `source_instance_label` | Carried as `additional.cidx_instance`. |
-| `harness_endpoint` | Test receiver only: accepted ONLY in a process whose non-production fault-injection gate is active (loopback origin; the key's `token_uri` must then be `<harness_endpoint>/token`). |
+SIEM delivery settings are runtime settings: they live in the server
+database, not in `config.json`, and are changed in the Web UI, menu
+**Config**, section **SIEM Delivery (Google SecOps)** (**Edit**, then
+**Save**).
 
-Every SIEM loop cycle reads the COMMITTED configuration from the database,
-not the process's cached config, so a save made through any worker or node
-takes effect everywhere on the next cycle.
+Every save of the section needs TOTP elevation when elevation enforcement is
+on, and is audited as `config_changed` (delivered as a self-report). The audit
+row records the values of `enabled`, `api_version`, `max_batch_events`,
+`region` and the trusted-CA fingerprint; other fields are recorded by name
+only. Leading and trailing spaces are trimmed from every text field.
 
-### Service-account credential (Web UI only)
+| Field | Allowed values | Default | Notes |
+|-------|----------------|---------|-------|
+| `enabled` | Yes / No | No | The capture switch. Already captured events keep being delivered whatever it says, as long as a destination is configured. |
+| `region` | One of the regions listed below. Required when enabled. | empty | The endpoint is derived as `https://chronicle.<region>.rep.googleapis.com`; there is no URL field. |
+| `api_version` | `v1`, `v1beta`, `v1alpha` | `v1` | Not part of the destination identity. |
+| `project_id` | 1 to 128 characters: letters, digits, `_`, `-`, starting with a letter or digit. Required when enabled. | empty | The Google Cloud project linked to the SecOps instance. |
+| `location` | Same rule as `project_id`. Required when enabled. | empty | For SecOps, the same value as `region`. |
+| `instance_id` | Same rule as `project_id`. Required when enabled. | empty | The SecOps customer ID. |
+| `max_batch_events` | 1 to 1000 | 1000 | Most events per request. |
+| `source_instance_label` | 1 to 64 characters: letters, digits, `.`, `_`, `-`. Required when enabled. | empty | Sent in every event as `additional.cidx_instance`, to tell CIDX servers apart. |
+| `harness_endpoint` | Leave empty. | empty | Test receiver for CIDX's own automated tests. Accepted only in a non-production process whose fault-injection test gate is active; refused everywhere else. |
 
-The SecOps service-account JSON key is pasted or uploaded in the same Web UI
-section ("Set / Replace Credential"); there is no key-file path and no other
-way to configure it. Setting, replacing and removing it need TOTP elevation,
-like every other admin secret change.
+Regions accepted (`SECOPS_REGIONS` in `services/siem_delivery/destination.py`,
+the regional endpoints of Google's
+[Migrate to Chronicle API](https://docs.cloud.google.com/chronicle/docs/soar/admin-tasks/advanced/api-migration-guide)
+guide): `us`, `eu`, `africa-south1`, `asia-northeast1`, `asia-south1`,
+`asia-southeast1`, `asia-southeast2`, `australia-southeast1`, `europe-west2`,
+`europe-west3`, `europe-west6`, `europe-west9`, `europe-west12`,
+`me-central1`, `me-central2`, `me-west1`, `northamerica-northeast2`,
+`southamerica-east1`.
 
-- Validation on save: the JSON parses; `type` is `service_account`;
-  `client_email`, `private_key`, `private_key_id` and `token_uri` are present;
-  the private key loads; `token_uri` is Google's token endpoint (behind the
-  fault-injection gate, a loopback `<harness origin>/token` is also accepted).
-  A rejected key changes nothing.
-- Storage: one row of table `siem_delivery_credential` (SQLite `groups.db`
-  solo, PostgreSQL cluster, migration `055`), so every node uses it. The key is
-  AES-256 encrypted (`services/token_encryption.py`). The encryption key is:
-  - cluster (PostgreSQL): derived from the SHARED JWT secret row in
-    `cluster_secrets` (the same helper LLM lease state uses, with a SIEM-only
-    salt), so every node derives the same key whatever its local files;
-  - solo (SQLite): derived from the node's `.encryption_key_salt`, as for CI
-    tokens and git credentials.
+How the request URL is built from these fields, and why `region` and
+`location` hold the same value, is in the
+[Google SecOps guide](secops-guide.md#22-region-location-and-the-endpoint).
 
-  The key is derived on first use (by the delivery loop or an admin action,
-  off the startup path) and cached for the process.
+A validation error names the field, never its value, for example
+`SIEM Delivery: invalid region (not a documented SecOps region)`.
 
-  Only `client_email`, `private_key_id`, who set it and when, and a key-check
-  value (HMAC of the encryption key) are stored in clear. When a process's
-  key does not match the stored key-check (a rotated cluster JWT secret, or a
-  changed solo salt) it probes `credential_key_mismatch`, logs one WARNING
-  naming the cause, and the key must be re-uploaded; this is never reported
-  as an invalid key.
-- Only RSA service-account keys are accepted (google-auth signs RS256).
-- The forms read at most 512 KiB of request body (larger: HTTP 413, refused
-  before parsing), one file and two fields; the key JSON itself is capped at
-  64 KiB.
-- Write-only: no page, API or log returns the key. The status table and
-  `GET /api/admin/siem-delivery/stats` (`credential`) show the identity only.
-- Audit: `siem_credential_changed` with `change` (`set`, `replaced`,
-  `removed`), `client_email` and `private_key_id` only. It is a SIEM
-  self-report, delivered to the configured destination.
-- Delivery reads the stored key on every token request, so a Replace or Remove
-  made on any node applies at the next request everywhere. Without a usable
-  credential a process probes `credential_missing` or `credential_invalid`
-  and capture does not arm.
-- Replacing or removing a stored key disarms delivery in the same
-  transaction and clears the canary: re-arming needs a fresh canary and
-  confirmation (see Arming). A canary sent while the key was being replaced
-  is refused when recorded (HTTP 409; run it again).
-- A `service_account_key_path` value saved by 12.79.0 is IGNORED: each process
-  logs one WARNING, never reads that file, and the destination counts as
-  "credential missing" until a key is uploaded. The next save of the section
-  drops the field.
+The **destination** is the combination of `region`, `project_id`, `location`
+and `instance_id`. Changing any of them makes a new destination, which
+disarms delivery. Changing `api_version`, `max_batch_events` or
+`source_instance_label` does not.
+
+The [Google SecOps guide](secops-guide.md#2-values-for-the-cidx-administrator)
+explains where to find each value in Google.
+
+### Service-account credential
+
+The SecOps service-account JSON key is set in the same Web UI section, under
+**Service Account Credential**: paste the JSON, or upload the key file (one,
+not both), and press **Set / Replace Credential**. **Remove Credential**
+deletes it. There is no key-file path setting and no REST endpoint for it.
+Setting, replacing and removing need TOTP elevation when enforcement is on.
+
+The key is refused, and nothing changes, unless:
+
+- it is valid JSON, a JSON object, and at most 64 KiB;
+- `type` is `service_account`;
+- `client_email`, `private_key`, `private_key_id` and `token_uri` are present
+  and not empty; `client_email` looks like an address and `private_key_id`
+  is letters and digits only;
+- `token_uri` is exactly `https://oauth2.googleapis.com/token`;
+- the private key loads and is an RSA key.
+
+The form accepts at most 512 KiB of request body (HTTP 413 above that,
+refused before parsing), one file and two fields.
+
+How the key is handled:
+
+- It is stored encrypted in the server database, one row shared by every
+  node of a cluster. It is write-only: no page, API or log returns it.
+- The status table, and `credential` in `GET /api/admin/siem-delivery/stats`,
+  show only its identity: `client_email`, `private_key_id`, who set it and
+  when.
+- Every change is audited as `siem_credential_changed` with `change`
+  (`set`, `replaced`, `removed`), `client_email` and `private_key_id`, and
+  delivered as a self-report.
+- Every token request reads the stored key, so a replacement made on any
+  node applies everywhere at the next token request.
+- Replacing or removing the key disarms delivery at once and clears the
+  canary: re-arming needs a fresh canary and confirmation (see
+  [Arming](#arming)). A canary that was being sent while the key changed is
+  refused when it completes (HTTP 409; run it again).
+- If a process cannot decrypt the stored key because the server's encryption
+  key changed, its token probe reports `credential_key_mismatch` and it logs
+  one WARNING. Upload the key again.
+- The section has no key-file setting. A `service_account_key_path` value
+  found in the stored section is ignored: each process logs one WARNING and
+  never reads the file, and the destination has no credential until a key is
+  uploaded.
+
+Rotation, step by step, is in the
+[Google SecOps guide](secops-guide.md#34-rotate-the-key).
 
 ### Additional trusted CA (optional)
 
-For a TLS-inspecting proxy, or a test emulator that presents Google's
-hostnames with a test-CA certificate, CA certificates (PEM, one or more) can
-be pasted or uploaded in the same section ("Set / Replace Trusted CA"). They
-are public, so they are stored in the `siem_delivery` config section
-(`trusted_ca_pem`, plus `trusted_ca_fingerprint`, the SHA-256 over the DER of
-every certificate).
+Only for a TLS-inspecting proxy between CIDX and Google, or a test emulator.
+Under **Additional Trusted CA (optional)**, paste or upload one or more PEM
+CA certificates and press **Set / Replace Trusted CA**; **Remove Trusted CA**
+deletes them.
 
-- They are ADDED to the default trust the clients use (httpx's default
-  context: certifi, or `SSL_CERT_FILE`) for BOTH outbound legs, the OAuth
-  token exchange and `events:import`. Certificate and hostname verification
-  are always on; nothing can skip verification.
-- The environment proxy is still honoured (`HTTPS_PROXY` / `HTTP_PROXY` /
-  `ALL_PROXY`, bypassed per `NO_PROXY`), so a TLS-inspecting proxy works.
-- The CA bundle is capped at 256 KiB (512 KiB request body, HTTP 413 above).
-- Rolling upgrade: a 12.79.0 node that saves the SIEM section during the
-  upgrade drops the CA fields (it does not know them). Set the CA again once
-  every node runs this release.
-- Test harness only: behind the fault-injection gate the harness endpoint
-  may be `https://<loopback>:<port>`, so Phase 7 drives delivery through a
-  loopback TLS front with a test CA.
-- Validation on save: one or more X.509 certificates, certificates only, each
-  a CA (basicConstraints CA=true) and not expired.
-- Setting, replacing and removing need TOTP elevation and are recorded as a
-  `config_changed` row whose values carry the fingerprint before and after.
-- The UI shows each certificate's subject, issuer, SHA-256 fingerprint and
-  expiry. The combined trust is built once per bundle and picked up through
-  the committed-configuration read on the next cycle.
-- A change (set, replace or remove) does not change the destination key,
-  but it ends the configuration lifetime: delivery disarms and needs a fresh
-  canary (see Arming). Set the CA before running the canary.
+- Each certificate must be a CA (basicConstraints CA=true) and not expired;
+  the bundle may contain certificates only and is at most 256 KiB.
+- The certificates are ADDED to the default trust (certifi, or
+  `SSL_CERT_FILE`) for both outbound calls: the OAuth token exchange and
+  `events:import`. Certificate and hostname verification always stay on.
+- The proxy environment variables `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`
+  and `NO_PROXY` are honoured.
+- The page shows each certificate's subject, issuer, SHA-256 fingerprint and
+  expiry, and the bundle's SHA-256.
+- A change needs TOTP elevation when enforcement is on, and is audited as
+  `config_changed` with the bundle fingerprint before and after.
+- A change ends the configuration lifetime (see [Arming](#arming)): delivery
+  disarms and needs a fresh canary. Set the CA before running the canary.
 
 ## Arming
 
-Capture starts only after one atomic arming statement succeeds. That statement requires:
+Capture of pilot events starts only when delivery is **armed**. Arming
+happens on a delivery loop cycle once all of these hold:
 
-1. a synthetic canary (one event per UDM mapping entry plus one unmapped
-   event), sent once and ACCEPTED;
-2. every canary `productLogId` confirmed visible in SecOps search;
-3. at least one live server process, every live process able to mint a token
-   for the destination, and (cluster) every active node represented.
+1. delivery is enabled with a complete destination;
+2. a synthetic **canary** was sent to this destination, under the current
+   UDM mapping version and configuration lifetime, and SecOps ACCEPTED it;
+3. an admin confirmed that every canary event is visible in SecOps;
+4. at least one server process is live, every live process has recently
+   minted a token for the destination (`probe_result` `ok`), and in a cluster
+   every active node has a live process.
 
-A destination change disarms. A new mapping version does not disarm, but it
-shows a DEGRADED reason until the canary is re-run.
+The canary holds one event per UDM mapping entry plus one deliberately
+unmapped event: 34 events with the current mapping (version 3). Its events
+are sent directly; they are never queued.
 
-The order is: configure (key, optional CA, destination fields with
-`enabled` off), run the canary, confirm it, then enable; capture arms on a
-later cycle. The canary runs while delivery is disabled, as long as a
-destination is configured.
+### Order of work
+
+1. Upload the key, and only if needed the trusted CA.
+2. Fill the destination fields with `enabled` at No, and save. The canary
+   can run while delivery is disabled, as long as a destination is
+   configured.
+3. Run the canary.
+4. A SecOps analyst finds the canary events (see the
+   [Google SecOps guide](secops-guide.md#4-verify-the-canary)); confirm them.
+5. Set `enabled` to Yes and save.
+6. Watch the ARMED row: delivery arms on a later loop cycle.
+
+### Configuration lifetime
 
 A canary confirmation is valid only for the configuration lifetime that
-produced it (Bug #2018). The lifetime is the committed section's
-`arming_epoch`, a token no form can set: every configuration change carries
-it over from the committed pre-image and renews it when the destination is
-disabled, cleared or changed, or the trusted CA changes
-(`siem_delivery/boundary.py` `carry_arming_epoch`). The canary records the
-epoch it ran under (`siem_delivery_state.canary_config_epoch`, PostgreSQL
-migration 056); the arming statement and the fence require it to equal the
-committed epoch (`state_store.CANARY_CONFIRMED_FOR`), so a newer version of
-another lifetime disarms and a stale confirmation is refused. Replacing or
-removing the service-account key clears the canary and disarms in its own
-transaction. A canary is recorded only if, under the state-row lock, the key
-it was sent with is still the stored one, its lifetime is still the
-committed one, and no run issued later was recorded; otherwise nothing
-changes and the action answers 409. Runs are ordered by a durable,
-strictly increasing ordinal taken under the state-row lock before the send
-(`canary_issued_seq` issues it, `canary_run_seq` keeps the recorded run's;
-PostgreSQL migration 057), never by clocks, so two runs started in the same
-clock tick are still ordered. Enabling, and every other change
-of the section, keeps a confirmed canary valid.
+produced it. These changes end the lifetime: delivery disarms at once in the
+process that made the change, other processes and nodes follow at their next
+loop cycle (within about 30 seconds), and a fresh canary and confirmation are
+needed:
 
-Fail closed at once: `state_store.capture_active` also requires the state's
-canary epoch to equal the committed one, and the scheduler subscribes to the
-config service's commits (`ConfigService.register_on_commit_callback`, at
-`register_process`). A SIEM-section commit, or a credential change, in a
-process re-applies the fence, the capture snapshot and the status view in
-that process immediately (`scheduler.apply_committed_change`); the snapshot
-publish is monotonic in the config version, so a slower cycle that read an
-older version cannot re-arm it. Other processes and nodes follow at their
-next cycle (`cycle_idle_seconds`, 30 s). Events they capture in that window
-are bounded by that cycle and by the 90 s capture-snapshot age
-(`CAPTURE_SNAPSHOT_MAX_AGE`). They are counted as captures after the
-boundary (`capture_after_boundary`, see Capture above) only when the change
-is a disable, a clear, a destination change or a reset (the boundary kinds
-`stats.py` counts); after a trusted-CA change or a credential replacement or
-removal they are NOT counted.
+- disabling delivery;
+- clearing the destination, or changing it to other coordinates;
+- changing the trusted CA;
+- replacing or removing the service-account key.
 
-A configuration saved before the epoch existed has the empty epoch, so an
-already armed destination stays armed across the upgrade until its next
-lifetime-ending change. During a mixed-version cluster upgrade, re-run the
-canary once all nodes are upgraded: older nodes do not take a canary run
-number, so run ordering holds only when every node runs this release.
+Enabling delivery, and every other change of the section (for example
+`max_batch_events` or the instance label), keeps a confirmed canary valid. A
+canary or a confirmation from an earlier lifetime is refused with HTTP 409
+("canary run is stale").
+
+A CIDX upgrade that brings a new UDM mapping version does not disarm, but the
+health reason `SIEM delivery canary not run for mapping version <n>` stays
+until the canary is run again. Quarantined events are requeued once
+automatically after such an upgrade.
 
 ### Arming from the Web UI
 
-Config page, "SIEM Delivery (Google SecOps)" section, "Operations":
+Config page, section **SIEM Delivery (Google SecOps)**, **Operations**:
 
-1. The arming checklist explains the state, row by row: enabled and the
-   committed destination (with its config version), the stored credential,
-   the canary for this destination and mapping, confirmed ids of expected,
+1. The arming checklist explains the state row by row: enabled and the
+   committed destination, the stored credential, the canary for this
+   destination and mapping, the confirmed ids out of the expected ones,
    processes ready (aggregated over every live process, failing ones listed),
-   nodes without a process (cluster), and ARMED. ARMED is authoritative; the
-   other rows explain it. The checklist reads the COMMITTED configuration and
-   the database, so a save made through any node shows immediately; the
-   "this process" line below it is a per-process diagnostic only.
-2. "Run canary" sends the synthetic events once and lists each
-   `product_log_id` with its action and event type, plus the run-wide SecOps
-   search: `metadata.vendor_name = "CIDX" AND
-   additional.fields["correlation_id"] = "canary-<run_id>"`.
-3. The analyst finds the ids in SecOps; tick them, or paste them (separated
-   by spaces, new lines or commas), and press "Confirm visible".
-4. Watch the ARMED row (the panel refreshes after every action; "Refresh"
-   reloads it).
+   nodes without a process (cluster), and **ARMED**. ARMED is authoritative;
+   the other rows explain it. The checklist reads the committed configuration
+   and the database, so a save made through any node shows at once. The
+   "This process" line under it is a diagnostic for the serving process only.
+2. **Run canary** sends the canary once and lists each `product_log_id` with
+   its action and event type, plus the search for the whole run:
+   `metadata.vendor_name = "CIDX" AND additional.fields["correlation_id"] = "canary-<run_id>"`.
+   If SecOps rejected it, the checklist shows the rejection signature.
+3. Tick the ids the analyst found, or paste them (separated by spaces, new
+   lines or commas), and press **Confirm visible**. Arming needs every
+   expected id, including the unmapped one; missing ones are named by action
+   type, and the confirmation can be repeated.
+4. Watch the ARMED row; the panel refreshes after every action, and
+   **Refresh** reloads it.
 
-REST alternative: `POST /api/admin/siem-delivery/canary`, then
-`POST /api/admin/siem-delivery/canary/confirm-visible` with
-`{"canary_run_id": ..., "visible_product_log_ids": [...]}`.
+The status table's **Capture state** reads, in order of progress:
+`delivery disabled or no destination`, `awaiting canary`, `canary rejected`,
+`canary accepted, N of M visible`, `awaiting process readiness`, `armed`.
 
-### Who can do what
+The REST equivalent is in the [curl runbook](curl-runbook.md).
 
-- Reading the panels (and REST `GET /stats`, `GET /quarantine`) needs an
-  admin; no elevation.
+## Who can do what
+
+- Reading the panels, `GET /api/admin/siem-delivery/stats` and
+  `GET /api/admin/siem-delivery/quarantine` needs an admin; no elevation.
 - Every action (canary, confirm visible, resume, requeue, acknowledge,
-  re-batch, retarget, abandon) needs an admin with TOTP elevation while
-  `elevation_enforcement_enabled` is ON, on both the Web and REST doors
-  (the Web opens the TOTP modal and replays the action). With enforcement
-  OFF, actions pass through exactly like every other elevated route.
-- Abandon through the Web requires typing `ABANDON` exactly; REST abandon
-  takes no body.
+  re-batch, retarget, abandon), every save of the section and every credential
+  or CA change needs an admin with TOTP elevation while
+  `elevation_enforcement_enabled` is on (default off). The Web UI opens the
+  TOTP prompt and replays the action. With enforcement off, these actions run
+  without an elevation check. See
+  [Login and elevation](../auth/login-and-elevation.md).
+- Abandon through the Web UI requires typing `ABANDON` exactly; the REST
+  abandon takes no body.
 - Each action writes the same audit row on both doors; a refused action
   writes none.
 
-## Operation and visibility
+Before connecting a real tenant, turn elevation enforcement on.
 
-- `GET /api/admin/siem-delivery/stats`: fleet counts (`pending` = undelivered
-  rows, capped at 10,000+), quarantine, durable counters, capture state, halt,
-  and this process's liveness.
-- `GET /api/admin/siem-delivery/quarantine?limit=N`: quarantined rows (event
-  uuid, reason, sanitised signature).
-- `GET /api/system/health` (authenticated): SIEM reasons appear in
-  `failure_reasons` and are DEGRADED only. A SecOps outage never makes a
-  node unhealthy. The public `/healthz` returns the resulting status only
-  (DEGRADED answers HTTP 200); `GET /health` does not include SIEM reasons.
-- OTEL: `cidx.siem.*` gauges (pending, quarantined, oldest pending age,
-  backlog estimate, halted, capture active, unrecoverable, capture after
-  boundary) and counters (delivered, capture failures, unmapped types, ...).
-- Operator alert signals: an ERROR log when a threshold is first crossed (backlog older
-  than 60 min, halted for more than 15 min, backlog over 5 GB, disk headroom
-  under 12 h, any capture failure), repeated at most hourly, then one INFO line
-  on recovery. There is no built-in paging.
-- Delivery runs as short `siem_delivery_tick` background jobs; like x-ray
-  searches, they are hidden from the dashboard's recent-jobs panel.
-- A 429 from SecOps ends the current tick for the destination; the batch is
-  retried no sooner than its `Retry-After` (seconds or an HTTP date, capped at
-  one hour).
+## Monitoring
 
-## Halts and probes
+### Health
 
-Request-wide failures halt delivery without quarantining anything. These are
-request-level 400s, 401/403, 404/413/415/501, a duplicate response, and
-unclassified responses. A probe retries each halt class on its own schedule
-and clears the halt by itself once the cause is fixed. The one exception is
-the duplicate-response halt, which needs an admin decision.
+SIEM problems only ever make a node DEGRADED, never unhealthy, so a SecOps
+outage cannot take CIDX out of a load balancer. The reasons appear in
+`failure_reasons` of the authenticated `GET /api/system/health`. The public
+`GET /healthz` returns only the resulting status (DEGRADED still answers HTTP
+200). `GET /health` does not include SIEM reasons. See
+[Observability](../observability.md) for the health endpoints.
 
-Recovery from the Web UI (Config page, SIEM section, "Operations", "Halts and
-recovery"): the halt (class, signature, since, next probe) with Resume; the
-halted batch, always shown even when it is beyond the first page, with
-Acknowledge and Re-batch; open batches, quarantined rows (select and Requeue)
-and stranded destinations, each paged with "More"; and "Open destination by
-key" for any key. Retarget and Abandon open a dialog with the destination's
-region, project and instance and its pending, batched and quarantined counts,
-labelled "currently queued; may grow until the action runs" (shown as
-10,000+ beyond the cap). Abandon is irreversible and requires typing
-`ABANDON`; the result shows the exact number of events abandoned.
+The reasons (`services/siem_delivery/health.py`):
 
-REST alternative:
+| Reason | Meaning |
+|--------|---------|
+| `SIEM delivery not running in this process: <error>` | The delivery service failed to start in this process. |
+| `SIEM delivery halted: <class>` | Delivery is halted (see [Halts and recovery](#halts-and-recovery)). |
+| `SIEM delivery loop stalled in this process` | The delivery loop has not completed a cycle for several cycle intervals. |
+| `SIEM delivery config never loaded in this process; capture INACTIVE here` | This process could never read the SIEM settings; it captures nothing. |
+| `SIEM delivery config unreadable in this process; using last-known-good (the 90 s stale-capture bound is suspended here)` | The last read of the settings failed; the process keeps the previous ones. |
+| `SIEM delivery backlog: oldest pending event is <n> s old` | The oldest undelivered event is older than 15 minutes. |
+| `SIEM delivery: <n> events quarantined` | Events set aside after a rejection. |
+| `SIEM delivery: <n> events unrecoverable (...)` | Events that could not be converted and whose audit row has aged out. |
+| `SIEM delivery canary not run for mapping version <n>` | Armed, but the canary predates the current UDM mapping version. |
+| `SIEM delivery backlog large or disk headroom low` | Backlog estimate over 1 GiB, or disk projected to fill within 24 hours. |
+| `SIEM delivery: process <id> cannot mint SecOps tokens: <reason>` | A process's token probe failed: `credential_missing`, `credential_invalid`, `credential_key_mismatch`, `token_uri_not_allowed`, `token_rejected` or `token_endpoint_unreachable`. |
+| `SIEM delivery: <n> events pending for unconfigured destination <key>` | Events wait for a destination that is no longer configured (retarget or abandon them). |
+| `SIEM capture failures since boot: <n>` | Capture of some events failed in this process. |
+| `SIEM delivery: <n> pilot events captured more than 90 s after a SIEM disable/change` | Late captures after a disable or destination change (a defect; report it). |
 
-- `POST /api/admin/siem-delivery/batches/{batch_id}/acknowledge`: the events
-  are confirmed present in SecOps; mark them delivered.
-- `POST /api/admin/siem-delivery/batches/{batch_id}/rebatch`: re-send in new
-  batches (accepting possible duplicates).
-- `POST /api/admin/siem-delivery/resume`: clear any halt now.
+While delivery is disabled and nothing is pending or halted, no SIEM reason
+is reported.
 
-Row-specific rejections quarantine only the rejected events (bisecting when
-no index is reported). The quarantine count is capped fleet-wide at 5 per
-hour: the next failure halts instead. A local-validation halt clears itself
-only when the failures still present could be quarantined within the current
-window, which is never reset by a probe. Quarantined rows are requeued
-automatically once per mapping-version change (even when nothing else is
-pending), and on demand through
-`POST /api/admin/siem-delivery/quarantine/requeue`.
+### Statistics and logs
 
-Rows captured for a destination that is no longer configured wait until an
-admin calls `POST /api/admin/siem-delivery/destinations/{key}/retarget` or
-`/abandon`. Both refuse the currently configured destination (409). All admin
-actions are audited.
+- `GET /api/admin/siem-delivery/stats` returns fleet counts (`pending` =
+  undelivered events, reported as 10,000+ above the cap; quarantined;
+  delivered total; unconfigured destinations; backlog estimate), the
+  credential identity, the capture state and canary status, the live
+  processes and their `probe_result`, any halt (`class`, `signature`,
+  `since`, `next_probe_at`, `batch_id`) and this process's liveness
+  (`local_process`). The counts, the halt and the process list are read live
+  from the database. The backlog estimates, and the counts the health reasons
+  use, come from a snapshot refreshed about once a minute. The `capture` state
+  and `configured_destination_key` come from the serving process's last loop
+  cycle, so they can lag a save made on another node by up to one idle cycle
+  (about 30 seconds).
+- `GET /api/admin/siem-delivery/quarantine?limit=N` (1 to 1000, default 100)
+  lists quarantined events: event id, action type, destination key, reason,
+  sanitised signature and capture time.
+- OTEL instruments under `cidx.siem.*`: gauges `pending`, `quarantined`,
+  `oldest_pending_age_seconds`, `backlog_bytes_estimate`,
+  `projected_hours_to_disk_full`, `halted`, `capture_active`, `unrecoverable`,
+  `capture_after_boundary`, `capture_after_boundary_late`; counters
+  `delivered`, `capture_failures`, `capture_skipped_snapshot_expired`,
+  `reprojected`, `unmapped_action_type`, `unexpected_success_body`.
+- Alert log lines: an ERROR `SIEM delivery alert: ...` when the oldest pending
+  event is older than 60 minutes, a halt lasts more than 15 minutes, the
+  backlog estimate passes 5 GiB, the disk is projected to fill within 12
+  hours, or any capture failure happened; repeated at most hourly while it
+  holds, then one INFO line on recovery. There is no built-in paging.
+- Delivery runs as short `siem_delivery_tick` background jobs. They are
+  hidden from the dashboard's recent-jobs panel.
 
-- `abandon` works for any destination key that is not the configured one,
-  including when NOTHING is configured (decommissioning). It resolves every
-  undelivered row of that key: pending, batched AND quarantined. Abandon is
-  the path for a quarantined row on a removed destination; the quarantine
-  requeue action would only return it to pending on the dead destination.
-- Both snapshot the key's highest queue id when they start and only ever
-  touch rows at or below it (rows captured afterwards, e.g. after the key is
-  configured again, are never moved). In every transaction, under the SIEM
-  state-row lock, they re-read the COMMITTED destination from the database
-  (never a process's cached view) and stop with 409 once the abandoned key
-  is configured (retarget: once its target is no longer the configured
-  destination). Configuration saves take no SIEM lock, so a save that
-  commits inside one round's (millisecond) window is not serialised with
-  that round: a known, documented limitation.
-- Both refuse with 409 "a send to this destination is in flight; retry
-  shortly" while any open batch of the key holds an unexpired sender lease
-  (claims take their lease under the same state-row lock, so the check is
-  race-free). A lease left by a crashed node blocks them only until it
-  expires (`lease_seconds`: 10 minutes; 30 s in the test harness profile).
-- `retarget` needs a configured destination to move the rows to; with none it
-  answers 409 "no SIEM destination is configured to retarget to; configure the
-  new destination first, or abandon the rows instead".
+## Halts and recovery
 
-Decommissioning: disable delivery and clear the destination fields, then
-abandon the old key (the clearing save itself captures one row for the removed
-destination). Once those rows are abandoned, every SIEM health reason clears.
+A request-wide failure halts delivery for the destination without
+quarantining or dropping anything:
+
+| Halt class | Cause | Clears |
+|------------|-------|--------|
+| `credential` | SecOps answered 401 or 403. | By itself once a probe succeeds, or by Resume. |
+| `request_rejection` | HTTP 400 naming a field outside the events, or 404, 413, 415, 501. | By itself once a probe succeeds, or by Resume. |
+| `unclassified` | Any other unexpected response. | By itself once a probe succeeds, or by Resume. |
+| `row_rejection_burst` | SecOps rejected individual events more often than the quarantine cap allows. | By itself once a probe batch is accepted, or by Resume. |
+| `local_validation_burst` | CIDX's own pre-send check failed for more events than the quarantine cap allows. | By itself once the failure that caused it is gone and the remaining failures fit the quarantine cap, or by Resume. |
+| `duplicate_response` | SecOps answered 409. | Only by an admin: Acknowledge, Re-batch or Resume. |
+
+While halted, a probe retries every 15 minutes (at once after an upgrade that
+brings a new mapping version) and clears the halt by itself once the cause is
+fixed, except for the duplicate-response halt.
+
+**Quarantine.** When SecOps rejects specific events, CIDX finds them from the
+field-violation paths of the error, or by splitting the batch in halves and
+resending, sets them aside and keeps sending the rest. Events that fail CIDX's
+own pre-send check are quarantined too. At most 5 events per hour are
+quarantined fleet-wide; the next failure halts delivery instead.
+
+**Duplicate response.** Check SecOps for the halted batch's events. Present:
+**Acknowledge** (mark them delivered). Absent: **Re-batch** (send them again
+in new batches, accepting possible duplicates). **Resume** also clears this
+halt, but leaves the halted batch pending: it is sent again unchanged, so
+duplicates are possible.
+
+**Recovery from the Web UI** (Config page, SIEM section, **Operations**,
+**Halts and recovery**): the halt (class, signature, since, next probe) with
+**Resume**; the halted batch, always shown, with **Acknowledge** and
+**Re-batch**; open batches, quarantined events (select and **Requeue
+selected**) and stranded destinations, each paged with **More**; and
+**Open destination by key** for any key. **Retarget / Abandon** opens a dialog
+with the destination's region, project and instance and its pending, batched
+and quarantined counts (shown as 10,000+ above the cap). Abandon is
+irreversible and requires typing `ABANDON`; the result shows how many events
+were abandoned.
+
+**Recovery over REST** (all `POST`, admin with elevation):
+
+| Endpoint | Effect |
+|----------|--------|
+| `/api/admin/siem-delivery/resume` | Clear any halt now (`{"resumed": false}` when nothing is halted). Needs a configured destination. |
+| `/api/admin/siem-delivery/batches/{batch_id}/acknowledge` | Duplicate-response halt only: mark the halted batch delivered. |
+| `/api/admin/siem-delivery/batches/{batch_id}/rebatch` | Duplicate-response halt only: send the halted batch's events again. |
+| `/api/admin/siem-delivery/quarantine/requeue` | Body `{"event_uuids": [...]}`, at most 500 per call: return quarantined events to the queue. |
+| `/api/admin/siem-delivery/destinations/{key}/retarget` | Move the undelivered events of a no-longer-configured destination to the configured one. |
+| `/api/admin/siem-delivery/destinations/{key}/abandon` | Drop the undelivered events (pending, batched and quarantined) of a destination that is not the configured one. |
+
+Retarget and abandon:
+
+- Both refuse the configured destination with 409 ("rows already target the
+  configured destination").
+- Retarget needs a configured destination to move to; with none it answers
+  409 and suggests abandoning instead. Abandon works even when nothing is
+  configured.
+- Both act only on events captured before they started. Retarget stops with
+  409 if the configured destination changes while it runs; abandon stops with
+  409 only if the key being abandoned becomes the configured destination.
+- Both answer 409 "a send to this destination is in flight; retry shortly"
+  while a send to that destination is in progress. A send left by a crashed
+  node blocks them until its lease expires (10 minutes).
+- Abandon is the way to dispose of quarantined events of a removed
+  destination: requeue would only return them to the dead destination.
+
+All recovery actions are audited and delivered as self-reports.
+
+## Decommissioning
+
+1. Resolve any halt first (Resume, or Acknowledge / Re-batch for a duplicate
+   response). Resume needs a configured destination, and no probe runs
+   without one, so a halt left open after step 2 stays reported.
+2. Disable delivery and clear the destination fields, and save. The clearing
+   save itself captures one self-report for the removed destination.
+3. Remove the trusted CA (if any) and the service-account key.
+4. Abandon the old destination key (shown in the stats document under
+   `fleet.unconfigured_destinations`, and in the recovery panel).
+5. Once those events are abandoned, every SIEM health reason clears.
+
 Configuring the same destination again later starts a new configuration
 lifetime: it arms only after a fresh canary and confirmation.
 
 ## Retention
 
-`DataRetentionScheduler` prunes only terminal SIEM rows. These are delivered
-rows after 24 h, abandoned or unrecoverable rows after the audit retention,
-and terminal batches after 24 h. It runs in paced transactions of at most 500
-rows, and pending, batched and quarantined rows are never deleted.
+The data-retention job prunes only finished SIEM rows: delivered events after
+24 hours, abandoned and unrecoverable events after the audit-log retention
+period, and finished batches after 24 hours. It deletes at most 500 rows per
+transaction. Pending, batched and quarantined events are never deleted.
 
-## Test harness timing profile
+## Cluster behaviour
 
-A process whose non-production fault-injection gate is active uses a
-compressed timing profile (1 s loop, 10 s halt probe, 30 s lease, 10 s
-DEGRADED backlog age) so end-to-end tests against the mock receiver finish
-quickly. Production processes cannot select it, and there is no setting. The
-90 s capture bound, the quarantine cap and the operator alert thresholds are never
-compressed.
+- The settings, the credential, the queue and the delivery state are in the
+  shared database, so every node uses the same ones.
+- Every delivery loop cycle reads the committed settings from the database,
+  not the process's cached configuration, so a save made through any node
+  takes effect everywhere within one cycle (30 seconds when idle). The
+  process that made a change applies it at once.
+- Arming requires every active node to have a live delivery process that can
+  mint a token.
+- The Config page's settings readout shows the configuration as the serving
+  process last loaded it, so another node's page can lag a save by up to
+  about 30 seconds. The same applies to the `capture` block of the stats
+  document (see [Statistics and logs](#statistics-and-logs)). Only the arming
+  checklist reads the committed configuration and does not lag.
 
 ## Real-tenant enablement checklist
 
 Before enabling against a real tenant:
 
-1. Turn TOTP elevation enforcement ON (`elevation_enforcement_enabled`) and
+1. Turn TOTP elevation enforcement on (`elevation_enforcement_enabled`) and
    confirm that a SIEM action asks for elevation.
-2. Grant a dedicated identity only the events-import permission.
-3. Upload the service-account key (and, only if needed, the trusted CA) in
-   the Web UI, then configure the region, project, location and instance
-   with `enabled` off.
+2. Use a dedicated service account that holds only the events-import
+   permission (see the [Google SecOps guide](secops-guide.md#3-create-the-google-service-account)).
+3. Upload the key (and, only if needed, the trusted CA), then configure the
+   destination with `enabled` at No.
 4. Run the canary.
-5. Search each canary `productLogId` in SecOps and submit the confirmation.
-6. Enable delivery, and wait for the ARMED row.
-7. Record the real 400 body shape and any duplicate response.
-8. Confirm that the IAM permission name is correct.
-9. Verify that `principal.ip` is the client address.
-10. Re-verify the region list against Google's documentation.
+5. Have each canary `product_log_id` found in SecOps, and confirm them.
+6. Enable delivery and wait for the ARMED row.
+7. Record the real shape of a SecOps 400 rejection and of any duplicate
+   response.
+8. Confirm the IAM permission name with your Google administrator.
+9. Check what `principal.ip` holds behind your reverse proxy (see
+   [Known limitations](secops-guide.md#7-known-limitations)).
+10. Re-check the region list against Google's documentation.
 
-The same steps from a shell are in the
-[operator curl runbook](curl-runbook.md). The Web UI `session`
-cookie is `Secure` whenever the server is not bound to localhost, so a
-deployment served over plain `http` needs a TLS front door for browser and
-curl web-form use (the key and CA uploads exist only as Web forms; public
-issue #2004).
+The Web UI `session` cookie carries the `Secure` attribute whenever the
+server's `host` setting is not a loopback address, so a deployment served
+over plain `http` needs a TLS front door for browser use. The key and CA
+uploads exist only as Web UI forms.
+
+## How it works
+
+A short map for readers of the code (`src/code_indexer/server/services/siem_delivery/`):
+
+- **Capture.** `capture.py` is a hook inside the audit writers
+  (`services/audit_log_service.py` for SQLite and
+  `storage/postgres/audit_log_backend.py` for PostgreSQL). Events are
+  selected and projected (`projection.py`) before the audit transaction; the
+  queue row is then written inside the audit transaction under its own
+  savepoint, so a failed queue insert never fails the audit write. Only typed,
+  allowlisted values are projected.
+- **Capture switch.** Each process decides from a snapshot that its delivery
+  loop republishes every cycle; a snapshot older than 90 seconds captures
+  nothing. Self-reports carry their destination explicitly
+  (`boundary.py` computes it from the committed before and after
+  configuration).
+- **Arming.** `state_store.py` arms with one conditional database statement.
+  Each configuration lifetime has an `arming_epoch` that no form can set; it is
+  renewed by the changes listed under [Configuration lifetime](#configuration-lifetime),
+  and when a canary is recorded its epoch, the stored credential's id and its
+  run ordinal are checked, so a stale canary is refused.
+- **Delivery.** `scheduler.py` runs the loop and submits `siem_delivery_tick`
+  jobs; `claim.py`, `sender.py`, `classifier.py` and `completion.py` build,
+  send and settle batches under leases. `udm.py` holds the UDM mapping
+  (`UDM_MAPPING`, `MAPPING_VERSION`).
+- **Timings** are code constants (`timings.py`), not settings. A process whose
+  non-production fault-injection gate is active uses a compressed test
+  profile (1 s loop, 10 s halt probe, 30 s lease, 10 s backlog threshold) so
+  the end-to-end tests finish quickly; production processes cannot select
+  it. The 90 s capture bound, the quarantine cap and the alert thresholds are
+  never compressed.

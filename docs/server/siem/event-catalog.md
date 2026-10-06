@@ -1,17 +1,19 @@
-# cidx Event Catalog for Google SecOps
+# CIDX Event Catalog for Google SecOps
 
-This catalog lists every cidx audit event that SIEM delivery sends to Google
+This catalog lists every CIDX audit event that SIEM delivery sends to Google
 Security Operations (SecOps), with the UDM fields each one fills and an
-example. It is the reference part of the
-[Google SecOps Guide for cidx Audit Events](secops-guide.md); read that
-guide first for the terms used here (UDM, principal, target), for
-configuration, and for searching and alerting.
+example. The terms used here (UDM, principal, target) and searching and
+alerting are explained in the [Google SecOps guide](secops-guide.md); the
+CIDX side of delivery is in [SIEM Delivery: CIDX Operations](operations.md).
 
-Every statement about cidx here was checked against the cidx source code.
+Every statement about CIDX here was checked against the CIDX source code:
+the mapping table is `UDM_MAPPING` (mapping version 3) in
+`src/code_indexer/server/services/siem_delivery/udm.py`, and the projected
+fields come from `projection.py` in the same package.
 
 How to read field names in this catalog:
 
-- The JSON examples show what cidx sends, in camelCase (`productLogId`,
+- The JSON examples show what CIDX sends, in camelCase (`productLogId`,
   `securityResult`). SecOps Search and rules use snake_case for the same
   fields (`metadata.product_log_id`, `security_result.action`).
 - `additional.X` (for example `additional.cidx_instance`) is shorthand for
@@ -64,7 +66,7 @@ How to read field names in this catalog:
 
 ## 1. Summary
 
-| cidx event (`metadata.product_event_type`) | `metadata.event_type` | Outcome field | Alert idea |
+| CIDX event (`metadata.product_event_type`) | `metadata.event_type` | Outcome field | Alert idea |
 |---|---|---|---|
 | `authentication_success` | `USER_LOGIN` | `security_result.action` ALLOW | Logins at odd hours, new accounts logging in |
 | `authentication_failure` | `USER_LOGIN` | BLOCK | Repeated failures for one account |
@@ -101,7 +103,7 @@ How to read field names in this catalog:
 | `siem_destination_abandoned` | `STATUS_UPDATE` | ALLOW | Any (audit events dropped on purpose) |
 | any other type (fallback) | `GENERIC_EVENT` | as recorded | Any (mapping gap) |
 
-Outcome rule: cidx's `outcome` `success` becomes `security_result.action`
+Outcome rule: CIDX's `outcome` `success` becomes `security_result.action`
 `ALLOW`; `failure` and `denied` become `BLOCK`; `attempted` or no outcome
 means no `security_result` at all. "Often absent" marks the older audit
 writers (group, repository access, impersonation), which record an outcome
@@ -110,7 +112,7 @@ only when it is given or the type name ends in `_success`, `_failure` or
 
 Failed attempts: the MFA and admin actions marked "BLOCK on a failed
 attempt" also write a row when the action fails (`outcome` `failure`,
-action `BLOCK`). cidx records only what it verified, so a failure row
+action `BLOCK`). CIDX records only what it verified, so a failure row
 usually has no `cidx_details`, and for user, credential and key actions
 usually no `target`. (MFA failure rows keep the account as target.) A
 failed admin action is worth an alert. Example, a failed `user_created`:
@@ -125,35 +127,36 @@ failed admin action is worth an alert. Example, a failed `user_created`:
 ```
 
 `STATUS_UPDATE` is described in Google's UDM list as "A software or
-fingerprint update". cidx uses it for its SIEM self-reports; treat it as
-"SIEM pipeline status" for cidx events.
+fingerprint update". CIDX uses it for its SIEM self-reports; treat it as
+"SIEM pipeline status" for CIDX events.
 
 ## 2. Fields every event carries
 
 | UDM field | Value |
 |-----------|-------|
-| `metadata.event_timestamp` | When the action happened in cidx, UTC, RFC 3339. |
+| `metadata.event_timestamp` | When the action happened in CIDX, UTC, RFC 3339. |
 | `metadata.event_type` | From the table in section 1. |
 | `metadata.vendor_name` | `CIDX` |
 | `metadata.product_name` | `cidx-server` |
-| `metadata.product_event_type` | The cidx action type, for example `user_role_changed`. |
-| `metadata.product_log_id` | The cidx audit event UUID. Unique per audit event; use it to remove duplicates. |
-| `principal.user.userid` | The cidx username that acted. Absent for system actions and for failed logins with an unknown account name. |
+| `metadata.product_event_type` | The CIDX action type, for example `user_role_changed`. |
+| `metadata.product_log_id` | The CIDX audit event UUID. Unique per audit event; use it to remove duplicates. |
+| `principal.user.userid` | The CIDX username that acted. Absent for system actions and for failed logins with an unknown account name. |
 | `principal.application` | `cidx-server` for system actions (and when nothing else identifies the actor). |
-| `principal.ip` | Peer address of the HTTP request. **Currently the reverse proxy address, not the client** (see [Known limitations](secops-guide.md#8-known-limitations)). Absent for system actions. |
+| `principal.ip` | Peer address of the HTTP connection as the server sees it. **Behind a reverse proxy this can be the proxy's address, not the client's** (see [Known limitations](secops-guide.md#7-known-limitations)). Absent for system actions. |
 | `target` | Depends on the event: `target.user.userid` for user and login targets; `target.resource.name` plus `target.resource.type` for repositories, keys, credentials and settings. |
 | `security_result.action` | `ALLOW` or `BLOCK`, see section 1. |
 | `extensions.auth.type` | Only on `authentication_success` and `authentication_failure`: `AUTHTYPE_UNSPECIFIED` (password), `SSO` (sso), `MACHINE` (api_key or mcp_credential). |
 | `additional.cidx_instance` | Your `source_instance_label`. |
-| `additional.schema_version` | Version of the cidx event payload (currently 1). |
-| `additional.outcome` | cidx outcome: `success`, `failure`, `denied` or `attempted`, when recorded. |
+| `additional.schema_version` | Version of the CIDX event payload (currently 1). |
+| `additional.outcome` | CIDX outcome: `success`, `failure`, `denied` or `attempted`, when recorded. |
 | `additional.source` | Front door: `rest`, `mcp`, `web` or `system`. |
 | `additional.auth_method` | How the caller was authenticated: `jwt`, `oauth_token`, `mcp_credential`, `web_session`, `none` (before login) or `system`. |
-| `additional.actor_is_system` | true for cidx's own components. |
-| `additional.correlation_id` | cidx request correlation id. Events from one request share it. |
-| `additional.node_id` | cidx cluster node id (absent on a single-node server). |
+| `additional.actor_is_system` | true for CIDX's own components. |
+| `additional.correlation_id` | CIDX request correlation id. Events from one request share it. |
+| `additional.node_id` | CIDX cluster node id (absent on a single-node server). |
+| `additional.impersonated_user` | Only on actions an administrator took over MCP while impersonating another user: the impersonated user. `principal.user.userid` is then the administrator. |
 | `additional.cidx_details` | The allowlisted details of the action (listed per event below). |
-| `additional.principal_unknown` | true when cidx had no user and no IP for the actor. |
+| `additional.principal_unknown` | true when CIDX had no user and no IP for the actor. |
 | `additional.cidx_canary` | true on canary events only. |
 
 `additional` is a Google `Struct`. Google's
@@ -161,7 +164,8 @@ fingerprint update". cidx uses it for its SIEM self-reports; treat it as
 says `additional.fields["key"] = "value"` works for string values only, and
 its [YARA-L map syntax](https://docs.cloud.google.com/chronicle/docs/yara-l/expressions)
 page says the same for rules. So `cidx_instance`, `outcome`, `source`,
-`auth_method`, `correlation_id` and `node_id` can be matched by key. For
+`auth_method`, `correlation_id`, `node_id` and `impersonated_user` can be
+matched by key. For
 booleans and numbers (`actor_is_system`, `cidx_canary`, `principal_unknown`,
 `schema_version`) the search syntax reference documents
 `additional.fields.value.bool_value = true` and
@@ -169,8 +173,8 @@ booleans and numbers (`actor_is_system`, `cidx_canary`, `principal_unknown`,
 any key, not a named one. Searching inside the nested `cidx_details` object
 is not documented; read it in the event viewer.
 
-The examples below were produced by running the cidx mapping code on sample
-events. They use the camelCase JSON form that cidx sends. Every value is a
+The examples below were produced by running the CIDX mapping code on sample
+events. They use the camelCase JSON form that CIDX sends. Every value is a
 neutral sample.
 
 ## 3. Logins
@@ -200,11 +204,11 @@ A login was refused. `cidx_details`: `method`, `stage` (`credentials`,
 `mfa_code`, `challenge`, `issuance`), `reason` (`bad_credentials`,
 `mfa_code_invalid`, `challenge_invalid_or_expired`, `account_locked`,
 `rate_limited`, `password_expired`, `server_error`). `account_locked` is
-legacy and no longer emitted (logins use a progressive throttle with no
+reserved and not emitted (logins use a progressive throttle with no
 lockout); `rate_limited` marks the failed attempt that
 starts the throttle, and attempts refused while it runs (HTTP 429) write no
 event. The typed username is
-recorded only when it names an existing account. Otherwise cidx records
+recorded only when it names an existing account. Otherwise CIDX records
 `(unknown)` and sends no `principal.user` and no `target` (so a password typed
 into the username box never reaches SecOps).
 
@@ -327,7 +331,7 @@ One user (an admin) regenerated another user's MFA secret. No
 
 ### user_role_changed
 
-A user's cidx role changed. `cidx_details`: `old_role`, `new_role` (`admin`,
+A user's CIDX role changed. `cidx_details`: `old_role`, `new_role` (`admin`,
 `power_user`, `normal_user`).
 
 ```json
@@ -476,7 +480,7 @@ An MCP client credential was revoked. Same fields as above.
 
 ### api_key_created
 
-A cidx API key was created. `target.resource` type `api_key`.
+A CIDX API key was created. `target.resource` type `api_key`.
 `cidx_details`: `key_id` (an id, never the key).
 
 ```json
@@ -550,7 +554,8 @@ A user tried to impersonate someone and was refused. Action `BLOCK`.
 
 ## 7. SIEM delivery self-reports
 
-All of these have `target.resource.name` = `siem_delivery`, type `config`.
+All of these have `target.resource.name` = `siem_delivery`, type `config`,
+except the full-send form of `config_changed`, whose name is `*` (see below).
 
 ### config_changed
 
@@ -603,7 +608,7 @@ The service-account key was set, replaced or removed. `cidx_details`:
   "principal": {"ip": ["198.51.100.7"], "user": {"userid": "example-admin"}},
   "target": {"resource": {"name": "siem_delivery", "type": "config"}},
   "securityResult": [{"action": ["ALLOW"]}],
-  "additional": {"actor_is_system": false, "auth_method": "web_session", "cidx_details": {"change": "replaced", "client_email": "secops-sa@example.com", "private_key_id": "0123456789abcdef0123456789abcdef01234567"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "web"}
+  "additional": {"actor_is_system": false, "auth_method": "web_session", "cidx_details": {"change": "replaced", "client_email": "cidx-siem-import@example.com", "private_key_id": "0123456789abcdef0123456789abcdef01234567"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "web"}
 }
 ```
 
@@ -618,7 +623,7 @@ An admin sent the canary. `cidx_details`: `canary_run_id`, `event_count`,
   "principal": {"ip": ["198.51.100.7"], "user": {"userid": "example-admin"}},
   "target": {"resource": {"name": "siem_delivery", "type": "config"}},
   "securityResult": [{"action": ["ALLOW"]}],
-  "additional": {"actor_is_system": false, "auth_method": "jwt", "cidx_details": {"canary_run_id": "6c1d2e3f-0000-4000-8000-000000000001", "event_count": 34, "mapping_version": 2, "result": "accepted"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "rest"}
+  "additional": {"actor_is_system": false, "auth_method": "jwt", "cidx_details": {"canary_run_id": "6c1d2e3f-0000-4000-8000-000000000001", "event_count": 34, "mapping_version": 3, "result": "accepted"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "rest"}
 }
 ```
 
@@ -640,7 +645,7 @@ An admin submitted the canary visibility list. `cidx_details`:
 ### siem_quarantine_requeued
 
 Quarantined events were put back in the queue, by an admin or automatically
-after a cidx upgrade with a new mapping. `cidx_details`: `count`,
+after a CIDX upgrade with a new mapping. `cidx_details`: `count`,
 `mapping_version`, `trigger` (`admin`, `mapping_version_change`). The
 automatic form is a system action:
 
@@ -650,7 +655,7 @@ automatic form is a system action:
   "principal": {"application": "cidx-server"},
   "target": {"resource": {"name": "siem_delivery", "type": "config"}},
   "securityResult": [{"action": ["ALLOW"]}],
-  "additional": {"actor_is_system": true, "auth_method": "system", "cidx_details": {"count": 2, "mapping_version": 2, "trigger": "mapping_version_change"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "system"}
+  "additional": {"actor_is_system": true, "auth_method": "system", "cidx_details": {"count": 2, "mapping_version": 3, "trigger": "mapping_version_change"}, "cidx_instance": "cidx-example-1", "correlation_id": "5f0c2a9e-0000-4000-8000-00000000c0de", "node_id": "example-node-1", "outcome": "success", "schema_version": 1, "source": "system"}
 }
 ```
 
@@ -732,14 +737,15 @@ never reach SecOps. `cidx_details`: `destination_key`, `count`.
 
 ## 8. Unmapped events (fallback)
 
-If cidx ever delivers an action type that has no UDM mapping, it does not
+If CIDX ever delivers an action type that has no UDM mapping, it does not
 drop it. It sends it as `metadata.event_type` = `GENERIC_EVENT`, with the
-cidx type in `metadata.product_event_type`, and without `target` and without
-`cidx_details`. cidx also logs one WARNING per type and counts it.
+CIDX type in `metadata.product_event_type`, and without `target` and without
+`cidx_details`. CIDX also logs one WARNING per type and counts it.
 
 How to recognise one: `metadata.vendor_name = "CIDX"` and
 `metadata.event_type = "GENERIC_EVENT"`. In normal operation the only one is
-the canary's `siem_canary_unmapped`. This is what the canary code produces
+the canary's `siem_canary_unmapped`, which is built without that WARNING and
+counter, so it is neither logged nor counted. This is what the canary code produces
 (sample address `192.0.2.10`, correlation id `canary-<canary_run_id>`,
 `cidx_canary` true, no `node_id`):
 
@@ -752,5 +758,5 @@ the canary's `siem_canary_unmapped`. This is what the canary code produces
 }
 ```
 
-Any other `GENERIC_EVENT` from cidx means a mapping gap; tell the cidx
+Any other `GENERIC_EVENT` from CIDX means a mapping gap; tell the CIDX
 operator.
