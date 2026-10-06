@@ -179,7 +179,7 @@ class TestStatus:
     def test_includes_docs_url(self, cl: TestClient) -> None:
         body = cl.get("/admin/fault-injection/status").json()
         assert body["docs_url"] == DOCS_URL
-        assert "fault-injection-operator-guide" in body["docs_url"]
+        assert "server/fault-injection.md" in body["docs_url"]
 
     def test_profile_count_increments_after_upsert(self, cl: TestClient) -> None:
         cl.put(f"/admin/fault-injection/profiles/{_TARGET}", json=_profile_body())

@@ -824,7 +824,7 @@ Each `error_type` carries a distinct `error_message` shape:
 
 ```json
 {
-  "file_path": "docs/architecture.md",
+  "file_path": "docs/architecture/overview.md",
   "line_number": 0,
   "error_type": "UnsupportedLanguage",
   "error_message": "No grammar for extension '.md'"

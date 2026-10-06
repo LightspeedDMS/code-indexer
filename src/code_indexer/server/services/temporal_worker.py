@@ -66,7 +66,7 @@ fail-closed:
   ``uses_shared_metadata_stores()``, plural.
 
 Full rationale, the confirmed cluster symptoms, and the both-doors injection
-requirement: docs/architecture-invariants.md, "Temporal Worker Lineage Store
+requirement: docs/architecture/invariants.md, "Temporal Worker Lineage Store
 Selection (Bug #1533)".
 """
 

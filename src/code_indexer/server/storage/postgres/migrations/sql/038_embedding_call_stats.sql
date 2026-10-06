@@ -1,6 +1,6 @@
 -- Migration 038: Add embedding_call_stats table (Story #1418)
 --
--- Vendor cost reconciliation: see docs/architecture-invariants.md's
+-- Vendor cost reconciliation: see docs/architecture/invariants.md's
 -- "Embedding & Reranker Call Tracking" section for the full architecture.
 --
 -- Records every REAL (non-cached, non-suppressed) embedding/reranker call

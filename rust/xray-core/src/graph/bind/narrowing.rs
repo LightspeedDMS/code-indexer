@@ -575,7 +575,7 @@ fn indices_matching_enclosing_type(
 /// local -- indistinguishable, from the caller's side, from an actual
 /// absence. Nothing built on top of that lookup can be proven closed-
 /// world without fixing the underlying `(enclosing_method, name)` scope
-/// key (see `docs/xray-architecture.md`'s candidate-admission section for
+/// key (see `docs/architecture/xray/architecture.md`'s candidate-admission section for
 /// what a future attempt would need). Five straight rounds across two
 /// issues could not converge on a safe hard-empty contract, so hard
 /// receiver-type narrowing is retired for good, not merely deferred.
@@ -772,7 +772,7 @@ pub(super) fn apply_type_qualifier_narrowing(
 /// UNIMPLEMENTED idea for tagging precision only (`SAME_CLASS_OR_SUPER`
 /// tag accuracy), never as grounds for a hard-narrow, unless a future
 /// attempt first threads a qualified/unique type identity through the
-/// entire reference-site pipeline (see `docs/xray-architecture.md`'s
+/// entire reference-site pipeline (see `docs/architecture/xray/architecture.md`'s
 /// candidate-admission section).
 ///
 /// A/B-probed end-to-end on real javac-valid source (inner/anonymous/

@@ -2,13 +2,13 @@
 //! "Quick Start" demonstration fixture used a `private` Java method as its
 //! cross-language target, so the Kotlin call to it was not legal Java/
 //! Kotlin in the first place. Running the documented Quick Start dead-code
-//! template (`docs/xray-cookbook.md` / `analyze_graph.md`, "Java and
+//! template (`docs/guides/xray-cookbook.md` / `analyze_graph.md`, "Java and
 //! Kotlin bind to EACH OTHER") against that illegal fixture reported the
 //! showcase method DEAD, with `fact_graph_complete: true` and every
 //! degradation counter at zero -- the FIXTURE was wrong, not the binder:
 //! `apply_private_visibility_filter` (D2, `bind::narrowing`) correctly
 //! discards a private candidate declared in a different known top-level
-//! type (`docs/xray-architecture.md`'s own documented rule), and a Java
+//! type (`docs/architecture/xray/architecture.md`'s own documented rule), and a Java
 //! `private` instance method called via an instance-qualified receiver
 //! from a DIFFERENT top-level Kotlin type in a DIFFERENT file is exactly
 //! that shape -- it is not legal Java/Kotlin as written, so the exclusion

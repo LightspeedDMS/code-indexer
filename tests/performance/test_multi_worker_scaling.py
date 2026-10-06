@@ -31,7 +31,7 @@ Operator note
 -------------
 The FULL 1/2/3/4-worker benchmark with the 1.7x assertion is the operator
 gate; this test may run a smaller subset (e.g. --workers 1,2 --queries 50)
-to keep CI time bounded.  The operator gate is documented in docs/architecture-invariants.md.
+to keep CI time bounded.  The operator gate is documented in docs/architecture/invariants.md.
 
 CIDX_BENCH_SERVER has no safe default: the script's --server is now a required
 argument.  Set CIDX_BENCH_SERVER to a dedicated isolated server before running.

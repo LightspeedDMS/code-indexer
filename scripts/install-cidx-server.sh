@@ -171,7 +171,7 @@ cluster.node_id):
   --cow-local-bind              This node is co-located with the CoW daemon
                                 on the same host: bind-mount --nfs-export onto
                                 --nfs-mount (mount --bind) instead of an NFS
-                                mount. See docs/cow-storage-setup.md "Bind
+                                mount. See docs/server/cow-storage-setup.md "Bind
                                 Mount on the Daemon Host".
   --workers N                   uvicorn workers (default: 1)
   --auto-update-branch BRANCH   CIDX_AUTO_UPDATE_BRANCH env var (default: --branch)
@@ -553,7 +553,7 @@ add_fstab_bind_entry() {
 # ---------------------------------------------------------------------------
 # Cluster step: CoW-daemon LOCAL BIND mount (this node co-located with the
 # daemon on the same host — it cannot NFS-mount its own export). See
-# docs/cow-storage-setup.md "Bind Mount on the Daemon Host". --nfs-export is
+# docs/server/cow-storage-setup.md "Bind Mount on the Daemon Host". --nfs-export is
 # used as the local source directory; --nfs-server is not required/used here.
 # ---------------------------------------------------------------------------
 

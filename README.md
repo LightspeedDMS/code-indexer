@@ -4,7 +4,7 @@ AI-powered semantic code search for your codebase. Find code by meaning, not jus
 
 [![CI/CD](https://img.shields.io/github/actions/workflow/status/LightspeedDMS/code-indexer/main.yml?branch=master&label=CI%2FCD)](https://github.com/LightspeedDMS/code-indexer/actions/workflows/main.yml) [![Release](https://img.shields.io/github/v/release/LightspeedDMS/code-indexer?sort=semver&color=blue)](https://github.com/LightspeedDMS/code-indexer/releases) [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/github/license/LightspeedDMS/code-indexer?color=green)](LICENSE)
 
-[Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
+[Changelog](CHANGELOG.md) | [Migration Guide](docs/archive/migration-to-v10.md) | [Architecture](docs/architecture/overview.md)
 
 ## What is CIDX?
 
@@ -39,7 +39,7 @@ cidx --version
 ```
 
 **Requirements**: Python 3.9-3.12, 4GB+ RAM, VoyageAI API key (or Cohere API key).
-For platform-specific instructions, Windows setup, and troubleshooting, see [Installation Guide](docs/installation.md).
+For platform-specific instructions, Windows setup, and troubleshooting, see [Installation Guide](docs/getting-started/installation.md).
 
 ## Quick Start
 
@@ -56,7 +56,7 @@ cidx query "user" --language python --min-score 0.7
 cidx query "save" --path-filter "*/models/*" --limit 10
 ```
 
-For comprehensive query options and search strategies, see [Query Guide](docs/query-guide.md).
+For comprehensive query options and search strategies, see [Query Guide](docs/guides/query.md).
 
 ## Key Features
 
@@ -73,7 +73,7 @@ cidx query "database connection setup" --language python
 
 Search documentation that includes diagrams, screenshots, and visual content. CIDX automatically detects and indexes images embedded in markdown and HTML files using multimodal embeddings -- no special flags needed.
 
-See: [Architecture Guide](docs/architecture.md#dual-model-architecture-v88)
+See: [Architecture Guide](docs/architecture/overview.md#dual-model-architecture-v88)
 
 ### Full-Text Search (FTS)
 
@@ -85,7 +85,7 @@ cidx query "test_.*" --fts --regex --language python
 cidx query "auth" --fts --semantic         # hybrid: keyword + semantic
 ```
 
-See: [Hybrid Search](docs/query-guide.md#hybrid-search)
+See: [Hybrid Search](docs/guides/query.md#hybrid-search)
 
 ### SCIP Code Intelligence
 
@@ -98,7 +98,7 @@ cidx scip references "authenticate"   # Find all usages
 cidx scip callchain "main" "login"    # Trace execution path
 ```
 
-See: [SCIP Code Intelligence Guide](docs/scip/README.md)
+See: [SCIP Code Intelligence Guide](docs/guides/scip.md)
 
 ### Git History Search
 
@@ -110,7 +110,7 @@ cidx query "JWT auth" --time-range-all
 cidx query "bug fix" --time-range 2024-01-01..2024-12-31
 ```
 
-See: [Temporal Search Guide](docs/temporal-search.md)
+See: [Temporal Search Guide](docs/guides/temporal-search.md)
 
 ### Real-Time Watch Mode
 
@@ -121,7 +121,7 @@ cidx config --daemon && cidx start
 cidx watch
 ```
 
-See: [Operating Modes Guide](docs/operating-modes.md#daemon-mode)
+See: [Operating Modes Guide](docs/getting-started/operating-modes.md#daemon-mode)
 
 ### AI Integration
 
@@ -131,97 +131,97 @@ Connect AI assistants to CIDX for semantic search in conversations. Supports loc
 cidx teach-ai --claude --project    # Local CLI integration
 ```
 
-See: [AI Integration Guide](docs/ai-integration.md)
+See: [AI Integration Guide](docs/getting-started/teach-ai.md)
 
 ### Langfuse Trace Sync
 
 Pull AI conversation traces from Langfuse and make them semantically searchable alongside your code. Background sync, smart deduplication, and automatic indexing.
 
-See: [Langfuse Trace Sync Guide](docs/langfuse-trace-sync.md)
+See: [Langfuse Trace Sync Guide](docs/server/langfuse-trace-sync.md)
 
 ### Inter-Repository Dependency Map
 
 A Claude-driven analysis pipeline maps domain-level relationships across all registered golden repos and stores them as a queryable, directed dependency graph. Through the server's MCP tools, AI agents can retrieve the full cross-domain graph, identify hub domains, find which domains consume a given domain, and detect stale domains that need re-analysis -- enabling cross-repository discovery and change-impact reasoning.
 
-See: [Meta-Repo Discovery Guide](docs/meta-repo-discovery.md)
+See: [Meta-Repo Discovery Guide](docs/guides/meta-repo-discovery.md)
 
 ### Multi-Provider Embedding
 
 Supports VoyageAI (default) and Cohere providers with configurable query strategies: primary-only, failover, parallel fusion (RRF), or explicit provider targeting.
 
-See: [Configuration Guide](docs/configuration.md#embedding-provider)
+See: [Configuration Guide](docs/getting-started/configuration.md#embedding-provider)
 
 ### X-Ray AST Search
 
-Tree-sitter-powered AST analysis with Rust evaluators. MCP `xray_search` accepts `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` for structural code search beyond text matching. See the [X-Ray Architecture](docs/xray-architecture.md), [X-Ray Cookbook](docs/xray-cookbook.md), and [graph-mode tool contract](src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md).
+Tree-sitter-powered AST analysis with Rust evaluators. MCP `xray_search` accepts `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` for structural code search beyond text matching. See the [X-Ray Architecture](docs/architecture/xray/architecture.md), [X-Ray Cookbook](docs/guides/xray-cookbook.md), and [graph-mode tool contract](src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md).
 
 ## Operating Modes
 
 | Mode | Cache surface | Best For | Details |
 |------|---------------|----------|---------|
-| **CLI** | None (per-invocation cold load) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
-| **Daemon** | In-process HNSW/FTS cache, single user | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
-| **Server** | In-process HNSW/FTS cache, multi-user | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
-| **Cluster** | Per-node HNSW/FTS cache, shared PostgreSQL state | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
+| **CLI** | None (per-invocation cold load) | Individual developers, quick searches | [Operating Modes](docs/getting-started/operating-modes.md#cli-mode) |
+| **Daemon** | In-process HNSW/FTS cache, single user | Active development, watch mode | [Operating Modes](docs/getting-started/operating-modes.md#daemon-mode) |
+| **Server** | In-process HNSW/FTS cache, multi-user | Team collaboration, multi-user | [Server Deployment](docs/server/deployment.md) |
+| **Cluster** | Per-node HNSW/FTS cache, shared PostgreSQL state | High availability, horizontal scaling | [Cluster Setup](docs/server/cluster-setup.md) |
 
-End-to-end query latency is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the cache surface column above describes only how each mode amortizes the in-process index lookup. See [Operating Modes Guide](docs/operating-modes.md) for measured HNSW lookup numbers and the methodology behind them.
+End-to-end query latency is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the cache surface column above describes only how each mode amortizes the in-process index lookup. See [Operating Modes Guide](docs/getting-started/operating-modes.md) for measured HNSW lookup numbers and the methodology behind them.
 
-**Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, cross-encoder reranking, semantic memory retrieval, inter-repository dependency mapping, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
+**Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, cross-encoder reranking, semantic memory retrieval, inter-repository dependency mapping, HNSW caching, and web administration. See [Operating Modes Guide](docs/getting-started/operating-modes.md#server-mode) for the full feature set.
 
-**Cluster Mode** extends Server Mode across multiple nodes sharing PostgreSQL with leader election, distributed job queuing, and cross-node configuration propagation. See [Cluster Architecture](docs/cluster-architecture.md).
+**Cluster Mode** extends Server Mode across multiple nodes sharing PostgreSQL with leader election, distributed job queuing, and cross-node configuration propagation. See [Cluster Architecture](docs/architecture/cluster.md).
 
 ## Configuration
 
 CIDX requires a VoyageAI or Cohere API key. Project settings auto-generate in `.code-indexer/config.json` on first run.
 
-See: [Configuration Guide](docs/configuration.md)
+See: [Configuration Guide](docs/getting-started/configuration.md)
 
 ## Documentation
 
 ### Getting Started
 
-- [Installation Guide](docs/installation.md) -- Setup for all platforms
-- [Query Guide](docs/query-guide.md) -- All query parameters and search strategies
-- [Configuration Guide](docs/configuration.md) -- API keys, config options, environment variables
+- [Installation Guide](docs/getting-started/installation.md) -- Setup for all platforms
+- [Query Guide](docs/guides/query.md) -- All query parameters and search strategies
+- [Configuration Guide](docs/getting-started/configuration.md) -- API keys, config options, environment variables
 
 ### Features
 
-- [SCIP Code Intelligence](docs/scip/README.md) -- Symbol navigation, dependencies, call chains
-- [Temporal Search](docs/temporal-search.md) -- Git history search with time-range filtering
-- [Operating Modes](docs/operating-modes.md) -- CLI, Daemon, Server modes explained
-- [X-Ray Architecture](docs/xray-architecture.md) -- AST search engine and sandbox
-- [X-Ray Cookbook](docs/xray-cookbook.md) -- Evaluator examples and patterns
+- [SCIP Code Intelligence](docs/guides/scip.md) -- Symbol navigation, dependencies, call chains
+- [Temporal Search](docs/guides/temporal-search.md) -- Git history search with time-range filtering
+- [Operating Modes](docs/getting-started/operating-modes.md) -- CLI, Daemon, Server modes explained
+- [X-Ray Architecture](docs/architecture/xray/architecture.md) -- AST search engine and sandbox
+- [X-Ray Cookbook](docs/guides/xray-cookbook.md) -- Evaluator examples and patterns
 
 ### AI Integration
 
-- [AI Integration Guide](docs/ai-integration.md) -- Connect AI assistants to CIDX
-- [Langfuse Trace Sync](docs/langfuse-trace-sync.md) -- Searchable AI conversation history
-- [Meta-Repo Discovery](docs/meta-repo-discovery.md) -- Cross-repo dependency mapping
+- [AI Integration Guide](docs/getting-started/teach-ai.md) -- Connect AI assistants to CIDX
+- [Langfuse Trace Sync](docs/server/langfuse-trace-sync.md) -- Searchable AI conversation history
+- [Meta-Repo Discovery](docs/guides/meta-repo-discovery.md) -- Cross-repo dependency mapping
 
 ### Server Administration
 
-- [Server Deployment](docs/server-deployment.md) -- Deploy and operate CIDX Server
-- [Cluster Architecture](docs/cluster-architecture.md) -- Multi-node design and storage abstraction
-- [Cluster Setup](docs/cluster-setup.md) -- Install and operate a cluster with PostgreSQL
-- [CoW Storage Setup](docs/cow-storage-setup.md) -- Configure CoW Storage Daemon as shared cluster storage
-- [OIDC Setup](docs/oidc-setup-and-configuration.md) -- OpenID Connect SSO configuration
-- [TOTP Elevation](docs/totp-elevation.md) -- Step-up authentication for admin operations
-- [Auto-Update Guide](docs/auto-update.md) -- Job-aware updates with graceful drain mode
-- [Fault Injection](docs/fault-injection-operator-guide.md) -- Resilience testing harness (non-prod)
-- [Server Memory Invariants](docs/server-memory-invariants.md) -- Cache tuning and memory management
+- [Server Deployment](docs/server/deployment.md) -- Deploy and operate CIDX Server
+- [Cluster Architecture](docs/architecture/cluster.md) -- Multi-node design and storage abstraction
+- [Cluster Setup](docs/server/cluster-setup.md) -- Install and operate a cluster with PostgreSQL
+- [CoW Storage Setup](docs/server/cow-storage-setup.md) -- Configure CoW Storage Daemon as shared cluster storage
+- [OIDC Setup](docs/server/auth/oidc.md) -- OpenID Connect SSO configuration
+- [TOTP Elevation](docs/server/auth/login-and-elevation.md) -- Step-up authentication for admin operations
+- [Auto-Update Guide](docs/server/auto-update.md) -- Job-aware updates with graceful drain mode
+- [Fault Injection](docs/server/fault-injection.md) -- Resilience testing harness (non-prod)
+- [Server Memory Invariants](docs/architecture/invariants.md#server-memory-invariants) -- Cache tuning and memory management
 
 ### Architecture
 
-- [Architecture Guide](docs/architecture.md) -- System design and storage architecture
-- [Dep-Map Parser](docs/depmap-parser-architecture.md) -- Dependency map module design
-- [Memory Retrieval](docs/memory-retrieval-operator-guide.md) -- Semantic memory pipeline
-- [Migration to v10](docs/migration-to-v10.md) -- Upgrading from v9.x
-- [Migration to v8](docs/migration-to-v8.md) -- Upgrading from v7.x
+- [Architecture Guide](docs/architecture/overview.md) -- System design and storage architecture
+- [Dep-Map Parser](docs/architecture/dependency-map.md) -- Dependency map module design
+- [Memory Retrieval](docs/server/memory-retrieval.md) -- Semantic memory pipeline
+- [Migration to v10](docs/archive/migration-to-v10.md) -- Upgrading from v9.x
+- [Migration to v8](docs/archive/migration-to-v8.md) -- Upgrading from v7.x
 - [Changelog](CHANGELOG.md) -- Version history and release notes
 
 ## Security
 
-Found a vulnerability? Please report it privately -- see [SECURITY.md](SECURITY.md). Do not open a public issue for security reports. The authentication stack, X-Ray evaluator sandbox, and multi-user deployment surfaces are documented under [docs/security/](docs/security/).
+Found a vulnerability? Please report it privately -- see [SECURITY.md](SECURITY.md). Do not open a public issue for security reports. The authentication stack, X-Ray evaluator sandbox, and multi-user deployment surfaces are documented under [docs/server/](docs/server/).
 
 ## Contributing
 

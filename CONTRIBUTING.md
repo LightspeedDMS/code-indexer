@@ -81,6 +81,30 @@ pre-commit run --all-files
 pre-commit run
 ```
 
+## Dependencies
+
+All dependencies are defined in `pyproject.toml`, which is the single source of truth for this project.
+
+### For Developers
+
+```bash
+# Clone and install with all development dependencies
+git clone https://github.com/LightspeedDMS/code-indexer.git
+cd code-indexer
+pip install -e ".[dev]"
+
+# Full development setup including all optional extras
+pip install -e ".[dev,cohere,cluster]"
+```
+
+### Files
+
+- `pyproject.toml` - Project configuration and all dependency definitions (primary source of truth)
+
+Note: `requirements.txt` and `requirements-dev.txt` are not used by this project. All
+dependencies are declared in `pyproject.toml` under `[project.dependencies]` and
+`[project.optional-dependencies]`.
+
 ## Developer Certificate of Origin (DCO)
 
 CIDX uses the [Developer Certificate of Origin](https://developercertificate.org/) as a lightweight contributor agreement. The DCO is a per-commit attestation that you wrote the code you are submitting, or have the right to submit it under the project's MIT license. There is no CLA to sign.
@@ -418,8 +442,8 @@ When bumping version, update ALL of these files:
 1. `src/code_indexer/__init__.py` - Primary source of truth
 2. `README.md` - Version badge
 3. `CHANGELOG.md` - New version entry
-4. `docs/architecture.md` - Version references
-5. `docs/query-guide.md` - Version references
+4. `docs/architecture/overview.md` - Version references
+5. `docs/guides/query.md` - Version references
 
 ## Getting Help
 

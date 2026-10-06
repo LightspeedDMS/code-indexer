@@ -396,7 +396,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 ```json
 {
-  "file_path": "docs/architecture.md",
+  "file_path": "docs/architecture/overview.md",
   "line_number": 0,
   "error_type": "UnsupportedLanguage",
   "error_message": "No grammar for extension '.md'"

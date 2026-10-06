@@ -9992,7 +9992,7 @@ All users must migrate to v8.0:
 5. Re-initialize: `cidx init`
 6. Re-index: `cidx index`
 
-See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
+See [Migration Guide](docs/archive/migration-to-v8.md) for complete instructions.
 
 ### Removed
 
@@ -10112,7 +10112,7 @@ See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
 ### Links
 
 - [GitHub Repository](https://github.com/LightspeedDMS/code-indexer)
-- [Migration Guide](docs/migration-to-v8.md)
+- [Migration Guide](docs/archive/migration-to-v8.md)
 - [Documentation](https://github.com/LightspeedDMS/code-indexer/blob/master/README.md)
 - [Issue Tracker](https://github.com/LightspeedDMS/code-indexer/issues)
 

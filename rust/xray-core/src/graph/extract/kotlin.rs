@@ -20,7 +20,7 @@
 //! `ReceiverEvidence::Advisory` (a bare identifier that IS itself a known
 //! in-repo type name, e.g. `JavaUtil`) -- but `apply_receiver_type_
 //! narrowing` (`bind::narrowing`) is PERMANENTLY tag-only (epic #1906,
-//! seven review rounds, see `docs/xray-architecture.md`'s
+//! seven review rounds, see `docs/architecture/xray/architecture.md`'s
 //! candidate-admission section): it can set `RECEIVER_TYPE_MATCH` on a
 //! match, but it NEVER deletes a candidate on an empty or non-matching one,
 //! under either evidence tier. So the two forms differ only in whether the

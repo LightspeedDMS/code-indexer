@@ -16,7 +16,7 @@
 //! identifier(receiver), identifier(member)}, value_arguments}`, no
 //! structural difference). At bind time, `apply_receiver_type_narrowing`
 //! (`rust/xray-core/src/graph/bind/narrowing.rs`) is PERMANENTLY tag-only
-//! (epic #1906, seven review rounds -- see `docs/xray-architecture.md`'s
+//! (epic #1906, seven review rounds -- see `docs/architecture/xray/architecture.md`'s
 //! candidate-admission section): it may set the `RECEIVER_TYPE_MATCH`
 //! reason bit, but it NEVER deletes a candidate, on an empty match or a
 //! non-matching one, under either the `Positive` or `Advisory` receiver

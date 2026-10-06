@@ -1,0 +1,605 @@
+# Installation Guide
+
+Complete installation guide for Code Indexer (CIDX) across all platforms and scenarios.
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Installation Methods](#installation-methods)
+  - [pipx (Recommended)](#pipx-recommended)
+  - [pip with Virtual Environment](#pip-with-virtual-environment)
+  - [Development Installation](#development-installation)
+- [Environment Setup](#environment-setup)
+- [Global Registry Setup](#global-registry-setup)
+- [Verification](#verification)
+- [Platform-Specific Notes](#platform-specific-notes)
+- [Upgrading](#upgrading)
+- [Troubleshooting](#troubleshooting)
+- [Uninstallation](#uninstallation)
+- [Dependencies](#dependencies)
+
+## Prerequisites
+
+### System Requirements
+
+- **Python**: Version 3.9 to 3.12 (Python 3.13 is not yet supported)
+- **C++ compiler**: Required at install time to build the HNSW vector index library from source
+  - Ubuntu/Debian: `sudo apt install gcc g++ python3-dev`
+  - RHEL/Rocky/Fedora: `sudo dnf install gcc gcc-c++ python3-devel`
+  - macOS: `xcode-select --install` (provides clang via Xcode Command Line Tools)
+- **RAM**: 4GB minimum (8GB+ recommended for large codebases)
+- **Disk Space**: 500MB for installation + index storage (varies by codebase size)
+- **Network**: Internet connection for VoyageAI API (semantic search)
+
+### Verify Python Version
+
+```bash
+python3 --version
+# Should output: Python 3.9.x or higher
+```
+
+If Python 3.9+ is not installed:
+- **Ubuntu/Debian**: `sudo apt install python3.11`
+- **macOS**: `brew install python@3.11`
+- **Windows**: Download from [python.org](https://www.python.org/downloads/)
+
+### Install pipx (Recommended)
+
+pipx isolates CIDX in its own environment and makes it globally available:
+
+```bash
+# Ubuntu/Debian
+sudo apt install pipx
+pipx ensurepath
+
+# macOS
+brew install pipx
+pipx ensurepath
+
+# Any platform with pip
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+```
+
+**After installation, restart your shell** to ensure PATH is updated.
+
+## Installation Methods
+
+### pipx (Recommended)
+
+Best for most users - provides isolated environment with global command access:
+
+```bash
+# Install the package
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
+
+# Verify installation
+cidx --version
+```
+
+**Note**: The `cidx setup-global-registry` command is deprecated as of v8.0. The filesystem backend does not require port coordination or registry setup. The command still exists but displays a deprecation notice.
+
+**If `cidx` command is not found** after installation:
+
+```bash
+# Add pipx bin directory to PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# Make permanent (add to ~/.bashrc or ~/.zshrc)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### pip with Virtual Environment
+
+For users who prefer traditional virtual environments:
+
+```bash
+# Create virtual environment
+python3 -m venv code-indexer-env
+
+# Activate environment
+source code-indexer-env/bin/activate  # Linux/macOS
+# OR
+code-indexer-env\Scripts\activate     # Windows
+
+# Install CIDX
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@latest
+
+# Verify installation
+cidx --version
+```
+
+**Note**: You must activate the virtual environment each time before using CIDX:
+```bash
+source code-indexer-env/bin/activate
+```
+
+### Development Installation
+
+For contributors or those who want to modify CIDX:
+
+```bash
+# Clone repository
+git clone https://github.com/LightspeedDMS/code-indexer.git
+cd code-indexer
+
+# Initialize submodule (required for custom hnswlib build)
+git submodule update --init --recursive
+
+# Install in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Verify installation
+cidx --version
+
+# Run tests to ensure everything works
+./fast-automation.sh
+```
+
+**Development dependencies include**:
+- pytest (testing framework)
+- ruff (linter and formatter — `ruff format` is used instead of black)
+- black (listed as dev dependency; `ruff format` is used for formatting in this project)
+- mypy (type checker)
+
+## Environment Setup
+
+CIDX requires VoyageAI API key for semantic search functionality.
+
+### 1. Get VoyageAI API Key
+
+1. Sign up at [https://www.voyageai.com/](https://www.voyageai.com/)
+2. Navigate to API Keys section
+3. Generate a new API key
+4. Copy the key (starts with `pa-...`)
+
+### 2. Configure API Key
+
+**Option A: Environment Variable (Recommended)**
+
+```bash
+# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+export VOYAGE_API_KEY="your-api-key-here"
+
+# Reload shell configuration
+source ~/.bashrc  # or ~/.zshrc
+```
+
+**Option B: .env File (Per-Project)**
+
+```bash
+# In your project directory
+echo 'VOYAGE_API_KEY=your-api-key-here' > .env.local
+```
+
+**Note**: Use `VOYAGE_API_KEY=...` format (no `export` statement) in `.env.local`. CIDX does NOT automatically load `.env.local` files. For CLI usage, set `VOYAGE_API_KEY` via shell environment variable as shown in Option A.
+
+**Option C: System-Wide Configuration**
+
+```bash
+# Add to your shell profile for persistent environment variable
+echo 'export VOYAGE_API_KEY="your-api-key-here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Note**: There is no `~/.config/cidx/config.env` file. CIDX does not read from `~/.config/cidx/`. The correct system-wide approach is to add `VOYAGE_API_KEY` to your shell profile (`.bashrc`, `.zshrc`, etc.) as shown in Option A and Option C above.
+
+### 3. Verify API Key Setup
+
+```bash
+# Check if environment variable is set
+echo $VOYAGE_API_KEY
+
+# Should output your API key
+```
+
+## Global Registry Setup (DEPRECATED - No Longer Required)
+
+**Important**: You can skip this section entirely. CIDX v8.0+ uses filesystem-based storage that doesn't require a global registry.
+
+The `~/.code-indexer/` directory is still used by CIDX server mode for storing golden repositories and user data, but does NOT require manual setup via `cidx setup-global-registry` command. The directory is created automatically when needed.
+
+## Verification
+
+### Basic Verification
+
+```bash
+# 1. Check version
+cidx --version
+# Output: code-indexer, version X.Y.Z
+
+# 2. Check help
+cidx --help
+# Should display command list
+
+# 3. Verify API key
+echo $VOYAGE_API_KEY
+# Should display your key
+```
+
+### Full Verification (Test Indexing)
+
+```bash
+# Navigate to a small test project
+cd /path/to/test/project
+
+# Initialize CIDX
+cidx init
+
+# Index the project
+cidx index
+
+# Test semantic search
+cidx query "your search term" --limit 5
+
+# Cleanup
+cidx clean-data
+```
+
+If all steps complete without errors, installation is successful!
+
+## Platform-Specific Notes
+
+### Linux (Ubuntu/Debian)
+
+**Additional dependencies for SCIP indexing**:
+```bash
+# Java projects
+sudo apt install openjdk-17-jdk
+
+# Node.js projects
+sudo apt install nodejs npm
+
+# Python projects (already have Python)
+```
+
+**PATH issues**: If `cidx` not found after pipx install:
+```bash
+pipx ensurepath
+# Restart shell
+```
+
+### macOS
+
+**Homebrew recommended** for dependencies:
+```bash
+# Java projects
+brew install openjdk@17
+
+# Node.js projects
+brew install node
+
+# Python projects (already have Python via Homebrew)
+```
+
+**Apple Silicon (M1/M2/M3) Notes**:
+- Use ARM-native Python (`brew install python`)
+- VoyageAI API works natively, no Rosetta needed
+
+### Windows
+
+**Use PowerShell or Windows Terminal** (not CMD):
+
+```powershell
+# Install Python from python.org
+# Ensure "Add Python to PATH" is checked during installation
+
+# Install pipx
+python -m pip install --user pipx
+python -m pipx ensurepath
+
+# Restart terminal
+
+# Install CIDX
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
+```
+
+**Path issues**: If `cidx` not found:
+```powershell
+# Add to PATH manually
+$env:Path += ";$env:USERPROFILE\.local\bin"
+
+# Make permanent via System Environment Variables
+```
+
+**SCIP indexing**: Install required SDKs:
+- **Java**: [OpenJDK 17](https://adoptium.net/)
+- **Node.js**: [Node.js LTS](https://nodejs.org/)
+- **.NET**: [.NET SDK](https://dotnet.microsoft.com/download)
+
+## Upgrading
+
+### Upgrade to Latest Version
+
+**pipx installation**:
+```bash
+pipx upgrade code-indexer
+```
+
+**pip installation**:
+```bash
+# Activate virtual environment first
+source code-indexer-env/bin/activate
+
+# Upgrade
+pip install --upgrade git+https://github.com/LightspeedDMS/code-indexer.git@master
+```
+
+### Upgrade to Specific Version
+
+```bash
+# pipx
+pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@latest
+
+# pip
+pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@latest
+```
+
+### Post-Upgrade Steps
+
+After upgrading, you may need to reindex projects:
+
+```bash
+# Navigate to project
+cd /path/to/project
+
+# Clear old indexes
+cidx clean-data
+
+# Reindex with new version
+cidx index
+```
+
+**Migration guides**: See [Migration Guide](../archive/migration-to-v8.md) for major version upgrades.
+
+## Troubleshooting
+
+### Command Not Found: cidx
+
+**Symptoms**: `bash: cidx: command not found`
+
+**Solutions**:
+
+1. **Ensure pipx bin directory in PATH**:
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
+
+2. **Verify installation**:
+   ```bash
+   pipx list | grep code-indexer
+   ```
+
+3. **Reinstall**:
+   ```bash
+   pipx uninstall code-indexer
+   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
+   ```
+
+### Python Version Too Old
+
+**Symptoms**: `ERROR: This package requires Python >=3.9`
+
+**Solutions**:
+
+1. **Check Python version**:
+   ```bash
+   python3 --version
+   ```
+
+2. **Install Python 3.9+**:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt install python3.11
+
+   # macOS
+   brew install python@3.11
+   ```
+
+3. **Use specific Python version**:
+   ```bash
+   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
+   ```
+
+### VoyageAI API Key Not Found
+
+**Symptoms**: `ERROR: VOYAGE_API_KEY environment variable not set`
+
+**Solutions**:
+
+1. **Set environment variable**:
+   ```bash
+   export VOYAGE_API_KEY="your-key-here"
+   ```
+
+2. **Add to shell profile**:
+   ```bash
+   echo 'export VOYAGE_API_KEY="your-key-here"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+3. **Note on .env files**: CIDX does NOT automatically load `.env` or `.env.local` files.
+   Set `VOYAGE_API_KEY` via your shell profile (`.bashrc`, `.zshrc`) as shown in option 2 above.
+
+### Permission Denied Errors
+
+**Symptoms**: `Permission denied: '.code-indexer'`
+
+**Solutions**:
+
+1. **Check directory permissions**:
+   ```bash
+   ls -la .code-indexer
+   ```
+
+2. **Fix ownership**:
+   ```bash
+   sudo chown -R $USER:$USER .code-indexer
+   ```
+
+3. **Fix permissions**:
+   ```bash
+   chmod -R 755 .code-indexer
+   ```
+
+### Installation Fails: Build Dependencies Missing
+
+**Symptoms**: `ERROR: Failed building wheel for [package]`
+
+**Solutions**:
+
+1. **Ubuntu/Debian - Install build tools**:
+   ```bash
+   sudo apt install build-essential python3-dev
+   ```
+
+2. **macOS - Install Xcode Command Line Tools**:
+   ```bash
+   xcode-select --install
+   ```
+
+3. **Windows - Install Visual C++ Build Tools**:
+   - Download from [Microsoft](https://visualstudio.microsoft.com/downloads/)
+   - Select "Desktop development with C++"
+
+### Global Registry Not Created (DEPRECATED Issue)
+
+**Note**: If you see registry-related errors, you're likely using an outdated workflow or documentation. The `cidx setup-global-registry` command is deprecated since v8.0. CIDX no longer requires `registry.json` for normal CLI operations. The `~/.code-indexer/` directory is used by CIDX server mode and created automatically when needed. CIDX v8.0+ uses filesystem-based storage without requiring registry setup.
+
+### SCIP Indexing Fails
+
+**Symptoms**: `ERROR: No SCIP indexer found for language`
+
+**Solutions**:
+
+1. **Install language-specific dependencies**:
+   ```bash
+   # Java/Kotlin
+   sudo apt install openjdk-17-jdk  # Linux
+   brew install openjdk@17          # macOS
+
+   # TypeScript/JavaScript
+   sudo apt install nodejs npm      # Linux
+   brew install node                # macOS
+
+   # C#
+   # Install .NET SDK from microsoft.com
+
+   # Go
+   sudo apt install golang-go       # Linux
+   brew install go                  # macOS
+   ```
+
+2. **Verify indexer availability**:
+   ```bash
+   cidx scip status
+   ```
+
+## Uninstallation
+
+### Remove CIDX
+
+**pipx installation**:
+```bash
+pipx uninstall code-indexer
+```
+
+**pip installation**:
+```bash
+# Activate virtual environment
+source code-indexer-env/bin/activate
+
+# Uninstall
+pip uninstall code-indexer
+
+# Remove virtual environment
+deactivate
+rm -rf code-indexer-env
+```
+
+### Clean Up Data
+
+```bash
+# Remove global registry
+rm -rf ~/.code-indexer
+
+# Remove per-project indexes
+cd /path/to/project
+cidx clean-data  # Run before uninstalling
+# OR manually
+rm -rf .code-indexer
+```
+
+### Complete Cleanup
+
+```bash
+# 1. Uninstall CIDX
+pipx uninstall code-indexer
+
+# 2. Remove global registry
+rm -rf ~/.code-indexer
+
+# 3. Remove environment variables (edit shell profile)
+# Remove: export VOYAGE_API_KEY="..."
+
+# 4. Remove .env files from projects
+find . -name ".env.local" -type f -delete
+```
+
+## Dependencies
+
+All dependencies are defined in `pyproject.toml`, which is the single source of truth for this project.
+
+### For Users
+
+Install the package and its core dependencies:
+
+```bash
+pip install git+https://github.com/LightspeedDMS/code-indexer.git
+```
+
+#### Optional extras
+
+The following optional extras are available:
+
+```bash
+# Cohere embedding provider support (alternative to VoyageAI)
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cohere]"
+
+# PostgreSQL cluster mode (required for multi-node deployments)
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cluster]"
+
+# Both optional providers
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cohere,cluster]"
+```
+
+### Notable dependencies
+
+- `hnswlib` is installed from a custom fork that exposes the `check_integrity()` method absent
+  from the PyPI version. This requires `gcc`/`g++` at install time. See
+  `docs/server/hnswlib-custom-build.md` for details.
+- `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` are pinned core dependencies
+  required for X-Ray AST-aware code search (included since v10.2.1).
+
+---
+
+## Next Steps
+
+After successful installation:
+
+1. **Index your first project**: [Quick Start Guide](../../README.md#quick-start)
+2. **Learn query syntax**: [Query Guide](../guides/query.md)
+3. **Explore SCIP**: [SCIP Code Intelligence](../guides/scip.md)
+4. **Set up watch mode**: [Operating Modes](operating-modes.md)
+
+---
+
+## Getting Help
+
+- **Documentation**: [Main README](../../README.md)
+- **Issues**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- **Architecture**: [Architecture Guide](../architecture/overview.md)
+- **Migration**: [Migration Guide](../archive/migration-to-v8.md)
+
+---

@@ -15,7 +15,7 @@
 //! the seven defects was caught by the existing suite, and not one was
 //! found by reading a diff. Every one was found by driving a real,
 //! javac-valid adversarial fixture through the actual `build_repo_graph`
-//! front door. #1910's salvage (see `docs/xray-architecture.md`'s
+//! front door. #1910's salvage (see `docs/architecture/xray/architecture.md`'s
 //! candidate-admission section) made both narrowing passes PERMANENTLY
 //! tag-only, closing this defect class entirely -- but "closed today"
 //! and "guarded against tomorrow" are different claims. Without this
@@ -59,7 +59,7 @@
 //!   root cause as C1 (no assertion in the probe either, `println!`-only)
 //!   plus a second dead premise -- it measured the A1 within-file
 //!   nested-class collision through `direct_lexical_parent`, a substrate
-//!   the salvage deleted entirely (see `docs/xray-architecture.md`'s
+//!   the salvage deleted entirely (see `docs/architecture/xray/architecture.md`'s
 //!   "What survived the revert" item 5). Nothing left to measure.
 //!
 //! Every fixture below uses neutral, public-repository-safe naming
