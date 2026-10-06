@@ -11042,7 +11042,8 @@ def ssh_keys_page(request: Request):
     Listing key metadata requires the caller's own elevation window, like
     the REST twin ``GET /api/ssh-keys`` (``require_elevation()``): with
     enforcement on and no window, the admin is sent to the elevation page,
-    which returns here afterwards. Enforcement off passes through.
+    which returns here afterwards (query string kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
     """
     session = _require_admin_session(request)
     if not session:
@@ -11054,8 +11055,11 @@ def ssh_keys_page(request: Request):
         # Error dict when no valid window exists; None when the window is valid.
         elev_err = mfa_routes._check_elevation_window(request, session.username)
         if elev_err is not None:
+            return_to = request.url.path
+            if request.url.query:
+                return_to = f"{return_to}?{request.url.query}"
             return RedirectResponse(
-                f"{mfa_routes._ELEVATE_PAGE}?next={quote(request.url.path, safe='')}",
+                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
                 status_code=status.HTTP_303_SEE_OTHER,
             )
 
@@ -11345,10 +11349,30 @@ def logs_page(
         search: Search by message text
         node_id: Filter by cluster node ID (Story #501 AC4)
         page: Page number for pagination
+
+    Reading server logs requires the caller's own elevation window, like
+    the MCP twin ``admin_logs_query`` (``@require_mcp_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards (filters kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
     """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+
+    if dependencies._is_elevation_enforcement_enabled():
+        from . import mfa_routes
+
+        # Error dict when no valid window exists; None when the window is valid.
+        elev_err = mfa_routes._check_elevation_window(request, session.username)
+        if elev_err is not None:
+            return_to = request.url.path
+            if request.url.query:
+                return_to = f"{return_to}?{request.url.query}"
+            return RedirectResponse(
+                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
 
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
@@ -11402,7 +11426,11 @@ def logs_page(
     return response
 
 
-@web_router.get("/partials/logs-list", response_class=HTMLResponse)
+@web_router.get(
+    "/partials/logs-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def logs_list_partial(
     request: Request,
     level: Optional[str] = None,
@@ -11413,6 +11441,11 @@ def logs_list_partial(
 ):
     """
     Partial endpoint for logs list - used by HTMX for dynamic updates (Story #664 AC2, Story #501 AC4).
+
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``, which the shared elevation interceptor turns
+    into the TOTP modal. Enforcement off passes through.
 
     Args:
         request: FastAPI request object
@@ -11477,7 +11510,10 @@ def logs_list_partial(
     return response
 
 
-@web_router.get("/logs/export")
+@web_router.get(
+    "/logs/export",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def export_logs_web(
     request: Request,
     format: str = "json",
@@ -11488,6 +11524,9 @@ def export_logs_web(
     Export logs to file in JSON or CSV format (Story #667 AC1).
 
     Web UI endpoint that triggers browser download of log export file.
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``. Enforcement off passes through.
 
     Args:
         request: FastAPI request object

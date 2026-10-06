@@ -19,7 +19,10 @@ Test suite:
   test_user_mutation_routes_require_elevation -- key user-CRUD routes wired
   test_config_totp_elevation_route_requires_elevation -- config handler gated
   test_inline_gated_pages_send_unelevated_admin_to_elevate -- GET pages that
-      list sensitive metadata (e.g. /ssh-keys) redirect to /admin/elevate
+      list sensitive metadata (e.g. /ssh-keys, /logs) redirect to /admin/elevate
+  test_dependency_gated_reads_require_elevation -- GET reads listed in
+      _DEPENDENCY_ELEVATION_GATED_READS (the logs list partial and the logs
+      export) carry require_elevation()
   test_exempt_routes_accessible_without_elevation -- logout/elevate not gated
 """
 
@@ -77,8 +80,20 @@ _EXEMPT_ROUTES: frozenset = frozenset(
 # GET pages (web_router-relative) that list sensitive metadata and enforce
 # elevation inline: with enforcement on and no elevation window, they
 # redirect to /admin/elevate?next=<page> instead of rendering.  Their REST
-# twins carry require_elevation() (e.g. GET /api/ssh-keys).
-_INLINE_ELEVATION_GATED_PAGES: frozenset = frozenset(["/ssh-keys"])
+# twins carry require_elevation() (e.g. GET /api/ssh-keys) or, for /logs,
+# the MCP twin admin_logs_query carries @require_mcp_elevation().
+_INLINE_ELEVATION_GATED_PAGES: frozenset = frozenset(["/ssh-keys", "/logs"])
+
+# GET routes (method, web_router-relative path) that return sensitive data
+# to fetch()/HTMX or as a download and carry require_elevation(): without a
+# window they answer 403 elevation_required, which the shared elevation
+# interceptor turns into the TOTP modal.
+_DEPENDENCY_ELEVATION_GATED_READS: frozenset = frozenset(
+    [
+        ("GET", "/partials/logs-list"),
+        ("GET", "/logs/export"),
+    ]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +304,16 @@ class TestAdminElevationGating:
         assert _route_has_elevation_dep(route), (
             "POST /config/{section} must have require_elevation() — "
             "it covers the totp_elevation kill-switch config section."
+        )
+
+    @pytest.mark.parametrize("method,path", sorted(_DEPENDENCY_ELEVATION_GATED_READS))
+    def test_dependency_gated_reads_require_elevation(self, method: str, path: str):
+        """Each GET read in _DEPENDENCY_ELEVATION_GATED_READS has
+        require_elevation() wired (decorator deps or param Depends)."""
+        route = _find_route(path, method=method)
+        assert route is not None, f"{method} {path!r} not registered in web_router"
+        assert _route_has_elevation_dep(route), (
+            f"{method} {path} is missing require_elevation() dependency."
         )
 
     @pytest.mark.parametrize("page", sorted(_INLINE_ELEVATION_GATED_PAGES))

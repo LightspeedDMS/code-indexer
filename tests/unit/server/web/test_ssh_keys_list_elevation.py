@@ -231,6 +231,34 @@ def test_web_page_without_elevation_sends_admin_to_elevate(
     assert key_name not in response.text
 
 
+def test_web_page_elevate_redirect_keeps_query_string(
+    client, accounts, esm, totp, key_name
+) -> None:
+    """After elevating, the admin returns to the page with its query string;
+    the elevate page's _sanitize_next accepts it as a same-site path."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from code_indexer.server.web.elevation_web_routes import _sanitize_next
+
+    admin = _admin(accounts, totp)
+    cookie = _session_cookie(admin, UserRole.ADMIN)
+    client.cookies.clear()
+    client.cookies.set(web_auth.SESSION_COOKIE_NAME, cookie)
+    try:
+        with enforcement(True):
+            response = client.get(f"{SSH_KEYS_PAGE}?view=managed")
+    finally:
+        client.cookies.clear()
+
+    assert response.status_code == 303, response.text[:300]
+    location = urlsplit(response.headers["location"])
+    assert location.path == "/admin/elevate"
+    next_value = parse_qs(location.query)["next"][0]
+    assert next_value == f"{SSH_KEYS_PAGE}?view=managed"
+    assert _sanitize_next(next_value) == next_value
+    assert key_name not in response.text
+
+
 def test_web_page_with_elevation_lists_keys(
     client, accounts, esm, totp, key_name
 ) -> None:

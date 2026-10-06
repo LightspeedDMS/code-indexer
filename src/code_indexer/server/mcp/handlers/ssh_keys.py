@@ -228,9 +228,15 @@ def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error deleting SSH key", e)
 
 
+@require_mcp_elevation()
 def _show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Get the public key content for copy/paste (inner handler).
+
+    Elevation-gated to match the REST twin (GET /api/ssh-keys/{name}/public
+    carries require_elevation()) and list_ssh_keys: without an active
+    elevation window neither the key nor whether the name exists is
+    revealed.
 
     Args:
         args: Dict with name
@@ -326,13 +332,13 @@ def handle_manage_ssh_key(
     Dispatches to inner handlers based on the 'action' parameter:
       - 'create'      -> _create(args, user)       [elevation required]
       - 'delete'      -> _delete(args, user)       [elevation required]
-      - 'show_public' -> _show_public(args, user)  [read-only, no elevation]
+      - 'show_public' -> _show_public(args, user)  [elevation required]
       - 'assign_host' -> _assign_host(args, user)  [elevation required]
 
     Admin role required in the handler (``_admin_role_first``), like every
     REST ``/api/ssh-keys`` twin, however the call was admitted.
-    Elevation: create/delete/assign_host (and the separate list_ssh_keys
-    tool) are decorated with @require_mcp_elevation() individually
+    Elevation: create/delete/show_public/assign_host (and the separate
+    list_ssh_keys tool) are decorated with @require_mcp_elevation() individually
     (Story #992 pattern -- inner handlers own the decorator, not this
     dispatcher). **kwargs is forwarded so a caller-supplied session_key
     reaches those decorators; this function itself declares
@@ -359,7 +365,7 @@ def handle_manage_ssh_key(
     if action == "delete":
         return _delete(args, user, **kwargs)  # type: ignore[no-any-return]
     if action == "show_public":
-        return _show_public(args, user)
+        return _show_public(args, user, **kwargs)  # type: ignore[no-any-return]
     # action == "assign_host"
     return _assign_host(args, user, **kwargs)  # type: ignore[no-any-return]
 
