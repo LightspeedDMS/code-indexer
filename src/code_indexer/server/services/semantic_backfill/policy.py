@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -43,6 +44,10 @@ _NON_SEMANTIC = ("multimodal", "temporal", "tantivy")
 #: Marker (on the clone's .code-indexer) for a repo with no indexable code — it
 #: legitimately embeds to 0 vectors, so ``is_present`` honours it to stop re-embedding.
 SEMANTIC_NO_FILES_MARKER = ".semantic_backfill_no_files.skip"
+#: Directories that are not the repo's own content when deciding "all files are empty".
+_CONTENT_WALK_SKIP = frozenset({".git", ".code-indexer"})
+#: A file larger than this is assumed to carry real content without reading it all.
+_EMPTY_PROBE_BYTES = 4096
 
 
 class SemanticReindexProducedNoVectorsError(RuntimeError):
@@ -113,6 +118,41 @@ def _discovered_indexable_files(clone_path: Path) -> Optional[int]:
     return tf if isinstance(tf, int) else None
 
 
+def _clone_has_only_empty_files(clone_path: Path) -> bool:
+    """True iff the clone holds AT LEAST ONE of its own files and every one of them is
+    empty (no non-whitespace bytes).
+
+    This separates two cases that both reach the 0-vector branch with ``discovered > 0``:
+
+    * The repo really is a placeholder — e.g. a single 0-byte ``README.md``. ``cidx index``
+      DISCOVERS the file (``total_files: 1``) but there is nothing to chunk, so 0 vectors is
+      the CORRECT outcome. Failing loud here retries the repo forever and never converges.
+    * The clone is empty/removed under a progress file that still claims files. That is the
+      silent-empty failure this guard exists for, and it must keep failing loud.
+
+    The distinction is "files present but empty" vs "files absent", so a vanished clone
+    returns False (no files seen) and still raises. Anything unreadable also returns False:
+    we cannot confirm emptiness, so we err toward fail-loud rather than mask a real failure.
+    """
+    seen_file = False
+    try:
+        for root, dirs, files in os.walk(clone_path):
+            dirs[:] = [d for d in dirs if d not in _CONTENT_WALK_SKIP]
+            for name in files:
+                path = Path(root) / name
+                try:
+                    if path.stat().st_size > _EMPTY_PROBE_BYTES:
+                        return False  # too big to be empty — real content
+                    if path.read_bytes().strip():
+                        return False  # non-whitespace content
+                except OSError:
+                    return False  # unreadable → cannot confirm → fail loud
+                seen_file = True
+    except OSError:
+        return False
+    return seen_file
+
+
 def semantic_index_present(repo_path: Path) -> bool:
     """Count-based presence: 'present' iff the repo has REAL vectors (vector_count > 0),
     OR it is a marked no-indexable-files repo. A present-but-empty index (hnsw file exists,
@@ -160,9 +200,12 @@ def semantic_backfill_reindex_executor(
 
     # 0 vectors — distinguish a legitimately file-less repo from a real (silent) failure.
     discovered = _discovered_indexable_files(clone)
-    if discovered == 0:
-        # Genuinely file-less (cidx index found nothing to index → no session written).
-        # Mark it so the sweep stops re-embedding a repo that has nothing to embed.
+    # Two routes to "nothing to embed": cidx discovered no files at all, OR it discovered
+    # files that are all empty (a placeholder repo — e.g. one 0-byte README). Both embed to
+    # 0 vectors legitimately, and both must stop being retried. A clone whose files are
+    # MISSING is not either case and still falls through to fail-loud below.
+    if discovered == 0 or _clone_has_only_empty_files(clone):
+        # Nothing to embed. Mark it so the sweep stops re-embedding this repo.
         marker = clone / ".code-indexer" / SEMANTIC_NO_FILES_MARKER
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
@@ -170,8 +213,10 @@ def semantic_backfill_reindex_executor(
         except OSError:
             pass
         logger.info(
-            "semantic_backfill: '%s' has no indexable files → marked no-files skip",
+            "semantic_backfill: '%s' has nothing to embed (discovered=%s) → marked "
+            "no-files skip",
             alias,
+            discovered,
         )
         return {"status": "skipped_no_files", "alias": alias}
 
