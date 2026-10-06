@@ -5,7 +5,7 @@ OAuth ``POST /oauth/authorize`` routes through TestClient with a real
 SQLite UserManager, a real audit store and a real DB-backed throttle whose
 clock is injected (time is advanced, never slept).  Only the Web form's CSRF
 check, its session manager and the REST token bucket (given room for the
-attack loops) are replaced.
+repeated-attempt loops) are replaced.
 
 Semantics under test (max_attempts=3, base window 5 s, cap 120 s):
 
@@ -50,7 +50,7 @@ from code_indexer.server.services.audit_log_service import AuditLogService
 
 _ADMIN = "admin"
 _PASSWORD = "SecureP@ssw0rd!XyZ789"
-_WRONG = "attacker-guess-value"
+_WRONG = "wrong-password-value"
 _MAX = 3
 _BASE = 5
 _CAP = 120
@@ -316,7 +316,7 @@ def test_unknown_username_is_indistinguishable_from_a_known_one(world, door):
 
 
 def test_admin_cannot_be_permanently_locked_by_someone_else(world, door):
-    # An attacker hammers the admin account for a long time ...
+    # Repeated wrong passwords for admin over a long period ...
     for _ in range(25):
         response = door.post(_ADMIN, _WRONG)
         if response.status_code == 429:
@@ -476,8 +476,8 @@ def _raw_surrogate_request(door: _Door) -> Tuple[str, Dict[str, Any]]:
 
 
 # REST's LoginRequest model rejects such a name before the login handler
-# runs (rendering that validation error currently answers 500, which predates
-# A2 and is filed separately), so the throttle never sees it there.  OAuth's
+# runs (rendering that validation error currently answers 500, tracked
+# separately), so the throttle never sees it there.  OAuth's
 # authorize door passes the name to the throttle and the user store.
 @pytest.mark.parametrize("door_name", ["oauth"])
 def test_lone_surrogate_username_is_an_ordinary_failure(world, monkeypatch, door_name):

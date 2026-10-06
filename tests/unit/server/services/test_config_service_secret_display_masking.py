@@ -1,6 +1,6 @@
 """``ConfigService.get_all_settings()`` (the Config page's data) shows stored
-API keys only as a mask revealing at most their last 4 characters
-(finding 058). Real ConfigService over a temp server directory."""
+API keys only as a mask revealing at most their last 4 characters.
+Real ConfigService over a temp server directory."""
 
 from __future__ import annotations
 

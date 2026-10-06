@@ -200,8 +200,8 @@ A login was refused. `cidx_details`: `method`, `stage` (`credentials`,
 `mfa_code`, `challenge`, `issuance`), `reason` (`bad_credentials`,
 `mfa_code_invalid`, `challenge_invalid_or_expired`, `account_locked`,
 `rate_limited`, `password_expired`, `server_error`). `account_locked` is
-legacy and no longer emitted (since 12.83.0 there is no account lockout, only
-a progressive login throttle); `rate_limited` marks the failed attempt that
+legacy and no longer emitted (logins use a progressive throttle with no
+lockout); `rate_limited` marks the failed attempt that
 starts the throttle, and attempts refused while it runs (HTTP 429) write no
 event. The typed username is
 recorded only when it names an existing account. Otherwise cidx records

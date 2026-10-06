@@ -12,7 +12,7 @@ dispatcher and the activated-repo REST routes apply.
   listed (so its owner can find and deactivate it) as its alias plus
   ``access_revoked`` only, never its metadata.
 
-Driven through the real front door of a real app over A15's real services
+Driven through the real front door of a real app over the real services
 (see activated_repo_access_env). Aliases and usernames are neutral
 placeholders.
 """

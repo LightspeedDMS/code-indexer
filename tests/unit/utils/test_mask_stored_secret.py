@@ -1,5 +1,4 @@
-"""Display masking of stored secrets reveals at most the last 4 characters
-(finding 058)."""
+"""Display masking of stored secrets reveals at most the last 4 characters."""
 
 from __future__ import annotations
 

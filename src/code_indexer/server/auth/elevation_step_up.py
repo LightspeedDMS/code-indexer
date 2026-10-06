@@ -9,8 +9,8 @@ after that:
 1. the attempt is reserved in the progressive throttle before any code is
    checked: while the key's backoff window runs the request is refused,
    even with a correct code, and produces no elevation outcome row.  There
-   is no lock state, but the key is the username, so someone sending wrong
-   codes for that account can keep its step-up throttled.  If the throttle
+   is no lock state.  The key is the username; every window ends on its
+   own (cap 120 s).  If the throttle
    store stays locked past its bound the outcome is ``BUSY`` (no code is
    checked; the door answers "try again shortly");
 2. the code is verified: a recovery code opens a ``totp_repair`` window, a

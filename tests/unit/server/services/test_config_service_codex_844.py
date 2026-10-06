@@ -104,7 +104,7 @@ def test_codex_integration_update_roundtrip(
 
 def test_codex_api_key_stored_and_returned_masked(config_service):
     """get_all_settings() must return a masked api_key revealing at most the
-    last 4 characters (finding 058), not the raw stored value."""
+    last 4 characters, not the raw stored value."""
     config_service.update_setting(
         "codex_integration", "api_key", "dummy-api-key-not-real"
     )
@@ -155,7 +155,7 @@ def test_api_key_display_mask_preserved(config_service, stored_key):
 
 @pytest.mark.parametrize("blank", ["", None])
 def test_blank_api_key_keeps_stored_key(config_service, blank):
-    """The key is write-only: a blank value means "keep" (as for A6's
+    """The key is write-only: a blank value means "keep" (as for the
     Langfuse secret_key and OIDC client_secret)."""
     config_service.update_setting("codex_integration", "api_key", "dummy-real-key")
 

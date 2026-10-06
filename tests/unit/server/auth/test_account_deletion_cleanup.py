@@ -338,8 +338,8 @@ class TestStartupOrphanSweep:
         stores.user_manager.create_user("bob", PASSWORD, UserRole.ADMIN)
         alice = seed_account_rows(stores, "alice")
         bob = seed_account_rows(stores, "bob")
-        # The unaudited primitive removes only the account row: the leftovers
-        # an earlier release's deletion produced.
+        # The unaudited primitive removes only the account row: rows left
+        # without an owning account.
         assert stores.user_manager.delete_user("alice")
 
         purger = build_account_data_purger("sqlite", stores.server_dir, None)

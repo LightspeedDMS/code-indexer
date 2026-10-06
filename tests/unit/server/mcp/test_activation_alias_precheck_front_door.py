@@ -3,7 +3,7 @@ by its source repositories, the same rule the query access filter applies.
 
 Driven through the real ``POST /mcp`` endpoint of a real app (``create_app``
 via ``isolated_app``, never ~/.cidx-server). The services the tools reach
-are A15's real ones (QueryAccessEnv): AccessFilteringService over a real
+are the real ones (QueryAccessEnv): AccessFilteringService over a real
 GroupAccessManager, real ActivatedRepoManager activations (real git clones),
 GoldenRepoManager, global registry and alias files. Only the external
 embedding + HNSW search boundary is replaced.

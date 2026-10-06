@@ -1,5 +1,5 @@
 """``token_suffix`` in a git credential listing follows the stored-secret
-display rule (finding 058): nothing for a token under 20 characters, the
+display rule: nothing for a token under 20 characters, the
 last 4 for a longer one. Real GitCredentialManager over a real SQLite DB;
 the Web list partial is rendered with the real template environment.
 """

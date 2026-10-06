@@ -785,8 +785,7 @@ _UNSAFE_KEY_ERROR = "provider API key must be printable ASCII"
 @pytest.fixture
 def listening_url() -> Iterator[str]:
     """A real local TCP listener that accepts connections and never answers:
-    a request with the stored key would reach header serialization, where
-    the HTTP layer rejects (and quotes, escaped) a header-unsafe key."""
+    a header-unsafe key must never reach header serialization."""
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:

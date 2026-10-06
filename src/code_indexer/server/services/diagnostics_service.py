@@ -48,8 +48,8 @@ API_TIMEOUT_SECONDS = 30.0
 # Timeout for SSH connectivity checks (seconds) - Story S5 AC6
 SSH_TIMEOUT_SECONDS = 60.0
 
-# Result detail keys that once carried part of a stored secret (finding 058);
-# dropped whenever persisted results are rebuilt, so old rows never serve them.
+# Retired result detail keys: dropped whenever persisted results are rebuilt,
+# never served.
 _RETIRED_SECRET_DETAIL_KEYS = frozenset({"token_prefix"})
 
 # Cache TTL by category (per epic spec)

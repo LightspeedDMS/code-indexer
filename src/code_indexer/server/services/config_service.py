@@ -730,7 +730,7 @@ class ConfigService:
             },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
-                # Stored keys: at most the last 4 characters (finding 058).
+                # Stored keys: at most the last 4 characters.
                 "anthropic_api_key": (
                     mask_stored_secret(
                         config.claude_integration_config.anthropic_api_key
@@ -2610,7 +2610,7 @@ class ConfigService:
 
         Mirrors _update_claude_cli_setting but scoped to CodexIntegrationConfig.
         api_key is write-only: a blank value or the exact display mask that
-        get_all_settings() returns keeps the stored key (finding 058).
+        get_all_settings() returns keeps the stored key.
         """
         from code_indexer.server.utils.config_manager import CodexIntegrationConfig
 

@@ -1,7 +1,7 @@
 """Shared front-door environment for the activated-repository access tests.
 
 A real app (``create_app`` via ``isolated_app``, never ~/.cidx-server)
-whose routes reach A15's real services (QueryAccessEnv): AccessFilteringService
+whose routes reach the real services (QueryAccessEnv): AccessFilteringService
 over a real GroupAccessManager, real ActivatedRepoManager activations (real
 git clones), GoldenRepoManager and the global registry. Nothing about the
 access decision is mocked.

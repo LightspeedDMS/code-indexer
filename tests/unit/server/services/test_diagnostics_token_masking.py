@@ -1,5 +1,5 @@
 """The GitHub/GitLab token diagnostics never expose a stored token's leading
-characters; at most the last 4 are shown (finding 058).
+characters; at most the last 4 are shown.
 
 Real ``DiagnosticsService`` over a real SQLite server database and the real
 ``CITokenManager`` it builds. The stored tokens fail the format check (as a
@@ -71,7 +71,7 @@ async def test_gitlab_invalid_format_details_show_only_last_four(tmp_path) -> No
     _assert_masked(await service.check_gitlab_token(), GITLAB_LEGACY_TOKEN)
 
 
-# --- Rows persisted before finding 058 still carry ``token_prefix`` ---------
+# --- Persisted rows carrying the retired ``token_prefix`` key ---------------
 
 _LEGACY_PREFIX = "zqgh-examp"
 _LEGACY_RESULTS = [

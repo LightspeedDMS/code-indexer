@@ -57,7 +57,7 @@ def mask_stored_secret(value: Any) -> str:
     """Display form of a stored secret: ``"••••••••abcd"`` (last 4 only) for
     a secret of 20+ characters, ``"configured"`` for a shorter one, and
     ``""`` when nothing is stored. Never reveals a leading character (the
-    provider prefix plus entropy is what screenshots and exports leak)."""
+    leading characters identify the provider and part of the secret)."""
     if not value:
         return ""
     tail = stored_secret_tail(value)

@@ -1,4 +1,4 @@
-"""Progressive per-username login throttle (release 12.83.0, item A2).
+"""Progressive per-username login throttle.
 
 A login is THROTTLED after repeated failures; there is no lock state.
 Each attempt is RESERVED (``begin_attempt``) before its password is
@@ -6,8 +6,8 @@ checked: while a backoff window runs the attempt is refused after a plain
 read (no write lock); otherwise it is counted and admitted in one row-locked
 transaction.  The attempt that reaches ``max_attempts`` starts the window;
 each later admitted attempt doubles it, capped.  A passed check clears the
-key (``record_success``).  Accepted residual: because the key is the
-username, someone who keeps failing for an account can keep it throttled.
+key (``record_success``).  The key is the username; windows always end
+(cap).
 
 The state is DB-backed (shared SQLite file in solo mode, PostgreSQL in a
 cluster) so every worker/node sees it.  Time is controlled by an injected

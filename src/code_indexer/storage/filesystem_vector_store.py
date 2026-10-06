@@ -105,9 +105,9 @@ def _content_unavailable(
 ) -> Tuple[str, Dict[str, Any]]:
     """Result for a chunk whose content could not be read (Bug #1991).
 
-    The content is EMPTY -- an exception message is never presented as code
-    (it also used to leak absolute server paths). Callers detect the state via
-    ``staleness["content_unavailable"]``; the details go to the log.
+    The content is EMPTY -- an exception message is never presented as code.
+    Callers detect the state via ``staleness["content_unavailable"]``; the
+    details go to the log.
     """
     first = _first_unavailable_report((str(project_root), file_path))
     logging.getLogger(__name__).log(

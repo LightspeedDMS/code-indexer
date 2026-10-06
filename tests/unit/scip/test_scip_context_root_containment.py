@@ -509,9 +509,7 @@ class TestReadIsVerifiedAfterOpen:
     def test_symlink_swapped_after_check_returns_no_outside_content(
         self, tmp_path, monkeypatch
     ):
-        """The file actually opened must lie inside the root, not just the
-        path that was checked: swap the checked file for an outside symlink
-        right after the containment check resolves it."""
+        """The opened file, not only the checked path, must lie inside the root."""
         outside_file = _write_outside_file(tmp_path)
         repo = tmp_path / "repo"
         target = repo / "pkg" / "service.py"

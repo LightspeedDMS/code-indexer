@@ -1,5 +1,5 @@
 """Stored GitHub/GitLab tokens are shown on the admin Config page only as a
-mask revealing at most their last 4 characters (finding 058).
+mask revealing at most their last 4 characters.
 
 Front door: the real app (``create_app``) over an isolated server home, a
 real admin Web login, and ``GET /admin/config`` plus the HTMX partial

@@ -143,8 +143,8 @@ class TestGetAllSettingsSubscriptionFields:
         assert "sk-secret-key-12345" != api_key_value, (
             "llm_creds_provider_api_key must be masked in get_all_settings() output"
         )
-        # Finding 058: a key under 20 characters reveals none of its
-        # characters, only that one is configured.
+        # A key under 20 characters reveals none of its characters, only
+        # that one is configured.
         assert api_key_value == "configured", (
             f"Expected 'configured' for a 19-character key, got: {api_key_value}"
         )

@@ -1,5 +1,5 @@
 """
-Story #557 login rate limiting, reworked (release 12.83.0, A2): a login is
+Story #557 login rate limiting, reworked as a progressive throttle: a login is
 THROTTLED after repeated failures and is never hard-locked out.  Every
 attempt is reserved (``begin_attempt``) before its password is checked.
 

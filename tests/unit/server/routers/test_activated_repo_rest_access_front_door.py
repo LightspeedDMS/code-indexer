@@ -8,7 +8,7 @@ alias_granted over caller_activation_sources).
 
 Driven through the real REST front door of a real app (``create_app`` via
 ``isolated_app``, never ~/.cidx-server). The services the routes reach are
-A15's real ones (QueryAccessEnv): AccessFilteringService over a real
+the real ones (QueryAccessEnv): AccessFilteringService over a real
 GroupAccessManager, real ActivatedRepoManager activations (real git
 clones), GoldenRepoManager and the global registry. Nothing about the
 access decision is mocked.
