@@ -146,7 +146,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage), 6 parallel chunks | Touching `src/code_indexer/server/` | ~12 min (chunk 1 `services/` is the long pole) |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet in the required gate sequence | ~45 min |
 | `rust-automation.sh` | Rust X-Ray engine: `cargo test --workspace` (447 tests incl. AC18 PREAMBLE parity) + `cargo clippy --workspace --all-targets -D warnings` | Touching `rust/` | seconds warm |
-| `e2e-automation.sh` | 6-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
+| `e2e-automation.sh` | 7-phase E2E (CLI standalone/daemon, server in-process, CLI remote, fault-injection, PostgreSQL parity, SIEM delivery). No mocks. | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- touching server code without `server-fast-automation.sh` = untested. All three pytest suites ignore `rust/` -- touching `rust/` without `rust-automation.sh` = untested. `e2e-automation.sh` (Epic #700) is non-negotiable for epic/story completion; pure doc/config edits may waive with explicit user approval. The `@pytest.mark.slow` marker routes a test INTO `slow-automation.sh`, not nowhere -- confirm that lane covers its path.
 
@@ -181,13 +181,14 @@ In between, pick tests strategically: (1) tests for the specific capability bein
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 6 phases
+./e2e-automation.sh              # All 7 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
 ./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server)
 ./e2e-automation.sh --phase 6    # PostgreSQL parity (port 8901)
+./e2e-automation.sh --phase 7    # SIEM delivery (live server + SecOps sidecar)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. (The fresh E2E servers seed the default `admin`/`admin` account -- not the dev/staging admin password.)
@@ -337,7 +338,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 - **No env vars for server settings**: runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never `os.environ["CIDX_SETTING"]`.
 - **Every runtime-row write is a compare-and-set (Bug #2017)**: every runtime (server-process) writer's `server_config` SQL lives in `services/config_runtime_row.py` (guarded by `test_runtime_row_write_sql_lives_only_in_config_runtime_row`); some read-only queries still live in `config_service.py`. The one exception is the OFFLINE operator tool `tools/migrate_to_postgres.py` (unconditional upsert, table name built at runtime): never run it against a live cluster. A write names the version it was applied to (SQLite `BEGIN IMMEDIATE` re-read + check; PG `UPDATE ... AND version = %s RETURNING version`); the only other write is insert-only first-boot seeding; after EITHER seed outcome (won or lost) the process adopts the committed row and its version from ONE read (`_adopt_committed_row`, SQLite and PG), since a peer may have saved after the insert. Writers, with `updated_by`: setting changes (`_change_config` via `update_settings_*`/`apply_audited_change` = `web-ui`, `apply_system_change` = `system`: re-read the committed row, mutate, retry up to `_CHANGE_ATTEMPTS`, else `ConfigChangeConflict`), startup migrations (`_rewrite_committed_row` = `startup-migration`; a no-op still adopts the row it read), `save_config` (`web-ui`; compare-and-set on the version this process loaded; a stale whole config raises `ConfigChangeConflict`), and `bump_launch_restart_generation` (`launch-restart`; compare-and-set + retry, and it does NOT advance `_db_config_version`, so the poll still detects it). No DB lock is held across mutate/`before_publish`. NEVER write `get_config()`'s cached copy back; use `apply_system_change(mutate)`. READS can still be stale (SQLite workers never reload; cluster polls every 30 s).
 - **SIEM canary lifetime (Bug #2018)**: arming and `capture_active` require `canary_config_epoch` == the committed `siem_delivery_config.arming_epoch` (`state_store.CANARY_FOR`/`CANARY_CONFIRMED_FOR`). The epoch is stamped in `_change_config` by `boundary.carry_arming_epoch`, renewed on disable/clear/destination change/CA change. The scheduler subscribes to config commits at `register_process` (`register_on_commit_callback`, whose returned unregister handle `deregister_process` releases) and applies a SIEM change in the saving process at once (`apply_committed_change`, version-monotonic snapshot publish); other processes follow at their next cycle. A key replace/remove calls `invalidate_canary` in the credential transaction. `record_canary` refuses (changing nothing) a canary of a replaced key, of an ended lifetime, or superseded by a later-issued run: runs are ordered by a durable ordinal taken under the state-row lock BEFORE the send (`issue_canary_run`; `canary_run_seq`, PG migration 057), never by clocks.
-- **Config bootstrap vs runtime (Story #578)**: `config.json` is BOOTSTRAP ONLY (`server_dir`, `host`, `port`, `workers`, `log_level`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster.node_id`); runtime settings in DB. NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
+- **Config bootstrap vs runtime (Story #578)**: `config.json` is BOOTSTRAP ONLY -- the keys in `BOOTSTRAP_KEYS` (`services/config_service.py`: `server_dir`, `storage_mode`, `postgres_dsn`, `ontap`, `cluster`, `clone_backend`, `cow_daemon`, `pace_maker_clone_path`, fault-injection flags, pool/malloc knobs, graph-repair flags); everything else is runtime in the DB. `host`, `port`, `workers`, `log_level` are RUNTIME since Story #1197 (seeded at first boot, stripped from config.json). NEVER call `ServerConfigManager().load_config()` -- use `get_config_service().get_config()`.
 - **Auto-updater idempotent deployment (ABSOLUTE, NO EXCEPTIONS)**: any bootstrap change (systemd unit, env, PATH, file locations, service wiring) MUST be automated in BOTH the installer (`scripts/install-cidx-server.sh` / `server/auto_update/templates/`) AND the auto-updater (an idempotent `_ensure_X_config()` self-heal in `deployment_executor.py`). A template/installer-only fix is NOT done -- Bug #1440 left 3 already-running nodes silently broken because nothing re-renders a deployed unit. A live-host bootstrap gap is fixed only when an automated self-heal provably repairs that host via the REAL auto-update firing naturally (not manual SSH). Flow: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. See memory: `feedback_bootstrap_changes_need_installer_and_autoupdater.md`.
 - **Pace-Maker guard (Story #997)**: auto-updater installs/updates pace-maker (fresh install = master switch OFF; updates never touch config). Config split `pace_maker_clone_path` (bootstrap) + `pace_maker_mode` (runtime Web UI, default `"disabled"`); three-way `enforce_pace_maker_config()`. Injected at `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker); non-fatal.
 
@@ -383,7 +384,7 @@ Cleanup daemon once per app lifetime (started/stopped in lifespan; never piggyba
 | Mode | Storage | Use Case |
 |------|---------|----------|
 | **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
-| **Daemon** | Same + in-memory cache, Unix socket `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
+| **Daemon** | Same + in-memory cache, Unix socket under `/tmp/cidx/` (hash-named, `config.py` daemon socket path) | ~5ms cached vs ~1s disk |
 
 Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2). **Server mode**: separate deployment; cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server/deployment.md`, `docs/architecture/cluster.md`.
 
@@ -487,7 +488,7 @@ Externalized to `src/code_indexer/server/mcp/tool_docs/` (YAML frontmatter + mar
 
 ## Version Bump
 
-Versioning MAJOR.MINOR.HOTFIX: MAJOR only when the user says "major version" (resets Y.Z); MINOR on normal dev cycles on `development` (resets Z); HOTFIX on production hotfixes on `master` only (never on development). Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `README.md` badge (line 5), `CHANGELOG.md`, `docs/architecture/overview.md`, `docs/guides/query.md`. Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`. Do NOT bump `server/app.py` OpenAPI spec or `test-fixtures/`.
+Versioning MAJOR.MINOR.HOTFIX: MAJOR only when the user says "major version" (resets Y.Z); MINOR on normal dev cycles on `development` (resets Z); HOTFIX on production hotfixes on `master` only (never on development). Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update: `CHANGELOG.md` (the README release badge is dynamic; no doc carries the version string). Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`. Do NOT bump `server/app.py` OpenAPI spec or `test-fixtures/`.
 
 ## Python Compatibility
 
