@@ -50,12 +50,12 @@ main() {
     local all_passed=true
 
     # Run ruff check
-    if ! run_command "ruff check $src_path $tests_path" "ruff check"; then
+    if ! run_command "ruff check $src_path $tests_path tools/docs" "ruff check"; then
         all_passed=false
     fi
 
     # Run ruff format check
-    if ! run_command "ruff format --check $src_path $tests_path" "ruff format check"; then
+    if ! run_command "ruff format --check $src_path $tests_path tools/docs" "ruff format check"; then
         all_passed=false
     fi
 
@@ -79,6 +79,21 @@ main() {
         echo -e "${GREEN}✅ Doc reference check passed${NC}"
     else
         echo -e "${RED}❌ Doc reference check failed${NC}"
+        all_passed=false
+    fi
+
+    # Story #2082: generated reference docs (CLI, MCP tools, error codes) match the code
+    echo -e "${BLUE}Running Story #2082 generated reference doc check...${NC}"
+    local reference_docs_current=true
+    for generator in cli_reference mcp_tools error_codes; do
+        if ! PYTHONPATH=src python3 -m "tools.docs.${generator}" --check; then
+            reference_docs_current=false
+        fi
+    done
+    if $reference_docs_current; then
+        echo -e "${GREEN}✅ Generated reference doc check passed${NC}"
+    else
+        echo -e "${RED}❌ Generated reference doc check failed${NC}"
         all_passed=false
     fi
 
