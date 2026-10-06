@@ -413,7 +413,12 @@ def test_a_worker_that_cannot_find_its_launcher_says_so(tmp_path, caplog):
         {
             "1": (["/usr/local/bin/cidx-server", "--workers", "2"], "0"),
             "9": (
-                ["python", "-B", "-c", "from multiprocessing.spawn import spawn_main"],
+                [
+                    "python",
+                    "-B",
+                    "-c",
+                    "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=6)",
+                ],
                 "1",
             ),
         },
@@ -423,6 +428,59 @@ def test_a_worker_that_cannot_find_its_launcher_says_so(tmp_path, caplog):
     assert any(
         "no cidx server launch was found" in r.message for r in caplog.records
     ), "a spawned worker that cannot resolve its worker count must say so"
+
+
+@pytest.mark.parametrize(
+    "argv,is_worker,why",
+    [
+        (
+            [
+                "python",
+                "-B",
+                "-c",
+                "from multiprocessing.spawn import spawn_main; "
+                "spawn_main(tracker_fd=6, pipe_handle=9)",
+            ],
+            True,
+            "the program CPython actually generates for a spawn child",
+        ),
+        (
+            ["/bin/sh", "-c", "python -c \"if 'multiprocessing.spawn' in cmd: ...\""],
+            False,
+            "a script whose own TEXT mentions multiprocessing.spawn",
+        ),
+        (
+            [
+                "python",
+                "-c",
+                "from multiprocessing.spawn import spawn_main",
+            ],
+            False,
+            "imports spawn_main but never calls it",
+        ),
+        (
+            ["python", "-c", "spawn_main(tracker_fd=1)"],
+            False,
+            "calls a local spawn_main without multiprocessing's import",
+        ),
+        (
+            ["python", "-m", "code_indexer.server.main", "--workers", "2"],
+            False,
+            "the uvicorn master is not a spawn child",
+        ),
+    ],
+)
+def test_only_a_real_spawn_child_counts_as_a_worker(argv, is_worker, why):
+    """Both the import AND the call, never a bare substring.
+
+    The first version tested for "multiprocessing.spawn" alone and warned about
+    a `sh -c` script whose own text contained the phrase -- observed live on the
+    canary, from the verification command itself. A diagnostic that cries wolf
+    is worse than none: it trains everyone to ignore the one case it exists for.
+    """
+    from code_indexer.utils.worker_budget import _looks_like_a_spawned_worker
+
+    assert _looks_like_a_spawned_worker(argv) is is_worker, why
 
 
 def test_an_ordinary_process_that_finds_nothing_stays_quiet(tmp_path, caplog):

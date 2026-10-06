@@ -146,8 +146,20 @@ _SERVER_SCRIPT_SUFFIXES = (
 
 #: How a multiprocessing spawn child identifies itself in its own argv. uvicorn
 #: only forks workers when ``--workers`` is 2 or more (a single worker runs
-#: in-process), so seeing this means we ARE one of several workers.
-_SPAWN_CHILD_MARKER = "multiprocessing.spawn"
+#: in-process), so matching this means we ARE one of several workers.
+#:
+#: BOTH fragments are required, and that is not belt-and-braces. CPython
+#: generates the child's ``-c`` program as
+#: ``from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=N,
+#: pipe_handle=M)`` -- the import and the CALL. Testing only for
+#: "multiprocessing.spawn" is a bare substring match that fires on any command
+#: line merely mentioning it, which is how the first version warned about a
+#: `sh -c` script whose own text contained the phrase. Same flaw as matching
+#: the server by substring instead of by launch path.
+_SPAWN_CHILD_FRAGMENTS = (
+    "multiprocessing.spawn import spawn_main",
+    "spawn_main(",
+)
 
 
 def _is_server_argv(argv: list) -> bool:
@@ -161,7 +173,11 @@ def _is_server_argv(argv: list) -> bool:
 
 
 def _looks_like_a_spawned_worker(argv: list) -> bool:
-    return any(_SPAWN_CHILD_MARKER in part for part in argv)
+    """Whether THIS argv is multiprocessing's generated spawn-child program."""
+    return any(
+        all(fragment in part for fragment in _SPAWN_CHILD_FRAGMENTS)
+        for part in argv
+    )
 
 
 def _workers_in_argv(argv: list) -> Optional[int]:
