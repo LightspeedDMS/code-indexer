@@ -558,10 +558,27 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 _utils.app_module.app.state, "activated_repo_manager", None
             ),
         )
-        status_data = index_manager.get_index_status(
-            repo_alias=repo_alias,
-            username=user.username,
-        )
+        try:
+            status_data = index_manager.get_index_status(
+                repo_alias=repo_alias,
+                username=user.username,
+            )
+        except FileNotFoundError:
+            # A globally-activated repo has no activated-repos/<user>/ directory --
+            # it lives under the golden clone. list_repositories publishes its alias
+            # as "<alias>-global", so without this the published alias reports a
+            # missing activated-repo path that was never going to exist.
+            _grm = _utils.app_module.golden_repo_manager
+            global_clone = (
+                _grm.resolve_global_clone_path(repo_alias) if _grm is not None else None
+            )
+            if global_clone is None:
+                raise
+            status_data = index_manager.get_index_status_for_path(
+                global_clone,
+                repo_alias=repo_alias,
+                username=user.username,
+            )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(

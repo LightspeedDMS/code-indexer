@@ -1741,6 +1741,40 @@ class GoldenRepoManager:
         activator = GlobalActivator(self.golden_repos_dir)
         return bool(activator.is_globally_active(alias))
 
+    def resolve_global_clone_path(self, alias: str) -> Optional["Path"]:
+        """Clone path for a globally-activated repo addressed by either alias form.
+
+        ``list_repositories`` publishes the USER-facing alias of a globally-activated
+        repo as ``<alias>-global``, while the golden repo itself is registered under
+        the bare ``<alias>``. A handler handed the published alias therefore cannot
+        look it up directly. This maps either form onto the golden clone.
+
+        This is a plain lookup, NOT the bare-to-global promotion in
+        ``mcp/handlers/_global_fallback.py``: it never widens access, it only
+        resolves an alias the caller already supplied. It is therefore safe for the
+        admin/health handlers that are explicitly forbidden from importing that
+        module.
+
+        Args:
+            alias: Bare (``"example-repo"``) or suffixed (``"example-repo-global"``).
+
+        Returns:
+            The golden clone path, or ``None`` when the alias names no globally
+            active golden repo.
+        """
+        from pathlib import Path as _Path
+
+        if not alias:
+            return None
+        bare = alias[: -len("-global")] if alias.endswith("-global") else alias
+        if not bare or not self.is_globally_active(bare):
+            return None
+        repo = self.get_golden_repo(bare)
+        if repo is None:
+            return None
+        clone_path = getattr(repo, "clone_path", None)
+        return _Path(clone_path) if clone_path else None
+
     def register_local_repo(
         self,
         alias: str,
@@ -3351,7 +3385,9 @@ class GoldenRepoManager:
                 )
 
                 if result.returncode != 0:
-                    combined_output = redact_url_credentials(result.stdout) + redact_url_credentials(result.stderr)
+                    combined_output = redact_url_credentials(
+                        result.stdout
+                    ) + redact_url_credentials(result.stderr)
                     if self._is_recoverable_init_error(combined_output):
                         logging.warning(
                             f"Recoverable configuration conflict during init. "
@@ -4345,11 +4381,13 @@ class GoldenRepoManager:
             )
             if result.stdout:
                 logger.debug(
-                    "[change_branch] cidx index stdout:\n%s", redact_url_credentials(result.stdout)[-2000:]
+                    "[change_branch] cidx index stdout:\n%s",
+                    redact_url_credentials(result.stdout)[-2000:],
                 )
             if result.stderr:
                 logger.warning(
-                    "[change_branch] cidx index stderr:\n%s", redact_url_credentials(result.stderr)[-2000:]
+                    "[change_branch] cidx index stderr:\n%s",
+                    redact_url_credentials(result.stderr)[-2000:],
                 )
         except subprocess.CalledProcessError as e:
             logger.error(
@@ -5274,7 +5312,9 @@ class GoldenRepoManager:
                     text=True,
                     env=build_cidx_subprocess_env(),
                 )
-                init_output = (redact_url_credentials(init_result.stdout) or "") + (redact_url_credentials(init_result.stderr) or "")
+                init_output = (redact_url_credentials(init_result.stdout) or "") + (
+                    redact_url_credentials(init_result.stderr) or ""
+                )
                 if (
                     init_result.returncode != 0
                     and "already exists" not in init_output.lower()
@@ -5288,9 +5328,13 @@ class GoldenRepoManager:
                         f"Failed to initialize repo before indexing: {error_details}"
                     )
                 if init_result.stdout:
-                    all_stdout += f"[init] {redact_url_credentials(init_result.stdout)}\n"
+                    all_stdout += (
+                        f"[init] {redact_url_credentials(init_result.stdout)}\n"
+                    )
                 if init_result.stderr:
-                    all_stderr += f"[init] {redact_url_credentials(init_result.stderr)}\n"
+                    all_stderr += (
+                        f"[init] {redact_url_credentials(init_result.stderr)}\n"
+                    )
 
                 # Run each requested index type sequentially
                 for index_type in index_types:

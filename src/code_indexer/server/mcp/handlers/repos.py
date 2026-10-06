@@ -427,13 +427,18 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         force_refresh = params.get("force_refresh", False)
 
-        repo = _utils.app_module.golden_repo_manager.get_golden_repo(repository_alias)
-        if not repo:
+        _grm = _utils.app_module.golden_repo_manager
+        repo = _grm.get_golden_repo(repository_alias)
+        clone_path = Path(repo.clone_path) if repo else None
+        if clone_path is None:
+            # list_repositories publishes a globally-activated repo as
+            # "<alias>-global", but the golden repo is registered under the bare
+            # alias -- so the published alias would otherwise be rejected here.
+            clone_path = _grm.resolve_global_clone_path(repository_alias)
+        if clone_path is None:
             return _mcp_response(
                 {"success": False, "error": f"Repository not found: {repository_alias}"}
             )
-
-        clone_path = Path(repo.clone_path)
         index_base_path = clone_path / ".code-indexer" / "index"
 
         if _utils.app_module.background_job_manager is None:
