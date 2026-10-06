@@ -145,6 +145,17 @@ _LOCK_CONTENTION_SUBSTRINGS = (
 )
 
 
+def is_chunk_store_lock_contention(exc: BaseException) -> bool:
+    """True when ``exc`` is SQLite reporting that another connection holds
+    the chunks.db lock beyond the busy timeout ("database is locked" /
+    "database table is locked") -- transient, unlike every other
+    ``sqlite3.DatabaseError``."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    message = str(exc).lower()
+    return any(substring in message for substring in _LOCK_CONTENTION_SUBSTRINGS)
+
+
 def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
     """Bug #1746 code review findings H1+H2: classify whether ``exc``
     (raised from an attempted chunk-store open/write) represents a FATAL
@@ -178,10 +189,7 @@ def is_fatal_chunk_store_write_error(exc: BaseException) -> bool:
     messages above.
     """
     if isinstance(exc, sqlite3.DatabaseError):
-        message = str(exc).lower()
-        if any(substring in message for substring in _LOCK_CONTENTION_SUBSTRINGS):
-            return False
-        return True
+        return not is_chunk_store_lock_contention(exc)
     if isinstance(exc, OSError):
         return True
     return False

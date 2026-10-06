@@ -42,7 +42,10 @@ from .high_throughput_processor import HighThroughputProcessor
 from .git_hook_manager import GitHookManager
 from ..utils.enhanced_messaging import OperationType, create_enhanced_callback
 from ..utils.path_confinement import resolve_if_within_root
-from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
+from ..storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    is_chunk_store_lock_contention,
+)
 
 # CRITICAL: Lazy import for FTS - only load when --fts flag used
 # This prevents Tantivy from loading on every cidx command (including --help)
@@ -71,6 +74,12 @@ _CONTENT_HASH_READ_ERROR_PREFIX = "sha256:error-"
 # File mtimes come from the filesystem's clock (an NFS server), read times
 # from the indexing host's clock: tolerate the filesystem being this far behind.
 _RACY_MTIME_CLOCK_SKEW_MARGIN_SECONDS = 2
+
+# Reads of the reconcile snapshot while another connection holds the
+# chunks.db lock. Each attempt already waits up to sqlite's busy timeout
+# (5 s), so three attempts ride out ~15 s of contention; past that the run
+# fails loudly instead of reconciling against an empty snapshot.
+_SNAPSHOT_LOCK_MAX_ATTEMPTS = 3
 
 
 def working_dir_content_id(relative_path: str, mtime: int, size: int) -> str:
@@ -3805,113 +3814,98 @@ class SmartIndexer(HighThroughputProcessor):
         # file_hash) for mtime/size-identified points (racy-timestamp check).
         db_working_dir_index: Dict[str, Tuple[float, Optional[str]]] = {}
 
-        try:
-            if progress_callback:
-                progress_callback(
-                    0, 0, Path(""), info="📸 Taking snapshot of indexed files..."
+        if progress_callback:
+            progress_callback(
+                0, 0, Path(""), info="📸 Taking snapshot of indexed files..."
+            )
+
+        # Every content point in one pass. Any read error propagates: a
+        # reconcile against an empty or partial snapshot would re-embed the
+        # files it cannot see and record the store as verified.
+        all_points = self._scroll_content_points_through_lock_contention(
+            collection_name
+        )
+
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info=f"📊 Processing {len(all_points)} points from database snapshot",
+            )
+
+        # Process all points in memory (no database access = no consistency issues)
+        for point in all_points:
+            payload = point.get("payload", {})
+
+            if "path" not in payload:
+                continue
+
+            # Extract file path
+            path_from_db = payload["path"]
+            if Path(path_from_db).is_absolute():
+                file_path = Path(path_from_db)
+            else:
+                file_path = self.config.codebase_dir / path_from_db
+
+            # Extract best available timestamp
+            timestamp = self._extract_best_timestamp(payload)
+
+            # Keep the most recent timestamp per file (multiple chunks per file)
+            if (
+                file_path not in indexed_files_with_timestamps
+                or timestamp > indexed_files_with_timestamps[file_path]
+            ):
+                indexed_files_with_timestamps[file_path] = timestamp
+
+            # Issue #1505: derive this file's DB-side content id once,
+            # first point encountered per relative path wins (mirrors
+            # the pre-existing `limit=1` first-match semantics of the
+            # per-file scroll query this replaces).
+            try:
+                relative_key = str(file_path.relative_to(self.config.codebase_dir))
+            except ValueError:
+                relative_key = str(path_from_db)
+            if relative_key not in db_content_ids:
+                db_content_ids[relative_key] = self._derive_db_content_id_from_point(
+                    relative_key, point
                 )
 
-            # Get all content points in a single atomic operation
-            all_points = self._scroll_all_content_points(collection_name)
+            # Codex #1505 review, Finding 1: capture hidden_branches for
+            # this path once too, first point wins -- mirrors the
+            # pre-existing `limit=1` first-match semantics of the
+            # per-file scroll query this replaces.
+            if relative_key not in db_hidden_branches:
+                db_hidden_branches[relative_key] = payload.get("hidden_branches", [])
+            # Issue #1999 review: branches hidden on EVERY point of the
+            # path -- a path is visible on a branch while ANY point is.
+            point_hidden = set(payload.get("hidden_branches") or [])
+            if relative_key in db_hidden_on_all_points:
+                db_hidden_on_all_points[relative_key] &= point_hidden
+            else:
+                db_hidden_on_all_points[relative_key] = point_hidden
 
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info=f"📊 Processing {len(all_points)} points from database snapshot",
-                )
-
-            # Process all points in memory (no database access = no consistency issues)
-            for point in all_points:
-                payload = point.get("payload", {})
-
-                if "path" not in payload:
-                    continue
-
-                # Extract file path
-                path_from_db = payload["path"]
-                if Path(path_from_db).is_absolute():
-                    file_path = Path(path_from_db)
-                else:
-                    file_path = self.config.codebase_dir / path_from_db
-
-                # Extract best available timestamp
-                timestamp = self._extract_best_timestamp(payload)
-
-                # Keep the most recent timestamp per file (multiple chunks per file)
-                if (
-                    file_path not in indexed_files_with_timestamps
-                    or timestamp > indexed_files_with_timestamps[file_path]
-                ):
-                    indexed_files_with_timestamps[file_path] = timestamp
-
-                # Issue #1505: derive this file's DB-side content id once,
-                # first point encountered per relative path wins (mirrors
-                # the pre-existing `limit=1` first-match semantics of the
-                # per-file scroll query this replaces).
-                try:
-                    relative_key = str(file_path.relative_to(self.config.codebase_dir))
-                except ValueError:
-                    relative_key = str(path_from_db)
-                if relative_key not in db_content_ids:
-                    db_content_ids[relative_key] = (
-                        self._derive_db_content_id_from_point(relative_key, point)
+            # Issue #2013 (racy timestamp): for an mtime/size-identified
+            # point keep the file's EARLIEST content-read time
+            # (`indexed_timestamp`) and its stored whole-file content
+            # hash. A point without one counts as 0.0, so that file is
+            # hash-checked on every reconcile.
+            if "filesystem_mtime" in payload:
+                indexed_ts = float(payload.get("indexed_timestamp") or 0.0)
+                previous = db_working_dir_index.get(relative_key)
+                if previous is None or indexed_ts < previous[0]:
+                    db_working_dir_index[relative_key] = (
+                        indexed_ts,
+                        payload.get("file_hash"),
                     )
 
-                # Codex #1505 review, Finding 1: capture hidden_branches for
-                # this path once too, first point wins -- mirrors the
-                # pre-existing `limit=1` first-match semantics of the
-                # per-file scroll query this replaces.
-                if relative_key not in db_hidden_branches:
-                    db_hidden_branches[relative_key] = payload.get(
-                        "hidden_branches", []
-                    )
-                # Issue #1999 review: branches hidden on EVERY point of the
-                # path -- a path is visible on a branch while ANY point is.
-                point_hidden = set(payload.get("hidden_branches") or [])
-                if relative_key in db_hidden_on_all_points:
-                    db_hidden_on_all_points[relative_key] &= point_hidden
-                else:
-                    db_hidden_on_all_points[relative_key] = point_hidden
-
-                # Issue #2013 (racy timestamp): for an mtime/size-identified
-                # point keep the file's EARLIEST content-read time
-                # (`indexed_timestamp`) and its stored whole-file content
-                # hash. A point without one counts as 0.0, so that file is
-                # hash-checked on every reconcile.
-                if "filesystem_mtime" in payload:
-                    indexed_ts = float(payload.get("indexed_timestamp") or 0.0)
-                    previous = db_working_dir_index.get(relative_key)
-                    if previous is None or indexed_ts < previous[0]:
-                        db_working_dir_index[relative_key] = (
-                            indexed_ts,
-                            payload.get("file_hash"),
-                        )
-
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info=f"✅ Snapshot complete: {len(indexed_files_with_timestamps)} unique files found",
-                )
-
-        except Exception as e:
-            logger.error(f"Failed to get indexed files snapshot: {e}")
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info=f"⚠️ Database snapshot failed: {e}, proceeding with empty state",
-                )
-            # Return empty dict - reconcile will treat all files as new
-            indexed_files_with_timestamps = {}
-            db_content_ids = {}
-            db_hidden_branches = {}
-            db_hidden_on_all_points = {}
-            db_working_dir_index = {}
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info=f"✅ Snapshot complete: {len(indexed_files_with_timestamps)} unique files found",
+            )
 
         self._reconcile_db_content_ids = db_content_ids
         self._reconcile_hidden_branches = db_hidden_branches
@@ -3958,6 +3952,31 @@ class SmartIndexer(HighThroughputProcessor):
         git_commit = payload.get("git_commit_hash", "unknown")
         return f"{relative_path}:{git_commit}"
 
+    def _scroll_content_points_through_lock_contention(
+        self, collection_name: str
+    ) -> List[Dict[str, Any]]:
+        """``_scroll_all_content_points``, retried while another connection
+        holds the chunks.db lock (at most ``_SNAPSHOT_LOCK_MAX_ATTEMPTS``
+        attempts, each waiting up to sqlite's busy timeout). Any other error,
+        and contention outlasting the last attempt, is raised."""
+        for attempt in range(1, _SNAPSHOT_LOCK_MAX_ATTEMPTS + 1):
+            try:
+                return self._scroll_all_content_points(collection_name)
+            except Exception as exc:
+                if (
+                    not is_chunk_store_lock_contention(exc)
+                    or attempt == _SNAPSHOT_LOCK_MAX_ATTEMPTS
+                ):
+                    raise
+                logger.info(
+                    "Index snapshot read of %r found chunks.db locked by another "
+                    "writer (attempt %d of %d); retrying",
+                    collection_name,
+                    attempt,
+                    _SNAPSHOT_LOCK_MAX_ATTEMPTS,
+                )
+        raise AssertionError("unreachable: the last attempt returns or raises")
+
     def _scroll_all_content_points(self, collection_name: str) -> List[Dict[str, Any]]:
         """Scroll through all content points and return them as a list.
 
@@ -3998,9 +4017,13 @@ class SmartIndexer(HighThroughputProcessor):
             # multi-page scroll to page 1. Mirrors the already-correct
             # sibling loop in
             # HighThroughputProcessor._fetch_all_content_points.
+            # A stuck cursor leaves the snapshot partial; reconciling against
+            # it would re-embed the unseen files, so fail loudly.
             if next_offset is not None and next_offset == offset:
-                logger.error(f"Pagination stuck at offset {offset} - breaking")
-                break
+                raise RuntimeError(
+                    f"Pagination stuck at offset {offset} while reading the "
+                    f"content points of {collection_name!r}"
+                )
 
             offset = next_offset
             if offset is None:
