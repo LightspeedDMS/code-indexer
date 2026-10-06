@@ -26,13 +26,13 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING
 
 from cachetools import TTLCache
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
-from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.logging_utils import format_error_log, mask_url_credentials
 from code_indexer.server.services.git_argv_safety import (
     validate_branch_name,
     validate_pathspecs,
@@ -1856,9 +1856,13 @@ class GitOperationsService:
             return response
 
         except subprocess.CalledProcessError as e:
-            stderr = getattr(e, "stderr", "")
+            # The push target is an authenticated URL, so it appears both in git's
+            # own stderr and in CalledProcessError's rendering of the command. Mask
+            # the authority before either reaches a caller or a log.
+            stderr = cast(str, mask_url_credentials(getattr(e, "stderr", "")))
+            detail = stderr or cast(str, mask_url_credentials(str(e)))
             raise GitCommandError(
-                f"git push failed: {stderr or e}",
+                f"git push failed: {detail}",
                 stderr=stderr,
                 returncode=e.returncode,
             )
