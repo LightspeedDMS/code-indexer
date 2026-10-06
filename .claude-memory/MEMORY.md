@@ -16,6 +16,7 @@
 - [systemd restart](feedback_ssh_systemd_restart.md) - never kill+nohup to restart a server — systemd only
 - [Versioned path trap](feedback_versioned_path_trap.md) - resolver returns the VERSIONED path; never write to it
 - [convert_tool_docs](feedback_convert_tool_docs_destructive.md) - never run tools/convert_tool_docs.py — breaks the MCP tool surface
+- [No leaked literals in guards](feedback_never_store_leaked_literals_in_public_guards.md) - never put a leaked value in a public denylist/test to block its return; the checker was deleted for this
 - [No secrets in memory](feedback_no_secrets_in_memory.md) - memory files are versioned: no secrets, PII, or topology
 - [Staging creds local](feedback_staging_creds_local_exposure_ok.md) - staging creds in local output are not an incident; never commit credentials anywhere
 - [Auth retry loops](feedback_never_retry_loop_auth_endpoint.md) - auth rejection is terminal; retrying locks the account
@@ -89,6 +90,7 @@
 - [Index failures transient](feedback_index_failures_are_transient.md) - index file failures = transient embedder calls; retry, no caps or loop guards
 - [Session trailer OK](feedback_claude_session_trailer_ok.md) - Claude-Session commit trailer is owner-approved for public commits; don't re-raise
 - [Codex exhausted](feedback_codex_exhausted_fallback_to_claude.md) - codex out of credits/auth: coordinator switches pair->tdd-engineer, codex review->code-reviewer, announced
+- [Relay scratch collision](feedback_parallel_codex_relays_scratchpad_collision.md) - parallel codex relays overwrite each other's scratch prompt files; per-run subdir + verify scope in sessions
 - [Verify codex ran](feedback_verify_codex_actually_ran.md) - codex wrappers fall back to Claude silently — verify via ~/.codex/sessions
 - [find is bfs](feedback_find_is_bfs_use_mmin.md) - `find` here is bfs: use -mmin, not relative -newermt
 - [Gate flakes](project_test_gates_flake_under_load.md) - gate flakiness = hardcoded 15s pytest timeout under load, NOT SQLite contention; grep .test-telemetry for "from pytest-timeout" before re-rolling
