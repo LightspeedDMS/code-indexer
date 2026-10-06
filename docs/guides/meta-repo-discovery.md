@@ -1,473 +1,155 @@
-# Meta-Repo Discovery: RAG-Style Repository Discovery
+# Meta-Repo Discovery
 
-## Overview
+A CIDX server keeps a catalog repository, `cidx-meta`, that holds one written description per golden repository.
+Searching that catalog first tells you, or an AI agent, which repositories are worth searching; a second query then
+searches only those. This guide explains how the catalog is built and kept current, and how to query it.
 
-The meta-repository (cidx-meta-global) serves as the canonical discovery endpoint for finding relevant repositories before searching them. This enables a RAG-style (Retrieval-Augmented Generation) workflow where AI assistants first discover which repositories are relevant, then search within those specific repositories for precise results.
+Audience: users and AI agents working against a CIDX server, and the operators who run it. Discovery is a server
+feature: the catalog is created and maintained by the server, and no CLI command builds it.
 
-## Why Use Meta-Repo Discovery?
+## Contents
 
-### Problem: Global Search Noise
+- [How the Catalog Is Built](#how-the-catalog-is-built)
+- [Discovery Workflow](#discovery-workflow)
+- [Reading Discovery Results](#reading-discovery-results)
+- [Dependency Map](#dependency-map)
+- [Keeping the Catalog Current](#keeping-the-catalog-current)
+- [Querying the Catalog from the CLI](#querying-the-catalog-from-the-cli)
+- [Troubleshooting](#troubleshooting)
 
-When searching across many repositories simultaneously, results can be:
-- Overwhelming (too many matches from irrelevant repos)
-- Diluted (relevant matches buried in noise)
-- Inefficient (searching repos that don't contain what you need)
+## How the Catalog Is Built
 
-### Solution: Two-Step Discovery Workflow
+1. **Bootstrap.** At startup the server creates `{golden_repos_dir}/cidx-meta`, initializes an index in it and
+   registers it as a golden repository with the URL `local://cidx-meta`, then activates it globally as
+   `cidx-meta-global` (`bootstrap_cidx_meta`, `src/code_indexer/server/startup/bootstrap.py`). The golden-repos
+   directory is `golden-repos` under the server's data directory.
+2. **One description per repository.** When a golden repository is added, the server generates a Markdown
+   description of it with the Claude CLI and writes it as `cidx-meta/<alias>.md`, using the short alias (`example-repo.md`,
+   not `example-repo-global.md`); the catalog is then re-indexed (`on_repo_added`,
+   `src/code_indexer/global_repos/meta_description_hook.py`). The description summarizes the repository's purpose,
+   languages and frameworks.
+3. **No fallback text.** If the Claude CLI is not available on the server, no description is written for that
+   repository; the server does not substitute a README copy or a stub.
+4. **Removal.** Removing a golden repository deletes its `<alias>.md` file and re-indexes the catalog
+   (`on_repo_removed`).
 
-1. **Discovery Phase**: Query the meta-repo to find relevant repositories
-2. **Search Phase**: Query specific repositories for detailed code search
+Layout:
 
-This mimics how humans research: first find the right book, then read it.
-
-## Quick Start
-
-### CLI / Standalone Mode
-
-#### 1. Initialize Meta-Directory
-
-```bash
-cidx global init-meta
+```
+{golden_repos_dir}/cidx-meta/
+  example-repo.md            description of example-repo
+  another-repo.md            description of another-repo
+  dependency-map/            optional, see Dependency Map
+    _index.md
+    <domain>.md
+  .code-indexer/             the catalog's own index
 ```
 
-This creates:
-- A meta-directory at `~/.code-indexer/golden-repos/cidx-meta`
-- AI-generated descriptions for all registered global repos
-- Registers meta-directory as `cidx-meta-global`
+`cidx-meta` is refreshed like every golden repository, with `cidx index --fts` (`_index_source`,
+`src/code_indexer/global_repos/refresh_scheduler.py`), so it has both a semantic and an FTS index. Discovery
+questions are usually phrased as concepts, so the default `semantic` mode fits best; `fts` works for an exact word
+in a description. A wildcard `repository_alias` (such as `*-global`) in `fts` or `hybrid` mode skips `cidx-meta`;
+name `cidx-meta-global` explicitly to search it (`src/code_indexer/server/mcp/handlers/_utils.py`).
 
-#### 2. Discover Repositories
+## Discovery Workflow
 
-```bash
-cidx query "authentication libraries" --repo cidx-meta-global --limit 5
-```
-
-Example output:
-```
-Repository: auth-service (auth-service-global)
-Score: 0.92
-JWT authentication service with OAuth2 support and token refresh...
-
-Repository: user-management (user-management-global)
-Score: 0.78
-User registration and role-based access control with password hashing...
-```
-
-#### 3. Search Specific Repository
-
-```bash
-cidx query "JWT token validation" --repo auth-service-global --limit 10
-```
-
-This searches only the `auth-service` repository for precise results.
-
-### Server / MCP Mode
-
-In server mode, meta-repo descriptions are automatically maintained by the
-description-refresh scheduler. No initialization command is needed.
-
-Discover repositories via MCP:
+Step 1, ask the catalog which repositories match (MCP `search_code`):
 
 ```json
-{"tool": "search_code", "repository_alias": "cidx-meta-global", "query_text": "authentication libraries", "limit": 5}
+{"query_text": "authentication service with JWT tokens", "repository_alias": "cidx-meta-global", "limit": 5}
 ```
 
-Then search within a specific repository:
+Step 2, search a repository the catalog returned. A result whose `file_path` is `example-repo.md` describes the
+golden repository `example-repo`; query it by its global alias:
 
 ```json
-{"tool": "search_code", "repository_alias": "auth-service-global", "query_text": "JWT token validation", "limit": 10}
+{"query_text": "JWT token validation", "repository_alias": "example-repo-global", "limit": 10}
 ```
 
-To list all registered repositories in server mode, use the `list_global_repos` MCP tool instead of `cidx global list`.
+The same requests work over REST as `POST /api/query` with the same field names. To list every repository you can
+query, use the MCP tool `list_global_repos`.
 
-## Meta-Repo as Well-Known Endpoint
+If the first repository does not answer the question, search the next one from step 1 rather than widening step 2
+to every repository.
 
-### Reserved Names
+## Reading Discovery Results
 
-The following name is reserved for the meta-directory:
+A catalog search returns the normal `search_code` result shape. In each result:
 
-- `cidx-meta-global` - Primary discovery endpoint
+| Field | Meaning |
+|-------|---------|
+| `file_path` | the description file, `<alias>.md`; append `-global` to the base name to query that repository |
+| `code_snippet` | the matching part of the description |
+| `similarity_score` | semantic similarity, 0.0-1.0 |
+| `repository_alias`, `source_repo` | `cidx-meta-global` |
 
-**This name cannot be used for user repositories.**
+Results are filtered by access: a user only sees descriptions of repositories they are allowed to query
+(`filter_cidx_meta_results`, applied in `src/code_indexer/server/mcp/handlers/search/_shared.py`).
 
-Attempting to register a repo with this name will fail:
+## Dependency Map
+
+When enabled, the server also writes a cross-repository dependency map into `cidx-meta/dependency-map/`:
+`_index.md` (a domain catalog and a repository-to-domain matrix) and one `<domain>.md` file per discovered domain,
+describing which repositories take part in the domain and how they depend on each other. These files are indexed
+with the descriptions, so a discovery query can match them too.
+
+MCP tools that read the map:
+
+| Tool | Returns |
+|------|---------|
+| `depmap_get_repo_domains` | the domains a repository takes part in, and its role in each |
+| `depmap_find_consumers` | the repositories that depend on a given repository |
+| `depmap_get_domain_summary` | the summary of one domain |
+| `depmap_get_cross_domain_graph` | domain-to-domain edges as JSON records |
+| `depmap_get_hub_domains` | the most connected domains |
+| `depmap_get_stale_domains` | domains older than a given number of days |
+
+`trigger_dependency_analysis` (requires the `manage_golden_repos` permission) starts a full or delta analysis on
+demand. How the map is computed is described in [Dependency Map Architecture](../architecture/dependency-map.md).
+
+## Keeping the Catalog Current
+
+Descriptions are written when a repository is added. Two runtime settings, changed in the Web UI configuration
+screen, control later updates (`ClaudeIntegrationConfig`, `src/code_indexer/server/utils/config_manager.py`):
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `description_refresh_enabled` | false | periodically regenerate descriptions of repositories that changed |
+| `description_refresh_interval_hours` | 24 | how often the description refresh runs |
+| `dependency_map_enabled` | false | build and refresh the dependency map on a schedule |
+| `dependency_map_interval_hours` | 168 | how often the dependency map refresh runs |
+
+Both scheduled jobs run the Claude CLI on the server and consume its API usage.
+
+## Querying the Catalog from the CLI
+
+The CLI can query the catalog only on a machine that has the server's golden-repos directory, through the local
+`--repo` option:
 
 ```bash
-Error: Cannot register repo with name 'cidx-meta-global':
-This name is reserved for meta-directory for repository discovery.
-Choose a different alias name for your repository.
-```
-
-### Documentation and Conventions
-
-- **Discovery endpoint**: Always use `cidx-meta-global` for discovery queries
-- **Well-known**: This is the standard way to find repositories
-- **AI-friendly**: Designed for AI assistants to use programmatically
-
-## Discovery Query Response Format
-
-A discovery query against `cidx-meta-global` is an ordinary semantic search
-over the repository-description files stored in the meta directory. It returns
-the same response shape as any `search_code` call: a top-level envelope
-(`success`, `results`) where `results.results` is the list of matched chunks,
-`results.total_results` is the count, and `results.query_metadata` carries the
-query echo and timing.
-
-Each item in `results.results` is the serialized form of
-`QueryResult.to_dict()` (`server/query/semantic_query_manager.py`) and contains:
-
-- **`file_path`**: Path of the matched description file within the meta
-  directory (for example `auth-service.md`). The file base name is the golden
-  repository alias; append `-global` to query that repository directly.
-- **`line_number`**: Line where the matching chunk begins.
-- **`code_snippet`**: The matched text from the description file (the
-  AI-generated summary of the repository's purpose, languages, and frameworks).
-- **`similarity_score`**: Semantic similarity score (0.0 to 1.0).
-- **`repository_alias`**: Alias of the repository searched (`cidx-meta-global`).
-- **`source_repo`**: Source repository for the result. For a global-repo
-  search the handler sets this to the searched alias (`cidx-meta-global`).
-- **`source_provider`**: Embedding provider that produced the match (for
-  example `voyage-ai`).
-
-Optional fields appear only when present: `match_text` (FTS matches),
-`metadata` and `temporal_context` (temporal queries), and `fusion_score` /
-`contributing_providers` (hybrid/multi-provider queries).
-
-### Example JSON Response (MCP/REST)
-
-```json
-{
-  "success": true,
-  "results": {
-    "results": [
-      {
-        "file_path": "auth-service.md",
-        "line_number": 1,
-        "code_snippet": "auth-service: JWT authentication service with OAuth2 support; Python, FastAPI.",
-        "similarity_score": 0.92,
-        "repository_alias": "cidx-meta-global",
-        "source_repo": "cidx-meta-global",
-        "source_provider": "voyage-ai"
-      }
-    ],
-    "total_results": 1,
-    "query_metadata": {
-      "query_text": "authentication libraries",
-      "execution_time_ms": 42,
-      "repositories_searched": 1,
-      "timeout_occurred": false,
-      "reranker_used": false,
-      "reranker_provider": null,
-      "rerank_time_ms": 0
-    }
-  }
-}
-```
-
-The matched `file_path` (`auth-service.md`) names the description file; its
-base name (`auth-service`) is the golden repository alias. To search that
-repository directly, use the alias with the `-global` suffix
-(`auth-service-global`).
-
-## RAG Workflow Integration
-
-### Complete Workflow Example
-
-User question: "How do we validate JWT tokens in our authentication system?"
-
-#### Step 1: Discovery Query
-
-```bash
-cidx query "JWT authentication validation" --repo cidx-meta-global --limit 3
-```
-
-Results show:
-- `auth-service-global` (score: 0.95)
-- `api-gateway-global` (score: 0.72)
-- `user-management-global` (score: 0.68)
-
-#### Step 2: Targeted Search
-
-```bash
-cidx query "JWT token validation middleware" --repo auth-service-global --limit 10
-```
-
-This returns precise code locations within the auth-service repo.
-
-#### Step 3: Follow-Up (if needed)
-
-If auth-service doesn't have what you need, query the next most relevant repo:
-
-```bash
-cidx query "JWT validation" --repo api-gateway-global --limit 10
-```
-
-### Benefits of Two-Step Workflow
-
-- **Precision**: Focus search on relevant repos only
-- **Efficiency**: Don't search 100 repos when you need 1
-- **Context**: Understand which repos contain what before diving in
-- **Scalability**: Works with 10 repos or 1000 repos
-
-## Catalog Completeness
-
-### Verify All Repos Registered
-
-Use `cidx global list` to verify all golden repos are registered:
-
-```bash
+export CIDX_GOLDEN_REPOS_DIR=/path/to/server/data/golden-repos
 cidx global list
+cidx query "authentication service with JWT tokens" --repo cidx-meta-global --limit 5
+cidx query "JWT token validation" --repo example-repo-global --limit 10
 ```
 
-Output:
-```
-                    Global Repositories (5 total)
-Alias                  Repo Name         URL
-auth-service-global    auth-service      https://github.com/org/auth
-user-management-global user-management   https://github.com/org/users
-api-gateway-global     api-gateway       https://github.com/org/gateway
-cidx-meta-global       cidx-meta         (local)
-```
-
-### One-to-One Mapping
-
-Every registered golden repo should have a corresponding description in the meta-directory:
-
-- Golden repo registered → Description file created
-- Description file → Indexed in cidx-meta-global
-- Query meta-repo → Discover all repos
-
-### Missing Descriptions
-
-If a repo is registered but missing from discovery results:
-
-1. Check `cidx global list` to verify registration
-2. Run `cidx global init-meta` to regenerate descriptions
-3. Query meta-repo again to verify completeness
-
-## Catalog Freshness Indicator
-
-### Check Meta-Repo Status
-
-Use `cidx global status` to check when the catalog was last refreshed:
-
-```bash
-cidx global status cidx-meta-global
-```
-
-Output:
-```
-Repository Status: cidx-meta-global
-Alias:        cidx-meta-global
-Repo Name:    cidx-meta
-URL:          (local repository)
-Index Path:   ~/.code-indexer/golden-repos/cidx-meta/.code-indexer/index
-Created:      2025-11-28 09:00:00 UTC
-Last Refresh: 2025-11-28 09:30:00 UTC
-```
-
-### Interpreting Freshness
-
-- **Last Refresh**: When meta-directory was last updated
-- **Staleness**: If new repos registered after this time, they won't appear in discovery
-- **Action**: Run `cidx global init-meta` to refresh if stale
-
-### When to Refresh
-
-Refresh the meta-directory when:
-
-- New repos are registered
-- Repo descriptions become outdated
-- Discovery results seem incomplete
-- After significant changes to registered repos
-
-## Command Reference
-
-### Global Commands
-
-#### List All Global Repos
-
-```bash
-cidx global list
-```
-
-Shows all registered global repositories with their aliases, URLs, and last refresh timestamps.
-
-#### Check Repository Status
-
-```bash
-cidx global status <alias-name>
-```
-
-Shows detailed metadata for a specific global repository:
-- Alias and repo name
-- Repository URL
-- Index storage location
-- Creation and last refresh timestamps
-
-#### Initialize Meta-Directory
-
-```bash
-cidx global init-meta
-```
-
-Creates or refreshes the meta-directory with descriptions for all registered repos.
-
-### Query Commands
-
-#### Discover Repositories
-
-```bash
-cidx query "<search-term>" --repo cidx-meta-global [--limit N]
-```
-
-Search meta-directory to discover relevant repositories.
-
-#### Search Specific Repository
-
-```bash
-cidx query "<search-term>" --repo <alias-name> [--limit N]
-```
-
-Search within a specific repository discovered in step 1.
-
-## Best Practices
-
-### For AI Assistants
-
-1. **Start with Discovery**: Always query `cidx-meta-global` first for new topics
-2. **Use Scores**: Focus on repos with score > 0.7 for relevance
-3. **Iterate**: If first repo doesn't have results, try next highest score
-4. **Cache Results**: Remember which repos contain what for session efficiency
-
-### For Users
-
-1. **Keep Meta Fresh**: Refresh after registering new repos
-2. **Descriptive Repos**: Ensure repo README files describe their purpose clearly
-3. **Verify Completeness**: Use `cidx global list` to check all repos registered
-4. **Monitor Staleness**: Check `cidx global status cidx-meta-global` periodically
-
-### For Organizations
-
-1. **Standardize Discovery**: Train teams to use meta-repo for exploration
-2. **Maintain Descriptions**: Keep repo READMEs up-to-date for better discovery
-3. **Regular Refresh**: Schedule periodic meta-directory refreshes
-4. **Document Repos**: Add clear purpose statements to repo documentation
+`--repo` reads aliases from `$CIDX_GOLDEN_REPOS_DIR/aliases` (default `~/.code-indexer/golden-repos`). The `cidx
+global` group has `activate`, `list`, `status` and `regex-search`; none of them creates or refreshes the catalog.
+From a workstation, use the MCP or REST requests above.
 
 ## Troubleshooting
 
-### Repository Not Appearing in Discovery
+| Symptom | Cause and fix |
+|---------|---------------|
+| a registered repository never appears in discovery results | its description was not generated: check that the Claude CLI is available on the server and look for the generation error in the server logs. With `description_refresh_enabled` on, the next refresh run generates it, because a repository with no successful run counts as changed |
+| a repository appears for other users but not for you | access filtering: you lack permission to query that repository |
+| an `fts` or `hybrid` search over `*-global` returns no catalog hits | wildcard expansion skips `cidx-meta` in those modes; pass `cidx-meta-global` explicitly |
+| descriptions describe an old state of a repository | enable `description_refresh_enabled`; repositories whose commit changed since the last run are refreshed |
+| `Repository 'cidx-meta-global' not found in global registry` from `cidx global status` | `CIDX_GOLDEN_REPOS_DIR` does not point at the server's golden-repos directory |
 
-**Problem**: Query meta-repo but repo doesn't show up
+## Related
 
-**Solutions**:
-1. Verify repo is registered: `cidx global list`
-2. Check if repo has a README or description
-3. Refresh meta-directory: `cidx global init-meta`
-4. Query again with broader terms
-
-### Discovery Results Too Broad
-
-**Problem**: Too many repos returned, all with similar scores
-
-**Solutions**:
-1. Use more specific search terms
-2. Add technical keywords (e.g., "Python JWT authentication" vs "auth")
-3. Use `--limit` to reduce results
-4. Focus on highest-scoring repos (>0.8)
-
-### Reserved Name Error
-
-**Problem**: Cannot register repo with desired name
-
-**Error**: `Cannot register repo with name 'cidx-meta-global': This name is reserved...`
-
-**Solution**: Choose a different alias name. Reserved name:
-- `cidx-meta-global`
-
-### Stale Catalog
-
-**Problem**: New repos registered but not appearing in discovery
-
-**Solutions**:
-1. Check last refresh: `cidx global status cidx-meta-global`
-2. Refresh meta-directory: `cidx global init-meta`
-3. Verify new repos indexed: `cidx global list`
-
-## Technical Details
-
-### Meta-Directory Structure
-
-```
-~/.code-indexer/golden-repos/
-  cidx-meta/                      # Meta-directory
-    auth-service.md               # AI-generated repo description
-    user-management.md            # AI-generated repo description
-    api-gateway.md                # AI-generated repo description
-    dependency-map/               # Inter-repo dependency map (v9.0+)
-      _index.md                   #   Domain catalog + repo-to-domain matrix
-      authentication.md           #   Per-domain dependency analysis
-      data-pipeline.md            #   Per-domain dependency analysis
-      ...                         #   One file per discovered domain
-    .code-indexer/
-      index/                      # Indexed descriptions + dependency map
-```
-
-### Description File Format
-
-Each repo `.md` file contains:
-- Repository name and purpose
-- Primary technologies and frameworks
-- Key features and capabilities
-- Use cases and examples
-
-These are AI-generated from:
-- README files
-- Package metadata
-- Directory structure analysis
-- Code statistics
-
-### Dependency Map Format (v9.0+)
-
-The `dependency-map/` subdirectory contains domain-clustered analysis of cross-repository relationships, generated by the multi-pass Claude CLI analysis pipeline.
-
-**`_index.md`** -- Domain catalog and repo-to-domain matrix:
-```yaml
----
-schema_version: 1
-last_analyzed: 2026-02-13T10:00:00Z
-repos_analyzed:
-  - auth-service-global
-  - web-app-global
-repos_analyzed_count: 2
-domains_count: 3
----
-```
-Followed by a Domain Catalog table listing all domains with descriptions, and a Repo-to-Domain Matrix showing which repos participate in which domains.
-
-**Per-domain `.md`** (e.g., `authentication.md`) -- Detailed dependency analysis:
-```yaml
----
-domain: authentication
-last_analyzed: 2026-02-13T10:00:00Z
-participating_repos:
-  - auth-service-global
-  - web-app-global
----
-```
-Followed by: Overview, Repo Roles table, Subdomain Dependencies with semantic context (imports, API contracts, shared types), and Cross-Domain Connections.
-
-The dependency map is generated by `trigger_dependency_analysis` (MCP tool) or the scheduled daemon thread when `dependency_map_enabled` is True. Delta refresh updates only domain files affected by changed repos.
-
-### Indexing Process
-
-1. Generate descriptions for each registered repo
-2. Write descriptions to `.md` files in `cidx-meta/`
-3. Index all descriptions using standard CIDX indexing
-4. Register meta-directory as `cidx-meta-global`
-5. Query just like any other global repo
-
-## Related Documentation
-
-- [Global Repos Architecture](../architecture/overview.md#global-repos)
-- [Query Command Reference](../../README.md#query-command)
-- [Migration to v8.0](../archive/migration-to-v8.md)
+- [Query Guide](query.md)
+- [Repository Lifecycle](../architecture/repository-lifecycle.md)
+- [Dependency Map Architecture](../architecture/dependency-map.md)
+- [MCP Registration](../getting-started/mcp-registration.md)

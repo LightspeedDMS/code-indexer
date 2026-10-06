@@ -5,171 +5,87 @@ description: Code search and intelligence using CIDX. Use when searching codebas
 
 # CIDX - Semantic Code Search and Intelligence
 
-Comprehensive CIDX (Code Indexer) documentation for AI coding assistants.
+CIDX (Code Indexer) reference for AI coding assistants. Detailed guides are in `reference/`.
 
-## INDEX MANAGEMENT - CRITICAL FIRST STEP
+## INDEX MANAGEMENT - CHECK FIRST
 
-**Before querying, verify indexes exist**. Queries fail or return empty results without proper indexes.
-
-### Check Index Status
+Each search mode needs its own index; without it the query fails or returns nothing.
 
 ```bash
-cidx status                  # Semantic/FTS index status (shows indexed files, last update)
-cidx scip status             # SCIP indexes per project (shows SUCCESS/FAILED/PENDING)
-cidx scip status -v          # Detailed status with error messages
+cidx status                  # semantic, FTS and temporal index status
+cidx scip status             # SCIP status: success / failed / pending / limbo (partial)
+cidx scip status -v          # include per-project errors
 ```
 
-**Status interpretation**:
-- **Semantic/FTS**: Shows file count, languages, last indexed time
-- **SCIP SUCCESS**: Project indexed successfully, queries will work
-- **SCIP FAILED**: Generation failed (check -v for errors, fix issues, rebuild)
-- **SCIP PENDING**: Not yet generated (run `cidx scip generate`)
-- **SCIP LIMBO**: Partial success (some projects succeeded, some failed)
-
-### Create Indexes
+Create or update indexes:
 
 ```bash
-# Semantic + FTS indexes (required for cidx query)
-cidx init                    # Initialize .code-indexer/ in project
-cidx index                   # Index current codebase
-cidx index --index-commits   # Also index git history (enables temporal search)
-
-# SCIP indexes (required for cidx scip commands)
-cidx scip generate           # Generate SCIP indexes for all discovered projects
-cidx scip generate --project backend/  # Generate only for specific project
+cidx init                    # create .code-indexer/ (once)
+cidx index --fts             # semantic + FTS index (incremental on re-run)
+cidx index --clear --fts     # full rebuild
+cidx index --index-commits   # git history for temporal search (history only)
+cidx scip generate           # SCIP indexes for every discovered project
+cidx scip rebuild --failed   # retry failed SCIP projects
 ```
 
-### Re-index / Update Indexes
+SCIP project markers: Java `pom.xml`/`build.gradle`, Kotlin `build.gradle.kts`, TypeScript/JavaScript
+`package.json`, Python `pyproject.toml`/`setup.py`/`requirements.txt`, C# `*.sln`/`*.csproj`, Go `go.mod`. Each
+language's SCIP indexer must be installed.
+
+## CHOOSE THE MODE
+
+| Query | Mode | Example |
+|-------|------|---------|
+| concept, behaviour, question | semantic (default) | `cidx query "user authentication flow" --quiet` |
+| exact identifier or word | FTS | `cidx query "authenticate_user" --fts --quiet` |
+| pattern, grep replacement | regex | `cidx query 'def [a-z_]+_user' --fts --regex --quiet` |
+| when / which commit | temporal | `cidx query "JWT validation" --time-range-all --quiet` |
+| definition, usages, callers | SCIP | `cidx scip references UserService` |
+
+Never pass prose to `--fts`: `cidx query "how does login work" --fts` matches only documents containing every one
+of those words. Prose goes to semantic search.
+
+## KEY FLAGS
+
+`--limit N` (default 10; start with 5-10 to save context) | `--language python` | `--exclude-language js` |
+`--path-filter '*/src/*'` | `--exclude-path '*/tests/*'` | `--min-score 0.6` (semantic only) |
+`--accuracy fast|balanced|high` | `--quiet` (always)
+
+Example: `cidx query "authentication" --language python --exclude-path '*/tests/*' --limit 5 --quiet`
+
+## FTS AND REGEX
+
+- `--fts`: word matching; identifiers are split at `_` and lowercased. `--fuzzy` (edit distance 1) or
+  `--edit-distance 0-3` tolerates typos per word. `--snippet-lines 0-50` (default 5).
+- `--fts --regex`: grep-like substring match over each file, case-insensitive unless `--case-sensitive`.
+  Whitespace and punctuation work (`'find_user\(username\)'`). Use `[A-Za-z0-9_]` instead of `\w`; `\w` exceeds
+  the regex size limit and degrades to token matching. `.` stops at newlines; `\s`/`\n` cross them.
+  Incompatible with `--semantic`, `--fuzzy` and `--edit-distance`.
+- `--fts --semantic`: hybrid; prints the FTS list, then the semantic list.
+
+## TEMPORAL (GIT HISTORY)
+
+Requires `cidx index --index-commits`. Flags: `--time-range-all` | `--time-range YYYY-MM-DD..YYYY-MM-DD` |
+`--author NAME` (name substring, not email) | `--chunk-type commit_message`. `--language` and `--diff-type` do not
+filter temporal results; `--path-filter` makes them empty. Details: reference/temporal-search.md.
+
+## SCIP (CALL GRAPH AND DEPENDENCIES)
 
 ```bash
-# Semantic/FTS re-indexing
-cidx index                   # Re-indexes changed files (incremental)
-cidx index --force           # Full re-index (ignores cache)
-
-# SCIP re-indexing
-cidx scip rebuild PROJECT    # Rebuild specific project
-cidx scip rebuild --failed   # Rebuild all failed projects
-cidx scip rebuild --force PROJECT  # Force rebuild even if succeeded
+cidx scip definition SYMBOL          # where defined (substring match; --exact for Class#method)
+cidx scip references SYMBOL          # where used
+cidx scip dependencies SYMBOL        # what it uses (--depth 1-10)
+cidx scip dependents SYMBOL          # what uses it (--depth 1-10)
+cidx scip impact SYMBOL              # what a change affects (--depth 1-10, default 3)
+cidx scip callchain FROM TO          # call paths (--max-depth 1-3, default 3)
+cidx scip context SYMBOL             # definition plus related references, scored (--limit caps files)
 ```
 
-### Supported Languages
-
-**Semantic/FTS**: All text-based source files (auto-detected)
-
-**SCIP** (requires language-specific tooling):
-| Language | Project Marker | Requirement |
-|----------|----------------|-------------|
-| Java | pom.xml | Maven |
-| TypeScript | package.json | npm/yarn |
-| Python | pyproject.toml | Poetry |
-| Kotlin | build.gradle.kts | Gradle |
-| C# | *.sln, *.csproj | .NET SDK 8.0+ |
-| Go | go.mod | Go SDK 1.18+ |
-
----
-
-## SEMANTIC SEARCH - MANDATORY FIRST ACTION
-
-**CIDX FIRST**: Always use `cidx query` before grep/find/rg for semantic searches.
-
-**Decision Rule**:
-- "What code does", "Where is X implemented" → CIDX semantic (default)
-- Exact text (identifiers, function names) → `--fts`
-- Pattern matching (regex) → `--fts --regex` (10-50x faster than grep)
-- CIDX unavailable → grep/find (fallback only)
-
-**Key Flags**: `--limit N` (default 10, start with 5-10 to conserve context) | `--language python` | `--path-filter */tests/*` | `--exclude-path PATTERN` | `--exclude-language LANG` | `--min-score 0.8` | `--accuracy high` | `--quiet`
-
-**Context Conservation**: Start with low `--limit` values (5-10) on initial queries. High limits consume context window rapidly when results contain large code files.
-
-**Example**: `cidx query "authentication" --language python --exclude-path "*/tests/*" --limit 5 --quiet`
-
-### ANTI-PATTERN WARNING: FTS Misuse
-
-**Never use --fts with natural language or concept descriptions.**
-
-| WRONG | WHY IT'S WRONG | CORRECT |
-|-------|----------------|---------|
-| `cidx query "authentication logic" --fts` | "authentication logic" is a concept | `cidx query "authentication logic" --quiet` |
-| `cidx query "timer display seconds" --fts` | Multiple words describing concept | `cidx query "timer display" --quiet` |
-| `cidx query "how does login work" --fts` | Question/description | `cidx query "login implementation" --quiet` |
-
-**When to use each mode**:
-- **Semantic (default)**: Concepts, descriptions, questions → "authentication flow", "error handling", "database connection"
-- **FTS (--fts)**: Single exact identifiers → `user_id`, `authenticate_user`, `DatabaseManager`
-
-**Quick test**: If it reads like English prose → Semantic. If it's a code identifier → FTS.
-
----
-
-## FULL-TEXT SEARCH (FTS)
-
-**Use For**: Exact names, identifiers, TODO comments, typo debugging.
-
-**Flags**: `--fts` | `--case-sensitive` | `--fuzzy` | `--edit-distance N` | `--snippet-lines N`
-
-**Example**: `cidx query "authenticate_user" --fts --case-sensitive --quiet`
-
-**Hybrid**: `--fts --semantic` runs both in parallel.
-
----
-
-## REGEX MODE (Grep Replacement)
-
-**Flags**: `--fts --regex` | Incompatible with `--semantic` and `--fuzzy`
-
-**Token-Based**: Matches individual tokens only.
-- Works: `def`, `login.*`, `test_.*`
-- Doesn't work: `def\s+\w+` (whitespace removed)
-
-**Example**: `cidx query "def.*auth" --fts --regex --language python --quiet`
-
-**Fallback**: Use grep only when CIDX unavailable.
-
----
-
-## TEMPORAL SEARCH (Git History)
-
-**Use For**: Code archaeology, commit message search, bug history, feature evolution.
-
-**Prerequisite**: `cidx index --index-commits` (indexes git history)
-
-**Flags**: `--time-range-all` | `--time-range YYYY-MM-DD..YYYY-MM-DD` | `--chunk-type commit_message` | `--chunk-type commit_diff` | `--author EMAIL`
-
-**Examples**:
-- When added: `cidx query "JWT auth" --time-range-all --quiet`
-- Bug history: `cidx query "database bug" --time-range-all --chunk-type commit_message --quiet`
-- Author work: `cidx query "refactor" --time-range-all --author "dev@example.com" --quiet`
-
-**Indexing Options**: `--all-branches` | `--max-commits N` | `--since-date YYYY-MM-DD`
-
----
-
-## SCIP CALL GRAPH AND DEPENDENCY ANALYSIS
-
-CIDX provides precise code intelligence via SCIP (Source Code Intelligence Protocol) indexes.
-
-**Prerequisite**: `cidx scip generate` (generates SCIP indexes)
-
-**For complete SCIP documentation**: See reference/scip-intelligence.md
-
-**Quick reference - SCIP commands**:
-- `cidx scip definition SYMBOL` - Find where a symbol is defined
-- `cidx scip references SYMBOL` - Find all references to a symbol
-- `cidx scip dependencies SYMBOL` - Get symbols this symbol depends on
-- `cidx scip dependents SYMBOL` - Get symbols that depend on this symbol
-- `cidx scip callchain FROM TO` - Trace call chains between symbols
-- `cidx scip context SYMBOL` - Get smart context (curated file list)
-- `cidx scip impact SYMBOL` - Analyze change impact
-
-**Common options**: `--limit N` | `--exact` | `--project PATH` | `--depth N`
-
----
+Common options: `--limit N` (default 0 = unlimited) | `--project PATH`. Details: reference/scip-intelligence.md.
 
 ## REFERENCE DOCUMENTATION
 
-Detailed documentation available in reference/ directory:
-- reference/semantic-search.md - Semantic search flags and patterns
-- reference/fts-search.md - Full-text search, regex, fuzzy modes
-- reference/temporal-search.md - Git history search guide
-- reference/scip-intelligence.md - Complete SCIP call graph and dependency analysis guide
+- reference/semantic-search.md - semantic search flags and patterns
+- reference/fts-search.md - full-text, regex and fuzzy search
+- reference/temporal-search.md - git history search
+- reference/scip-intelligence.md - SCIP call graph and dependency analysis

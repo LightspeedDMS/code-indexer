@@ -1,961 +1,341 @@
 # Query Guide
 
-Complete guide to searching code with CIDX across all search modes and query parameters.
+How to search an indexed repository with `cidx query`: the search modes, filters, result controls, reranking,
+and the parameters the same search accepts through the server's REST API and MCP `search_code` tool.
 
-## Table of Contents
+Audience: CLI users and AI-agent integrators. Git-history search has its own guide
+([Temporal Search](temporal-search.md)); symbol navigation is covered in [SCIP Code Intelligence](scip.md).
 
-- [Quick Reference](#quick-reference)
+## Contents
+
+- [Before You Query](#before-you-query)
 - [Search Modes](#search-modes)
   - [Semantic Search](#semantic-search)
   - [Full-Text Search (FTS)](#full-text-search-fts)
   - [Regex Search](#regex-search)
   - [Hybrid Search](#hybrid-search)
-- [Query Parameters](#query-parameters)
-- [Filtering](#filtering)
-- [Temporal Queries](#temporal-queries)
-- [Performance Tuning](#performance-tuning)
-- [Best Practices](#best-practices)
-- [Examples](#examples)
+- [Filters](#filters)
+- [Result Control](#result-control)
+- [Reranking](#reranking)
+- [Multi-Provider Query Strategy](#multi-provider-query-strategy)
+- [Querying Other Repositories](#querying-other-repositories)
+- [Query Parameter Inventory](#query-parameter-inventory)
+- [Validation Rules](#validation-rules)
+- [Known Limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 
-## Quick Reference
+## Before You Query
 
-```bash
-# Semantic search (default)
-cidx query "authentication logic"
+Each search mode reads its own index. Build the ones you need inside the repository:
 
-# Full-text search
-cidx query "authenticate_user" --fts
+| Mode | Index | Build command | Location |
+|------|-------|---------------|----------|
+| Semantic | vector index (HNSW) | `cidx init` then `cidx index` | `.code-indexer/index/<model>/` |
+| FTS, regex | Tantivy full-text index | `cidx index --fts` (builds semantic and FTS) | `.code-indexer/tantivy_index/` |
+| Temporal | per-commit history index | `cidx index --index-commits` | see [Temporal Search](temporal-search.md) |
 
-# Regex search
-cidx query "def.*test" --fts --regex
+`cidx index --rebuild-fts-index` rebuilds only the FTS index from already-indexed files. `cidx status` shows which
+indexes exist.
 
-# Hybrid search (semantic + FTS)
-cidx query "user authentication" --fts --semantic
-
-# With filtering
-cidx query "database" --language python --path-filter "*/models/*"
-
-# Temporal search (git history)
-cidx query "JWT auth" --time-range-all --quiet
-```
+Semantic queries embed the query text, so the embedding provider's API key must be set in the environment
+(`VOYAGE_API_KEY` for VoyageAI, `CO_API_KEY` for Cohere). FTS and regex queries need no API key.
 
 ## Search Modes
 
+| Mode | Flags | Use for |
+|------|-------|---------|
+| Semantic (default) | none, or `--semantic` | concepts and behaviour: "user authentication logic" |
+| FTS | `--fts` | exact identifiers and words: `authenticate_user` |
+| Regex | `--fts --regex` | patterns: `def\s+[a-z_]+_user` |
+| Hybrid | `--fts --semantic` | an identifier search and a concept search in one call |
+
 ### Semantic Search
 
-**Default mode** - Finds code by meaning using AI embeddings.
+Finds code by meaning. The query is embedded and compared with the indexed chunks; each result carries a
+similarity score (0.0-1.0). By default the candidates are then reordered by a reranker using the query itself (see
+[Reranking](#reranking)), so the order can differ from the score order; `--rerank-query ""` keeps similarity order.
 
-**Use When**:
-- Searching by concept or functionality
-- Don't know exact symbol names
-- Want to find similar implementations
-- Exploring unfamiliar codebase
-
-**Examples**:
 ```bash
-# Find authentication code
-cidx query "user authentication logic"
-
-# Find database connections
-cidx query "how to connect to database"
-
-# Find error handling
-cidx query "exception handling patterns"
-
-# Find specific functionality
-cidx query "JWT token validation"
+cidx query "user authentication logic" --quiet --limit 5
+cidx query "database connection" --language javascript --quiet
 ```
 
-**How It Works**:
-1. Query converted to embedding vector
-2. HNSW index searched for similar vectors
-3. Results ranked by cosine similarity
-4. Min score threshold filters low-confidence matches
-
-**Performance**: ~20ms per query (HNSW index)
+Results are filtered to the current git branch. In `--quiet` mode each result prints
+`<rank>. <score> <staleness> <path>:<lines>` followed by the chunk content.
 
 ### Full-Text Search (FTS)
 
-**Fast exact text matching** - 1.36x faster than grep on indexed codebases.
+Matches words in the Tantivy index. The index tokenizer splits text on every non-alphanumeric character
+(underscore included) and lowercases it, so `authenticate_user` is indexed as the two terms `authenticate` and
+`user`. A query with several words returns only documents containing all of them.
 
-**Use When**:
-- Searching for exact identifiers (function names, variables)
-- Know exact text to find
-- Need case-sensitive matching
-- Want typo tolerance (fuzzy matching)
-
-**Examples**:
 ```bash
-# Find function by name
-cidx query "authenticate_user" --fts
-
-# Case-sensitive search
-cidx query "ParseError" --fts --case-sensitive
-
-# Fuzzy matching (typo tolerance)
-cidx query "authenticte" --fts --fuzzy  # Finds "authenticate"
-
-# With context lines
-cidx query "def validate" --fts --snippet-lines 10
+cidx query "authenticate_user" --fts --quiet
+cidx query "jwt token" --fts --quiet
+cidx query "authenticte" --fts --fuzzy --quiet          # typo tolerance, edit distance 1
+cidx query "token" --fts --snippet-lines 0               # list matches without context
 ```
 
-**How It Works**:
-1. Tantivy FTS index (Rust-based)
-2. Token-based exact matching
-3. Optional fuzzy matching (edit distance)
-4. Returns matching files with context
+- `--fuzzy` is shorthand for `--edit-distance 1`; `--edit-distance N` accepts 0-3. Fuzzy matching applies to
+  each word separately, so pass the misspelled word on its own.
+- `--snippet-lines N` (0-50, default 5) sets the context lines shown around each match.
+- Matching is case-insensitive. See [Known Limitations](#known-limitations) for `--case-sensitive`.
+- FTS results carry no similarity score; `--min-score` does not apply to them.
 
-**Performance**: <100ms per query, 1.36x faster than grep
+In `--quiet` mode each result prints `<rank>. <path>:<line>:<column>`.
 
 ### Regex Search
 
-**Pattern matching** - 10-50x faster than grep for token-based patterns.
+`--fts --regex` matches the pattern as a substring of each indexed file's raw content, like grep. It is not
+limited to single tokens: whitespace, punctuation and identifiers with underscores all match.
 
-**Use When**:
-- Searching for patterns (test_*, class.*, def.*())
-- Complex string patterns
-- Token-level matching
-
-**Examples**:
 ```bash
-# Find function definitions
-cidx query "def" --fts --regex
-
-# Find test functions
-cidx query "test_.*" --fts --regex --language python
-
-# Find class methods
-cidx query "class.*authenticate" --fts --regex
-
-# Find TODO comments
-cidx query "TODO|FIXME" --fts --regex
+cidx query "TODO|FIXME" --fts --regex --quiet
+cidx query 'def\s+[a-z_]+_user' --fts --regex --quiet
+cidx query 'find_user\(username\)' --fts --regex --quiet
+cidx query "def" --fts --regex --language python --quiet
+cidx query "connectDatabase" --fts --regex --case-sensitive --quiet
 ```
 
-**How It Works**:
-1. Query interpreted as regex pattern
-2. Tantivy applies regex to tokens
-3. Token-level matching (not grep-style line matching)
-4. Results include matching files
-
-**Performance**: 10-50x faster than grep (token-based)
-
-**Limitations**:
-- Token-based (not arbitrary regex like grep)
-- Cannot combine with fuzzy matching
+- Matching is case-insensitive unless you pass `--case-sensitive`.
+- `.` does not match a newline, but `\n`, `\s` and `[\s\S]` do, so a pattern can span lines:
+  `'try:\s+authenticate'` matches a `try:` followed by `authenticate` on the next line.
+- Tantivy compiles the pattern to an automaton capped at 1000 states. The Unicode class `\w` exceeds the cap;
+  CIDX then logs a WARNING and falls back to matching single index tokens, which usually returns nothing for
+  multi-word patterns. Use an ASCII class such as `[A-Za-z0-9_]` instead of `\w`.
+- `--regex` requires `--fts` and cannot be combined with `--semantic`, `--fuzzy` or `--edit-distance`.
 
 ### Hybrid Search
 
-**Combine semantic and FTS** - Best of both worlds.
-
-**Use When**:
-- Want conceptual matches + exact matches
-- Broader search coverage
-- Exploring and validating findings
-
-**Examples**:
-```bash
-# Find auth code semantically + exact "JWT"
-cidx query "JWT authentication" --fts --semantic
-
-# Find test code with specific patterns
-cidx query "user validation tests" --fts --semantic --regex
-```
-
-**How It Works**:
-1. Runs both semantic and FTS search
-2. Merges results
-3. Ranks by combined relevance
-
-**Performance**: Combined time of both modes
-
-## Query Parameters
-
-CIDX supports query parameters across CLI, REST API, and MCP interfaces.
-
-### Core Parameters
-
-| Parameter | CLI Flag | Type | Default | Description |
-|-----------|----------|------|---------|-------------|
-| **query** | QUERY (positional) | string | required | Search query text |
-| **limit** | --limit N | int | 10 | Maximum results (1-100) |
-| **min_score** | --min-score N | float | None | Minimum similarity score (0.0-1.0) |
-
-**Examples**:
-```bash
-cidx query "search text" --limit 20 --min-score 0.7
-```
-
-### Language and Path Filtering
-
-| Parameter | CLI Flag | Type | Default | Description |
-|-----------|----------|------|---------|-------------|
-| **language** | --language LANG | string | None | Filter by programming language |
-| **path_filter** | --path-filter PATTERN | string | None | Include files matching glob pattern |
-| **exclude_language** | --exclude-language LANG | string | None | Exclude specified language |
-| **exclude_path** | --exclude-path PATTERN | string | None | Exclude files matching glob pattern |
-| **file_extensions** | --file-extensions EXTS | array | None | Filter by file extensions |
-
-**Supported Languages**:
-python, javascript, typescript, java, c, cpp, csharp, go, rust, kotlin, swift, ruby, php, lua, groovy, pascal, sql, html, css, yaml, xml, markdown, and more
-
-**Glob Pattern Syntax**:
-- `*` - Match any characters
-- `**` - Match any path segments
-- `?` - Match single character
-- `[seq]` - Match character class
-
-Note: patterns starting with `*/` match at any depth including the repository root.
-`*/tests/*` matches both `tests/foo.py` (root) and `src/tests/foo.py` (nested).
-`**/tests/**` is equivalent and also accepted.
-
-**Examples**:
-```bash
-# Filter by language
-cidx query "database" --language python
-
-# Path filtering
-cidx query "model" --path-filter "*/src/*"
-
-# Exclude tests
-cidx query "business logic" --exclude-path "*/tests/*"
-
-# Exclude multiple languages
-cidx query "api" --exclude-language javascript --exclude-language css
-
-# Combine filters
-cidx query "auth" --language python --path-filter "*/src/*" --exclude-path "*/tests/*"
-```
-
-### Search Mode Selection
-
-| Parameter | CLI Flag | Type | Values | Default |
-|-----------|----------|------|--------|---------|
-| **search_mode** | --fts / --semantic | enum | semantic, fts, hybrid | semantic |
-
-**Examples**:
-```bash
-# Semantic (default)
-cidx query "authentication"
-
-# FTS
-cidx query "authenticate_user" --fts
-
-# Hybrid
-cidx query "user auth" --fts --semantic
-```
-
-### Search Accuracy
-
-| Parameter | CLI Flag | Type | Values | Default |
-|-----------|----------|------|--------|---------|
-| **accuracy** | --accuracy LEVEL | enum | fast, balanced, high | balanced |
-
-**When to Use**:
-- **fast**: Quick results, lower precision
-- **balanced**: Good tradeoff (default)
-- **high**: Maximum precision, slower
-
-**Examples**:
-```bash
-cidx query "security vulnerabilities" --accuracy high
-```
-
-### FTS-Specific Parameters
-
-| Parameter | CLI Flag | Type | Default | Description |
-|-----------|----------|------|---------|-------------|
-| **case_sensitive** | --case-sensitive | bool | false | Case-sensitive matching |
-| **fuzzy** | --fuzzy | bool | false | Typo tolerance (edit distance 1) |
-| **edit_distance** | --edit-distance N | int | 0 | Fuzzy match tolerance (0-3) |
-| **snippet_lines** | --snippet-lines N | int | 5 | Context lines around matches (0-50) |
-| **regex** | --regex | bool | false | Interpret query as regex pattern |
-
-**Constraints**:
-- FTS parameters only work with `--fts` or hybrid mode
-- `--regex` and `--fuzzy` are mutually exclusive
-
-**Examples**:
-```bash
-# Case-sensitive search
-cidx query "ParseError" --fts --case-sensitive
-
-# Fuzzy matching (typo tolerance)
-cidx query "authenticte" --fts --fuzzy
-
-# Custom edit distance
-cidx query "databse" --fts --edit-distance 2
-
-# More context lines
-cidx query "validate_user" --fts --snippet-lines 15
-
-# Regex search
-cidx query "test_.*_auth" --fts --regex
-```
-
-### Temporal Query Parameters
-
-Search git history semantically.
-
-| Parameter | CLI Flag | Type | Default | Description |
-|-----------|----------|------|---------|-------------|
-| **time_range** | --time-range RANGE | string | None | Time range (YYYY-MM-DD..YYYY-MM-DD) |
-| **time_range_all** | --time-range-all | flag | false | Search all git history |
-| **diff_type** | --diff-type TYPE | string | None | Filter by diff type |
-| **author** | --author NAME | string | None | Filter by commit author |
-| **chunk_type** | --chunk-type TYPE | enum | None | commit_message or commit_diff |
-
-**API-Only Temporal Parameters** (not exposed in CLI):
-- **at_commit**: Query code at specific commit hash
-- **include_removed**: Include removed files
-- **show_evolution**: Show code evolution timeline
-- **evolution_limit**: Limit evolution entries
-
-**Requirements**:
-- Must index commits first: `cidx index --index-commits`
-
-**Examples**:
-```bash
-# Index commits first
-cidx index --index-commits
-
-# Search all history
-cidx query "authentication refactor" --time-range-all --quiet
-
-# Specific time range
-cidx query "bug fix" --time-range 2024-01-01..2024-12-31 --quiet
-
-# Filter by author
-cidx query "login feature" --time-range-all --author "john@example.com" --quiet
-
-# Search only commit messages
-cidx query "JIRA-123" --time-range-all --chunk-type commit_message --quiet
-
-# Filter by diff type
-cidx query "auth" --time-range-all --diff-type added --quiet
-```
-
-**Diff Types**:
-- `added` - Newly added code
-- `modified` - Changed code
-- `deleted` - Removed code
-- `renamed` - Renamed files
-- `binary` - Binary file changes
-
-## Filtering
-
-### Language Filtering
+`--fts --semantic` runs the FTS and semantic searches in parallel.
 
 ```bash
-# Include specific language
-cidx query "model" --language python
-
-# Exclude language
-cidx query "api" --exclude-language javascript
+cidx query "user authentication" --fts --semantic --quiet --limit 5
 ```
 
-### Path Filtering
+- The CLI prints the FTS results first and the semantic results second, as two separate lists; it does not merge
+  them.
+- The server merges the two lists with Reciprocal Rank Fusion when `search_mode` is `hybrid`
+  (`SemanticQueryManager._merge_hybrid_results`).
+- If the FTS index is missing, the CLI warns and runs the semantic search only.
+- The FTS half honours only the first `--language` value.
+
+## Filters
+
+| Flag | Repeatable | Effect |
+|------|------------|--------|
+| `--language LANG` | yes (OR) | include a language by friendly name (`python`, `javascript`, ...) or extension (`py`, `js`) |
+| `--exclude-language LANG` | yes | exclude a language |
+| `--path-filter GLOB` | yes (OR) | include paths matching a glob |
+| `--exclude-path GLOB` | yes | exclude paths matching a glob |
+| `--file-extensions LIST` | no | comma-separated extensions (`py,js`, leading dot optional); intersected with `--language` |
 
 ```bash
-# Include path pattern
-cidx query "auth" --path-filter "*/src/auth/*"
-
-# Exclude path pattern
-cidx query "core logic" --exclude-path "*/tests/*" --exclude-path "*/docs/*"
-
-# Combine with language
-cidx query "database" --language python --path-filter "*/models/*"
+cidx query "authentication" --path-filter "*/tests/*" --quiet
+cidx query "authentication" --exclude-path "*/tests/*" --quiet --limit 3
+cidx query "authentication" --exclude-language python --quiet
+cidx query "authentication" --file-extensions py --language python --quiet --limit 2
+cidx query "user" --fts --path-filter "*/tests/*" --quiet
 ```
 
-### Multiple Filters
+- Globs support `*`, `**`, `?` and `[seq]`. A pattern starting with `*/` also matches at the repository root:
+  `*/tests/*` matches `tests/test_login.py`.
+- Exclusions win over inclusions.
+- Run `cidx query --help` for the full list of friendly language names.
+- `--file-extensions` applies to semantic search only; see [Known Limitations](#known-limitations).
+
+## Result Control
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--limit N`, `-l N` | 10 | maximum results; see [Known Limitations](#known-limitations) for `0` |
+| `--min-score F` | none | drop semantic results scoring below F (0.0-1.0) |
+| `--accuracy fast\|balanced\|high` | `balanced` | search accuracy profile; `high` is slower |
+| `--quiet`, `-q` | off | print results only, without headers and timing |
 
 ```bash
-# Complex filtering
-cidx query "user management" \
-  --language python \
-  --path-filter "*/src/*" \
-  --exclude-path "*/tests/*" \
-  --exclude-language javascript \
-  --min-score 0.8 \
-  --limit 20
+cidx query "authentication" --min-score 0.5 --quiet
+cidx query "authentication" --accuracy high --quiet --limit 1
 ```
 
-## Temporal Queries
+## Reranking
 
-### Setup
+A reranker re-orders the retrieved candidates against a second query before the result list is cut to `--limit`.
 
 ```bash
-# Index git history (one-time setup)
-cidx index --index-commits
-
-# Verify temporal index exists
-ls -lh .code-indexer/index/*/temporal_meta.json
+cidx query "authentication" --rerank-query "JWT token signature check" --limit 3
+cidx query "authentication" --rerank-query "JWT token signature check" \
+  --rerank-instruction "Prefer implementation over tests" --quiet --limit 2
+cidx query "user" --fts --rerank-query "" --quiet       # disable reranking for this query
 ```
 
-### Basic Temporal Search
+- `--rerank-query TEXT` sets the reranker query. `--rerank-instruction TEXT` is passed to the reranker with it and
+  has no effect without a rerank query.
+- When `--rerank-query` is omitted and `rerank.auto_populate_rerank_query` is true (the default), the search query
+  itself is used as the rerank query. An empty string (`--rerank-query ""`) disables reranking.
+- Reranking calls Voyage or Cohere and needs `VOYAGE_API_KEY` or `CO_API_KEY`. With no key, or when every reranker
+  fails, results are returned in retrieval order.
+- CLI reranker settings live in a per-user file, created with defaults on first use: `$CIDX_GLOBAL_CONFIG_PATH`
+  if set, else `$XDG_CONFIG_HOME/cidx/global.json`, else `~/.config/cidx/global.json`
+  (`src/code_indexer/config_global.py`):
 
-```bash
-# Search all git history
-cidx query "JWT authentication" --time-range-all --quiet
-
-# Always use --quiet for temporal queries (cleaner output)
+```json
+{
+  "rerank": {
+    "auto_populate_rerank_query": true,
+    "cohere_reranker_model": "rerank-v3.5",
+    "overfetch_multiplier": 5,
+    "preferred_vendor_order": ["voyage", "cohere"],
+    "voyage_reranker_model": "rerank-2.5"
+  }
+}
 ```
 
-### Time Range Filtering
-
-```bash
-# Specific date range
-cidx query "auth refactor" --time-range 2024-01-01..2024-06-30 --quiet
-
-# Last year
-cidx query "security fix" --time-range 2024-01-01..2024-12-31 --quiet
-
-# Specific month
-cidx query "login update" --time-range 2024-03-01..2024-03-31 --quiet
-```
-
-### Author Filtering
-
-```bash
-# Filter by author email
-cidx query "feature implementation" --time-range-all --author "dev@example.com" --quiet
-
-# Filter by author name (partial match)
-cidx query "refactoring" --time-range-all --author "John" --quiet
-```
-
-### Chunk Type Filtering
-
-```bash
-# Search only commit messages
-cidx query "JIRA-123" --time-range-all --chunk-type commit_message --quiet
-
-# Search only code diffs
-cidx query "password validation" --time-range-all --chunk-type commit_diff --quiet
-```
-
-### Diff Type Filtering
-
-```bash
-# Find when code was added
-cidx query "JWT validation" --time-range-all --diff-type added --quiet
-
-# Find what was deleted
-cidx query "legacy auth" --time-range-all --diff-type deleted --quiet
-
-# Find modified code
-cidx query "security update" --time-range-all --diff-type modified --quiet
-```
-
-### Combined Temporal Filters
-
-```bash
-# Complex temporal query
-cidx query "authentication changes" \
-  --time-range 2024-01-01..2024-12-31 \
-  --author "security-team@example.com" \
-  --chunk-type commit_diff \
-  --diff-type modified \
-  --language python \
-  --quiet
-```
-
-## Performance Tuning
-
-### Start Small
-
-```bash
-# Start with low limit for quick results
-cidx query "search term" --limit 5
-
-# Increase if needed
-cidx query "search term" --limit 20
-```
-
-### Use Accuracy Wisely
-
-```bash
-# Fast exploration
-cidx query "concept" --accuracy fast --limit 10
-
-# Balanced (default) for most use cases
-cidx query "concept" --accuracy balanced
-
-# High accuracy for critical searches
-cidx query "security vulnerability" --accuracy high
-```
-
-### Filter Aggressively
-
-```bash
-# Narrow scope with filters (faster queries)
-cidx query "model" --language python --path-filter "*/core/*"
-
-# Broad scope (slower)
-cidx query "model"  # Searches everything
-```
-
-### Choose Right Search Mode
-
-| Mode | Speed | Use Case |
-|------|-------|----------|
-| Semantic | ~20ms | Conceptual search |
-| FTS | <100ms | Exact text search |
-| Regex | <100ms | Pattern matching |
-| Hybrid | ~120ms | Combined search |
-
-## Best Practices
-
-### 1. Choose Appropriate Search Mode
-
-```bash
-# Concept → Semantic
-cidx query "user authentication workflow"
-
-# Exact identifier → FTS
-cidx query "validate_user_credentials" --fts
-
-# Pattern → Regex
-cidx query "test_.*_auth" --fts --regex
-```
-
-### 2. Start Broad, Refine Narrow
-
-```bash
-# Step 1: Broad search
-cidx query "authentication" --limit 10
-
-# Step 2: Refine with filters
-cidx query "authentication" --language python --path-filter "*/auth/*" --limit 5
-```
-
-### 3. Use Min Score Effectively
-
-```bash
-# High confidence matches only
-cidx query "security vulnerability" --min-score 0.8
-
-# Cast wider net
-cidx query "helper functions" --min-score 0.5
-```
-
-### 4. Combine Modes for Validation
-
-```bash
-# Find conceptually, validate exactly
-cidx query "JWT validation" --fts --semantic --limit 15
-```
-
-### 5. Temporal Search for Code Archaeology
-
-```bash
-# When was feature added?
-cidx query "OAuth integration" --time-range-all --diff-type added --quiet
-
-# Who worked on auth?
-cidx query "authentication" --time-range-all --author "security" --quiet
-
-# What changed recently?
-cidx query "login" --time-range 2024-11-01..2024-12-31 --diff-type modified --quiet
-```
-
-## Examples
-
-### Find API Endpoints
-
-```bash
-# Semantic
-cidx query "REST API endpoints" --limit 10
-
-# FTS for exact route definitions
-cidx query "@app.route" --fts --language python
-```
-
-### Find Test Files
-
-```bash
-# Pattern matching
-cidx query "test_.*" --fts --regex --path-filter "*/tests/*"
-
-# Semantic
-cidx query "unit tests for authentication" --language python
-```
-
-### Find Database Models
-
-```bash
-# Semantic
-cidx query "database models" --language python --path-filter "*/models/*"
-
-# FTS for class names
-cidx query "class.*Model" --fts --regex --language python
-```
-
-### Find Security Vulnerabilities
-
-```bash
-# High accuracy semantic search
-cidx query "SQL injection vulnerability" --accuracy high --min-score 0.8
-
-# Historical security fixes
-cidx query "security patch" --time-range-all --chunk-type commit_message --quiet
-```
-
-### Find Configuration Files
-
-```bash
-# Semantic
-cidx query "application configuration settings"
-
-# FTS exact
-cidx query "config.yaml" --fts
-
-# By extension (API)
-# Use REST/MCP API with file_extensions parameter
-```
-
-### Find Error Handling
-
-```bash
-# Semantic
-cidx query "exception handling patterns"
-
-# FTS for try/catch blocks
-cidx query "try:.*except" --fts --regex --language python
-```
-
-## Troubleshooting
-
-### No Results Found
-
-**Possible Causes**:
-1. Query too specific
-2. Min score too high
-3. Aggressive filtering
-4. Code not indexed
-
-**Solutions**:
-```bash
-# Broaden query
-cidx query "auth" --limit 20 --min-score 0.5
-
-# Remove filters
-cidx query "authentication"  # No language/path filters
-
-# Reindex
-cidx index --clear
-cidx index
-```
-
-### Too Many Results
-
-**Solutions**:
-```bash
-# Increase min score
-cidx query "function" --min-score 0.8
-
-# Add filters
-cidx query "function" --language python --path-filter "*/core/*"
-
-# Use exact search
-cidx query "specific_function_name" --fts
-```
-
-### Slow Queries
-
-**Possible Causes**:
-1. Large codebase
-2. High limit value
-3. Complex regex
-4. Temporal queries without filters
-
-**Solutions**:
-```bash
-# Reduce limit
-cidx query "search" --limit 5
-
-# Add filters to narrow scope
-cidx query "search" --language python
-
-# Use fast accuracy
-cidx query "search" --accuracy fast
-
-# For temporal, always use --quiet
-cidx query "search" --time-range-all --quiet
-```
-
-### Fuzzy Matching Not Working
-
-**Check**:
-```bash
-# Fuzzy requires --fts mode
-cidx query "authenticte" --fts --fuzzy
-
-# Not this (wrong - no --fts)
-cidx query "authenticte" --fuzzy  # Won't work
-```
-
-### Regex Not Matching
-
-**Common Issues**:
-1. Token-based matching (not line-based like grep)
-2. Need --fts --regex flags
-3. Pattern syntax
-
-**Examples**:
-```bash
-# Correct: Token-based pattern
-cidx query "def" --fts --regex
-
-# Wrong: Line-based pattern (use grep instead)
-# cidx does token-based, not arbitrary regex
-```
-
-### Temporal Queries Return Nothing
-
-**Check**:
-```bash
-# 1. Verify commits were indexed
-ls -lh .code-indexer/index/*/temporal_chunks.json
-
-# 2. If missing, index commits
-cidx index --index-commits
-
-# 3. Verify with --time-range-all
-cidx query "anything" --time-range-all --quiet
-```
-
----
-
-## Next Steps
-
-- **Installation**: [Installation Guide](../getting-started/installation.md)
-- **SCIP Code Intelligence**: [SCIP Guide](scip.md)
-- **Operating Modes**: [Operating Modes](../getting-started/operating-modes.md)
-- **Main Documentation**: [README](../../README.md)
-
-## Parameter Reference
-
-Complete list of CLI query parameters with flags, types, and defaults.
-
-| Parameter | CLI Flag | Type | Default | Modes | Description |
-|-----------|----------|------|---------|-------|-------------|
-| query | QUERY | string | required | All | Search query text |
-| limit | --limit | int | 10 | All | Max results (1-100) |
-| min_score | --min-score | float | None | All | Minimum similarity score (0.0-1.0) |
-| language | --language | string (multiple) | None | All | Filter by programming language |
-| path_filter | --path-filter | string (multiple) | None | All | Include files matching glob pattern |
-| exclude_language | --exclude-language | string (multiple) | None | All | Exclude language |
-| exclude_path | --exclude-path | string (multiple) | None | All | Exclude path pattern |
-| file_extensions | --file-extensions | string | None | All | Filter by extensions (comma-separated, e.g. "py,js,ts") |
-| search_mode | --fts / --semantic | enum | semantic | All | semantic/fts/hybrid |
-| accuracy | --accuracy | enum | balanced | All | fast/balanced/high |
-| case_sensitive | --case-sensitive | bool | false | FTS | Case-sensitive match |
-| case_insensitive | --case-insensitive | bool | false | FTS | Case-insensitive match |
-| fuzzy | --fuzzy | bool | false | FTS | Typo tolerance |
-| edit_distance | --edit-distance | int | 0 | FTS | Fuzzy tolerance (0-3) |
-| snippet_lines | --snippet-lines | int | 5 | FTS | Context lines (0-50) |
-| regex | --regex | bool | false | FTS | Regex pattern |
-| rerank_query | --rerank-query | string | None | All | Reranker query (requires API key) |
-| rerank_instruction | --rerank-instruction | string | None | All | Reranker instruction hint |
-| time_range | --time-range | string | None | Temporal | Date range filter |
-| diff_type | --diff-type | string (multiple) | None | Temporal | Diff type filter (can be specified multiple times) |
-| author | --author | string | None | Temporal | Author filter |
-| chunk_type | --chunk-type | enum | None | Temporal | commit_message/commit_diff |
-| repo | --repo | string | None | Remote | Query global repo by alias |
-| repos | --repos | string | None | Remote | Query multiple repos (comma-separated) |
-
-**API-Only Parameters** (not available as CLI flags):
-- at_commit (string) - Query at specific commit
-- include_removed (bool) - Include removed files
-- show_evolution (bool) - Show code evolution
-- evolution_limit (int) - Limit evolution entries
+On the server, REST `POST /api/query` and MCP `search_code` accept `rerank_query` and `rerank_instruction`; without
+`rerank_query` the server does not rerank.
+
+## Multi-Provider Query Strategy
+
+A server can hold embeddings of the same repository from two providers, VoyageAI (`voyage-ai`) and Cohere
+(`cohere`). The MCP `search_code` tool chooses how to use them:
+
+| `query_strategy` | Behaviour |
+|------------------|-----------|
+| `primary_only` | query the primary provider only |
+| `failover` | query VoyageAI; on an API error or timeout (not on empty results) query Cohere |
+| `parallel` | query both and fuse the two result lists with `score_fusion` |
+| `specific` | query only the provider named in `preferred_provider` (`voyage-ai` or `cohere`; required) |
+
+`score_fusion` (parallel only): `rrf` (Reciprocal Rank Fusion, default; rank-based, so it is unaffected by the two
+providers' different score scales), `multiply` or `average` (normalized score arithmetic). Parallel results carry
+`fusion_score` and `contributing_providers` next to the raw `similarity_score`.
+
+When `query_strategy` is omitted, the server picks `parallel` with `rrf` if both providers are configured, the
+search mode is `semantic` and no temporal parameter is set; otherwise `primary_only`
+(`SemanticQueryManager`, `src/code_indexer/server/query/semantic_query_manager.py`). The resolved value is returned
+as `effective_query_strategy`. REST `POST /api/query` has no `query_strategy` field and always uses this default.
+
+The CLI does not fan out across providers. A local semantic query embeds the query with the repository's configured
+`embedding_provider` (`.code-indexer/config.json`, read by `EmbeddingProviderFactory.create`); there is no fallback
+to the other provider: with `VOYAGE_API_KEY` unset, a `voyage-ai` repository fails with
+`VOYAGE_API_KEY environment variable is required` even when `CO_API_KEY` is set. Temporal search selects an
+embedder with `--temporal-embedder` instead (see [Temporal Search](temporal-search.md)).
+
+## Querying Other Repositories
+
+| Flag | Mode | Effect |
+|------|------|--------|
+| `--repo ALIAS` | local | query a global repository by its alias (`example-repo-global`) from any directory |
+| `--repos A,B` | remote only | query several server repositories in one call (`POST /api/query/multi`) |
+
+`--repo` resolves the alias from the local golden-repos directory: `$CIDX_GOLDEN_REPOS_DIR`, or
+`~/.code-indexer/golden-repos` when unset (alias files in its `aliases/` subdirectory). `cidx global list` lists the
+repositories registered there. `--repo` and `--repos` are mutually exclusive.
+
+In remote mode (`cidx init --remote`), `cidx query` runs a semantic search on the server for the linked repository.
+FTS, regex, hybrid and temporal queries run in local mode only. Remote mode sends only the query text, `--limit`,
+the first `--language`, the first `--path-filter`, `--min-score` and `--accuracy`; `--exclude-language`,
+`--exclude-path`, `--file-extensions` and the rerank flags are not sent.
 
 ## Query Parameter Inventory
 
-### Purpose
+One table for all three interfaces. The CLI is `cidx query`; REST is `POST /api/query` (model `SemanticQueryRequest`,
+`src/code_indexer/server/models/query.py`); MCP is the `search_code` tool
+(`src/code_indexer/server/mcp/tool_docs/search/search_code.md`). "-" means the interface does not accept it.
 
-This document serves as the authoritative reference for all query parameters supported by CIDX across all interfaces (CLI, REST API, MCP API). It ensures parameter consistency and prevents future parity regressions.
+| Parameter | CLI | REST | MCP | Default | Notes |
+|-----------|-----|------|-----|---------|-------|
+| query text | `QUERY` (positional) | `query_text` | `query_text` | required | REST: 1-1000 characters |
+| limit | `--limit` | `limit` | `limit` | 10 | REST/MCP: 1-100 |
+| min score | `--min-score` | `min_score` | `min_score` | none | MCP single-repository search applies 0.3 when omitted |
+| language | `--language` (repeatable) | `language` | `language` | none | REST/MCP: one value |
+| exclude language | `--exclude-language` (repeatable) | `exclude_language` | `exclude_language` | none | |
+| path filter | `--path-filter` (repeatable) | `path_filter` | `path_filter` | none | |
+| exclude path | `--exclude-path` (repeatable) | `exclude_path` | `exclude_path` | none | MCP: comma-separated for several |
+| file extensions | `--file-extensions py,js` | `file_extensions` | `file_extensions` | none | REST/MCP: list with leading dot, `[".py"]` |
+| search mode | `--fts` / `--semantic` | `search_mode` | `search_mode` | `semantic` | `semantic`, `fts`, `hybrid` |
+| accuracy | `--accuracy` | `accuracy` | `accuracy` | `balanced` | `fast`, `balanced`, `high` |
+| case sensitive | `--case-sensitive` | `case_sensitive` | `case_sensitive` | false | CLI also has `--case-insensitive` |
+| fuzzy | `--fuzzy` | `fuzzy` | `fuzzy` | false | edit distance 1 |
+| edit distance | `--edit-distance` | `edit_distance` | `edit_distance` | 0 | 0-3 |
+| snippet lines | `--snippet-lines` | `snippet_lines` | `snippet_lines` | 5 | 0-50 |
+| regex | `--regex` | `regex` | `regex` | false | FTS or hybrid only |
+| time range | `--time-range` | `time_range` | `time_range` | none | `YYYY-MM-DD..YYYY-MM-DD` |
+| all history | `--time-range-all` | `time_range_all` | `time_range_all` | false | |
+| at commit | - | `at_commit` | `at_commit` | none | results at or before a commit or ref |
+| diff type | `--diff-type` (repeatable) | `diff_type` | `diff_type` | none | accepted, does not filter (see temporal guide) |
+| author | `--author` | `author` | `author` | none | |
+| chunk type | `--chunk-type` | `chunk_type` | `chunk_type` | none | `commit_message`, `commit_diff` |
+| temporal embedder | `--temporal-embedder` | `temporal_embedder` | `temporal_embedder` | active embedder | |
+| rerank query | `--rerank-query` | `rerank_query` | `rerank_query` | none | CLI auto-fills it, see [Reranking](#reranking) |
+| rerank instruction | `--rerank-instruction` | `rerank_instruction` | `rerank_instruction` | none | |
+| repository | `--repo` / `--repos` | `repository_alias` | `repository_alias` | none | MCP also takes a list or a wildcard (`*-global`) |
+| aggregation mode | - | `aggregation_mode` | `aggregation_mode` | `global` | multi-repo: `global` or `per_repo` |
+| exclude repositories | - | `exclude_patterns` | `exclude_patterns` | none | regex patterns, multi-repo |
+| query strategy | - | - | `query_strategy` | see above | [Multi-Provider Query Strategy](#multi-provider-query-strategy) |
+| score fusion | - | - | `score_fusion` | `rrf` | parallel strategy only |
+| preferred provider | - | - | `preferred_provider` | none | `specific` strategy only |
+| response format | - | - | `response_format` | `flat` | multi-repo: `flat` or `grouped` |
+| skip embedding cache | - | `no_embedding_cache_shortcut` | `no_embedding_cache_shortcut` | false | skip the server's query-embedding cache read |
+| asynchronous | - | `async_query` | - | false | returns a job; fetch it with `GET /api/query/result/{job_id}` |
+| quiet output | `--quiet` | - | - | false | |
 
-### Overview
+`tests/unit/query/test_query_parameter_parity.py` pins the parameters shared by the CLI, REST and MCP. A new query
+parameter goes into all three interfaces and that test, or is listed there as interface-specific.
 
-CIDX currently supports **23 query parameters** across three interfaces:
+## Validation Rules
 
-- **CLI**: 18 parameters (subset - some API-only temporal params not exposed)
-- **REST API**: 23 parameters (full set)
-- **MCP API**: 23 parameters (full set)
+The CLI rejects these combinations before searching (exit code 1):
 
-### Complete Parameter List
+| Input | Message |
+|-------|---------|
+| `--regex` without `--fts` | `--regex requires --fts flag` |
+| `--fts --regex --semantic` | `Cannot combine --regex with --semantic` |
+| `--regex` with `--fuzzy` or `--edit-distance` > 0 | `Cannot combine --regex with --fuzzy or --edit-distance` |
+| `--case-sensitive --case-insensitive` with `--fts` | `Cannot use both --case-sensitive and --case-insensitive` |
+| `--edit-distance` outside 0-3 with `--fts` | `--edit-distance must be between 0 and 3` |
+| `--snippet-lines` outside 0-50 with `--fts` | `--snippet-lines must be between 0 and 50` |
+| `--chunk-type` without a time range | `--chunk-type requires --time-range or --time-range-all` |
+| `--repo` with `--repos` | `--repos and --repo are mutually exclusive` |
+| `--repos` outside remote mode | `Multi-repository queries require remote mode` |
 
-#### Core Parameters
+The case, edit-distance and snippet-lines checks run only in FTS and hybrid mode; a semantic query ignores those
+flags. (`--regex --semantic` without `--fts` stops earlier, at `--regex requires --fts flag`.)
 
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| query | string | QUERY (positional) | query_text | query_text | (required) | Search query text | Initial |
-| limit | integer | --limit | limit | limit | 10 | Maximum number of results (1-100) | Initial |
-| min_score | float | --min-score | min_score | min_score | 0.5 | Minimum similarity score (0.0-1.0) | Initial |
+REST validates differently (`SemanticQueryRequest`): `regex=true` is accepted with `search_mode` `fts` or `hybrid`
+(otherwise `regex=true requires search_mode to be 'fts' or 'hybrid'`), is rejected with `fuzzy=true`
+(`regex=true is incompatible with fuzzy=true`), and is accepted with `edit_distance` > 0. REST also rejects a
+malformed `time_range` and any `diff_type` other than `added`, `modified`, `deleted`, `renamed`, `binary`.
 
-#### Language and Path Filtering
+## Known Limitations
 
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| language | string | --language | language | language | None | Filter by programming language (python, javascript, etc.) | Initial |
-| path_filter | string | --path-filter | path_filter | path_filter | None | Filter by path pattern (glob syntax: */tests/*, **/*.py) | Initial |
-| exclude_language | string | --exclude-language | exclude_language | exclude_language | None | Exclude files of specified language | Phase 1 |
-| exclude_path | string | --exclude-path | exclude_path | exclude_path | None | Exclude files matching path pattern (glob syntax) | Phase 1 |
-| file_extensions | array | N/A | file_extensions | file_extensions | None | Filter by file extensions ([".py", ".js"]) - API-only | Initial |
+Observed on the current code and filed for fixing; listed so results are not misread.
 
-#### Search Mode Selection
+- `--limit 0`: a semantic query returns no results. An FTS query returns every match only when reranking is off
+  (`--rerank-query ""`); with the default auto-filled rerank query it returns nothing.
+- `--file-extensions` with more than one extension (`py,js`) returns no results; one extension works. FTS and
+  regex searches ignore `--file-extensions`.
+- `--case-sensitive` without `--regex` does not distinguish case, because the index lowercases terms. Use
+  `--fts --regex --case-sensitive` for case-sensitive matching.
+- Temporal queries ignore several of the filters above; see
+  [Temporal Search](temporal-search.md#filter-behaviour).
 
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| search_mode | enum | --fts / --semantic | search_mode | search_mode | semantic | Search mode: semantic, fts, or hybrid | Initial |
+## Troubleshooting
 
-#### Search Accuracy
+| Symptom | Cause and fix |
+|---------|---------------|
+| `FTS index not found` | build it: `cidx index --fts` |
+| `Temporal index not available` | build it: `cidx index --index-commits` |
+| `Full-text search is only supported in local mode` | FTS, regex and hybrid need a local index |
+| `Global repo alias '...' not found` | check `cidx global list` and `CIDX_GOLDEN_REPOS_DIR` |
+| WARNING `exceeds Tantivy's verbatim-field state limit` | replace `\w` with an ASCII class such as `[A-Za-z0-9_]` |
+| no semantic results | lower or drop `--min-score`, remove filters, confirm with `cidx status` that files are indexed |
+| fuzzy query finds nothing | pass a single word: fuzzy matching is per word and needs `--fts` |
 
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| accuracy | enum | --accuracy | accuracy | accuracy | balanced | Search accuracy profile: fast, balanced, high | Phase 1 |
+## Related
 
-#### FTS-Specific Parameters
-
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| case_sensitive | boolean | --case-sensitive | case_sensitive | case_sensitive | false | Enable case-sensitive FTS matching | Phase 2 |
-| fuzzy | boolean | --fuzzy | fuzzy | fuzzy | false | Enable fuzzy matching with edit distance 1 | Phase 2 |
-| edit_distance | integer | --edit-distance | edit_distance | edit_distance | 0 | Fuzzy match tolerance (0=exact, 1-3=typos allowed) | Phase 2 |
-| snippet_lines | integer | --snippet-lines | snippet_lines | snippet_lines | 5 | Context lines around FTS matches (0-50) | Phase 2 |
-| regex | boolean | --regex | regex | regex | false | Interpret query as regex pattern (FTS-only) | Phase 1 |
-
-#### Temporal Query Parameters
-
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| time_range | string | --time-range | time_range | time_range | None | Time range filter (YYYY-MM-DD..YYYY-MM-DD) | Story #446 |
-| at_commit | string | N/A | at_commit | at_commit | None | Point-in-time scoping to a specific commit hash or ref (restricts results to commits at/before it; unresolvable ref errors) - API-only | Story #446, Bug #1301 |
-
-#### Temporal Filtering Parameters
-
-| Parameter | Type | CLI Flag | REST Field | MCP Field | Default | Description | Phase |
-|-----------|------|----------|------------|-----------|---------|-------------|-------|
-| diff_type | string/array | --diff-type | diff_type | diff_type | None | Filter by diff type (added/modified/deleted/renamed/binary) | Phase 3 |
-| author | string | --author | author | author | None | Filter by commit author (name or email) | Phase 3 |
-| chunk_type | enum | --chunk-type | chunk_type | chunk_type | None | Filter by chunk type: commit_message or commit_diff | Phase 3 |
-
-### Parameter Naming Conventions
-
-#### CLI-Specific Naming
-
-- **Positional argument**: `QUERY` (required first argument, not a flag)
-- **Hyphenated flags**: `--exclude-language`, `--path-filter`, `--min-score`
-- **Search mode flags**: `--fts` and `--semantic` (instead of `--search-mode` enum)
-- **Temporal shortcut**: `--time-range-all` (shortcut for full temporal range)
-- **Case sensitivity**: `--case-insensitive` (inverse flag available)
-
-#### REST/MCP API Naming
-
-- **Underscore notation**: `query_text`, `min_score`, `exclude_language`
-- **Enum field**: `search_mode` (values: `semantic`, `fts`, `hybrid`)
-- **Boolean fields**: `case_sensitive`, `fuzzy`, `regex`
-
-### API-Only Parameters
-
-The following parameters are **NOT exposed in CLI** (only available via REST/MCP):
-
-1. **at_commit**: Point-in-time scoping to a specific commit hash - API provides more flexibility
-2. **file_extensions**: Array-based extension filtering - API uses this, CLI uses --language
-
-Note (Bug #1301): `include_removed`, `show_evolution`, and `evolution_limit` were retired --
-they were advertised but permanently non-functional (silent no-ops) on the per-commit
-temporal index. They have been removed from REST/MCP entirely, not just from CLI. Per-file
-diff timelines are available via the existing git tools (`git_file_history`, `git_log`,
-`git_blame`, `git_diff`) instead.
-
-### Validation Rules
-
-#### Parameter Constraints
-
-- **limit**: 1-100 (REST/MCP enforce maximum 100)
-- **min_score**: 0.0-1.0 (similarity score threshold)
-- **edit_distance**: 0-3 (fuzzy matching tolerance)
-- **snippet_lines**: 0-50 (FTS context lines)
-- **accuracy**: Enum values: `fast`, `balanced`, `high`
-- **search_mode**: Enum values: `semantic`, `fts`, `hybrid`
-- **chunk_type**: Enum values: `commit_message`, `commit_diff`
-
-#### Parameter Conflicts
-
-- **regex + fuzzy**: Mutually exclusive (CLI/API validation enforces this)
-- **FTS parameters**: Only applicable when `search_mode` is `fts` or `hybrid`
-- **Temporal parameters**: Require temporal index built with `cidx index --index-commits`
-
-### Parity Enforcement
-
-Automated tests in `tests/unit/query/test_query_parameter_parity.py` enforce:
-
-1. All 23 parameters exist in REST and MCP APIs
-2. CLI has expected 18 parameters (excludes API-only temporal params)
-3. No unexpected parameters are added without updating this document
-4. Parameter names are consistent between REST and MCP
-5. Parameter types are compatible across interfaces
-6. Default values are consistent between REST and MCP
-
-### Implementation Reference
-
-#### CLI Implementation
-
-- **File**: `src/code_indexer/cli.py`
-- **Command**: `cidx query`
-- **Help**: Run `cidx query --help` to see all CLI parameters
-
-#### REST API Implementation
-
-- **File**: `src/code_indexer/server/app.py`
-- **Model**: `SemanticQueryRequest` (Pydantic)
-- **Endpoint**: `POST /api/v1/query`
-
-#### MCP API Implementation
-
-- **File**: `src/code_indexer/server/mcp/tools.py`
-- **Tool**: `search_code`
-- **Schema**: JSON Schema in `TOOL_REGISTRY["search_code"]["inputSchema"]`
-
-### Phase History
-
-#### Initial Implementation
-Core parameters: query, limit, min_score, language, path_filter, search_mode, file_extensions
-
-#### Story #503 Phase 1 (P0 Gaps - REST API)
-Added: exclude_language, exclude_path, accuracy, regex
-
-#### Story #503 Phase 2 (P1 Gaps - MCP FTS Options)
-Added: case_sensitive, fuzzy, edit_distance, snippet_lines
-
-#### Story #503 Phase 3 (P1 Gaps - Temporal Filtering)
-Added: diff_type, author, chunk_type
-
-#### Story #446 (Temporal Query Parameters)
-Added: time_range, at_commit, include_removed, show_evolution, evolution_limit
-
-#### Story #503 Phase 4 (Documentation & Validation)
-Created this inventory document and automated parity validation tests
-
-### Future Additions
-
-When adding new query parameters:
-
-1. Add parameter to **all three interfaces** (CLI, REST, MCP) unless there's a strong reason it's API-only
-2. Update **this document** with parameter details (type, default, description, phase)
-3. Update **automated parity tests** in `test_query_parameter_parity.py`
-4. Update **CLI help text** (via @click.option decorator)
-5. Update **OpenAPI schema** (via SemanticQueryRequest Pydantic model)
-6. Update **MCP schema** (via TOOL_REGISTRY in tools.py)
-7. Update **README.md** with usage examples
-
-### Version History
-
-- **v7.4.0**: Phase 4 implementation - Parameter inventory documentation and automated parity validation tests
-- **v7.3.0**: Phase 3 implementation - Temporal filtering parameters (diff_type, author, chunk_type)
-- **v7.2.0**: Phase 2 implementation - MCP FTS options (case_sensitive, fuzzy, edit_distance, snippet_lines)
-- **v7.1.0**: Phase 1 implementation - REST API P0 gaps (exclude_language, exclude_path, accuracy, regex)
-- **v7.0.0**: Temporal query parameters (time_range, at_commit, include_removed, show_evolution, evolution_limit)
+- [Temporal Search](temporal-search.md)
+- [SCIP Code Intelligence](scip.md)
+- [Meta-Repo Discovery](meta-repo-discovery.md)
+- [CLI Reference](../reference/cli/README.md)
+- [Operating Modes](../getting-started/operating-modes.md)
