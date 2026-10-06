@@ -372,14 +372,21 @@ _BARRIER_TIMEOUT_S = 30
 _JOIN_TIMEOUT_S = 120
 
 
+@pytest.mark.parametrize("first_alone", [False, True], ids=["burst", "after-first"])
 def test_concurrent_wrong_codes_at_one_challenge_admit_at_most_the_allowance(
-    env, door, clock
+    env, door, clock, first_alone
 ):
+    """*first_alone*: one answer completes before the rest arrive (the
+    order a loaded machine produces), so the rest find the challenge gone."""
     name, totp = _enrolled_member(env)
     wrong = _wrong_code(totp)
     challenge = door.challenge(name)  # attempt 1
-    barrier = threading.Barrier(_BURST)
+    after_password = _attempts_on_key(name)
     responses: List[Any] = []
+    if first_alone:
+        responses.append(door.verify(challenge, totp_code=wrong))
+    burst = _BURST - len(responses)
+    barrier = threading.Barrier(burst)
     guard = threading.Lock()
 
     def attempt() -> None:
@@ -388,30 +395,44 @@ def test_concurrent_wrong_codes_at_one_challenge_admit_at_most_the_allowance(
         with guard:
             responses.append(response)
 
-    threads = [threading.Thread(target=attempt) for _ in range(_BURST)]
+    threads = [threading.Thread(target=attempt) for _ in range(burst)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=_JOIN_TIMEOUT_S)
     assert len(responses) == _BURST
     statuses = [r.status_code for r in responses]
+    # Count what the throttle RESERVED (its row) and which codes were
+    # CHECKED, never responses: an answer that finds the challenge already
+    # consumed reserves nothing and checks nothing, whatever its status
+    # (OAuth 400, REST 401 without "Invalid MFA code", Web 303 mfa_expired).
+    code_reservations = _attempts_on_key(name) - after_password
+    checked = sum(door.code_rejected(r) for r in responses)
+    # Frozen clock: the remaining allowance before the window is attempts
+    # 2-5 (THRESHOLD - 1); no burst may reserve more.
+    assert 0 <= code_reservations <= THRESHOLD - 1, (code_reservations, statuses)
+    # Consume-first: only an answer whose code was reserved can consume the
+    # challenge, and exactly one does: one code is checked once any is
+    # reserved, none otherwise.
+    expected_checked = 1 if code_reservations else 0
+    assert checked == expected_checked, (checked, code_reservations, statuses)
     # 503 = the solo store's 2 s write-lock bound (possible under an I/O
     # stall with 16 simultaneous reservations): refused unchecked, and it
     # reserves nothing.
-    busy = statuses.count(503)
-    admitted = [r for r in responses if r.status_code not in (429, 503)]
-    # Frozen clock: the remaining allowance before the window is attempts
-    # 2-5 (THRESHOLD - 1); no burst may admit more.
-    assert len(admitted) <= THRESHOLD - 1, statuses
-    # Consume-first: at most one admitted attempt checks the code, the
-    # others find the challenge gone.
-    assert sum(door.code_rejected(r) for r in admitted) <= 1, statuses
-    if busy == 0:
-        # Every reservation was decided: the allowance is exactly filled,
-        # one code was checked, and the window now runs.
-        assert len(admitted) == THRESHOLD - 1, statuses
-        assert sum(door.code_rejected(r) for r in admitted) == 1
+    if 503 not in statuses:
+        # The first arrival always finds the challenge and the allowance.
+        assert code_reservations >= 1, statuses
+    if code_reservations == THRESHOLD - 1:
+        # The allowance is filled: the window now runs.
         _assert_refused(door.password(name), BASE_WINDOW)
+
+
+def _attempts_on_key(name: str) -> int:
+    """Attempts the throttle counted on *name*'s login key (frozen clock:
+    none has aged out)."""
+    limiter = throttle_module.login_rate_limiter
+    row = limiter._current_store().read(throttle_module.throttle_key(name))
+    return 0 if row is None else row.failure_count
 
 
 @pytest.fixture

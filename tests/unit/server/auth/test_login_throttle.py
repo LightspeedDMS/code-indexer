@@ -434,6 +434,38 @@ class TestSqliteWriteLock:
             limiter.record_success(f"user-{i}")
         assert opened == []
 
+    def test_re_pointing_never_leaves_a_thread_on_the_old_file(
+        self, tmp_path: Path, clock
+    ):
+        # A thread's cached connection belongs to the store of the CURRENT
+        # path: once re-pointed, the same thread reserves and clears in the
+        # new file, even after the old file's directory is gone.
+        import shutil
+
+        old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        limiter = LoginRateLimiter(clock=clock)
+        limiter.set_sqlite_path(str(old_dir / "cidx_server.db"))
+        assert limiter.begin_attempt("alice").admitted  # caches this thread's conn
+        shutil.rmtree(old_dir)
+
+        new_db = str(new_dir / "cidx_server.db")
+        limiter.set_sqlite_path(new_db)
+        assert limiter.begin_attempt("alice").admitted
+        assert limiter.begin_attempt("alice", scope=SCOPE_STEP_UP).admitted
+        limiter.clear_completed_login("alice", scope=SCOPE_STEP_UP)
+
+        reader = sqlite3.connect(new_db)
+        try:
+            rows = reader.execute(
+                "SELECT key_hash, failure_count FROM login_throttle"
+            ).fetchall()
+        finally:
+            reader.close()
+        # Only the login key remains, counted once (in the new file).
+        assert rows == [(throttle_key("alice", SCOPE_LOGIN), 1)]
+
     # _HOLD_S and _REFUSAL_BUDGET_S are defined at the top of this class.
     _HOLD_LONG_S = 8.0  # a writer that outlasts the throttle's bound
     _BUSY_BOUND_S = 2.0  # the reservation's SQLite busy timeout

@@ -21,13 +21,12 @@ import json
 import re
 import secrets
 import string
-import tempfile
-from pathlib import Path
 from typing import Any, Iterator, Tuple
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.unit.server._isolated_app import isolated_app
 
 _TEST_TIMEOUT = 120
 
@@ -69,47 +68,47 @@ def _scrape_csrf_token(html: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def _app() -> Iterator[Tuple[TestClient, Any]]:
-    """One app per module: ``(client, the app's DB-attached ConfigService)``."""
-    from code_indexer.server.app import create_app
-    from code_indexer.server.auth.user_manager import UserManager, UserRole
+def _app(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Tuple[TestClient, Any]]:
+    """One app per module: ``(client, the app's DB-attached ConfigService)``.
+
+    Built through ``isolated_app``: ``create_app()`` re-points process-wide
+    singletons (the process app's user manager, the token blacklist, ...)
+    at this module's server home, and every later test in the process must
+    get them back once that home is deleted.
+    """
+    from code_indexer.server.auth.user_manager import UserRole
     from code_indexer.server.services.config_service import (
         get_config_service,
         reset_config_service,
     )
-    from code_indexer.server.storage.database_manager import DatabaseSchema
 
-    with tempfile.TemporaryDirectory() as d:
-        tmp = Path(d)
-        DatabaseSchema(str(tmp / "test.db")).initialize_database()
-        with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmp)}):
-            reset_config_service()
-            try:
-                with TestClient(create_app()) as c:
-                    um = UserManager(
-                        use_sqlite=True, db_path=str(tmp / "data" / "cidx_server.db")
-                    )
-                    username = "example-admin-" + secrets.token_hex(4)
-                    password = _make_test_password()
-                    um.create_user(
-                        username=username, password=password, role=UserRole.ADMIN
-                    )
-                    resp = c.get("/login")
-                    login = c.post(
-                        "/login",
-                        data={
-                            "username": username,
-                            "password": password,
-                            "csrf_token": _scrape_csrf_token(resp.text),
-                        },
-                        follow_redirects=False,
-                    )
-                    assert login.status_code == 303, login.status_code
-                    for name, val in login.cookies.items():
-                        c.cookies.set(name, val)
-                    yield c, get_config_service()
-            finally:
-                reset_config_service()
+    root = tmp_path_factory.mktemp("config-secrets-write-only")
+    reset_config_service()
+    try:
+        with isolated_app(root) as app, TestClient(app) as c:
+            username = "example-admin-" + secrets.token_hex(4)
+            password = _make_test_password()
+            app.state.user_manager.create_user(
+                username=username, password=password, role=UserRole.ADMIN
+            )
+            resp = c.get("/login")
+            login = c.post(
+                "/login",
+                data={
+                    "username": username,
+                    "password": password,
+                    "csrf_token": _scrape_csrf_token(resp.text),
+                },
+                follow_redirects=False,
+            )
+            assert login.status_code == 303, login.status_code
+            for name, val in login.cookies.items():
+                c.cookies.set(name, val)
+            yield c, get_config_service()
+    finally:
+        reset_config_service()
 
 
 @pytest.fixture
