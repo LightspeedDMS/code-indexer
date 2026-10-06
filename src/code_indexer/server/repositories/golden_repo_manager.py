@@ -1755,19 +1755,27 @@ class GoldenRepoManager:
         admin/health handlers that are explicitly forbidden from importing that
         module.
 
+        Resolution is by REGISTRATION, deliberately not by global-activation state.
+        Gating on ``is_globally_active`` would make this inert wherever the global
+        registry is not populated, even though the golden repo is registered and its
+        clone is on disk -- and the activation state adds nothing here: the suffixed
+        form resolves to the same golden repo the bare form already resolves to, for
+        handlers that accept the bare form anyway. So this strips the suffix and
+        looks the repo up; it grants nothing the bare alias would not.
+
         Args:
             alias: Bare (``"example-repo"``) or suffixed (``"example-repo-global"``).
 
         Returns:
-            The golden clone path, or ``None`` when the alias names no globally
-            active golden repo.
+            The golden clone path, or ``None`` when the alias names no registered
+            golden repo.
         """
         from pathlib import Path as _Path
 
         if not alias:
             return None
         bare = alias[: -len("-global")] if alias.endswith("-global") else alias
-        if not bare or not self.is_globally_active(bare):
+        if not bare:
             return None
         repo = self.get_golden_repo(bare)
         if repo is None:

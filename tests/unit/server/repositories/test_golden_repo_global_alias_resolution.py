@@ -45,18 +45,28 @@ def test_bare_alias_resolves_too() -> None:
     assert mgr.resolve_global_clone_path("example-repo") == Path("/golden/example-repo")
 
 
-def test_suffix_is_stripped_before_the_activation_check() -> None:
-    # The registry keys on the bare alias; querying it with the suffix still attached
-    # would never match, which is the bug this resolves.
+def test_suffix_is_stripped_before_the_lookup() -> None:
+    # The golden registry keys on the BARE alias; looking it up with the suffix
+    # still attached would never match, which is the bug this resolves.
     seen: list = []
-    mgr = _manager(globally_active=True, repo=_Repo("/golden/x"), seen=seen)
+    mgr = _manager(globally_active=True, repo=_Repo("/golden/x"))
+    mgr.get_golden_repo = lambda alias: (  # type: ignore[method-assign]
+        seen.append(alias),
+        _Repo("/golden/x"),
+    )[1]
     mgr.resolve_global_clone_path("example-repo-global")
     assert seen == ["example-repo"]
 
 
-def test_not_globally_active_returns_none() -> None:
+def test_resolution_does_not_depend_on_activation_state() -> None:
+    # Deliberate: gating on is_globally_active would make this inert wherever the
+    # global registry is unpopulated, even though the repo is registered and its
+    # clone is on disk. The suffixed form resolves to the same golden repo the bare
+    # form already does, so no access is widened.
     mgr = _manager(globally_active=False, repo=_Repo("/golden/example-repo"))
-    assert mgr.resolve_global_clone_path("example-repo-global") is None
+    assert mgr.resolve_global_clone_path("example-repo-global") == Path(
+        "/golden/example-repo"
+    )
 
 
 def test_unknown_repo_returns_none() -> None:
