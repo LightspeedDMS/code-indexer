@@ -1,434 +1,168 @@
-# MCP Server Registration
+# Connecting an MCP client to a CIDX server
 
-## Remote MCP Server
+A CIDX server exposes its search and repository tools over the Model Context Protocol (MCP). This guide covers the
+endpoints, how clients authenticate, and how to register the server in Claude Code. It assumes a running server
+(see [Server deployment](../server/deployment.md)) and an account on it. For a purely local setup with no server,
+see [teach-ai](teach-ai.md) instead.
 
-**Connect AI assistants to centralized CIDX server** for team-wide semantic search.
+In the examples, `https://cidx.example.com` stands for your server's base URL.
 
-### How It Works
+## What the server offers
 
-1. CIDX server runs with golden repositories indexed
-2. MCP (Model Context Protocol) interface exposed
-3. AI assistant authenticates via OAuth 2.1
-4. AI queries server via MCP tools
-5. Results returned to AI for interpretation
+| Endpoint | Authentication | Tools listed |
+|----------|---------------|--------------|
+| `POST /mcp` (JSON-RPC 2.0, MCP Streamable HTTP; `GET /mcp` for SSE) | Required; see below. Unauthenticated requests get HTTP 401 with a `WWW-Authenticate` header that points to the OAuth metadata. | Every tool the account's role and configuration allow. |
+| `POST /mcp-public` | None required. | Without a session cookie: only `authenticate` (takes `username` and an API key `cidx_sk_...`). A successful `authenticate` sets a `cidx_session` cookie; later requests carrying it see the role-filtered tool list. |
 
-### Architecture
+The server accepts MCP protocol versions `2024-11-05`, `2025-03-26` and `2025-06-18`
+(`SUPPORTED_PROTOCOL_VERSIONS` in `src/code_indexer/server/mcp/protocol.py`). One tool document per tool lives in
+`src/code_indexer/server/mcp/tool_docs/` (148 at the time of writing), grouped as admin, cicd, depmap, files,
+git, guides, memory, repos, scip, search, ssh and tracing.
 
-```
-AI Assistant → MCP Protocol → CIDX Server → Golden Repositories
-                    ↓                ↓
-              OAuth 2.1        Semantic Indexes
-```
+What an account can call depends on its role:
 
-### Features
+| Role | Permissions |
+|------|------------|
+| `normal_user` | query repositories, read repository status, activate and sync its own workspaces |
+| `power_user` | the above plus repository writes (file edits, commits, pushes) |
+| `admin` | the above plus user, golden-repository and destructive operations |
 
-- **Standard Protocol** - MCP Protocol 2025-06-18
-- **OAuth 2.1 Authentication** - Secure AI assistant auth via browser
-- **Remote Code Search** - Query centralized indexed codebases
-- **Permission Controls** - Role-based access (admin, power_user, normal_user)
-- **Golden Repository Access** - Query team's shared code repositories
+Some write and credential tools additionally require TOTP step-up elevation when the server enforces it; see
+[Login and elevation](../server/auth/login-and-elevation.md).
 
-### Setup
+## Authentication on `/mcp`
 
-See [CIDX MCP Bridge](../../README.md#cidx-mcp-bridge-for-claude-desktop) for complete setup instructions.
+`get_current_user_for_mcp` in `src/code_indexer/server/auth/dependencies.py` tries, in order:
 
-**Quick Overview**:
+1. **MCP credentials**: `Authorization: Basic base64(client_id:client_secret)`, or `client_id` and
+   `client_secret` fields in the JSON body (`client_secret_post`). Recommended for long-lived clients such as
+   Claude Code. A request authenticated this way gets a full elevation window automatically.
+2. **Bearer token**: `Authorization: Bearer <token>`, where the token is one of
+   - a personal API key (prefix `cidx_sk_`);
+   - an OAuth 2.1 access token issued by the server's own authorization server (see below);
+   - a JWT from `POST /auth/login`. These expire after `jwt_expiration_minutes` (default 10), so they suit
+     scripts, not a registered client.
+3. **Web UI session cookie** (`cidx_session`).
 
-1. **Deploy CIDX server** (admin task)
-2. **Add golden repositories** (admin task)
-3. **Configure AI assistant** (user task):
-   - Download MCP Bridge binary
-   - Configure API endpoint
-   - Authenticate via OAuth
+### Creating MCP credentials
 
-### Available via MCP
+An MCP credential is a `client_id` (prefix `mcp_`) and a `client_secret` (prefix `mcp_sec_`) owned by one
+account. The secret is shown once, at creation.
 
-**Query Tools**:
-- `search_code` - Semantic/FTS/temporal search
-- `list_repositories` - Browse available repos
-- `get_file_content` - Read file contents
-- `browse_directory` - Explore directory structure
+- **Web UI**: the MCP Credentials page, `/user/mcp-credentials` for every user or `/admin/mcp-credentials` for
+  admins.
+- **REST**:
 
-**SCIP Tools** (Code Intelligence):
-- `scip_definition` - Find symbol definitions
-- `scip_references` - Find symbol usages
-- `scip_dependencies` - Find dependencies
-- `scip_dependents` - Find dependents
-- `scip_impact` - Impact analysis
-- `scip_callchain` - Trace call chains
-- `scip_context` - Get symbol context
+  ```bash
+  TOKEN=$(curl -s -X POST https://cidx.example.com/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username": "alice", "password": "..."}' | jq -r .access_token)
 
-**Git Tools**:
-- `git_log` - Commit history
-- `git_show_commit` - Commit details
-- `git_diff` - Compare revisions
-- `git_blame` - Line attribution
+  curl -s -X POST https://cidx.example.com/api/mcp-credentials \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "alice-laptop"}'
+  ```
 
-**150+ MCP tools** available (exact count grows with new releases)
+  Response (HTTP 201): `client_id`, `client_secret`, `credential_id`, `name`, `created_at`, `message`.
+  Admins can create a credential for another account with `POST /api/admin/users/{username}/mcp-credentials`.
+  `GET /api/mcp-credentials` lists your credentials and `DELETE /api/mcp-credentials/{credential_id}` revokes one.
 
-### Permissions
+Creating or deleting a credential is a self-service credential change: when TOTP elevation enforcement is on, the
+caller needs an active elevation window first (`require_self_elevation`). Without one the server answers HTTP 403
+`elevation_required` (or `totp_setup_required` if the account has no TOTP yet).
 
-| Role | Capabilities |
-|------|-------------|
-| **admin** | Full access (manage repos, users) |
-| **power_user** | Activate repos, query, file operations |
-| **normal_user** | Query repositories only |
+## Registering the server in Claude Code
 
-## Registering CIDX Server as an MCP Server in Claude Code
-
-This guide explains how to register a CIDX server instance as an MCP server
-so that Claude Code can use CIDX tools (semantic search, SCIP intelligence,
-code browsing) during interactive sessions and automated workflows like
-dependency map analysis.
-
-### Overview
-
-The registration process has two steps:
-
-1. **Generate MCP credentials** on the CIDX server (client_id + client_secret)
-2. **Register the MCP server** in Claude Code's configuration (`~/.claude.json`)
-
-Authentication uses HTTP Basic auth: the client_id and client_secret are
-base64-encoded and sent as an `Authorization: Basic <token>` header on every
-MCP request.
-
----
-
-### Step 1: Generate MCP Credentials
-
-MCP credentials are API-level credentials stored in the CIDX server database.
-They are separate from the user's login password. Each credential has a
-`client_id` (prefixed `mcp_`) and a `client_secret` (prefixed `mcp_sec_`).
-
-There are three ways to generate credentials:
-
-#### Option A: Web UI
-
-1. Log in to the CIDX server admin panel (e.g. `https://your-server:8090/admin/`)
-2. Navigate to **MCP Credentials** page (`/admin/mcp-credentials`)
-3. Click **Generate New Credential**
-4. Optionally enter a name (e.g. "My Laptop", "CI Pipeline")
-5. Copy the `client_id` and `client_secret` shown in the modal
-
-The secret is displayed only once. Save it immediately.
-
-#### Option B: REST API
+Build the Basic header from the credential and add the server with `claude mcp add`:
 
 ```bash
-# 1. Authenticate to get a JWT token
-TOKEN=$(curl -s -X POST https://your-server:8090/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"YOUR_PASSWORD"}' | jq -r '.access_token')
+AUTH=$(printf '%s' "$CLIENT_ID:$CLIENT_SECRET" | base64 | tr -d '\n')
 
-# 2. Create an MCP credential
-curl -s -X POST https://your-server:8090/api/mcp-credentials \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"my-workstation"}' | jq .
+claude mcp add --transport http --scope user cidx https://cidx.example.com/mcp \
+  --header "Authorization: Basic $AUTH"
 ```
 
-Response:
+`--header` accepts several values, so it consumes every following argument up to the next option: put it after the
+name and URL (or follow it with another option). Written before the name, the command fails with
+`missing required argument 'name'`.
 
-```json
-{
-  "credential_id": "cred-abc123",
-  "client_id": "mcp_<32-hex-characters>",
-  "client_secret": "mcp_sec_<64-hex-characters>",
-  "name": "my-workstation",
-  "created_at": "2026-03-02T10:00:00Z"
-}
-```
+`--scope` decides where Claude Code stores the entry (observed with Claude Code 2.1.291):
 
-#### Option C: CIDX CLI (remote admin)
+| Scope | Stored in | Visible in |
+|-------|-----------|-----------|
+| `local` (default) | `~/.claude.json`, under the current project's entry | this project, for you only |
+| `user` | `~/.claude.json`, top-level `mcpServers` | every project, for you only |
+| `project` | `.mcp.json` in the project directory | everyone who uses the project's `.mcp.json` |
 
-```bash
-cidx admin mcp-credentials create --description "my-workstation" --json
-```
-
-This requires a configured CIDX CLI profile pointing to the server.
-
-#### Admin: Create credentials for other users
-
-Admins can create credentials on behalf of any user:
-
-```bash
-curl -s -X POST https://your-server:8090/api/admin/users/USERNAME/mcp-credentials \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"auto-provisioned"}'
-```
-
----
-
-### Step 2: Register in Claude Code
-
-#### Option A: Claude CLI (recommended)
-
-The `claude mcp add` command writes the entry to `~/.claude.json` for you:
-
-```bash
-# Build the base64 auth token
-AUTH_TOKEN=$(echo -n "CLIENT_ID:CLIENT_SECRET" | base64)
-
-# Register with user scope (available in all projects)
-claude mcp add \
-  --transport http \
-  --header "Authorization: Basic $AUTH_TOKEN" \
-  --scope user \
-  cidx-local \
-  http://localhost:8090/mcp
-
-# Or register with project scope (only available in a specific project)
-claude mcp add \
-  --transport http \
-  --header "Authorization: Basic $AUTH_TOKEN" \
-  --scope project \
-  cidx-production \
-  https://your-server:8090/mcp
-```
-
-##### Scope options
-
-| Scope | Storage location in `~/.claude.json` | Visibility |
-|-------|--------------------------------------|------------|
-| `user` | Top-level `mcpServers` object | All projects on this machine |
-| `project` | `projects.{project_path}.mcpServers` | Only that project directory |
-| `local` (default) | `.claude/settings.local.json` in project | Only that project, gitignored |
-
-##### Verify registration
-
-```bash
-claude mcp get cidx-local
-```
-
-Returns exit code 0 if registered, non-zero if not found.
-
-##### Remove registration
-
-```bash
-claude mcp remove cidx-local
-```
-
-#### Option B: Manual edit of ~/.claude.json
-
-If the Claude CLI is not available, you can edit `~/.claude.json` directly.
-
-##### Structure
-
-The file is a JSON object. MCP servers are stored in `mcpServers` objects at
-different nesting levels depending on scope.
-
-**User scope** (available everywhere):
+Do not put a credential header in `project` scope: `.mcp.json` is meant to be committed. The resulting `user`
+entry looks like this:
 
 ```json
 {
   "mcpServers": {
-    "cidx-local": {
+    "cidx": {
       "type": "http",
-      "url": "http://localhost:8090/mcp",
-      "headers": {
-        "Authorization": "Basic BASE64_ENCODED_CREDENTIALS"
-      }
+      "url": "https://cidx.example.com/mcp",
+      "headers": { "Authorization": "Basic <base64 of client_id:client_secret>" }
     }
   }
 }
 ```
 
-**Project scope** (only for a specific project directory):
+Check and remove the registration with `claude mcp get cidx` (exit 0 when registered, 1 when not) and
+`claude mcp remove cidx --scope user`. Claude Code's own options may change between releases; `claude mcp add --help`
+is authoritative.
 
-```json
-{
-  "projects": {
-    "/home/user/my-project": {
-      "mcpServers": {
-        "cidx-production": {
-          "type": "http",
-          "url": "https://your-server:8090/mcp",
-          "headers": {
-            "Authorization": "Basic BASE64_ENCODED_CREDENTIALS"
-          }
-        }
-      }
-    }
-  }
-}
-```
+## Clients that use OAuth
 
-##### Computing the Authorization header value
+Clients that implement MCP's OAuth flow can be given only the URL `https://cidx.example.com/mcp`. The server
+provides:
 
-The header value is `Basic ` followed by a base64 encoding of
-`CLIENT_ID:CLIENT_SECRET`:
+| Endpoint | Purpose |
+|----------|---------|
+| `/.well-known/oauth-protected-resource` | Protected-resource metadata (RFC 9728), naming the authorization server. |
+| `/.well-known/oauth-authorization-server` (also served at `/.well-known/oauth-authorization-server/mcp`) | Authorization-server metadata (RFC 8414). |
+| `POST /oauth/register` | Dynamic client registration. |
+| `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | Authorization code with PKCE (`S256`), refresh token and client credentials grants. |
 
-```bash
-echo -n "$CLIENT_ID:$CLIENT_SECRET" | base64
-```
+The user signs in through the browser (password with MFA, or SSO) during the authorization step. The URLs in the
+metadata are built from the server's issuer URL (`CIDX_ISSUER_URL` in the server's environment, default
+`http://localhost:8000`). If the issuer is wrong, OAuth clients are sent to the wrong host; operators set it during
+installation (`cidx install-server --issuer-url ...`, see [Server deployment](../server/deployment.md)).
 
-The output is a single base64 string (no newlines) that goes into the
-`Authorization` header as `Basic <that string>`.
+## Server self-registration (`cidx-local`)
 
-##### Required fields for an HTTP MCP server entry
+When the server itself runs Claude CLI jobs (for example dependency-map analysis), it registers itself in that
+Claude CLI under the name `cidx-local`, so treat that name as reserved. `MCPSelfRegistrationService`
+(`src/code_indexer/server/services/mcp_self_registration_service.py`):
 
-| Field | Value | Description |
-|-------|-------|-------------|
-| `type` | `"http"` | Transport protocol (not `sse` or `stdio`) |
-| `url` | `"http[s]://host:port/mcp"` | Full URL to the CIDX MCP endpoint |
-| `headers` | `{"Authorization": "Basic ..."}` | HTTP Basic auth with MCP credentials |
+1. checks `claude --version`, then `claude mcp get cidx-local`;
+2. reuses the stored credential if it still exists, otherwise generates one for `admin` named `cidx-local-auto`
+   and stores it in the runtime configuration (`mcp_self_registration`, in the server database);
+3. runs `claude mcp add --transport http --header "Authorization: Basic ..." --scope user cidx-local http://localhost:<port>/mcp`.
 
-The MCP endpoint path is always `/mcp` (authenticated). There is also a
-`/mcp-public` endpoint for unauthenticated access, but it has restricted
-tool availability.
-
----
-
-### Naming Conventions
-
-| Name | Used by | Description |
-|------|---------|-------------|
-| `cidx-local` | Self-registration service | Auto-registered by CIDX server for local dep analysis |
-| `cidx` | Manual project registration | Typical name for a remote/production server |
-| `cidx-staging` | Manual registration | Staging environment |
-
-You can use any name, but `cidx-local` is reserved for the automatic
-self-registration process.
-
----
-
-### Automatic Self-Registration (How the Server Does It Internally)
-
-When the CIDX server runs dependency map analysis or golden repo description
-jobs, it needs Claude CLI to have access to CIDX tools via MCP. The server
-handles this automatically through the `MCPSelfRegistrationService`:
-
-1. **Trigger**: First time `ClaudeCliManager._worker_loop()` processes a job,
-   or first time `DependencyMapAnalyzer._run_claude_cli()` is called
-2. **CLI check**: Runs `claude --version` to verify the CLI is installed
-3. **Registration check**: Runs `claude mcp get cidx-local` to see if already
-   registered
-4. **Credential management**: Checks `~/.cidx-server/config.json` for stored
-   credentials under the `mcp_self_registration` key. If none exist or the
-   stored ones are no longer valid in the database, generates new ones via
-   `MCPCredentialManager.generate_credential(user_id="admin", name="cidx-local-auto")`
-5. **Registration**: Runs `claude mcp add --transport http --header "Authorization: Basic ..." --scope user cidx-local http://localhost:{port}/mcp`
-6. **Caching**: Sets an in-memory flag so subsequent calls skip all checks
-   for the lifetime of the process
-
-Credentials are persisted in `~/.cidx-server/config.json`:
-
-```json
-{
-  "mcp_self_registration": {
-    "client_id": "mcp_...",
-    "client_secret": "mcp_sec_..."
-  }
-}
-```
-
-This survives server restarts. On restart, the service re-validates the
-stored credentials against the database and re-checks the Claude CLI
-registration (the in-memory cache resets on restart, but the `claude mcp get`
-check avoids re-registering if already present).
-
-#### Key source files
-
-| File | Purpose |
-|------|---------|
-| `src/code_indexer/server/services/mcp_self_registration_service.py` | Core service: check, create, register |
-| `src/code_indexer/server/auth/mcp_credential_manager.py` | Credential generation and validation |
-| `src/code_indexer/server/utils/config_manager.py` | `MCPSelfRegistrationConfig` dataclass, persistent storage |
-| `src/code_indexer/server/services/claude_cli_manager.py` | Worker loop trigger (line 642) |
-| `src/code_indexer/global_repos/dependency_map_analyzer.py` | Dep analysis trigger (line 2022) |
-
----
-
-### Troubleshooting
-
-#### "Claude CLI not available"
-
-The server logs `Claude CLI not available - skipping MCP self-registration`.
-This means `claude --version` failed. Install Claude Code CLI or ensure it
-is on the PATH for the user running the CIDX server process.
-
-#### Credentials work but tools are not visible
-
-Check that the MCP endpoint URL is correct (`/mcp` not `/mcp-public`) and
-that the credential's user has the `query_repos` permission.
-
-#### Stale credentials after database reset
-
-If the CIDX server database is reset, stored credentials in
-`~/.cidx-server/config.json` become invalid. The self-registration service
-detects this automatically and generates new ones. For manual registrations,
-generate a new credential and update `~/.claude.json`.
-
-#### Verifying the registration works
-
-```bash
-# Check registration exists
-claude mcp get cidx-local
-
-# Test the MCP endpoint directly
-AUTH_TOKEN=$(echo -n "CLIENT_ID:CLIENT_SECRET" | base64)
-curl -s -X POST http://localhost:8090/mcp \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Basic $AUTH_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '.result.tools | length'
-```
-
-If the tools/list call returns a count (typically 100+), the registration
-and credentials are working correctly.
-
-## Platform Support
-
-### Claude Desktop (MCP Server)
-
-**Status**: Fully supported via MCP Bridge
-
-**Setup**: See [MCP Bridge Guide](../../README.md#cidx-mcp-bridge-for-claude-desktop)
-
-**Works With**:
-- Claude Desktop app (macOS, Windows, Linux)
-- Connects to remote CIDX server
-- OAuth 2.1 authentication
-
-## Use Cases
-
-### 6. Team Code Search (MCP Server)
-
-**Scenario**: Entire team uses AI for code search
-
-**Setup**: Deploy CIDX server with golden repositories
-
-**Benefits**:
-- Shared semantic search across team
-- Centralized index management
-- Consistent search results
-- OAuth 2.1-based access control
+The check runs once per server process. If the Claude CLI is missing, the server logs
+`Claude CLI not available - skipping MCP self-registration` and retries on a later job.
 
 ## Troubleshooting
 
-### MCP Connection Issues
+| Symptom | Check |
+|---------|-------|
+| HTTP 401 on every call | The `Authorization` header is missing or wrong. Re-encode `client_id:client_secret` without a trailing newline (`printf '%s'`, not `echo`). A revoked credential also returns 401. |
+| HTTP 403 `Non-SSO accounts are restricted to Web UI access only` | The server restricts non-SSO accounts; use an SSO account. |
+| HTTP 403 `elevation_required` when creating a credential | Complete TOTP elevation first (Web UI or `POST /auth/elevate`). |
+| Tools list contains only `authenticate` | You are on `/mcp-public` without a session. Use `/mcp`, or call `authenticate` first. |
+| Expected tools are missing | The account's role does not allow them, or the tool depends on a feature the server has turned off. |
+| Is the server up? | `curl https://cidx.example.com/healthz` needs no authentication and returns only a status. `/health` returns details and requires authentication. |
 
-**Check**:
+A direct check of a credential, without Claude Code:
 
-1. **Server is running**:
-   ```bash
-   curl https://your-server.com:8090/health \
-     -H "Authorization: Bearer YOUR_TOKEN"
-   ```
+```bash
+curl -s -X POST https://cidx.example.com/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}' | jq '.result.tools | length'
+```
 
-2. **Authentication valid**:
-   - Verify your JWT bearer token via `POST /auth/login` (`{"username": "...", "password": "..."}`) returns `200 OK` with `access_token`
-   - Confirm your MCP client points at the server's `/mcp` endpoint (authenticated, send the token in `Authorization: Bearer ...`) or `/mcp-public` (unauthenticated)
-   - Re-issue a fresh token if the existing one expired (default lifetime: 10 minutes)
-
-3. **Network connectivity**:
-   ```bash
-   ping your-server.com
-   ```
-
-### Platform-Specific Issues
-
-**Claude Desktop (MCP)**:
-- Verify MCP Bridge configured in claude_desktop_config.json
-- Check MCP Bridge binary permissions (chmod +x)
-- Verify server URL and authentication
+A number greater than 0 means the credential works.

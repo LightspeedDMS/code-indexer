@@ -1,109 +1,60 @@
 # Contributing to CIDX
 
-Thank you for considering contributing to CIDX! This guide will help you set up your development environment and understand our development workflow.
+How to set up a development checkout, which branches to use, which test suites must pass, and how releases are
+cut. User documentation starts at [docs/README.md](docs/README.md).
 
-## Development Setup
+## Prerequisites
 
-### Prerequisites
+- Python 3.9 to 3.12 (`requires-python = ">=3.9,<3.13"`).
+- git, and a C/C++ compiler plus Python headers (the `hnswlib` fork is built from source).
+- A Rust toolchain only if you touch `rust/`: `rustup` installs the pinned version from `rust/rust-toolchain.toml`
+  automatically the first time `cargo` runs inside `rust/`.
+- For tests that call embedding providers: `VOYAGE_API_KEY` and, for Cohere and reranking tests, `CO_API_KEY`.
 
-- Python 3.9 to 3.12 (Python 3.13 is not yet supported)
-- Git
-- VoyageAI API key (`VOYAGE_API_KEY`) for testing semantic search features, OR
-- Cohere API key (`CO_API_KEY`) as an alternative embedding provider (supported since v9.8)
-
-### Initial Setup
-
-1. **Fork and clone the repository**
-
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/code-indexer.git
-   cd code-indexer
-   ```
-
-2. **Initialize submodules**
-
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-   This pulls required dependencies:
-   - `third_party/hnswlib` - HNSW vector index library
-   - `test-fixtures/multimodal-mock-repo` - E2E test fixtures (if present)
-
-3. **Install development dependencies**
-
-   ```bash
-   python3 -m pip install -e ".[dev]" --break-system-packages
-   ```
-
-   This installs CIDX in editable mode with all development dependencies including:
-   - pytest (testing framework)
-   - mypy (type checking)
-   - ruff (linting and formatting)
-   - pre-commit (git hooks)
-
-4. **Install pre-commit hooks** (CRITICAL)
-
-   ```bash
-   pre-commit install
-   ```
-
-   This installs git hooks that automatically check your code before each commit. **All contributors must install these hooks** to ensure code quality.
-
-### Pre-commit Hooks
-
-All commits are automatically validated for:
-
-- **Linting**: Ruff checks for code quality issues and auto-fixes many of them
-- **Formatting**: Ruff-format ensures consistent code style
-- **Type Checking**: Mypy validates type annotations on `src/` code
-- **Standard Checks**: Trailing whitespace, EOF newlines, YAML syntax, etc.
-
-**What happens when you commit:**
+## Setup
 
 ```bash
-git add my_changes.py
-git commit -m "Add feature"
-# Pre-commit hooks run automatically
-# If checks fail, files are auto-fixed when possible
-# Re-stage and commit again:
-git add my_changes.py
-git commit -m "Add feature"
+git clone https://github.com/LightspeedDMS/code-indexer.git
+cd code-indexer
+git submodule update --init --recursive
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -e ".[dev]"
+pre-commit install
 ```
 
-**Manual pre-commit execution:**
+Submodules: `third_party/hnswlib` (the hnswlib fork), `test-fixtures/multimodal-mock-repo` and
+`test-fixtures/scip-python-mock`. The last one is configured with an SSH URL (`git@github.com:...`), so
+`--recursive` needs a GitHub SSH key; without one, initialise the other two by path
+(`git submodule update --init third_party/hnswlib test-fixtures/multimodal-mock-repo`).
 
-```bash
-# Run on all files (useful after pulling changes)
-pre-commit run --all-files
-
-# Run on staged files only
-pre-commit run
-```
+`fast-automation.sh` and `server-fast-automation.sh` run `pip install -e ".[dev]"` from the current checkout
+before testing, so running them points your editable install at that checkout.
 
 ## Dependencies
 
-All dependencies are defined in `pyproject.toml`, which is the single source of truth for this project.
-
-### For Developers
+All dependencies are declared in `pyproject.toml`, the only source of truth: `[project.dependencies]` for the base
+install and `[project.optional-dependencies]` for the `cluster`, `cohere` and `dev` extras. There is no
+`requirements.txt`.
 
 ```bash
-# Clone and install with all development dependencies
-git clone https://github.com/LightspeedDMS/code-indexer.git
-cd code-indexer
-pip install -e ".[dev]"
-
-# Full development setup including all optional extras
-pip install -e ".[dev,cohere,cluster]"
+python3 -m pip install -e ".[dev]"            # development
+python3 -m pip install -e ".[dev,cluster]"    # also PostgreSQL drivers, for cluster-mode tests
 ```
 
-### Files
+CI installs `".[dev,cluster]"` plus `third_party/hnswlib` in editable mode. End-user installation is described in
+[docs/getting-started/installation.md](docs/getting-started/installation.md).
 
-- `pyproject.toml` - Project configuration and all dependency definitions (primary source of truth)
+## Pre-commit hooks
 
-Note: `requirements.txt` and `requirements-dev.txt` are not used by this project. All
-dependencies are declared in `pyproject.toml` under `[project.dependencies]` and
-`[project.optional-dependencies]`.
+`.pre-commit-config.yaml` runs on every commit:
+
+- `ruff` with `--fix --exit-non-zero-on-fix`, and `ruff-format`;
+- `mypy` on `src/` only (tests are not type-checked by the hook, but `./lint.sh` and CI check them);
+- trailing whitespace, end-of-file, YAML syntax, large files (over 1000 KB), merge-conflict markers, case conflicts;
+- a check that `skills/` bundles are in sync with their `SKILL.md` (only when files under `skills/` change).
+
+When a hook rewrites files, stage them again and commit again. `pre-commit run --all-files` runs every hook on the
+whole tree.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -141,321 +92,132 @@ git rebase --signoff origin/development
 
 (replace the base branch as appropriate).
 
-## Architecture Overview
+## Branches
 
-CIDX v8.0+ uses a container-free, filesystem-based architecture:
+| Branch | Purpose | Direct commits |
+|--------|---------|----------------|
+| `development` | Active work; target of pull requests. Feature branches (`feature/*`, `bugfix/*`) start here. | yes |
+| `staging` | Pre-production validation. Receives merges from `development` only. | no |
+| `master` | Production. Receives merges from `staging`, and hotfixes. | hotfixes only |
 
-### Operational Modes
+Normal flow: `development` -> `staging` -> `master`. `development` is never merged directly into `master`.
 
-1. **CLI Mode** (Direct, Local)
-   - Direct command-line tool for local semantic code search
-   - Vectors stored in `.code-indexer/index/` as JSON files
-   - No daemon, no server, no network required
+Hotfix flow: branch from `master` (optionally `hotfix/*`), make only the fix, bump the HOTFIX version component,
+merge to `master`, then merge `master` back into `development`. The direction is always `master` -> `development`.
 
-2. **Daemon Mode** (Local, Cached)
-   - Local RPyC-based background service for faster queries
-   - In-memory HNSW/FTS index caching
-   - Unix socket communication at `/tmp/cidx/{repo_hash}.sock` (path uses a SHA-256 hash of the repo path to stay within the 108-character Unix socket limit)
+Open pull requests against `development`, one change per pull request, and describe what changed and why.
 
-### Key Components
+## Test suites
 
-- **VoyageAI / Cohere** - Supported embedding providers (VoyageAI: voyage-code-3 default 1024 dims, voyage-large-2 1536 dims; Cohere: embed-v4.0, supported since v9.8)
-- **FilesystemVectorStore** - Container-free vector storage
-- **HNSW** - Graph-based approximate nearest neighbor search
-- **Tantivy** - Full-text search (FTS) with regex support
+| Command | What it runs | Required when |
+|---------|-------------|---------------|
+| `pytest tests/unit/<path>/test_x.py -v --tb=short` | The tests for what you are changing, plus the tests of anything your change might break. | While developing. |
+| `./fast-automation.sh` | Unit tests outside `tests/unit/server/`, excluding the `slow`, `e2e`, `real_api`, `integration`, `requires_server`, `requires_containers` and `performance` markers. Per-test timeout 15 s (`PYTEST_TIMEOUT`). | Every change. |
+| `./server-fast-automation.sh` | `tests/unit/server/` in 6 parallel chunks, each with its own temporary `CIDX_SERVER_DATA_DIR`. Per-test timeout 15 s. | Any change under `src/code_indexer/server/`. |
+| `./rust-automation.sh` | `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` in `rust/`. | Any change under `rust/`, or to files compiled into the Rust binary (`docs/guides/xray-cookbook.md`, `docs/xray-templates/`). |
+| `./slow-automation.sh [--phase 1\|2] [--timeout N] [--paths ...]` | Tests marked `@pytest.mark.slow`: phase 1 non-server, phase 2 server (isolated data dir). Per-test timeout 120 s (`--timeout` or `SLOW_PYTEST_TIMEOUT`). | When you add or change a slow test. |
+| `./e2e-automation.sh [--phase N]` | End-to-end phases 1-7, no mocks: CLI standalone, CLI daemon, server in-process, CLI remote against a live server, fault-injection resiliency, PostgreSQL parity, SIEM delivery. | Before a story or epic is complete. |
+| `./lint.sh` | See below. | Every change. |
 
-## Code Quality Standards
+Notes:
 
-### Perfect Linting
+- A test that takes more than 30 s belongs in the slow lane: mark it `@pytest.mark.slow`.
+- Server tests write to `~/.cidx-server/` unless `CIDX_SERVER_DATA_DIR` points elsewhere. Run them through
+  `server-fast-automation.sh`, or set `CIDX_SERVER_DATA_DIR` to a temporary directory (and `CIDX_TEST_FAST_SQLITE=1`,
+  as the script does) when running them by hand.
+- pytest loads `<repo-root>/.env.local` and then `<repo-root>/.env` (`tests/conftest.py` imports
+  `tests/load_env.py`; `KEY=value` or `export KEY=value` lines; a variable already set in the environment is never
+  overridden). `fast-automation.sh`, `server-fast-automation.sh` and `slow-automation.sh` also `source` both files.
+  They are gitignored and must never be committed.
+- `e2e-automation.sh` reads credentials from `.e2e-automation` (copy `.e2e-automation.template`) or from the
+  environment. `E2E_ADMIN_USER` and `E2E_ADMIN_PASS` are required (the script exits at once without them).
+  `E2E_VOYAGE_API_KEY` falls back to `VOYAGE_API_KEY`. Phase 5 needs `CO_API_KEY` (or `E2E_COHERE_API_KEY`).
+  Phase 6 needs the PostgreSQL server utilities (`initdb`, `pg_ctl`) and is skipped, loudly, without them. The
+  OpenTelemetry collector check in phase 3 needs Docker and is skipped without it.
+- Run the full suites once, after code review, not between review rounds.
 
-CIDX maintains **zero linting errors**:
+Test layout, main directories (not an exhaustive list): `tests/unit/` (fast, no external services),
+`tests/integration/`, and `tests/e2e/` (end-to-end tests grouped by phase), plus shared fixtures and
+helpers such as `tests/fixtures/` and `tests/utils/`. Use real components rather than mocks wherever possible.
 
-- Ruff: 0 errors
-- Mypy: 0 errors (on `src/` code)
-- Ruff-format: All files formatted consistently
+## Lint
 
-Run linting manually with `./lint.sh`:
+`./lint.sh` checks and does not modify files. It runs:
 
-```bash
-# Check and auto-fix linting issues
-./lint.sh
+1. `ruff check src tests`
+2. `ruff format --check src tests`
+3. `mypy --explicit-package-bases --check-untyped-defs src tests`
+4. `scripts/check_no_direct_cp_reflink.py` (production code must go through the clone backend)
+5. `scripts/check_doc_references.py`: every relative Markdown link in a tracked `.md` file, every literal
+   `docs/...` path in code, scripts and docs, and every Rust `include_str!` path must point to a file that exists.
+6. Generated reference check: `PYTHONPATH=src python3 -m tools.docs.<generator> --check` for `cli_reference`,
+   `mcp_tools` and `error_codes`. Each generator owns one directory (`docs/reference/cli/`,
+   `docs/reference/mcp-tools/`, `docs/reference/error-codes/`) and fails when it no longer matches the code.
 
-# Or manually:
-ruff check src/ tests/
-ruff format src/ tests/
-mypy src/
-```
+To fix formatting and auto-fixable lint findings: `ruff format src tests` and `ruff check --fix src tests`. When
+step 6 fails (you changed a CLI option, an MCP tool doc or an error code), regenerate with the same command without
+`--check`, for example `PYTHONPATH=src python3 -m tools.docs.cli_reference`, and commit the regenerated files. Never
+edit those generated files by hand.
+`./lint.sh` must exit 0 before a change is merged.
 
-### Type Annotations
+Documentation files use plain Markdown with no emoji, and neutral sample data (`example.com`, `example-repo`,
+RFC 5737 addresses). Never put credentials, hostnames or personal data in a commit, issue or document.
 
-- All functions in `src/` should have type annotations
-- Use `from typing import` for type hints
-- Use `cast()` when mypy needs help inferring types
-- Tests (`tests/`) don't require full type annotations
+## What CI runs
 
-### Code Style
+`.github/workflows/main.yml` runs on pushes to `master`, `main`, `develop`, `development` and `staging`:
 
-- Follow PEP 8 (enforced by ruff)
-- Use descriptive variable names
-- Keep functions focused and small
-- Document complex logic with comments
+| Job | Runs |
+|-----|------|
+| `lint` | `./lint.sh` on Python 3.9, with `ruff==0.14.1` (the version `.pre-commit-config.yaml` pins) and `mypy==1.18.2` (the pre-commit hook pins mypy v1.13.0, so the two can disagree). |
+| `test` | Three smoke-test files on Python 3.9, 3.10, 3.11 and 3.12. Not the full suite. |
+| `rust` | The full Rust test suite and clippy, with the toolchain pinned to match `rust/rust-toolchain.toml`. |
+| `create-tag` | On `development`, when `src/code_indexer/__init__.py` changed in the pushed commit and the jobs above passed. |
+| `create-release` | On `master`, under the same conditions: builds the package and creates the GitHub release `vX.Y.Z` with it (or uploads the build to that release if it already exists). |
 
-## Testing
+A green CI badge means lint, the smoke tests and the Rust suite passed. The full Python suites run locally.
 
-### Testing Hierarchy (CRITICAL)
+## Version bumps
 
-Follow this workflow during development:
+Versions are `MAJOR.MINOR.HOTFIX`. Normal development bumps MINOR on `development`; HOTFIX is bumped only for a
+fix made on `master`.
 
-```
-1. Targeted unit tests (FAST - seconds)
-   |
-   v
-2. Manual testing (verify feature works)
-   |
-   v
-3. fast-automation.sh (CLI/core gate - must pass before commit)
-   |
-   v
-4. server-fast-automation.sh (server gate - required when touching src/code_indexer/server/)
-   |
-   v
-5. e2e-automation.sh (FINAL REGRESSION GATE - required before merge)
-```
+Files to update:
 
-**NEVER run fast-automation.sh after every small change.** That wastes time.
+1. `src/code_indexer/__init__.py` (`__version__`), the source of truth (the package version is read from it).
+2. `CHANGELOG.md`: a new `## [X.Y.Z] - YYYY-MM-DD` entry.
 
-### During Development - Targeted Tests Only
+Then check that the old version string is not left anywhere it should have changed:
+`git grep -nF "<old version>" -- '*.py' '*.md'`. The README badge reads the latest release from GitHub and needs no
+edit.
 
-Run specific tests related to your changes:
+Do not create tags by hand. CI creates the `vX.Y.Z` tag when the pushed `development` commit changed
+`__init__.py`; it compares only the last commit (`git diff HEAD~1 HEAD`), so the version-bump commit must be the
+tip of the push.
 
-```bash
-# Change base_client.py -> run related tests
-pytest tests/unit/api_clients/test_base_*.py -v --tb=short
-
-# Change handlers.py -> run handler tests
-pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short
-
-# Run specific test function
-pytest tests/unit/test_something.py::test_function_name -v
-
-# Run tests matching pattern
-pytest tests/ -k "test_scip" -v
-```
-
-Targeted tests give fast feedback (seconds, not minutes).
-
-### Final Validation - fast-automation.sh
-
-Run **only after ALL changes are complete**:
-
-```bash
-# Full test suite (~6-7 minutes, 865+ tests)
-./fast-automation.sh
-```
-
-**Performance Requirements:**
-- Must complete in under 10 minutes
-- If exceeded, investigate with `pytest --durations=20`
-- Move inherently slow tests (>30s) to full-automation.sh
-- Mark slow tests with `@pytest.mark.slow`
-
-### Test Suites
-
-| Suite | Tests | Time | When to Use |
-|-------|-------|------|-------------|
-| Targeted pytest | varies | seconds | During development |
-| fast-automation.sh | 865+ | ~6-7 min | Final validation before commit (CLI and core logic) |
-| server-fast-automation.sh | varies | ~10-15 min | Required when touching `src/code_indexer/server/` |
-| e2e-automation.sh | 5-phase E2E | 45-90 min | **Final regression gate before merge** (non-negotiable) |
-| full-automation.sh | all | 10+ min | Complete validation (legacy suite) |
-
-The `e2e-automation.sh` suite runs 5 phases: CLI standalone, CLI daemon, server in-process,
-CLI remote (live uvicorn), and fault-injection resiliency. It requires `E2E_ADMIN_USER`,
-`E2E_ADMIN_PASS`, and `E2E_VOYAGE_API_KEY` environment variables. Run a specific phase with
-`./e2e-automation.sh --phase N`.
-
-### Writing Tests
-
-- Use pytest for all tests
-- Follow existing test patterns in the codebase
-- Test files go in `tests/unit/`, `tests/integration/`, or `tests/e2e/`
-- Aim for >85% code coverage for new features
-- Use real implementations where possible, minimize mocking
-
-### Test Organization
+## Project layout
 
 ```
-tests/
-├── unit/           # Fast unit tests, no external dependencies
-├── integration/    # Tests requiring multiple components
-├── e2e/            # End-to-end workflow tests
-│   ├── server/     # Server E2E tests
-│   └── multimodal/ # Multimodal image vectorization tests
-└── conftest.py     # Shared fixtures
+src/code_indexer/      Python package (CLI entry point: cli.py, cli_fast_entry.py)
+  server/              multi-user server: routers/, mcp/ (tool_docs/), auth/, services/, storage/, web/
+  daemon/              daemon mode
+  services/, storage/  indexing, embedding providers, vector and chunk storage
+  scip/, xray/         SCIP intelligence, X-Ray AST search (Python side)
+rust/                  X-Ray engine (xray-core, xray-cli)
+prompts/ai_instructions/  content installed by `cidx teach-ai`
+docs/                  documentation (map: docs/README.md)
+scripts/               lint checks and operator scripts
+tests/                 unit/, integration/, e2e/
+third_party/hnswlib    hnswlib fork (submodule)
+*-automation.sh, lint.sh   test and lint gates
 ```
 
-## Development Workflow
+## Getting help
 
-### Making Changes
-
-1. **Create a feature branch**
-
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Make your changes**
-   - Write code following quality standards
-   - Add/update tests as needed
-   - Update documentation if needed
-
-3. **Run targeted tests during development**
-
-   ```bash
-   pytest tests/unit/path/to/relevant_tests.py -v --tb=short
-   ```
-
-4. **Run final validation**
-
-   ```bash
-   ./fast-automation.sh
-   ```
-
-5. **Commit your changes**
-
-   ```bash
-   git add .
-   git commit -m "feat: description of change"
-   # Pre-commit hooks run automatically
-   ```
-
-6. **Push to your fork**
-
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-7. **Open a Pull Request**
-   - Describe what you changed and why
-   - Reference any related issues
-   - Ensure CI checks pass
-
-### Commit Messages
-
-Use clear, descriptive commit messages:
-
-```
-feat: add semantic search caching
-fix: resolve SCIP index corruption on Windows
-docs: update installation guide for Python 3.12
-refactor: simplify query parameter parsing
-test: add coverage for temporal search edge cases
-```
-
-**Prefixes:**
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `docs:` - Documentation changes
-- `refactor:` - Code refactoring
-- `test:` - Test additions/changes
-- `chore:` - Build/tooling changes
-
-## Pull Request Process
-
-1. **Ensure all checks pass**
-   - Pre-commit hooks: pass
-   - Tests: pass (fast-automation.sh)
-   - Type checking: pass (mypy)
-   - Linting: pass (ruff)
-
-2. **Update documentation**
-   - Update README.md if adding user-facing features
-   - Add docstrings to new functions/classes
-   - Update relevant guides in `docs/`
-
-3. **Keep PRs focused**
-   - One feature/fix per PR
-   - Split large changes into smaller PRs
-   - Avoid mixing refactoring with feature work
-
-4. **Respond to feedback**
-   - Address reviewer comments
-   - Push additional commits to the same branch
-   - Request re-review when ready
-
-## Code Review Guidelines
-
-When reviewing PRs:
-
-- Check code quality and adherence to standards
-- Verify tests cover new functionality
-- Ensure documentation is updated
-- Test locally if needed
-- Be constructive and respectful
-
-## Project Structure
-
-```
-code-indexer/
-├── src/code_indexer/           # Main source code
-│   ├── __init__.py             # Version definition
-│   ├── cli.py                  # CLI entry point
-│   ├── daemon/                 # Daemon mode implementation
-│   ├── indexing/               # Indexing pipeline
-│   ├── scip/                   # SCIP code intelligence
-│   ├── server/                 # Multi-user server
-│   │   ├── mcp/                # MCP protocol handlers
-│   │   ├── multi/              # Multi-repo search
-│   │   └── routers/            # REST API routers
-│   ├── services/               # Core services (VoyageAI, etc.)
-│   └── storage/                # Vector storage (FilesystemVectorStore)
-├── tests/                      # Test suite
-│   ├── unit/                   # Unit tests
-│   ├── integration/            # Integration tests
-│   └── e2e/                    # End-to-end tests
-├── docs/                       # Documentation
-├── third_party/                # Git submodules
-│   └── hnswlib/                # HNSW library
-├── test-fixtures/              # Test fixture submodules
-│   └── multimodal-mock-repo/   # Multimodal E2E test fixtures
-├── fast-automation.sh          # Fast test suite (CLI and core logic)
-├── server-fast-automation.sh   # Server-specific test suite
-├── e2e-automation.sh           # Final 5-phase E2E regression gate (45-90 min)
-├── full-automation.sh          # Legacy complete test suite
-├── lint.sh                     # Linting script
-└── CLAUDE.md                   # Development guidelines
-```
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Comprehensive development guidelines and rules |
-| `README.md` | User-facing documentation |
-| `CHANGELOG.md` | Version history and release notes |
-| `pyproject.toml` | Project configuration and dependencies |
-
-## Version Bumping
-
-When bumping version, update ALL of these files:
-
-1. `src/code_indexer/__init__.py` - Primary source of truth
-2. `README.md` - Version badge
-3. `CHANGELOG.md` - New version entry
-4. `docs/architecture/overview.md` - Version references
-5. `docs/guides/query.md` - Version references
-
-## Getting Help
-
-- **Questions**: Open a [GitHub Discussion](https://github.com/LightspeedDMS/code-indexer/discussions)
-- **Bugs**: Report via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
-- **Features**: Suggest via [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
-- **Development Guidelines**: See `CLAUDE.md` for comprehensive rules
+- Questions: [GitHub Discussions](https://github.com/LightspeedDMS/code-indexer/discussions)
+- Bugs and feature requests: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
+- Security vulnerabilities: report privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
-
----
-
-**Thank you for contributing to CIDX!**

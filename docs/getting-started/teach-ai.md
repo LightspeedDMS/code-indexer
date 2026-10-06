@@ -1,414 +1,104 @@
-# AI Platform Integration
+# Teaching an AI assistant to use cidx (`cidx teach-ai`)
 
-Complete guide to integrating CIDX with AI assistants for semantic code search in conversations.
+`cidx teach-ai` installs instructions that tell a local AI coding assistant to search with `cidx` instead of
+grep. It runs entirely on your machine and needs no server. To give an assistant the server's tools instead,
+see [MCP registration](mcp-registration.md).
 
-## Table of Contents
+Implementation: `teach_ai` in `src/code_indexer/cli.py` and `src/code_indexer/teach_ai_templates.py`. The content it
+installs lives in `prompts/ai_instructions/`.
 
-- [Overview](#overview)
-- [Integration Approaches](#integration-approaches)
-- [Local CLI Integration](#local-cli-integration)
-- [Remote MCP Server](mcp-registration.md#remote-mcp-server)
-- [Platform Support](#platform-support)
-- [Use Cases](#use-cases)
-- [Troubleshooting](#troubleshooting)
+## What it installs
 
-## Overview
+Every run (except `--show-only`) does two things:
 
-CIDX can be integrated with AI assistants in two ways:
+1. **Skills**: copies `prompts/ai_instructions/skills/cidx/` to `~/.claude/skills/cidx/`. This is a clean
+   overwrite: an existing `~/.claude/skills/cidx/` is deleted first, so local edits there are lost. The skills are
+   installed to this Claude Code location whichever platform you choose. Files installed:
+   `SKILL.md`, `reference/fts-search.md`, `reference/scip-intelligence.md`, `reference/semantic-search.md`,
+   `reference/temporal-search.md`.
+2. **Awareness section**: writes the content of `prompts/ai_instructions/awareness/awareness.md` (a section
+   headed `## 1. SEMANTIC SEARCH - CIDX MANDATORY`) into the platform's instruction file (table below).
 
-1. **Local CLI Integration** - AI learns to use `cidx` command
-2. **Remote MCP Server** - AI connects to centralized CIDX server
-
-Both approaches enable **semantic code search directly in AI conversations**.
-
-## Integration Approaches
-
-### Comparison
-
-| Feature | Local CLI | Remote MCP Server |
-|---------|-----------|-------------------|
-| **Setup** | Simple (`cidx teach-ai`) | Moderate (server required) |
-| **Scope** | Local machine only | Team-wide access |
-| **Performance** | Local execution | Network latency |
-| **Multi-user** | No | Yes (OAuth 2.1) |
-| **Authentication** | None needed | OAuth 2.1 |
-| **Best For** | Individual developers | Teams |
-
-## Local CLI Integration
-
-**Teach AI assistants to use the `cidx` command** for semantic search.
-
-### How It Works
-
-1. Generate AI instruction file (CLAUDE.md, GEMINI.md, etc.)
-2. AI reads instructions on how to use `cidx` CLI
-3. AI executes `cidx query` commands during conversations
-4. AI receives and interprets search results
-
-### Supported Platforms
-
-| Platform | Instruction File | Location |
-|----------|-----------------|----------|
-| **Claude Code** | CLAUDE.md | Project or ~/.claude/ |
-| **Gemini** | .gemini/styleguide.md | Project-specific |
-| **Codex** | CODEX.md | Project-specific |
-| **OpenCode** | AGENTS.md | Project or ~/.config/opencode/ |
-| **Amazon Q** | .amazonq/rules/cidx.md | Project or ~/.aws/amazonq/ |
-| **Junie** | .junie/guidelines.md | Project-specific |
-
-### Setup (Claude Code)
-
-**Project-Level** (recommended for project-specific search):
+## Usage
 
 ```bash
-# Navigate to project
-cd /path/to/project
-
-# Generate Claude instructions
-cidx teach-ai --claude --project
-
-# Creates: ./CLAUDE.md
+cidx teach-ai --claude --project     # ./CLAUDE.md + skills
+cidx teach-ai --claude --global      # ~/.claude/CLAUDE.md + skills
+cidx teach-ai --claude --show-only   # print the awareness text and list the skill files; writes nothing
+cidx teach-ai --claude --show-only --verbose   # also print every skill file
+cidx teach-ai --skills-only          # only refresh ~/.claude/skills/cidx/
 ```
 
-**Global** (for system-wide semantic search):
+Exactly one platform flag is required, and exactly one of `--project` or `--global` unless `--show-only` is
+given. `--skills-only` ignores the platform and scope flags.
 
-```bash
-# Generate global instructions
-cidx teach-ai --claude --global
+## Target file per platform
 
-# Creates: ~/.claude/CLAUDE.md
-```
+| Flag | `--project` (current directory) | `--global` |
+|------|--------------------------------|-----------|
+| `--claude` | `CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| `--codex` | `CODEX.md` | `~/.codex/instructions.md` |
+| `--gemini` | `.gemini/styleguide.md` | not supported (exits with an error) |
+| `--opencode` | `AGENTS.md` | `~/.config/opencode/AGENTS.md` |
+| `--q` | `.amazonq/rules/cidx.md` | `~/.aws/amazonq/Q.md` |
+| `--junie` | `.junie/guidelines.md` | not supported (exits with an error) |
 
-### Setup (Gemini)
+Missing parent directories are created.
 
-```bash
-# Project-level
-cidx teach-ai --gemini --project
+## Re-running (refresh) and existing files
 
-# Creates: ./.gemini/styleguide.md
-```
+- Target file does not exist: it is created with the awareness section only.
+- Target file exists and contains a level-2 heading whose text starts with `SEMANTIC SEARCH`, case-insensitively,
+  optionally after a number such as `1.` (for example `## 1. SEMANTIC SEARCH - CIDX MANDATORY`,
+  `## Semantic search rules` or `## 3. Semantic Search`): that section, from its heading up to the next `## `
+  heading or the end of the file, is replaced with the current awareness text. Everything else in the file is kept.
+  The command reports `instructions updated`.
+- Target file exists without such a heading: the awareness text is appended after a `---` separator, and the
+  command reports `instructions added`. This includes headings where the words come later or at another level, such
+  as `## CIDX SEMANTIC SEARCH` or `### SEMANTIC SEARCH`.
 
-### Setup (Codex)
+Re-running the same command after upgrading CIDX therefore refreshes the section in place instead of duplicating
+it, and replaces the skills directory.
 
-```bash
-# Project-level
-cidx teach-ai --codex --project
+## Errors
 
-# Creates: ./CODEX.md
-```
+| Message | Cause |
+|---------|-------|
+| `Platform required: --claude, --codex, --gemini, --opencode, --q, or --junie` | No platform flag (also with `--show-only`). |
+| `Only one platform flag allowed at a time` | Two or more platform flags. |
+| `Scope required: --project or --global` | Neither scope flag and no `--show-only`. |
+| `Only one scope flag allowed at a time` | Both scope flags. |
+| `Gemini platform only supports project-level instructions (--project)` | `--gemini --global`; the same applies to `--junie --global`. |
+| `Failed to load awareness template: ...` | The templates are not available; see the limitation below. |
 
-### Setup (OpenCode)
+All of these exit with status 1.
 
-```bash
-# Project-level
-cidx teach-ai --opencode --project
+## Known limitation: source checkout required
 
-# Creates: ./AGENTS.md
+`teach_ai_templates.py` reads `prompts/ai_instructions/` relative to the source tree. The built package
+(`pipx install`, `pip install git+...`) does not contain that directory, so from an installed package:
 
-# Global
-cidx teach-ai --opencode --global
+- `cidx teach-ai --<platform> --project|--global` fails with `Failed to load awareness template` (exit 1) before
+  writing anything; an existing `~/.claude/skills/cidx/` is left as it was;
+- `cidx teach-ai --skills-only` deletes an existing `~/.claude/skills/cidx/`, reports `Installed 0 files`, exits 0,
+  and leaves the directory empty. Do not run it from an installed package.
 
-# Creates: ~/.config/opencode/AGENTS.md
-```
+Until this is fixed, run `teach-ai` from a source checkout, for example
+`PYTHONPATH=<checkout>/src python3 -m code_indexer.cli teach-ai --claude --project`, or from an editable install
+(`python3 -m pip install -e <checkout>`).
 
-### Setup (Amazon Q)
+## Verifying
 
-```bash
-# Project-level
-cidx teach-ai --q --project
-
-# Creates: ./.amazonq/rules/cidx.md
-```
-
-### Setup (Junie)
-
-```bash
-# Project-level
-cidx teach-ai --junie --project
-
-# Creates: ./.junie/guidelines.md
-```
-
-### What Gets Created
-
-The instruction file contains:
-
-- **CIDX overview** - What CIDX is and what it does
-- **Command syntax** - How to use `cidx query`
-- **Parameter reference** - All query parameters
-- **Example usage** - Search patterns and workflows
-- **Best practices** - When to use semantic search vs grep
-
-**Example Instructions** (simplified):
-
-```markdown
-# CIDX - Semantic Code Search
-
-Use the `cidx` command to semantically search this codebase.
-
-## Basic Usage
-
-cidx query "authentication logic" --limit 10
-
-## Parameters
-
---limit N          Maximum results
---language python  Filter by language
---path-filter PATH Include only paths matching pattern
-...
-```
-
-### AI Usage
-
-Once configured, AI assistants can use CIDX in conversations:
-
-**Example Conversation**:
-
-```
-User: "Where is the JWT authentication code?"
-
-AI: "Let me search for JWT authentication in the codebase."
-    [Executes: cidx query "JWT authentication" --limit 10]
-    [Reads results]
-
-    "The JWT authentication is implemented in:
-    - src/auth/jwt_validator.py (lines 42-87)
-    - src/middleware/auth.py (lines 15-35)
-
-    The main validation logic is in jwt_validator.py..."
-```
-
-### Update Instructions
-
-```bash
-# Regenerate instructions (overwrites existing)
-cidx teach-ai --claude --project
-
-# Or manually edit
-nano ./CLAUDE.md
-```
-
-## Platform Support
-
-### Claude Code (CLI Integration)
-
-**Status**: Fully supported
-
-**Setup**:
 ```bash
 cidx teach-ai --claude --project
+grep -n "SEMANTIC SEARCH" CLAUDE.md
+ls ~/.claude/skills/cidx ~/.claude/skills/cidx/reference
 ```
 
-**Works With**:
-- Claude Code (official CLI)
-- Uses local `cidx` command execution
+Then ask the assistant to find something in the code; it should run `cidx query ...` rather than grep. The project
+must be indexed first (`cidx init && cidx index`).
 
-### Gemini (CLI Integration)
+## Related
 
-**Status**: Supported
-
-**Setup**:
-```bash
-cidx teach-ai --gemini --project
-```
-
-**Note**: Instruction file format may need platform-specific adjustments.
-
-### Codex (CLI Integration)
-
-**Status**: Supported
-
-**Setup**:
-```bash
-cidx teach-ai --codex --project
-```
-
-**Note**: Instruction file format may need platform-specific adjustments.
-
-### OpenCode (CLI Integration)
-
-**Status**: Supported
-
-**Setup**:
-```bash
-cidx teach-ai --opencode --project
-```
-
-Creates `AGENTS.md` (project) or `~/.config/opencode/AGENTS.md` (global).
-
-### Amazon Q (CLI Integration)
-
-**Status**: Supported
-
-**Setup**:
-```bash
-cidx teach-ai --q --project
-```
-
-Creates `.amazonq/rules/cidx.md` (project) or `~/.aws/amazonq/Q.md` (global).
-
-### Junie (CLI Integration)
-
-**Status**: Supported
-
-**Setup**:
-```bash
-cidx teach-ai --junie --project
-```
-
-Creates `.junie/guidelines.md` in project root.
-
-### Other Platforms
-
-**Extend to Other AI Platforms**:
-
-1. Generate instruction file:
-   ```bash
-   cidx teach-ai --claude --project
-   ```
-
-2. Adapt format for target platform
-3. Place in platform-specific location
-4. Test AI can execute `cidx` commands
-
-## Use Cases
-
-### 1. Code Discovery in Conversations
-
-**Scenario**: Ask AI where specific functionality is implemented
-
-**Example**:
-```
-User: "Where is the payment processing code?"
-
-AI: [Uses cidx query "payment processing"]
-    "Payment processing is in src/payments/processor.py..."
-```
-
-### 2. Bug Investigation
-
-**Scenario**: AI helps investigate and fix bugs
-
-**Example**:
-```
-User: "Find authentication bugs"
-
-AI: [Uses cidx query "authentication" --path-filter "*/auth/*"]
-    "Found authentication code in 5 files. Let me check for common vulnerabilities..."
-```
-
-### 3. Code Understanding
-
-**Scenario**: AI explains how code works
-
-**Example**:
-```
-User: "Explain how the cache invalidation works"
-
-AI: [Uses cidx query "cache invalidation"]
-    [Reads relevant files]
-    "The cache invalidation uses a TTL-based approach..."
-```
-
-### 4. Refactoring Assistance
-
-**Scenario**: AI helps plan refactoring
-
-**Example**:
-```
-User: "I want to refactor the authentication system"
-
-AI: [Uses cidx query "authentication"]
-    [Uses cidx scip dependents "AuthService"]
-    "The authentication system has dependencies in 12 files..."
-```
-
-### 5. Historical Analysis
-
-**Scenario**: AI investigates code history
-
-**Example**:
-```
-User: "When was OAuth added?"
-
-AI: [Uses cidx query "OAuth integration" --time-range-all]
-    "OAuth was added in commit abc123 on 2024-03-15..."
-```
-
-## Troubleshooting
-
-### teach-ai Command Not Found
-
-**Solution**:
-```bash
-# Verify CIDX installation
-cidx --version
-
-# If old version, upgrade
-pipx upgrade code-indexer
-```
-
-### AI Not Using CIDX
-
-**Check**:
-
-1. **Instruction file exists**:
-   ```bash
-   ls -la CLAUDE.md  # Or GEMINI.md, CODEX.md
-   ```
-
-2. **File is readable**:
-   ```bash
-   cat CLAUDE.md  # Should show CIDX instructions
-   ```
-
-3. **AI can access file**:
-   - Project-level: File in current directory
-   - Global: File in ~/.claude/ (or platform-specific location)
-
-4. **Explicitly ask AI**:
-   ```
-   User: "Can you use the cidx command to search the codebase?"
-   ```
-
-### Instruction File Outdated
-
-**Update**:
-```bash
-# Regenerate instructions (overwrites)
-cidx teach-ai --claude --project
-
-# Or manually edit to add new features
-nano CLAUDE.md
-```
-
-### Platform-Specific Issues
-
-**Claude Code**:
-- Verify Claude Code installed and working
-- Check CLAUDE.md in project or ~/.claude/
-
-**Gemini/Codex**:
-- Check platform-specific instruction file format
-- Verify AI can execute shell commands
-- Test with simple `cidx --version` first
-
----
-
-## Next Steps
-
-- **MCP Bridge Setup**: [CIDX MCP Bridge](../../README.md#cidx-mcp-bridge-for-claude-desktop)
-- **MCP Server Registration**: [MCP Server Registration](mcp-registration.md)
-- **Query Guide**: [Query Guide](../guides/query.md)
-- **SCIP Integration**: [SCIP Code Intelligence](../guides/scip.md)
-- **Main Documentation**: [README](../../README.md)
-
----
-
-## Related Documentation
-
-- **Server Deployment**: [Server Deployment Guide](../server/deployment.md)
-- **Architecture**: [Architecture Guide](../architecture/overview.md)
-- **Configuration**: [Configuration Guide](configuration.md)
-
----
+- [MCP registration](mcp-registration.md): connect an assistant to a CIDX server.
+- [Query guide](../guides/query.md): the search options the skills describe.

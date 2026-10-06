@@ -1,790 +1,129 @@
-# Operating Modes
+# Operating modes
 
-Complete guide to CIDX's two operational modes (CLI Mode and Daemon Mode) plus Server Mode deployment option.
+CIDX runs in one of three ways on a workstation (CLI, daemon, or as a client of a server), and as a multi-user
+server, optionally clustered. This page explains what each mode does and how to switch, so you can choose one.
 
-## Table of Contents
+| Mode | Where the index lives | Who uses it | Set up with |
+|------|----------------------|-------------|-------------|
+| CLI | `.code-indexer/` in the project | one developer | `cidx init` |
+| Daemon | same as CLI, plus an in-memory cache in a background process | one developer | `cidx config --daemon` |
+| Remote client | on a CIDX server | one developer, against a shared server | `cidx init --remote <url> --username ... --password ...` |
+| Server | `~/.cidx-server/` on the server host | a team, through REST, MCP and the Web UI | [Server deployment](../server/deployment.md) |
+| Cluster | shared storage plus PostgreSQL | a team, several server nodes | [Cluster setup](../server/cluster-setup.md) |
 
-- [Overview](#overview)
-- [Mode Comparison](#mode-comparison)
-- [CLI Mode](#cli-mode)
-- [Daemon Mode](#daemon-mode)
-- [Server Mode](#server-mode)
-- [Switching Between Modes](#switching-between-modes)
-- [Performance Characteristics](#performance-characteristics)
-- [Troubleshooting](#troubleshooting)
+Every mode needs an embedding provider key for semantic search (see [Configuration](configuration.md)). Nothing
+runs in a container.
 
-## Overview
+## CLI mode
 
-CIDX has **two operational modes** for local development, plus an optional server deployment:
-
-1. **CLI Mode** - Direct command execution, simple setup, individual developers
-2. **Daemon Mode** - Background service with caching, faster queries, watch mode
-
-Additionally, **Server Mode** is available as a separate deployment option for team collaboration and centralized indexing.
-
-All modes use the same **container-free filesystem storage** - no Docker, no complex setup.
-
-## Mode Comparison
-
-| Feature | CLI Mode | Daemon Mode | Server Mode (Deployment) |
-|---------|----------|-------------|--------------------------|
-| **Setup Complexity** | Instant | Simple | Moderate |
-| **HNSW lookup (warm)** [^lat] | ~1s (cold-load) | ~5ms (cached) | <1ms (cached) |
-| **Watch Mode** | No | Yes | N/A |
-| **Multi-User** | No | No | Yes |
-| **Caching** | None | In-memory HNSW/FTS | Advanced HNSW caching |
-| **Authentication** | N/A | N/A | OAuth 2.0 |
-| **Best For** | Quick searches | Active development | Team collaboration |
-| **Resource Usage** | Minimal | Low | Moderate |
-| **Network** | None | Unix socket | HTTP/HTTPS |
-
-[^lat]: These figures are the **in-process HNSW index lookup time only**, not end-to-end query latency. Every real query (CLI, daemon, or server) also pays the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) plus, for server / cluster, HTTP and auth overhead. The "<1ms" figure traces to Story #526's HNSW cache micro-benchmark (`~277ms → <1ms` for repeated HNSW lookups on the same index, single-threaded, post-load). Treat these numbers as **cache-effectiveness signal**, not user-observed query speed.
-
-**Note**: CLI and Daemon are operational modes. Server Mode is a separate deployment for multi-user access.
-
-**Recommendation**:
-- **Start with CLI Mode** - Simple, works immediately
-- **Upgrade to Daemon Mode** - If you run many queries and want watch mode
-- **Deploy Server Mode** - For team-wide semantic search
-
-## CLI Mode
-
-**Direct command-line interface** for local development. No background processes, no setup complexity.
-
-### How It Works
-
-1. Commands execute directly (no daemon required)
-2. Indexes stored in `.code-indexer/` per project
-3. Each query loads indexes from disk
-4. Filesystem-based vector storage (JSON files)
-
-### Architecture
-
-```
-User → cidx query → Load indexes from disk → Search → Return results
-                    ↓
-              .code-indexer/index/
-                └── collection/
-                    ├── vectors/*.json
-                    ├── index.hnsw
-                    └── metadata.json
-```
-
-### Setup
+The default. Each `cidx` command runs in its own process and loads the index from disk, then exits.
 
 ```bash
-# No setup required! Just install and use
-cidx --version
-
-# Navigate to project
-cd /path/to/project
-
-# Index code
-cidx index
-
-# Query
-cidx query "search term"
-```
-
-### Storage Location
-
-**Per-Project**: `.code-indexer/` in each indexed project
-
-Contents:
-- `index/` - Vector indexes and metadata
-- `config.json` - Project configuration
-- `scip/` - SCIP indexes (if generated)
-
-### Commands
-
-All `cidx` commands work in CLI mode:
-
-```bash
-# Indexing
-cidx init                    # Create .code-indexer/
-cidx index                   # Index codebase
-cidx index --fts             # Add full-text search
-cidx index --index-commits   # Add git history
-
-# Querying
-cidx query "search"          # Semantic search
-cidx query "text" --fts      # Full-text search
-
-# SCIP
-cidx scip generate           # Generate SCIP indexes
-cidx scip definition "Symbol"
-
-# Data management
-cidx clean-data              # Clear indexes
-cidx uninstall               # Remove .code-indexer/
-```
-
-### Use Cases
-
-**✓ Best For**:
-- Individual developers
-- Quick ad-hoc searches
-- Simple projects
-- Minimal setup required
-- Learning CIDX
-
-**✗ Not Ideal For**:
-- Frequent repeated queries (slow disk I/O)
-- Real-time file watching
-- Team collaboration
-- Performance-critical workflows
-
-### Performance
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **First query** | ~1-2s | Load indexes from disk |
-| **Subsequent queries** | ~1s | Reload from disk each time |
-| **Indexing** | Varies | Depends on codebase size |
-
-**Why Slower?**:
-- No in-memory caching
-- Indexes loaded from disk per query
-- HNSW graph deserialization overhead
-
-**Trade-off**: Simplicity vs speed. CLI mode prioritizes ease of use.
-
-## Daemon Mode
-
-**Background service** with in-memory caching for faster queries and real-time watch mode.
-
-### How It Works
-
-1. Daemon process runs in background
-2. Indexes cached in memory
-3. Queries sent via Unix socket (IPC)
-4. Watch mode monitors file changes and auto-indexes
-
-### Architecture
-
-```
-User → cidx query → Unix socket → Daemon process → Cached indexes → Return results
-                                        ↓
-                                  In-memory cache:
-                                   - HNSW graph
-                                   - FTS index
-                                   - Metadata
-```
-
-### Setup
-
-```bash
-# 1. Enable daemon mode
-cidx config --daemon
-
-# 2. Start daemon (auto-starts on first query if not running)
-cidx start
-
-# 3. Verify daemon is running
-cidx status
-
-# 4. Use normally - queries go through daemon
-cidx query "search term"
-```
-
-### Daemon Management
-
-```bash
-# Start daemon
-cidx start
-
-# Stop daemon
-cidx stop
-
-# Check status
-cidx status
-
-# Restart daemon
-cidx stop && cidx start
-```
-
-### Watch Mode
-
-Monitor files and auto-index changes in real-time:
-
-```bash
-# Start watch mode (daemon must be running)
-cidx watch
-
-# Watch with FTS indexing
-cidx watch --fts
-
-# Custom debounce delay (default: 2.0 seconds)
-cidx watch --debounce 3.0
-
-# Stop watch mode
-cidx watch-stop
-```
-
-**How Watch Mode Works**:
-1. Monitors file system for changes
-2. Debounces changes (avoids indexing on every keystroke)
-3. Automatically indexes modified files
-4. Updates cached indexes in real-time
-
-**Use Cases for Watch Mode**:
-- Active development sessions
-- Keep indexes synchronized with code changes
-- Avoid manual re-indexing
-
-### Storage Location
-
-**Per-Project**: `.code-indexer/` (same as CLI mode)
-
-**Additional Files**:
-- `daemon.sock` - Unix socket for IPC
-- `daemon.pid` - Process ID file
-
-### Performance
-
-| Operation | Time | Improvement vs CLI |
-|-----------|------|--------------------|
-| **First HNSW lookup** | ~1s | Same (cold cache) |
-| **Cached HNSW lookup** | ~5ms | 200x faster |
-| **Watch indexing** | <20ms per file* | Real-time updates |
-
-*Typical performance - actual times vary by file size and system load. **HNSW lookup numbers cover the in-process index search component only**; the embedding-provider round trip (50–300ms typical) still applies on every query.
-
-**Why Faster?**:
-- HNSW/FTS indexes cached in RAM (eliminates cold-load disk I/O)
-- Unix socket communication (eliminates subprocess startup)
-- Embedding-provider round trip still applies on every query — it sets the end-to-end floor
-
-### Use Cases
-
-**✓ Best For**:
-- Active development (frequent queries)
-- Real-time file watching
-- Performance-sensitive workflows
-- Single developer, local machine
-
-**✗ Not Ideal For**:
-- Team collaboration (single user only)
-- Remote access (Unix socket is local only)
-- Minimal resource usage (daemon uses RAM)
-
-### Switching from CLI to Daemon
-
-```bash
-# Currently using CLI mode
-cidx query "search"  # ~1s per query
-
-# Enable daemon mode
-cidx config --daemon
-cidx start
-
-# Now using daemon mode
-cidx query "search"  # ~5ms per query (cached)
-```
-
-### Switching from Daemon to CLI
-
-```bash
-# Disable daemon mode
-cidx config --no-daemon
-
-# Stop daemon
-cidx stop
-
-# Now using CLI mode
-cidx query "search"  # Back to ~1s per query
-```
-
-## Server Mode
-
-**Multi-user server** with advanced caching for team-wide semantic search.
-
-### How It Works
-
-1. CIDX server runs as HTTP/HTTPS service
-2. Centralized golden repositories indexed server-side
-3. Advanced HNSW cache (100-1800x speedup)
-4. OAuth 2.0 authentication for secure access
-5. REST API and MCP interface for clients
-
-### Architecture
-
-```
-Users → HTTP/HTTPS → CIDX Server → HNSW Cache → Golden Repositories
-                           ↓                            ↓
-                      OAuth 2.0              ~/.cidx-server/data/
-                                                └── golden-repos/
-                                                    ├── project1/
-                                                    ├── project2/
-                                                    └── project3/
-```
-
-### Setup
-
-See [Server Deployment Guide](../server/deployment.md) for complete instructions.
-
-**Quick Overview**:
-```bash
-# 1. Install on server
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
-
-# 2. Configure environment
-export VOYAGE_API_KEY="your-key"
-export CIDX_SERVER_PORT=8090
-
-# 3. Add golden repositories
-# (done via admin API after server starts)
-
-# 4. Start server (via systemd or directly)
-python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8090
-```
-
-### Golden Repositories
-
-Server mode uses **golden repositories** - centralized code repositories indexed once and shared across all users.
-
-**Benefits**:
-- Index code once, query many times
-- Shared cache across team
-- Consistent results for all users
-- Centralized management
-
-**Storage**: `~/.cidx-server/data/golden-repos/`
-
-### Advanced HNSW Caching
-
-Server mode includes sophisticated caching:
-
-| Metric | Value | Description |
-|--------|-------|-------------|
-| **Cold query** | ~277ms | First query (disk load) |
-| **Warm query** | <1ms | Cached query (100-1800x faster) |
-| **Cache TTL** | 10 minutes | Default eviction time |
-| **Hit ratio** | >95%* | Typical cache efficiency |
-
-*Typical production performance - actual hit ratio varies by usage patterns
-
-**How It Works**:
-1. First query: Load index from disk (~277ms)
-2. Cache HNSW graph in memory
-3. Subsequent queries: Use cached graph (<1ms)
-4. TTL expiration: Evict stale cache entries
-5. Per-repository isolation: Independent caches
-
-**Cache Configuration**:
-```bash
-# Set cache TTL (minutes)
-export CIDX_INDEX_CACHE_TTL_MINUTES=10  # 10 minutes default
-
-# Increase for longer cache lifetime
-export CIDX_INDEX_CACHE_TTL_MINUTES=30  # 30 minutes
-
-# Decrease for more frequent updates
-export CIDX_INDEX_CACHE_TTL_MINUTES=5  # 5 minutes
-```
-
-**Monitor Cache Performance**:
-```bash
-# Query cache statistics
-curl http://localhost:8090/cache/stats
-
-# Response
-{
-  "total_hits": 1234,
-  "total_misses": 56,
-  "hit_ratio": 0.957,
-  "active_entries": 12
-}
-```
-
-### Authentication
-
-Server mode uses **OAuth 2.0** for secure access:
-
-**Roles**:
-- **admin** - Full access (manage repos, users)
-- **power_user** - Activate repos, query
-- **normal_user** - Query only
-
-**Authentication Flow**:
-1. User requests access
-2. OAuth 2.0 browser flow
-3. Server issues tokens
-4. Tokens used for API requests
-
-### Client Access
-
-**REST API**:
-```bash
-# Query via REST API
-curl -X POST http://localhost:8090/api/query \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query_text": "authentication", "limit": 10}'
-```
-
-**MCP Interface** (Claude Desktop):
-- See [CIDX MCP Bridge](../../README.md#cidx-mcp-bridge-for-claude-desktop)
-- Connects Claude to CIDX server
-- Semantic search in conversations
-
-### Self-Monitoring & Diagnostics (v8.8.2+)
-
-Automated server health monitoring with intelligent log analysis.
-
-**Features**:
-- Background scheduled monitoring at configurable intervals
-- Claude CLI-powered log analysis for bug detection
-- Automatic GitHub issue creation for discovered problems
-- SQLite-based structured logging for efficient analysis
-- Self-diagnostics database for monitoring history
-
-**Configuration**: Available via Web UI Admin > Configuration
-
-### Langfuse Integration (v8.10.0+)
-
-Optional observability integration for tracking MCP tool usage and research sessions.
-
-**Features**:
-- Research session tracing with explicit start/end boundaries
-- Automatic span creation for all MCP tool calls
-- Performance analysis and usage pattern discovery
-- Session scoring and quality feedback
-- Web UI-based trace search and semantic querying
-
-**Key Capabilities**:
-- `start_trace` / `end_trace` MCP tools for session boundaries
-- Automatic trace creation mode (optional)
-- Background trace synchronization from Langfuse server
-- Local trace file watching and indexing
-- Semantic search over trace content
-
-**Configuration**: Web UI Admin > Configuration > Langfuse Settings
-
-### Research Assistant (v8.10+)
-
-Interactive AI-powered investigation and remediation tool accessible via Admin Web UI.
-The RA has **elevated remediation authority** for environment and data issues — it is not
-a read-only investigation tool. Access is double-MFA gated (admin login + TOTP elevation).
-
-**Remediation authority and scope**:
-- Diagnose and remediate environment/data issues (corrupted indexes, orphaned metadata, stuck jobs)
-- Read and write the server database for approved fixes
-- Execute filesystem and service commands within defined scope boundaries
-- Write/Edit files inside the cidx-meta directory (repo descriptions, dependency maps)
-- Scope is restricted to `server_data_dir/`, `golden_repos_dir/`, and the current research session folder
-- Source code is read-only — code-level bugs must be reported as GitHub issues, not patched directly
-
-**Features**:
-- Chat-based interface for investigation and remediation
-- Direct Claude CLI integration for deep analysis and repair
-- Message persistence across sessions
-- Background processing with status tracking
-- Full codebase read access via `code-indexer` symlink
-- HTTP fetches routed through `cidx-curl.sh` wrapper (operator-configured CIDR allowlist; loopback always on; no external network exfiltration)
-
-**Security model**:
-- Defense lives at the entry boundary (double-MFA) and audit trail (all sessions persisted)
-- Every RA chat session is recorded in `research_messages` for audit purposes
-- Permission model: deny-list enforced at Claude CLI level, not just prompt-level
-
-**HTTP Fetch Wrapper (cidx-curl.sh)**:
-
-The Research Assistant cannot invoke raw `curl` — a permission deny rule blocks it.
-All HTTP/HTTPS fetches must go through `scripts/cidx-curl.sh`, which enforces an
-operator-configured CIDR allowlist before exec'ing curl.
-
-Configuration field: `ra_curl_allowed_cidrs` inside `claude_integration_config` in
-`~/.cidx-server/config.json`. Server restart required after changes.
-
-| Example | Effect |
-|---------|--------|
-| `"ra_curl_allowed_cidrs": []` | Only loopback reachable (127.0.0.1, ::1) |
-| `"ra_curl_allowed_cidrs": ["10.5.0.0/24"]` | Loopback + that subnet |
-| `"ra_curl_allowed_cidrs": ["10.5.0.0/24", "192.168.100.0/24"]` | Loopback + both subnets |
-
-The loopback rule (`127.0.0.0/8`, `::1`) is always on and cannot be disabled by operators.
-
-Wrapper exit codes: 0 (success), 2 (validation rejected), 3 (DNS resolution failed),
-4 (CIDR check rejected), 5 (internal Python crash in wrapper).
-
-Wrapper errors appear in the cidx-server log store (stderr from wrapper invocations
-is captured and logged at WARNING level).
-
-**Access**: Admin Web UI > Research Assistant tab
-
-### Group-Based Security (v8.5+)
-
-Fine-grained access control using group membership for repository access.
-
-**Features**:
-- Users belong to one or more groups
-- Golden repositories can be restricted to specific groups
-- Admin impersonation respects target user's groups
-
-**Configuration**:
-- Groups managed via Web UI or REST API
-- User-group assignments stored in server database
-- Group filtering applied at query time
-
-### Auto-Discovery (v8.5+)
-
-Automatically discover repositories from external sources for indexing.
-
-**Supported Sources**:
-- GitHub Organizations (via GitHub API)
-- GitLab Groups (via GitLab API)
-- Local filesystem paths
-
-**How It Works**:
-1. Configure external sources in server settings
-2. Server periodically scans for new repositories
-3. Discovered repos appear in Web UI for approval
-4. Admin selects repos to add as golden repositories
-
-**Benefits**:
-- No manual repo URL entry
-- Automatic detection of new team repositories
-- Centralized repository catalog
-
-### OTEL Telemetry (v8.5+)
-
-OpenTelemetry integration for comprehensive server observability.
-
-**Capabilities**:
-- **Traces**: Request tracing across server components
-- **Metrics**: Query latency, cache hit rates, job statistics
-- **Spans**: Detailed timing for indexing and search operations
-
-**Configuration**:
-```bash
-# Enable OTEL export
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4317"
-export OTEL_SERVICE_NAME="cidx-server"
-```
-
-**Integration**:
-- Compatible with Jaeger, Zipkin, Honeycomb, Datadog
-- Grafana dashboards for visualization
-- Alert integration for performance anomalies
-
-### Auto-Update (v8.5+)
-
-Job-aware server updates with graceful drain mode.
-
-**Features**:
-- Automatic update detection from configured source
-- Graceful drain: waits for running jobs to complete
-- Zero-downtime updates for most operations
-- Rollback capability on update failure
-
-**Configuration**:
-- Update source (Git tag, release URL)
-- Drain timeout (max wait for jobs)
-- Auto-restart behavior
-
-### Use Cases
-
-**✓ Best For**:
-- Team collaboration (10+ developers)
-- Centralized code search
-- Large codebases (100K+ files)
-- Shared indexing infrastructure
-- Remote access
-
-**✗ Not Ideal For**:
-- Individual developers (overhead)
-- Offline work (requires network)
-- Simple projects (CLI/Daemon sufficient)
-
-### Performance
-
-| Scenario | Performance | Notes |
-|----------|-------------|-------|
-| **First query (cold)** | ~277ms | OS page cache benefit |
-| **Repeated queries (warm)** | <1ms | 100-1800x speedup |
-| **Cache hit ratio** | >95% | Typical production |
-| **Multi-user** | Shared cache | All users benefit |
-
-### Cluster Mode
-
-When `storage_mode` is set to `"postgres"` in `~/.cidx-server/config.json`, the server operates in cluster mode. Multiple CIDX nodes share a PostgreSQL database for all state and coordinate via leader election, heartbeat, and distributed job claiming. All nodes are identical peers -- any node can serve queries, handle API/MCP requests, and execute background jobs. See [Cluster Architecture](../architecture/cluster.md) for details.
-
-## Switching Between Modes
-
-### CLI → Daemon
-
-```bash
-# Enable daemon
-cidx config --daemon
-
-# Start daemon
-cidx start
-
-# Verify
+cidx init
+cidx index --fts
+cidx query "retry with backoff" --limit 5
 cidx status
 ```
 
-**Impact**: Faster queries, watch mode available, daemon process runs in background
+Per-project files under `.code-indexer/`: `config.json`, `index/<collection>/` (one collection per embedding
+model, for example `voyage-code-3`), `tantivy_index/` (full-text index, when built) and the SCIP index when
+generated. `cidx uninstall --confirm` removes `.code-indexer/` and all of the project's index data.
 
-### Daemon → CLI
+Every semantic query calls the embedding provider to embed the query text, in every mode. What differs between
+modes is only whether the index has to be loaded from disk first.
+
+## Daemon mode
+
+A background process per project keeps the HNSW and full-text indexes in memory, so queries skip the load from
+disk. The daemon also runs watch mode.
 
 ```bash
-# Disable daemon
-cidx config --no-daemon
-
-# Stop daemon
-cidx stop
-
-# Verify
-cidx status
+cidx config --daemon    # enable for this project (stored in .code-indexer/config.json)
+cidx start              # start now; otherwise it starts on the first query
+cidx status             # "Daemon Mode: Active", with the socket name and cache TTL
+cidx query "retry with backoff"   # served by the daemon
+cidx stop               # stop the daemon
+cidx config --no-daemon # back to CLI mode
 ```
 
-**Impact**: Slower queries, no watch mode, no background process
+- The daemon listens on a Unix socket at `/tmp/cidx/<hash>.sock`, where `<hash>` is derived from the project path.
+  Its log is `.code-indexer/daemon.log`.
+- An idle cached index is dropped after the cache TTL: 10 minutes by default, changed with
+  `cidx config --daemon-ttl <minutes>` or `cidx init --daemon-ttl <minutes>`.
+- The daemon serves one user on one machine; the socket is local.
 
-### Local (CLI/Daemon) → Server
+### Watch mode
 
-**Migration**:
-1. Install CIDX server
-2. Add local repos as golden repositories
-3. Configure client to use server API
-4. Remove local `.code-indexer/` (optional)
+```bash
+cidx watch              # start watching (returns at once; the daemon keeps watching)
+cidx watch --debounce 3.0   # wait 3 s after the last change before re-indexing (default 2.0)
+cidx watch-stop         # stop watching
+```
 
-**Benefits**: Team access, shared cache, centralized management
+In daemon mode, `cidx watch` hands the watcher to the daemon and returns immediately. The watcher follows file
+changes and branch switches and re-indexes the changed files. Run `cidx index` once before starting it.
 
-### Server → Local (CLI/Daemon)
+## Remote client mode
 
-**Migration**:
-1. Clone repositories locally
-2. Run `cidx index` on each repo
-3. Use CLI or daemon mode
+`cidx init --remote https://cidx.example.com --username alice --password ...` turns the project directory into a
+client of a CIDX server: queries and the remote command groups (`repos`, `jobs`, `admin`, `files`, `git`, ...) go to
+the server's REST API instead of a local index. `cidx --help` marks which commands are available in which mode.
 
-**Benefits**: Offline access, no network dependency
+## Server mode
 
-## Performance Characteristics
+The CIDX server is a separate deployment for a team. It manages golden repositories (shared, centrally indexed
+clones), lets users activate their own copies, and serves:
 
-### HNSW Lookup Comparison
+- a REST API (for example `POST /api/query`),
+- an MCP endpoint at `/mcp` for AI assistants (see [MCP registration](mcp-registration.md)),
+- a Web UI for administration, under `/admin`.
 
-| Mode | Cold HNSW lookup | Warm HNSW lookup | Notes |
-|------|------------------|------------------|-------|
-| **CLI** | ~1s | ~1s | No caching |
-| **Daemon** | ~1s | ~5ms | In-memory cache |
-| **Server** | ~277ms | <1ms | Advanced HNSW cache |
+The server keeps its data in `~/.cidx-server/` (or `CIDX_SERVER_DATA_DIR`). Only bootstrap settings are in
+`~/.cidx-server/config.json`; all other settings are runtime settings in the server database, changed in the Web
+UI configuration screen. Install and operation: [Server deployment](../server/deployment.md). Accounts, SSO and
+MFA: [Login and elevation](../server/auth/login-and-elevation.md) and [OIDC](../server/auth/oidc.md).
 
-These numbers reflect the **in-process HNSW index lookup component only** — they do **not** include the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) that every real query also pays, nor HTTP / auth overhead on the server. See the footnote on the [Mode Comparison table](#mode-comparison) above for methodology.
+### Cluster mode
 
-### Resource Usage
+With `storage_mode` set to `"postgres"` (a bootstrap key in `config.json`), several server nodes share one
+PostgreSQL database for state and coordination, and any node can serve any request. See
+[Cluster setup](../server/cluster-setup.md) and [Cluster architecture](../architecture/cluster.md).
 
-| Mode | RAM | CPU | Disk | Network |
-|------|-----|-----|------|---------|
-| **CLI** | Minimal | Low | Per-query I/O | None |
-| **Daemon** | Moderate | Low | Minimal | Unix socket |
-| **Server** | High | Moderate | Minimal | HTTP/HTTPS |
+### Research Assistant
 
-### Indexing Performance
+The server's Web UI has a Research Assistant at `/admin/research`: a chat in which an admin directs a Claude CLI
+session to investigate and repair server problems. It is not a read-only investigation tool; it has remediation
+authority over the server's own environment and data.
 
-| Mode | Indexing Location | Speed |
-|------|-------------------|-------|
-| **CLI** | Local | Standard |
-| **Daemon** | Local | Standard |
-| **Server** | Server-side | Standard (but indexed once) |
+- **Access**: admin Web UI session only. Sending a message requires TOTP elevation when elevation enforcement is
+  on (`require_elevation()` in `src/code_indexer/server/routers/research_assistant.py`).
+- **Remediation authority**: the Claude CLI session gets the Bash, Read, Glob, Grep, Write, Edit and TodoWrite
+  tools, with permission rules passed through `--settings`. File operations (`rm`, `mv`, `cp`, `mkdir`, `rmdir`,
+  `touch`, `chmod`, `chown`, `ln`) and `kill`/`pkill` are deliberately left allowed so it can repair corrupted
+  indexes, orphaned metadata or stuck jobs. Denied: privilege escalation, interpreters and nested shells, package
+  managers, service start/stop, git writes, `killall`, and network tools (`_bash_deny_rules` and
+  `_build_permission_settings` in `src/code_indexer/server/services/research_assistant_service.py`).
+- **Edit scope**: the permission settings declare a tool-level deny for Write and Edit together with an Edit allow
+  rule scoped to the cidx-meta directory (repository descriptions and dependency maps). Which of the two the
+  Claude CLI applies to an edit inside cidx-meta depends on its rule precedence and is not documented here.
+- **Network scope**: direct `curl` is denied; HTTP requests go through `scripts/cidx-curl.sh`, which allows only
+  loopback plus operator-configured CIDR ranges.
+- **Audit**: every message of every session is stored in the `research_messages` table.
 
-**Note**: Indexing speed is the same across all modes. Performance differences are in query execution.
+## Switching modes
+
+| From | To | Steps |
+|------|----|-------|
+| CLI | daemon | `cidx config --daemon`, then `cidx start` (optional) |
+| daemon | CLI | `cidx stop`, then `cidx config --no-daemon` |
+| local (CLI or daemon) | server | Register the repository on the server as a golden repository; the local `.code-indexer/` can be removed with `cidx uninstall`. |
+| server | local | Clone the repository and run `cidx init` and `cidx index` in it. |
 
 ## Troubleshooting
 
-### Daemon Won't Start
-
-**Check**:
-```bash
-# Verify daemon status
-cidx status
-
-# Check for stale PID file
-ls -la .code-indexer/daemon.pid
-
-# Remove stale PID if needed
-rm .code-indexer/daemon.pid
-
-# Restart
-cidx start
-```
-
-### Daemon Queries Still Slow
-
-**Possible Causes**:
-1. Cache not warmed up (first query)
-2. Daemon not actually running
-3. Querying different repository
-
-**Solutions**:
-```bash
-# Verify daemon is running
-cidx status
-
-# Warm cache with a query
-cidx query "test" --limit 1
-
-# Subsequent queries should be fast
-cidx query "test" --limit 10  # Should be ~5ms
-```
-
-### Server Cache Not Working
-
-**Check**:
-```bash
-# Query cache stats
-curl http://localhost:8090/cache/stats
-
-# Check TTL configuration
-echo $CIDX_INDEX_CACHE_TTL_MINUTES
-
-# Verify cache hits increasing
-# (hit ratio should be >90% after warmup)
-```
-
-### Watch Mode Not Detecting Changes
-
-**Solutions**:
-```bash
-# Stop and restart watch mode
-cidx watch-stop
-cidx watch
-
-# Check debounce delay (increase if too sensitive)
-cidx watch --debounce 3.0
-
-# Verify daemon is running
-cidx status
-```
-
-### Unix Socket Permission Denied
-
-**Check**:
-```bash
-# Verify socket exists
-ls -la .code-indexer/daemon.sock
-
-# Check permissions
-# Should be readable/writable by user
-
-# Fix if needed
-chmod 600 .code-indexer/daemon.sock
-```
-
----
-
-## Next Steps
-
-- **Installation**: [Installation Guide](installation.md)
-- **Query Guide**: [Query Guide](../guides/query.md)
-- **Server Deployment**: [Server Deployment Guide](../server/deployment.md)
-- **Main Documentation**: [README](../../README.md)
-
----
-
-## Related Documentation
-
-- **Architecture**: [Architecture Guide](../architecture/overview.md)
-- **SCIP**: [SCIP Code Intelligence](../guides/scip.md)
-- **Configuration**: [Configuration Guide](configuration.md)
+| Symptom | Check |
+|---------|-------|
+| `cidx status` shows `Daemon Mode: Configured` (enabled but stopped) | Run `cidx start`, or just query: the daemon starts on the first query. |
+| Daemon does not start | Read `.code-indexer/daemon.log`. |
+| `cidx watch` prints `No indexes found. Run 'cidx index' first.` | Run `cidx index` first. Outside daemon mode the standalone watcher's index detection does not recognise the current index layout; enable daemon mode and run `cidx watch` again. |
+| Queries still slow in daemon mode | The first query after start or after the TTL expired loads the index. Semantic queries always include the embedding call. |
