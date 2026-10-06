@@ -482,3 +482,12 @@ def test_every_allowlist_entry_is_a_tracked_file_in_this_repo(entry: str) -> Non
         timeout=_GIT_TIMEOUT_SECONDS,
     )
     assert tracked.returncode == 0, f"{entry} is not tracked"
+
+
+def test_checker_source_and_its_tests_are_allowlisted() -> None:
+    # The checker names example doc paths in its docstrings/regex comments and
+    # this test file builds synthetic repos full of fake docs/ paths; without
+    # these entries the checker fails on a clean clone of its own repository.
+    allowlist = _load_checker().FIXTURE_ALLOWLIST
+    assert "scripts/check_doc_references.py" in allowlist
+    assert "tests/unit/scripts/test_check_doc_references.py" in allowlist

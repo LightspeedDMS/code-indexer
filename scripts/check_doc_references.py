@@ -63,6 +63,10 @@ FIXTURE_ALLOWLIST: Mapping[str, str] = {
         "example 'path' argument value for a user repository"
     ),
     "scripts/utils/create_test_repo.py": "generates a synthetic test repository",
+    # This checker and its own tests: the source names example doc paths in
+    # docstrings and regex comments; the tests build synthetic repos.
+    "scripts/check_doc_references.py": "example doc paths in docstrings/comments",
+    "tests/unit/scripts/test_check_doc_references.py": _SYNTHETIC_REPO,
     "rust/xray-core/src/validator.rs": _VALIDATOR_INPUT,
     "rust/xray-core/tests/s0a_validator_reject_sites.rs": _VALIDATOR_INPUT,
     "test-fixtures/versioned_fresh/v_fresh/README.md": _FIXTURE_REPO_README,
