@@ -45,6 +45,9 @@ from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
 )
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    _access_service_admin,
+)
 
 _SESSION_ID = "mcp-session-revision-resolution-left-to-call-sites"
 _BASE = "/api/v1/repos/myrepo/git"
@@ -78,21 +81,28 @@ def _make_repo(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+_REST_USERNAME = "testuser"
+
+
 @contextmanager
 def _arm_repo_rest(repo_path: Path):
-    with patch(
-        "code_indexer.server.routers.git._get_activated_repo_manager"
-    ) as mock_getter:
-        mock_arm = Mock()
-        mock_arm.get_activated_repo_path.return_value = str(repo_path)
-        mock_getter.return_value = mock_arm
-        yield mock_arm
+    # The REST caller is an admin of a real access service: the git routes'
+    # activated-repo guard then bypasses (as for every admin), so these
+    # tests pin revision handling, not access control.
+    with _access_service_admin(repo_path.parent / "groups.db", _REST_USERNAME):
+        with patch(
+            "code_indexer.server.routers.git._get_activated_repo_manager"
+        ) as mock_getter:
+            mock_arm = Mock()
+            mock_arm.get_activated_repo_path.return_value = str(repo_path)
+            mock_getter.return_value = mock_arm
+            yield mock_arm
 
 
 @pytest.fixture()
 def mock_user():
     user = Mock()
-    user.username = "testuser"
+    user.username = _REST_USERNAME
     return user
 
 

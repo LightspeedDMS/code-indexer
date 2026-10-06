@@ -2,7 +2,7 @@
 Unit tests for Bug #1623: stale-index status check blind to provider-
 suffixed metadata files.
 
-RefreshScheduler._check_stale_index_metadata()'s in_progress/failed
+RefreshScheduler._stale_index_signal()'s in_progress/failed
 interrupted-index signal (Bug #1508) only ever read the legacy bare
 metadata.json for the `status` field. Bug #1591 already made the sibling
 current_commit signal provider-aware (via metadata_reader.read_current_commit()),
@@ -16,7 +16,7 @@ their sibling metadata-cohere.json files say completed -- exactly the
 interrupted-index condition Bug #1508 exists to catch, sitting in a file
 the status check never opened.
 
-These tests exercise the REAL `_check_stale_index_metadata()` method
+These tests exercise the REAL `_stale_index_signal()` method
 against a REAL local git repository (mirrors
 test_refresh_scheduler_stale_index_prefix_sha_1591.py's pattern) -- no
 mocking of git itself.
@@ -92,6 +92,11 @@ def _write_metadata(source_path: Path, filename: str, **fields):
     meta_dir.mkdir(parents=True, exist_ok=True)
     with open(meta_dir / filename, "w") as f:
         json.dump(fields, f)
+
+
+def _forces_reconcile(scheduler, source_path: str, alias_name: str, **kwargs) -> bool:
+    """True when the scheduler's stale-index check reports a signal."""
+    return scheduler._stale_index_signal(source_path, alias_name, **kwargs) is not None
 
 
 @pytest.fixture
@@ -172,9 +177,7 @@ class TestProviderSuffixedStatusDetected:
             current_commit=actual_head,
         )
 
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "colorama-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "colorama-global")
 
         assert result is True, (
             "A status=in_progress recorded ONLY in the provider-suffixed "
@@ -194,23 +197,18 @@ class TestProviderSuffixedStatusDetected:
             current_commit=actual_head,
         )
 
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "markupsafe-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "markupsafe-global")
 
         assert result is True
 
     def test_provider_status_takes_precedence_over_stale_legacy_status(
         self, scheduler, real_git_repo
     ):
-        """Precedence guard matching read_status()'s documented contract:
-        the provider file wins even when the legacy file disagrees --
-        mirrors the real colorama scenario where metadata-cohere.json (a
-        DIFFERENT provider file, not consulted by read_status()) says
-        completed while metadata-voyage-ai.json says in_progress. Here we
-        exercise the read_status()-covered pair directly: legacy says
-        completed, voyage (the file read_status() actually prefers) says
-        in_progress -- the provider file must win."""
+        """Precedence guard matching read_index_states()'s documented
+        contract: the provider file wins even when the legacy file
+        disagrees (legacy metadata.json is read only when no provider file
+        exists). Here legacy says completed and metadata-voyage-ai.json
+        says in_progress -- the provider file must win."""
         actual_head = _actual_head(real_git_repo)
         _write_metadata(
             real_git_repo,
@@ -225,9 +223,7 @@ class TestProviderSuffixedStatusDetected:
             current_commit=actual_head,
         )
 
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "some-repo-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
 
         assert result is True, (
             "The provider-suffixed file's in_progress status must take "
@@ -254,9 +250,7 @@ class TestConsistentProviderMetadataStillSkips:
             current_commit=actual_head,
         )
 
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "some-repo-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
 
         assert result is False, (
             "Consistent, completed status in the provider-suffixed file "
@@ -276,15 +270,11 @@ class TestConsistentProviderMetadataStillSkips:
             current_commit=actual_head,
         )
 
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "some-repo-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
 
         assert result is True
 
     def test_no_metadata_files_does_not_force_reconcile(self, scheduler, real_git_repo):
-        result = scheduler._check_stale_index_metadata(
-            str(real_git_repo), "some-repo-global"
-        )
+        result = _forces_reconcile(scheduler, str(real_git_repo), "some-repo-global")
 
         assert result is False

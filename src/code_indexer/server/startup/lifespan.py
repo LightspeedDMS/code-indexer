@@ -546,6 +546,68 @@ def _start_hnsw_orphan_repair_sweep_scheduler(
     return scheduler
 
 
+def _legacy_json_migration(
+    server_data_dir: str, db_path: str, user_manager: Any, storage_mode: str
+) -> Any:
+    """The start-up legacy JSON migration for the configured storage mode.
+
+    Solo (SQLite): the users.json import creates new names through the
+    shared pre-creation step.  Cluster (PostgreSQL): accounts live in
+    PostgreSQL, so the local users.json import never runs (and never reaches
+    the shared purge); the other legacy files migrate as before.
+    """
+    from code_indexer.server.storage.migration_service import MigrationService
+
+    if storage_mode == "postgres":
+        return MigrationService(server_data_dir, db_path, import_users=False)
+    return MigrationService(
+        server_data_dir,
+        db_path,
+        prepare_new_account=user_manager.prepare_name_for_new_account,
+    )
+
+
+def _build_oidc_manager(
+    config: Any, user_manager: Any, jwt_manager: Any, backend_registry: Any
+) -> Any:
+    """The SSO manager, storing identity links in the configured OAuth store
+    (``oauth.db`` in solo mode, PostgreSQL in cluster mode): the same store
+    account deletion purges."""
+    from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
+
+    return OIDCManager(
+        config=config,
+        user_manager=user_manager,
+        jwt_manager=jwt_manager,
+        oauth_backend=(
+            backend_registry.oauth if backend_registry is not None else None
+        ),
+    )
+
+
+def _start_account_orphan_sweep(app: FastAPI, user_manager: Any) -> None:
+    """Schedule the start-up sweep removing rows whose account is gone.
+
+    Runs in the background on a worker thread (``run_startup_orphan_sweep``)
+    and never fails start-up: the sweep logs its own outcome.  The task is
+    kept on ``app.state`` so it is not garbage-collected mid-run.
+    """
+    from code_indexer.server.services.account_data_purge import (
+        run_startup_orphan_sweep,
+    )
+
+    purger = user_manager.account_data_purger
+    if purger is None:
+        logger.warning(
+            "Account data purge not configured: orphaned account data sweep skipped",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
+    app.state.account_orphan_sweep_task = asyncio.create_task(
+        run_startup_orphan_sweep(purger)
+    )
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -897,7 +959,6 @@ def make_lifespan(
         )
         try:
             from code_indexer.server.storage.database_manager import DatabaseSchema
-            from code_indexer.server.storage.migration_service import MigrationService
 
             db_path = Path(server_data_dir) / "data" / "cidx_server.db"
             schema = DatabaseSchema(str(db_path))
@@ -911,7 +972,12 @@ def make_lifespan(
             # Run migration of legacy JSON files to SQLite
             # Note: JSON files are in server_data_dir (e.g., ~/.cidx-server/users.json)
             # not in the data subdirectory
-            migration = MigrationService(str(server_data_dir), str(db_path))
+            # Solo: new names from the legacy import go through the same
+            # pre-creation step as every other account.  Cluster: accounts
+            # live in PostgreSQL, so the local users.json import is skipped.
+            migration = _legacy_json_migration(
+                str(server_data_dir), str(db_path), user_manager, storage_mode
+            )
             if migration.is_migration_needed():
                 logger.info(
                     "Legacy JSON files found, running migration to SQLite",
@@ -1168,6 +1234,10 @@ def make_lifespan(
             )
             app.state.ssh_migration_result = None
 
+        # Startup: remove rows left keyed to account names that no longer
+        # exist (background task, worker thread, never fails start-up).
+        _start_account_orphan_sweep(app, user_manager)
+
         # Startup: Initialize GroupAccessManager for group-based access control
         logger.info(
             "Server startup: Initializing GroupAccessManager",
@@ -1320,7 +1390,12 @@ def make_lifespan(
                 AccessFilteringService,
             )
 
-            access_filtering_service = AccessFilteringService(group_manager)
+            access_filtering_service = AccessFilteringService(
+                group_manager,
+                activated_repo_manager=getattr(
+                    app.state, "activated_repo_manager", None
+                ),
+            )
             app.state.access_filtering_service = access_filtering_service
             logger.info(
                 "AccessFilteringService initialized for query-time access filtering",
@@ -2223,6 +2298,9 @@ def make_lifespan(
                     group_manager,
                     memory_metadata_cache=_memory_metadata_cache,
                     memories_dir=_memories_dir,
+                    activated_repo_manager=getattr(
+                        app.state, "activated_repo_manager", None
+                    ),
                 )
                 app.state.access_filtering_service = (
                     _access_filtering_service_with_cache
@@ -3636,7 +3714,6 @@ def make_lifespan(
 
         try:
             from code_indexer.server.services.config_service import get_config_service
-            from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
             from code_indexer.server.auth.oidc.state_manager import StateManager
 
             # Bug #578: Read from ConfigService (has merged runtime from DB),
@@ -3656,10 +3733,11 @@ def make_lifespan(
                 # Use existing user_manager and jwt_manager (defined at module level below)
                 # Note: These are defined after the lifespan function, so we reference them here
                 state_manager = StateManager()
-                oidc_manager = OIDCManager(
-                    config=config.oidc_provider_config,
-                    user_manager=user_manager,  # Global from module level
-                    jwt_manager=jwt_manager,  # Global from module level
+                oidc_manager = _build_oidc_manager(
+                    config.oidc_provider_config,
+                    user_manager,
+                    jwt_manager,
+                    backend_registry,
                 )
 
                 # Initialize OIDC database schema (no network calls)
@@ -4400,18 +4478,16 @@ def make_lifespan(
                             and _late_config.oidc_provider_config
                             and _late_config.oidc_provider_config.enabled
                         ):
-                            from code_indexer.server.auth.oidc.oidc_manager import (
-                                OIDCManager,
-                            )
                             from code_indexer.server.auth.oidc.state_manager import (
                                 StateManager,
                             )
 
                             _late_state_mgr = StateManager()
-                            _late_oidc_mgr = OIDCManager(
-                                config=_late_config.oidc_provider_config,
-                                user_manager=user_manager,
-                                jwt_manager=jwt_manager,
+                            _late_oidc_mgr = _build_oidc_manager(
+                                _late_config.oidc_provider_config,
+                                user_manager,
+                                jwt_manager,
+                                backend_registry,
                             )
                             await _late_oidc_mgr.initialize()
 

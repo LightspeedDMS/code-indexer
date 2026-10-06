@@ -155,7 +155,7 @@ async def sso_callback(code: str, state: str, request: Request):
         # and its POST /oauth/mfa/verify completion, the same mechanism the
         # password-based OAuth authorize flow already applies.
         if _get_user_mfa_status(user.username):
-            from ..mfa_challenge import mfa_challenge_manager
+            from ..mfa_challenge import FIRST_FACTOR_SSO, mfa_challenge_manager
             from ...web.mfa_routes import render_oauth_mfa_challenge_page
 
             client_ip = request.client.host if request.client else "unknown"
@@ -168,6 +168,7 @@ async def sso_callback(code: str, state: str, request: Request):
                 oauth_redirect_uri=state_data["redirect_uri"],
                 oauth_code_challenge=state_data["code_challenge"],
                 oauth_state=state_data["oauth_state"],
+                first_factor=FIRST_FACTOR_SSO,
             )
             return render_oauth_mfa_challenge_page(challenge_token)
 
@@ -211,7 +212,7 @@ async def sso_callback(code: str, state: str, request: Request):
 
         # MFA enforcement for SSO users (same pattern as password login)
         if _get_user_mfa_status(user.username):
-            from ..mfa_challenge import mfa_challenge_manager
+            from ..mfa_challenge import FIRST_FACTOR_SSO, mfa_challenge_manager
             from ...web.mfa_routes import render_mfa_challenge_page
 
             client_ip = request.client.host if request.client else "unknown"
@@ -220,6 +221,7 @@ async def sso_callback(code: str, state: str, request: Request):
                 role=user.role.value,
                 client_ip=client_ip,
                 redirect_url=redirect_url,
+                first_factor=FIRST_FACTOR_SSO,
             )
             return render_mfa_challenge_page(challenge_token)
 

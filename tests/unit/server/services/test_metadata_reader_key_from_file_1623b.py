@@ -5,10 +5,10 @@ metadata_reader.py into one shared _read_key_from_file(metadata_path, key)
 helper (Messi Rule #4, anti-duplication -- the two ~30-line functions
 differed only in the dict key and variable name).
 
-This is a pure refactor: read_status() and read_current_commit() must
-behave identically before and after (verified by the pre-existing
-test_metadata_reader.py and test_metadata_reader_status_1623.py suites
-staying green). These tests exercise the new shared helper directly to
+This is a pure refactor: the helper's callers (today read_index_states()
+and read_current_commit()) must behave identically before and after
+(verified by the pre-existing metadata_reader suites staying green). These
+tests exercise the new shared helper directly to
 prove it carries the IDENTICAL error-handling contract the two functions
 it replaces had: malformed JSON, non-dict JSON, missing key, non-string
 value, and empty string all return None without raising; a valid

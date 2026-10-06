@@ -241,6 +241,10 @@ outputSchema:
                 - 'null'
                 description: Exact matched text from FTS engine. Only present in FTS and hybrid search modes for
                   FTS-originated results. Null or absent for pure semantic results.
+              content_unavailable:
+                type: boolean
+                description: Present and true only when the matched chunk's content could not be read from the
+                  working tree or git (code_snippet is then empty). Absent for normal results.
               file_last_modified:
                 type:
                 - number

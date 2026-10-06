@@ -13,6 +13,13 @@ import pytest
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 
+@pytest.fixture(autouse=True)
+def _isolate_grep_fallback_warned_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building a grep-engine service sets the process-wide one-time warning
+    flag; scope it to each test so later tests see the original value."""
+    monkeypatch.setattr(RegexSearchService, "_grep_fallback_warned", False)
+
+
 def _grep_only_service(repo_path) -> RegexSearchService:
     """Build the real grep fallback while making only ripgrep unavailable."""
     real_which = shutil.which

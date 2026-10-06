@@ -466,8 +466,10 @@ class TestReconcileWorkingDirDirtyUnaffected:
 
     def test_dirty_file_content_id_uses_working_dir_scheme(self, tmp_path):
         """Directly verify `_get_effective_content_id_for_reconcile` produces
-        the untouched `working_dir_<mtime>_<size>` format for a dirty file,
-        proving the dirty-file code path was not altered by this fix."""
+        the mtime/size (working_dir) id for a dirty file, never a blob-hash
+        id. Issue #2013: the format is the shared
+        `{path}:working_dir:{int mtime}:{size}` one, identical to what the
+        stored-payload side derives."""
         root = tmp_path / "repo"
         root.mkdir()
         _init_repo(root)
@@ -483,7 +485,8 @@ class TestReconcileWorkingDirDirtyUnaffected:
 
         content_id = indexer._get_effective_content_id_for_reconcile("a.py")
 
-        assert content_id.startswith("a.py:working_dir_")
+        stat = (root / "a.py").stat()
+        assert content_id == f"a.py:working_dir:{int(stat.st_mtime)}:{stat.st_size}"
 
 
 # ---------------------------------------------------------------------------

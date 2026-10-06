@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -150,6 +151,10 @@ def _run_harness(tmp_path: Path, *, telemetry_enabled: bool) -> Dict[str, Any]:
 
     env = dict(os.environ)
     env["CIDX_SERVER_DATA_DIR"] = str(config_dir)
+    # Keep the subprocess away from the real ~/.cidx-server (home-relative
+    # config readers), while user-site packages stay importable.
+    env["PYTHONUSERBASE"] = site.getuserbase()
+    env["HOME"] = str(tmp_path)
     env["REPRO_1679_OUTPUT_FILE"] = str(output_file)
 
     proc = subprocess.run(

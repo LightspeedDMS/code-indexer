@@ -172,17 +172,17 @@ def test_password_typed_as_username_is_not_stored(env) -> None:
     assert typed not in repr(rows)
 
 
-def test_lockout_transition_writes_one_row_and_locked_refusals_none(env) -> None:
-    # Two bad passwords lock the account (limit 2): the attempt that locks
-    # it is recorded once, as the lockout.  Refusals while locked write
-    # nothing (they cannot be used to flood the store).
+def test_throttle_start_writes_one_row_and_throttled_refusals_none(env) -> None:
+    # Two bad passwords start the throttle (limit 2): the attempt that
+    # starts it is recorded once, as rate_limited.  Refusals while throttled
+    # write nothing (they cannot be used to flood the store).
     _rebuild_app(env, LoginRateLimiter(max_attempts=2))
     for _ in range(2):
         assert _login(env, _USER, "wrong-password").status_code == 401
     rows = env.rows()
     assert [json.loads(r[7])["reason"] for r in rows] == [
         "bad_credentials",
-        "account_locked",
+        "rate_limited",
     ]
     assert {(r[0], r[1], r[4]) for r in rows} == {
         ("authentication_failure", _USER, "failure")

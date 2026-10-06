@@ -25,7 +25,11 @@ from code_indexer.server.auth.dependencies import (
     get_current_user_hybrid,
 )
 from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
-from code_indexer.server.auth.elevation_step_up import StepUpOutcome, step_up
+from code_indexer.server.auth.elevation_step_up import (
+    StepUpOutcome,
+    StepUpResult,
+    step_up,
+)
 from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.web.mfa_routes import get_totp_service
@@ -52,6 +56,8 @@ _HTTP_INTERNAL_SERVER_ERROR = status.HTTP_500_INTERNAL_SERVER_ERROR
 _RATE_LIMITED_MESSAGE = "Too many elevation attempts. Try again later."
 # Same wording as REST POST /auth/elevate's elevation_create_failed response.
 _CREATE_FAILED_MESSAGE = "Elevation window not retrievable after create."
+# Same wording as REST POST /auth/elevate's busy response.
+_BUSY_MESSAGE = "Elevation is busy, try again shortly."
 
 
 class _ElevResult(Enum):
@@ -63,6 +69,7 @@ class _ElevResult(Enum):
     RATE_LIMITED = auto()
     INVALID_CODE = auto()
     CREATE_FAILED = auto()
+    BUSY = auto()
 
 
 def _sanitize_next(next_value: str) -> str:
@@ -94,14 +101,26 @@ def _sanitize_next(next_value: str) -> str:
     return _DEFAULT_NEXT
 
 
-def _elev_error(request: Request, safe_next: str, message: str, http_status: int):
+def _elev_error(
+    request: Request,
+    safe_next: str,
+    message: str,
+    http_status: int,
+    headers: Optional[dict[str, str]] = None,
+):
     """Render elevation form with an error message at the given HTTP status."""
     return templates.TemplateResponse(
         request,
         "elevate.html",
         {"request": request, "next": safe_next, "error": message},
         status_code=http_status,
+        headers=headers,
     )
+
+
+def _retry_after(step: Optional[StepUpResult]) -> dict[str, str]:
+    """``Retry-After`` for a throttled step-up ({} when no step-up ran)."""
+    return step.retry_after_header() if step is not None else {}
 
 
 def _redirect_to_setup(safe_next: str, setup_path: str):
@@ -133,11 +152,11 @@ def _attempt_elevation(
     totp_code: Optional[str],
     recovery_code: Optional[str],
     client_ip: str,
-) -> Tuple[_ElevResult, Optional[str]]:
+) -> Tuple[_ElevResult, Optional[StepUpResult]]:
     """Run the shared elevation decision pipeline.
 
     Executes all validation steps (kill-switch, code presence, MFA config,
-    session key, failed-attempt lockout, credential verification) and — on
+    session key, throttle, credential verification) and — on
     success — creates the elevated session.  All audit log entries are emitted here so both the
     form and AJAX callers share identical observability.
 
@@ -149,8 +168,10 @@ def _attempt_elevation(
         client_ip: Client IP address for audit logging.
 
     Returns:
-        A tuple of (_ElevResult, scope_or_None).  scope is only set on
-        SUCCESS; all other results carry None as the second element.
+        A tuple of (_ElevResult, step_up_result_or_None).  The second element
+        is the shared step-up's result whenever the step-up ran (it carries
+        ``retry_after_seconds`` when throttled); None for checks refused
+        before it.
     """
     if not _is_elevation_enforcement_enabled():
         logger.warning(
@@ -187,8 +208,9 @@ def _attempt_elevation(
         return _ElevResult.NO_SESSION, None
 
     # The shared step-up: same limiter instance and key as REST /auth/elevate
-    # and MCP elevate_session, so failed attempts through any front door
-    # count against one lockout, checked before any code is verified.
+    # and MCP elevate_session, so attempts through any front door count
+    # against one throttle (keyed by username), reserved before any code is
+    # verified.
     result = step_up(
         username,
         totp_code=totp_code,
@@ -199,13 +221,20 @@ def _attempt_elevation(
         sessions=elevated_session_manager,
         limiter=login_rate_limiter,
     )
+    if result.outcome is StepUpOutcome.BUSY:
+        logger.warning(
+            "Elevation attempt by %s from %s not checked — throttle store busy",
+            username,
+            client_ip,
+        )
+        return _ElevResult.BUSY, result
     if result.outcome is StepUpOutcome.LOCKED_OUT:
         logger.warning(
             "Elevation attempt by %s from %s rejected — too many failed attempts",
             username,
             client_ip,
         )
-        return _ElevResult.RATE_LIMITED, None
+        return _ElevResult.RATE_LIMITED, result
     if result.outcome is StepUpOutcome.INVALID_CODE:
         code_type = "recovery code" if recovery_code else "TOTP code"
         logger.warning(
@@ -214,21 +243,21 @@ def _attempt_elevation(
             client_ip,
             code_type,
         )
-        return _ElevResult.INVALID_CODE, None
+        return _ElevResult.INVALID_CODE, result
     if result.outcome is StepUpOutcome.WINDOW_NOT_CREATED:
         logger.error(
             "Elevation window for %s from %s not retrievable after create",
             username,
             client_ip,
         )
-        return _ElevResult.CREATE_FAILED, None
+        return _ElevResult.CREATE_FAILED, result
     logger.info(
         "Elevation granted for %s from %s (scope=%s)",
         username,
         client_ip,
         result.scope,
     )
-    return _ElevResult.SUCCESS, result.scope
+    return _ElevResult.SUCCESS, result
 
 
 @router.get("/admin/elevate", response_class=HTMLResponse)
@@ -270,7 +299,7 @@ def elevate_form(
     safe_next = _sanitize_next(next)
     client_ip = request.client.host if request.client else "unknown"
 
-    result, _scope = _attempt_elevation(
+    result, step = _attempt_elevation(
         request, user.username, totp_code, recovery_code, client_ip
     )
 
@@ -284,9 +313,21 @@ def elevate_form(
         return _redirect_to_setup(safe_next, _mfa_setup_url_for_role(user.role))
     if result == _ElevResult.NO_SESSION:
         return _elev_error(request, safe_next, "No session.", _HTTP_FORBIDDEN)
+    if result == _ElevResult.BUSY:
+        return _elev_error(
+            request,
+            safe_next,
+            _BUSY_MESSAGE,
+            _HTTP_SERVICE_UNAVAILABLE,
+            headers=_retry_after(step),
+        )
     if result == _ElevResult.RATE_LIMITED:
         return _elev_error(
-            request, safe_next, _RATE_LIMITED_MESSAGE, _HTTP_TOO_MANY_REQUESTS
+            request,
+            safe_next,
+            _RATE_LIMITED_MESSAGE,
+            _HTTP_TOO_MANY_REQUESTS,
+            headers=_retry_after(step),
         )
     if result == _ElevResult.CREATE_FAILED:
         return _elev_error(
@@ -307,7 +348,7 @@ def elevate_ajax(
     """AJAX endpoint for inline modal elevation — returns JSON, never redirects."""
     client_ip = request.client.host if request.client else "unknown"
 
-    result, _scope = _attempt_elevation(
+    result, step = _attempt_elevation(
         request, user.username, totp_code, recovery_code, client_ip
     )
 
@@ -330,10 +371,17 @@ def elevate_ajax(
             {"success": False, "error": "No session."},
             status_code=_HTTP_FORBIDDEN,
         )
+    if result == _ElevResult.BUSY:
+        return JSONResponse(
+            {"success": False, "error": _BUSY_MESSAGE},
+            status_code=_HTTP_SERVICE_UNAVAILABLE,
+            headers=_retry_after(step),
+        )
     if result == _ElevResult.RATE_LIMITED:
         return JSONResponse(
             {"success": False, "error": _RATE_LIMITED_MESSAGE},
             status_code=_HTTP_TOO_MANY_REQUESTS,
+            headers=_retry_after(step),
         )
     if result == _ElevResult.CREATE_FAILED:
         return JSONResponse(

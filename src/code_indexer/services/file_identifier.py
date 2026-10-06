@@ -10,6 +10,7 @@ identification when git is not available.
 import hashlib
 import logging
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -190,12 +191,20 @@ class FileIdentifier:
         """
         rel_path = str(file_path.relative_to(self.project_dir))
 
+        # Issue #2013: taken immediately BEFORE the content is read. Point
+        # writers store it as `indexed_timestamp`, so reconcile's racy-
+        # timestamp check covers the second the file was READ in (the points
+        # are written later, after the embedding round-trip).
+        content_read_timestamp = time.time()
+        file_hash = self._get_file_content_hash(file_path)
+
         metadata = {
             "project_id": self.get_project_id(),
             "file_path": rel_path,
-            "file_hash": self._get_file_content_hash(file_path),
+            "file_hash": file_hash,
             "indexed_at": datetime.now(timezone.utc).isoformat() + "Z",
             "git_available": self.git_available,
+            "content_read_timestamp": content_read_timestamp,
         }
 
         if self.git_available:

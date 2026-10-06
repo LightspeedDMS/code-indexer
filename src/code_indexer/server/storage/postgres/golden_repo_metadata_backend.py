@@ -25,6 +25,10 @@ from typing import Any, Dict, List, Optional
 
 from .pg_utils import sanitize_row
 from .connection_pool import ConnectionPool
+from ._forced_reconcile_state_mixin import (
+    _ForcedReconcileStatePostgresMixin,
+    delete_forced_reconcile_state_for_repo,
+)
 from ._refresh_failure_backoff_mixin import (
     _RefreshFailureBackoffPostgresMixin,
     delete_refresh_failure_backoff_for_repo,
@@ -38,7 +42,9 @@ logger = logging.getLogger(__name__)
 _RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
 
 
-class GoldenRepoMetadataPostgresBackend(_RefreshFailureBackoffPostgresMixin):
+class GoldenRepoMetadataPostgresBackend(
+    _RefreshFailureBackoffPostgresMixin, _ForcedReconcileStatePostgresMixin
+):
     """
     PostgreSQL backend for golden repository metadata.
 
@@ -200,6 +206,7 @@ class GoldenRepoMetadataPostgresBackend(_RefreshFailureBackoffPostgresMixin):
                 )
                 deleted: bool = cur.rowcount > 0
                 delete_refresh_failure_backoff_for_repo(cur, alias)
+                delete_forced_reconcile_state_for_repo(cur, alias)
             conn.commit()
 
         if deleted:
@@ -223,6 +230,31 @@ class GoldenRepoMetadataPostgresBackend(_RefreshFailureBackoffPostgresMixin):
                     (alias,),
                 )
                 return cur.fetchone() is not None
+
+    def existing_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        The lookup is bounded to the given names (one parameterized
+        ``alias = ANY(%s)`` query), never a listing of every repository.
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        unique = sorted(set(names))
+        if not unique:
+            return set()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alias FROM golden_repos_metadata WHERE alias = ANY(%s)",
+                    (unique,),
+                )
+                rows = cur.fetchall()
+        return {str(row[0]) for row in rows}
 
     # ------------------------------------------------------------------
     # Field update methods

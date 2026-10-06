@@ -153,9 +153,12 @@ def _get_wiki_cache_for_handler():
 
 
 def _wiki_analytics_filter_by_search(
-    repo_alias: str, search_query: str, search_mode: str, username: str
+    wiki_alias: str, search_query: str, search_mode: str, username: str
 ) -> Optional[set]:
     """Filter wiki article paths via CIDX search (AC4).
+
+    Searches the wiki's GOLDEN repository (``{wiki_alias}-global``), never
+    a user activation that happens to carry the wiki's bare name.
 
     Returns a set of matching file_paths, or None if search was not performed.
     Returns an empty set when search runs but finds no matches.
@@ -169,7 +172,7 @@ def _wiki_analytics_filter_by_search(
     result = sqm.query_user_repositories(
         username=username,
         query_text=search_query,
-        repository_alias=repo_alias,
+        repository_alias=f"{wiki_alias}-global",
         search_mode=search_mode,
         limit=_WIKI_ANALYTICS_MAX_SEARCH_RESULTS,
         file_extensions=[".md"],
@@ -228,17 +231,17 @@ def quick_reference(
     try:
         from ..tools import TOOL_REGISTRY, tool_passes_config_gate
         from ..tool_doc_loader import _get_tool_doc_loader
-        from ..tool_access import ToolAccessMemo, resolve_effective_user
+        from ..tool_access import ToolAccessMemo, principal_for_tool
 
         if tool_access_memo is None:
             tool_access_memo = ToolAccessMemo()
-        effective_user = resolve_effective_user(user, session_state)
 
         category_filter = params.get("category")
 
         # Story #987 AC6: 'tool' parameter takes precedence over 'category'
         requested_tool = params.get("tool")
         if requested_tool:
+            effective_user = principal_for_tool(user, session_state, requested_tool)
             decision = tool_access_memo.is_allowed(requested_tool, effective_user)
             tool_def = TOOL_REGISTRY.get(requested_tool)
             if decision is False or (
@@ -278,7 +281,8 @@ def quick_reference(
         config = get_config_service().get_config()
 
         for tool_name, tool_def in TOOL_REGISTRY.items():
-            # Check permission
+            # Check permission (the same principal tools/list uses per tool)
+            effective_user = principal_for_tool(user, session_state, tool_name)
             decision = tool_access_memo.is_allowed(tool_name, effective_user)
             required_permission = tool_def.get("required_permission", "query_repos")
             if decision is False or (
@@ -507,11 +511,10 @@ def get_tool_categories(
     """
     from ..tool_doc_loader import _get_tool_doc_loader
     from ..tools import TOOL_REGISTRY
-    from ..tool_access import ToolAccessMemo, resolve_effective_user
+    from ..tool_access import ToolAccessMemo, principal_for_tool
 
     if tool_access_memo is None:
         tool_access_memo = ToolAccessMemo()
-    effective_user = resolve_effective_user(user, session_state)
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -527,6 +530,8 @@ def get_tool_categories(
         category_tools = []
         for tool_info in tools:
             tool_name = tool_info["name"]
+            # The same principal tools/list uses for this tool.
+            effective_user = principal_for_tool(user, session_state, tool_name)
             decision = tool_access_memo.is_allowed(tool_name, effective_user)
             tool_def = TOOL_REGISTRY.get(tool_name, {})
             if decision is False or (
@@ -743,7 +748,7 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
 
         # AC4: Optional search filter - raises on sqm unavailability
         article_paths_filter = _wiki_analytics_filter_by_search(
-            repo_alias, search_query or "", search_mode, user.username
+            wiki_alias, search_query or "", search_mode, user.username
         )
         if article_paths_filter is not None and not article_paths_filter:
             return _mcp_response(

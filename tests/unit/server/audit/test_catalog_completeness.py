@@ -284,8 +284,8 @@ _SELF_AUTHENTICATING_ROUTES: Dict[str, Tuple[str, ...]] = {
     "POST /auth/elevate-ajax": _ELEVATION,
     "POST /admin/mfa/verify": ("mfa_activated",),
     "POST /user/mfa/verify": ("mfa_activated",),
-    "GET /admin/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
-    "GET /user/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
+    "POST /admin/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
+    "POST /user/mfa/recovery-codes": ("mfa_recovery_codes_regenerated",),
     "POST /user/mfa/disable": ("mfa_disabled",),
     "GET /admin/mfa/setup": ("mfa_secret_regenerated_cross_user",),
     "PUT /api/users/change-password": (

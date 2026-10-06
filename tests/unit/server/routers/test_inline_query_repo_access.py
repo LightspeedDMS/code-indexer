@@ -322,6 +322,49 @@ class TestFtsAndHybrid:
         assert body["metadata"]["repositories_searched"] == len(ALL_REPOS)
 
 
+class TestOwnActivationCustomAlias:
+    """Rows from the caller's own activation are kept when the caller is
+    granted the golden repository the activation was created from, whatever
+    alias the activation uses (public #1984)."""
+
+    def test_semantic_custom_alias_activation_returns_its_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        resp = _post(
+            env,
+            NON_ADMIN,
+            {
+                "query_text": "find",
+                "repository_alias": OWN_ACTIVATION,
+                "limit": ROWS_PER_REPO,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()["results"]
+        assert len(rows) == ROWS_PER_REPO
+        assert _repos_of(rows) == {OWN_ACTIVATION}
+
+    def test_hybrid_custom_alias_activation_returns_its_fts_rows(self, env):
+        env.activate_for(USER, GRANTED_REPO, OWN_ACTIVATION)
+
+        resp = _post(
+            env,
+            NON_ADMIN,
+            {
+                "query_text": "authenticate",
+                "search_mode": "hybrid",
+                "repository_alias": OWN_ACTIVATION,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["fts_results"], body
+        assert _repos_of(body["fts_results"]) == {OWN_ACTIVATION}
+        assert _repos_of(body["semantic_results"]) == {OWN_ACTIVATION}
+
+
 class TestMissingAccessServiceRest:
     """No access service: refused whenever a global repo would be searched
     (admins included); an own-activation-only query still runs."""

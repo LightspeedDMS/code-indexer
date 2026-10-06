@@ -24,23 +24,35 @@ from typing import (
     Any,
     Dict,
     List,
+    NamedTuple,
     Optional,
     Protocol,
     Set,
+    Tuple,
     runtime_checkable,
 )
 
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
 from .group_access_manager import GroupAccessManager
 from .memory_io import MemoryFileCorruptError, MemoryFileNotFoundError, read_memory_file
+from ..models.api_models import MAX_CANDIDATE_LIMIT
 
 if TYPE_CHECKING:
+    from ..repositories.activated_repo_manager import ActivatedRepoManager
     from .memory_metadata_cache import MemoryMetadataCache
 
 # Memory files are named {uuid4().hex}.md — exactly 32 lowercase hex chars stem.
 _MEMORY_FILE_RE = re.compile(r"^[0-9a-f]{32}\.md$")
 
 logger = logging.getLogger(__name__)
+
+
+class _ActivationSource(NamedTuple):
+    """Golden repos one caller activation was created from."""
+
+    golden: Tuple[str, ...]
+    # The activation alias could also label a golden repository's rows.
+    collides: bool
 
 
 @runtime_checkable
@@ -74,12 +86,18 @@ class AccessFilteringService:
         *,
         memory_metadata_cache: "Optional[MemoryMetadataCache]" = None,
         memories_dir: Optional[Path] = None,
+        activated_repo_manager: "Optional[ActivatedRepoManager]" = None,
     ):
         """
         Initialize the AccessFilteringService.
 
         Args:
             group_access_manager: Manager for group and access data.
+            activated_repo_manager: Source of the caller's own activations.
+                filter_query_results() maps a row whose alias is one of the
+                caller's activations to the golden repositories it was
+                created from and checks THOSE against the caller's grants.
+                When None, every row is checked by golden name only.
             memory_metadata_cache: Optional cache for memory file frontmatter.
                 When provided, used by filter_cidx_meta_files() to look up
                 scope/referenced_repo for UUID-stemmed memory files.
@@ -94,6 +112,10 @@ class AccessFilteringService:
             memory_metadata_cache
         )
         self._memories_dir: Optional[Path] = memories_dir
+        self._activated_repo_manager: "Optional[ActivatedRepoManager]" = (
+            activated_repo_manager
+        )
+        self._unwired_warning_logged: bool = False
         # Bug #338: TTL cache for _get_all_repo_aliases()
         self._repo_aliases_cache: Optional[Set[str]] = None
         self._repo_aliases_cache_time: float = 0.0
@@ -147,33 +169,120 @@ class AccessFilteringService:
         group = self.group_manager.get_user_group(user_id)
         return group is not None and group.name == self.ADMIN_GROUP_NAME
 
-    def _get_repo_alias(self, result: Any) -> str:
-        """
-        Get repository alias from a result, normalized for access checks.
+    @staticmethod
+    def _get_raw_repo_alias(result: Any) -> str:
+        """Return a result's repository alias exactly as the row carries it.
 
         Handles both dict and object results. Falls back to source_repo when
-        repository_alias is absent (omni-search results). Strips the -global
-        suffix so aliases match stored repo names in get_accessible_repos().
-
-        Args:
-            result: A QueryResult object or dictionary
-
-        Returns:
-            The normalized repository alias, or empty string if not found
+        repository_alias is absent (omni-search results).
         """
         if isinstance(result, dict):
-            alias = str(
+            return str(
                 result.get("repository_alias", "") or result.get("source_repo", "")
             )
-        else:
-            alias = str(
-                getattr(result, "repository_alias", "")
-                or getattr(result, "source_repo", "")
-            )
-        # Strip -global suffix to match stored repo names in access control
+        return str(
+            getattr(result, "repository_alias", "")
+            or getattr(result, "source_repo", "")
+        )
+
+    @staticmethod
+    def _strip_global(alias: str) -> str:
+        """Strip the -global suffix so aliases match stored golden repo names."""
         if alias.endswith("-global"):
-            alias = alias[: -len("-global")]
+            return alias[: -len("-global")]
         return alias
+
+    @staticmethod
+    def _recorded_activation_sources(result: Any) -> Optional[List[str]]:
+        """Provenance stamped on an activation-derived row, or None.
+
+        A malformed (non-list) value is treated as no sources, which grants
+        nothing.
+        """
+        if isinstance(result, dict):
+            recorded = result.get("activation_source_repos")
+        else:
+            recorded = getattr(result, "activation_source_repos", None)
+        if recorded is None:
+            return None
+        if not isinstance(recorded, list):
+            return []
+        return [str(g) for g in recorded]
+
+    def _golden_repo_names(self, aliases: List[str]) -> Optional[Set[str]]:
+        """Which of *aliases* are golden repository names (never cached).
+
+        ONE lookup bounded to *aliases*, never a listing of every golden
+        repository. None when no golden repo manager is reachable; callers
+        then treat every activation alias as colliding (fail closed).
+        """
+        golden_manager = getattr(
+            self._activated_repo_manager, "golden_repo_manager", None
+        )
+        if golden_manager is None:
+            return None
+        if not aliases:
+            return set()
+        return set(golden_manager.existing_golden_aliases(aliases))
+
+    @staticmethod
+    def _alias_collides(alias: str, golden_names: Optional[Set[str]]) -> bool:
+        """True when *alias* could also label rows of a golden repository.
+
+        A ``-global`` alias, or one equal to a golden repository name, is
+        ambiguous: rows carrying it cannot be proven to come from the
+        activation. Unknown golden names count as colliding.
+        """
+        if alias.endswith("-global") or golden_names is None:
+            return True
+        return alias in golden_names
+
+    def caller_activation_sources(self, user_id: str) -> Dict[str, _ActivationSource]:
+        """Map each of the CALLER'S OWN activation aliases to its golden repos.
+
+        Only the caller's activations are read (never another user's). A
+        single activation maps to its ``golden_repo_alias``; a composite
+        activation maps to every component in ``golden_repo_aliases``. An
+        activation whose source cannot be determined maps to no sources,
+        which grants nothing.
+        """
+        if self._activated_repo_manager is None:
+            if not self._unwired_warning_logged:
+                self._unwired_warning_logged = True
+                logger.warning(
+                    "AccessFilteringService has no activated_repo_manager: query "
+                    "results are filtered by golden repository name only, so "
+                    "rows from custom-alias activations are dropped"
+                )
+            return {}
+        activations = self._activated_repo_manager.list_activated_repositories(user_id)
+        if not activations:
+            return {}
+        # One golden-repo lookup per call, bounded to the caller's own
+        # aliases; a -global alias collides by its suffix alone.
+        golden_names = self._golden_repo_names(
+            [
+                str(a["user_alias"])
+                for a in activations
+                if a.get("user_alias") and not str(a["user_alias"]).endswith("-global")
+            ]
+        )
+        sources: Dict[str, _ActivationSource] = {}
+        for activation in activations:
+            user_alias = activation.get("user_alias")
+            if not user_alias:
+                continue
+            if activation.get("is_composite"):
+                golden = list(activation.get("golden_repo_aliases") or [])
+            else:
+                single = activation.get("golden_repo_alias")
+                golden = [single] if single else []
+            alias = str(user_alias)
+            sources[alias] = _ActivationSource(
+                golden=tuple(self._strip_global(str(g)) for g in golden),
+                collides=self._alias_collides(alias, golden_names),
+            )
+        return sources
 
     def filter_query_results(self, results: List[Any], user_id: str) -> List[Any]:
         """
@@ -181,6 +290,15 @@ class AccessFilteringService:
 
         Implements AC1 and AC2: Users only see results from repos their
         group can access. Admins see all results.
+
+        A row carrying activation provenance (``activation_source_repos``) is
+        kept only when it belongs to one of the caller's CURRENT activations
+        and every recorded and current source repository is granted. A row
+        whose alias is one of the caller's own activations is kept only
+        when EVERY golden repository that activation was created from is
+        granted to the caller; the activation mapping takes precedence over
+        golden-name matching. Every other row is kept only when its alias
+        (minus -global) is a granted golden repository.
 
         Args:
             results: List of QueryResult objects or dictionaries with
@@ -198,8 +316,64 @@ class AccessFilteringService:
             return results
 
         accessible = self.get_accessible_repos(user_id)
+        # One activation lookup per call, never per row.
+        activation_sources = self.caller_activation_sources(user_id)
 
-        return [r for r in results if self._get_repo_alias(r) in accessible]
+        def _is_accessible(result: Any) -> bool:
+            alias = self._get_raw_repo_alias(result)
+            recorded = self._recorded_activation_sources(result)
+            if recorded is None:
+                return self.alias_granted(alias, accessible, activation_sources)
+            # Activation-derived row: it must belong to one of the caller's
+            # CURRENT activations, and both the recorded and the current
+            # sources must be granted.
+            activation = activation_sources.get(alias)
+            return (
+                activation is not None
+                and self._all_granted(
+                    [self._strip_global(g) for g in recorded], accessible
+                )
+                and self._all_granted(activation.golden, accessible)
+            )
+
+        return [r for r in results if _is_accessible(r)]
+
+    @staticmethod
+    def _all_granted(golden: Any, accessible: Set[str]) -> bool:
+        return bool(golden) and all(g in accessible for g in golden)
+
+    @classmethod
+    def alias_granted(
+        cls,
+        alias: str,
+        accessible: Set[str],
+        activation_sources: Dict[str, _ActivationSource],
+    ) -> bool:
+        """The non-admin access decision for one repository alias.
+
+        Shared by filter_query_results (rows carrying no recorded
+        provenance) and the MCP dispatcher's repository pre-check, so an
+        alias is judged the same before a tool runs and on its results.
+        *accessible* is get_accessible_repos() and *activation_sources* is
+        caller_activation_sources() for the same caller.
+
+        An alias of one of the caller's OWN activations is granted when
+        every golden repository that activation was created from is granted;
+        the activation mapping takes precedence over golden-name matching,
+        and an ambiguous (colliding) activation alias needs both. Any other
+        alias -- another user's activation included, indistinguishable from
+        an unknown alias -- is granted only as a granted golden repository
+        name (minus -global).
+        """
+        name_granted = cls._strip_global(alias) in accessible
+        activation = activation_sources.get(alias)
+        if activation is None:
+            return name_granted
+        sources_granted = cls._all_granted(activation.golden, accessible)
+        if activation.collides:
+            # Ambiguous label: both readings must be granted.
+            return name_granted and sources_granted
+        return sources_granted
 
     def filter_repo_listing(self, repos: List[str], user_id: str) -> List[str]:
         """
@@ -472,7 +646,9 @@ class AccessFilteringService:
         Calculate over-fetch limit for HNSW queries.
 
         To compensate for post-query filtering reducing results,
-        we over-fetch from HNSW by a factor.
+        we over-fetch from HNSW by a factor, bounded by MAX_CANDIDATE_LIMIT
+        (the internal per-search candidate cap). The result is never below
+        requested_limit.
 
         Args:
             requested_limit: Original requested result limit
@@ -480,4 +656,5 @@ class AccessFilteringService:
         Returns:
             Adjusted limit for HNSW query
         """
-        return requested_limit * self.DEFAULT_OVER_FETCH_FACTOR
+        over_fetch = requested_limit * self.DEFAULT_OVER_FETCH_FACTOR
+        return max(requested_limit, min(over_fetch, MAX_CANDIDATE_LIMIT))

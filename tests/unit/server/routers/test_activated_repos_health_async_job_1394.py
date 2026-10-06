@@ -49,6 +49,9 @@ from code_indexer.server.repositories.background_jobs import (
 )
 from code_indexer.server.routers import activated_repos
 from code_indexer.server.routers.inline_jobs import register_job_routes
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    caller_is_access_admin,  # noqa: F401
+)
 from code_indexer.server.services.repository_health_aggregator import (
     RepositoryHealthResult,
 )

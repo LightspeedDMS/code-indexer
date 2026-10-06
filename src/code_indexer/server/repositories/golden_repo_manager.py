@@ -2749,13 +2749,6 @@ class GoldenRepoManager:
             try:
                 run_with_popen_progress(**_popen_kwargs)
             except IndexingSubprocessError as e:
-                # Check for "No files found" — acceptable for golden repo registration
-                combined = "".join(_popen_stdout) + "".join(_popen_stderr)
-                if "No files found to index" in combined:
-                    logging.warning(
-                        "PATH A: Repository has no indexable files — acceptable for golden repo registration"
-                    )
-                    return
                 raise GitOperationError(str(e)) from e
 
         try:
@@ -3382,6 +3375,23 @@ class GoldenRepoManager:
         # Bug #1314: resolve via shared backend on a local cache miss so a
         # repo registered by ANOTHER worker/node is recognized here too.
         return self._resolve_golden_repo(alias) is not None
+
+    def existing_golden_aliases(self, names: List[str]) -> set[str]:
+        """
+        Return which of *names* are golden repository aliases.
+
+        One query bounded to *names* against the storage backend (SQLite
+        solo, PostgreSQL in cluster), never a listing of every repository
+        and never the per-worker cache (public #1984).
+
+        Args:
+            names: Candidate aliases.
+
+        Returns:
+            The subset of *names* that exist as golden repository aliases.
+        """
+        found: set[str] = self._sqlite_backend.existing_aliases(names)
+        return found
 
     def get_wiki_enabled(self, alias: str) -> bool:
         """Check if wiki is enabled for a golden repo (Story #280)."""

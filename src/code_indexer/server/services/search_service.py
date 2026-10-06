@@ -18,6 +18,7 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from ...backends.backend_factory import BackendFactory
 from ...services.embedding_factory import EmbeddingProviderFactory
+from ...utils.content_availability import is_content_unavailable
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.search_embed_event_emit import (
     emit_embed_error_event,
@@ -724,6 +725,7 @@ class SemanticSearchService:
                 language=self._detect_language_from_path(payload.get("path", "")),
                 file_last_modified=payload.get("file_last_modified"),
                 indexed_timestamp=payload.get("indexed_timestamp"),
+                content_unavailable=is_content_unavailable(result),
             )
             formatted_results.append(search_item)
 

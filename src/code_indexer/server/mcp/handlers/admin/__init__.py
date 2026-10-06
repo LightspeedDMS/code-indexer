@@ -867,10 +867,17 @@ def handle_set_session_impersonation(
 
     username = args.get("username")
 
-    # Check if user is ADMIN
-    if user.role != UserRole.ADMIN:
+    # Impersonation is managed by the AUTHENTICATED principal, never by the
+    # user currently impersonated: an administrator can always clear or
+    # change it, whatever the impersonated user's own role.  The dispatcher
+    # passes the CURRENT authenticated caller for this tool
+    # (tool_access.AUTHENTICATED_PRINCIPAL_TOOLS), loaded for this request --
+    # never a user snapshot stored when the session was created.
+    principal = user
+
+    if principal.role != UserRole.ADMIN:
         password_audit_logger.log_impersonation_denied(
-            actor_username=user.username,
+            actor_username=principal.username,
             target_username=username or "(clear)",
             reason="Impersonation requires ADMIN role",
             session_id=session_state.session_id if session_state else "unknown",
@@ -882,12 +889,15 @@ def handle_set_session_impersonation(
 
     # Handle clearing impersonation
     if username is None:
-        if session_state and session_state.is_impersonating:
-            previous_target = session_state.impersonated_user.username
+        # Read the impersonated user ONCE: another call on the same session
+        # may clear it concurrently (no lock is held across a check and a
+        # second read).
+        previous = session_state.impersonated_user if session_state else None
+        if previous is not None:
             session_state.clear_impersonation()
             password_audit_logger.log_impersonation_cleared(
-                actor_username=user.username,
-                previous_target=previous_target,
+                actor_username=principal.username,
+                previous_target=previous.username,
                 session_id=session_state.session_id,
                 ip_address="unknown",
             )
@@ -919,7 +929,7 @@ def handle_set_session_impersonation(
 
         session_state.set_impersonation(target_user)
         password_audit_logger.log_impersonation_set(
-            actor_username=user.username,
+            actor_username=principal.username,
             target_username=username,
             session_id=session_state.session_id,
             ip_address="unknown",
@@ -1199,14 +1209,25 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 @require_mcp_elevation()
 def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
-    """Assign a user to a group (inner handler — Story #992)."""
-    from ....services.group_access_manager import GroupNotFoundError
+    """Assign a user to a group (inner handler — Story #992).
+
+    A membership is only written for a name that has an account.
+    """
+    from ....services.group_access_manager import (
+        GroupNotFoundError,
+        UnknownAccountError,
+    )
 
     try:
         group_manager = _get_group_manager()
         if not group_manager:
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
+            )
+        user_manager = dependencies.user_manager
+        if user_manager is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {"success": False, "error": "User manager not configured"}
             )
 
         group_id, error = _parse_group_id(args)
@@ -1221,7 +1242,14 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
 
         try:
             group_manager.assign_user_to_group_audited(
-                user_id, group_id, actor=user.username
+                user_id,
+                group_id,
+                actor=user.username,
+                account_exists=lambda name: user_manager.get_user(name) is not None,
+            )
+        except UnknownAccountError:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {"success": False, "error": f"User not found: {user_id}"}
             )
         except GroupNotFoundError:
             return _group_not_found(group_id)

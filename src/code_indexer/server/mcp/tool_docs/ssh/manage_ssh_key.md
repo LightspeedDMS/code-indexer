@@ -79,8 +79,14 @@ TL;DR: Unified SSH key management (Story #992). Replaces cidx_ssh_key_create, ci
 ACTIONS:
 - create: Generate new SSH key pair. Required: name. Optional: key_type (ed25519/rsa), email, description.
 - delete: Remove a managed SSH key. Required: name.
-- show_public: Get public key content for copy/paste. Required: name.
+- show_public: Get public key content for copy/paste. Required: name. Requires elevation, like REST GET /api/ssh-keys/{name}/public.
 - assign_host: Add SSH config Host entry. Required: name, hostname. Optional: force (overwrite conflict).
+
+ADMIN ONLY. Every action requires MCP elevation (TOTP step-up), like its REST /api/ssh-keys twin. Without an elevation window no action reveals key content or whether a key name exists.
+
+ERRORS:
+- elevation_required: TOTP step-up needed (call elevate_session, then retry)
+- totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
 RELATED TOOLS: list_ssh_keys (view all keys).
 

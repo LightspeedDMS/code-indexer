@@ -614,8 +614,8 @@ class BackgroundJobsPostgresBackend:
         Bug #1950: writes status='interrupted' (not 'failed') -- a row
         still running/pending at startup was orphaned by a restart, a
         restart artifact rather than a genuine failure, so it must not
-        poison /health's get_failed_job_count() (which counts ONLY
-        status='failed', with no time window) forever.
+        count toward /health's failed jobs (status='failed' rows completed
+        within the last 24h, Bug #1964).
         """
         sql = (
             "UPDATE background_jobs SET status = 'interrupted', error = %s, "
@@ -1010,9 +1010,9 @@ class BackgroundJobsPostgresBackend:
                     # row reclaimed here (either this node's own dead
                     # worker, or a genuinely orphaned NULL-owner row) is a
                     # restart artifact, never a genuine failure, so it
-                    # must not poison /health's get_failed_job_count()
-                    # (which counts ONLY status='failed', with no time
-                    # window) forever.
+                    # must not count toward /health's failed jobs
+                    # (status='failed' rows completed within the last
+                    # 24h, Bug #1964).
                     cur.execute(
                         """
                         UPDATE background_jobs

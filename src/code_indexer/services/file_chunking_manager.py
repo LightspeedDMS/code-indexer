@@ -348,8 +348,12 @@ class FileChunkingManager:
             file_last_modified = None
             file_size = metadata.get("file_size", 0)  # Fallback to metadata or 0
 
-        # Always record when indexing occurred
-        indexed_timestamp = time.time()
+        # Issue #2013: indexed_timestamp is the time the file content was READ
+        # (recorded by FileIdentifier.get_file_metadata just before hashing),
+        # not this point's write time -- reconcile's racy-timestamp check
+        # must cover the read second. Metadata without a read time keeps
+        # the previous behaviour (the current time).
+        indexed_timestamp = metadata.get("content_read_timestamp", time.time())
 
         # Create Git-aware metadata
         metadata_info = None

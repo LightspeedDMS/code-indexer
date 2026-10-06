@@ -31,6 +31,9 @@ from code_indexer.services.temporal.temporal_server_paths import (
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers import activated_repos
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    caller_is_access_admin,  # noqa: F401
+)
 
 
 def _test_user() -> User:

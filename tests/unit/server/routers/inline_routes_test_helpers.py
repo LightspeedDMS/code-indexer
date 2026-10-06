@@ -117,12 +117,16 @@ _UNSET = object()
 
 
 @contextmanager
-def _access_service_granting(db_path, username: str, repos: List[str]):
+def _access_service_granting(
+    db_path, username: str, repos: List[str], activated_repo_manager=None
+):
     """Wire a REAL access service on app.state granting *repos* to *username*.
 
     Routes that name or list golden repositories require group access and
     fail closed without the access service; the previous app.state value
-    is restored on exit.
+    is restored on exit. *activated_repo_manager* (the one the route under
+    test uses) lets the service judge the caller's activations by their
+    source repositories.
     """
     from code_indexer.server.services.access_filtering_service import (
         AccessFilteringService,
@@ -136,6 +140,44 @@ def _access_service_granting(db_path, username: str, repos: List[str]):
     gam.assign_user_to_group(username, group.id, assigned_by="test")
     for repo in repos:
         gam.grant_repo_access(repo, group.id, granted_by="test")
+    previous = getattr(app.state, "access_filtering_service", _UNSET)
+    app.state.access_filtering_service = AccessFilteringService(
+        gam, activated_repo_manager=activated_repo_manager
+    )
+    try:
+        yield
+    finally:
+        if previous is _UNSET:
+            del app.state.access_filtering_service
+        else:
+            app.state.access_filtering_service = previous
+
+
+@contextmanager
+def _access_service_admin(db_path, *usernames: str):
+    """Wire a REAL access service on app.state whose admins group holds
+    *usernames*.
+
+    Routes serving the caller's ACTIVATED repository check the caller's
+    grants on that activation's source repositories (admins bypass, as on
+    MCP). Tests that pin such a route's own behaviour -- with the activated
+    repo manager faked -- make their caller an admin of a real group store
+    so the guard passes for real. Enter it AFTER a lifespan-running
+    TestClient starts (the lifespan installs its own service); the previous
+    app.state value is restored on exit.
+    """
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
+
+    gam = GroupAccessManager(db_path)
+    admins = gam.get_group_by_name("admins")
+    assert admins is not None, "bootstrap must create the 'admins' group"
+    for username in usernames:
+        gam.assign_user_to_group(username, admins.id, assigned_by="test")
     previous = getattr(app.state, "access_filtering_service", _UNSET)
     app.state.access_filtering_service = AccessFilteringService(gam)
     try:
@@ -177,6 +219,29 @@ def user_client():
     app.dependency_overrides[get_current_user] = lambda: user
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
+
+
+# The caller the activated-repos / indexing router-only tests authenticate as.
+ROUTER_TEST_CALLER = "alice"
+
+
+@pytest.fixture(autouse=True)
+def caller_is_access_admin(tmp_path_factory):
+    """Active ONLY in a test module that imports it: the helper's regular
+    user and admin, and ROUTER_TEST_CALLER, are admins of a real access
+    service for each test, so the activated-repo guard passes for routes
+    whose own behaviour the module pins. A test that installs its own
+    service (e.g. via _access_service_granting) overrides it for its
+    duration. Not for lifespan-running clients (the lifespan installs its
+    own service)."""
+    with _access_service_admin(
+        # Its own directory: tests often use tmp_path as a repository root.
+        tmp_path_factory.mktemp("access-admin") / "groups.db",
+        _make_regular_user().username,
+        _make_admin().username,
+        ROUTER_TEST_CALLER,
+    ):
+        yield
 
 
 @pytest.fixture

@@ -42,6 +42,10 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def repo_exists(self, alias: str) -> bool: ...
 
+    # public #1984: which of *names* are golden aliases, from one lookup
+    # bounded to those names (never a listing of every repository).
+    def existing_aliases(self, names: List[str]) -> set[str]: ...
+
     def update_enable_temporal(self, alias: str, enable: bool) -> bool: ...
 
     # Bug #1414: temporal_options is the Web UI's sole write target
@@ -119,6 +123,16 @@ class GoldenRepoMetadataBackend(Protocol):
     def get_refresh_integrity_failure_state(
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
+
+    # Consecutive forced reconciles that left the same stale-index signal
+    # unchanged, so the refresh scheduler stops forcing after a bound.
+    def record_forced_reconcile(self, golden_alias: str, signal: str) -> int: ...
+
+    def get_forced_reconcile_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def clear_forced_reconcile_state(self, golden_alias: str) -> None: ...
 
     # Bug #2022: per-repo refresh failure backoff for repeated failures the
     # self-heal cannot repair (refresh_scheduler.py).

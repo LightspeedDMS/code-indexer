@@ -7,6 +7,10 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.config import write_json_atomic
+from code_indexer.utils.credential_redaction import (
+    is_display_mask,
+    mask_stored_secret,
+)
 
 import copy
 import json
@@ -66,6 +70,17 @@ class BootstrapFileNotWritten(RuntimeError):
 # commits with a compare-and-set on its version; a concurrent commit restarts
 # the attempt from the new row, at most this many times.
 _CHANGE_ATTEMPTS = 10
+
+# claude_cli settings only /api/llm-creds/save-config may change: it reuses
+# the stored provider key only with the provider URL it was saved with.
+_LLM_CREDS_ROUTE_ONLY_KEYS = frozenset(
+    {"claude_auth_mode", "llm_creds_provider_url", "llm_creds_provider_api_key"}
+)
+
+
+class LangfusePullProjectsInvalid(ValueError):
+    """A submitted Langfuse pull-project list was refused (a duplicate public
+    key, or a project left with no secret key); nothing was published."""
 
 
 class ConfigChangeConflict(RuntimeError):
@@ -715,20 +730,22 @@ class ConfigService:
             },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
+                # Stored keys: at most the last 4 characters.
                 "anthropic_api_key": (
-                    config.claude_integration_config.anthropic_api_key[:10] + "***"
-                    if config.claude_integration_config.anthropic_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.anthropic_api_key
+                    )
+                    or None
                 ),
                 "voyageai_api_key": (
-                    config.claude_integration_config.voyageai_api_key[:6] + "***"
-                    if config.claude_integration_config.voyageai_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.voyageai_api_key
+                    )
+                    or None
                 ),
                 "cohere_api_key": (
-                    config.claude_integration_config.cohere_api_key[:6] + "***"
-                    if config.claude_integration_config.cohere_api_key
-                    else None
+                    mask_stored_secret(config.claude_integration_config.cohere_api_key)
+                    or None
                 ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
@@ -746,10 +763,10 @@ class ConfigService:
                 "claude_auth_mode": config.claude_integration_config.claude_auth_mode,
                 "llm_creds_provider_url": config.claude_integration_config.llm_creds_provider_url,
                 "llm_creds_provider_api_key": (
-                    config.claude_integration_config.llm_creds_provider_api_key[:6]
-                    + "***"
-                    if config.claude_integration_config.llm_creds_provider_api_key
-                    else None
+                    mask_stored_secret(
+                        config.claude_integration_config.llm_creds_provider_api_key
+                    )
+                    or None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
                 "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
@@ -760,7 +777,9 @@ class ConfigService:
                 "enabled": config.oidc_provider_config.enabled,
                 "issuer_url": config.oidc_provider_config.issuer_url,
                 "client_id": config.oidc_provider_config.client_id,
-                "client_secret": config.oidc_provider_config.client_secret,
+                # Stored secrets are write-only on the configuration page:
+                # only whether one is set is exposed, never its value.
+                "client_secret_set": bool(config.oidc_provider_config.client_secret),
                 "scopes": config.oidc_provider_config.scopes,
                 "email_claim": config.oidc_provider_config.email_claim,
                 "username_claim": config.oidc_provider_config.username_claim,
@@ -797,8 +816,9 @@ class ConfigService:
                 "public_key": (
                     config.langfuse_config.public_key if config.langfuse_config else ""
                 ),
-                "secret_key": (
-                    config.langfuse_config.secret_key if config.langfuse_config else ""
+                # Write-only secret: only whether one is set is exposed.
+                "secret_key_set": bool(
+                    config.langfuse_config and config.langfuse_config.secret_key
                 ),
                 "host": (
                     config.langfuse_config.host
@@ -821,8 +841,16 @@ class ConfigService:
                     if config.langfuse_config
                     else "https://cloud.langfuse.com"
                 ),
+                # Write-only secrets: each project exposes its public key and
+                # whether its secret key is set, never the secret itself.
                 "pull_projects": (
-                    [asdict(p) for p in config.langfuse_config.pull_projects]
+                    [
+                        {
+                            "public_key": p.public_key,
+                            "secret_key_set": bool(p.secret_key),
+                        }
+                        for p in config.langfuse_config.pull_projects
+                    ]
                     if config.langfuse_config
                     else []
                 ),
@@ -1097,7 +1125,7 @@ class ConfigService:
         settings["codex_integration"] = {
             "enabled": cx_cfg.enabled,
             "credential_mode": cx_cfg.credential_mode,
-            "api_key": (cx_cfg.api_key[:6] + "***" if cx_cfg.api_key else None),
+            "api_key": mask_stored_secret(cx_cfg.api_key) or None,
             "lcp_url": cx_cfg.lcp_url,
             "lcp_vendor": cx_cfg.lcp_vendor,
             "codex_weight": cx_cfg.codex_weight,
@@ -2246,18 +2274,15 @@ class ConfigService:
             claude_config.refinement_interval_hours = max(1, int(value))
         elif key == "refinement_domains_per_run":
             claude_config.refinement_domains_per_run = min(50, max(1, int(value)))
-        elif key == "claude_auth_mode":
-            allowed = {"api_key", "subscription"}
-            str_value = str(value)
-            if str_value not in allowed:
-                raise ValueError(
-                    f"Invalid claude_auth_mode '{value}': must be one of {sorted(allowed)}"
-                )
-            claude_config.claude_auth_mode = str_value
-        elif key == "llm_creds_provider_url":
-            claude_config.llm_creds_provider_url = str(value) if value else ""
-        elif key == "llm_creds_provider_api_key":
-            claude_config.llm_creds_provider_api_key = str(value) if value else ""
+        elif key in _LLM_CREDS_ROUTE_ONLY_KEYS:
+            # The provider key is reused only with the provider URL it was
+            # saved with; only /api/llm-creds/save-config enforces that, so
+            # no generic save may change the mode, the URL or the key.
+            raise ValueError(
+                f"claude_cli.{key} can be changed only through "
+                "/api/llm-creds/save-config (the LLM credentials provider "
+                "settings), which binds the provider key to its URL"
+            )
         elif key == "llm_creds_provider_consumer_id":
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         elif key == "dep_map_fact_check_enabled":
@@ -2394,7 +2419,10 @@ class ConfigService:
         elif key == "public_key":
             langfuse.public_key = str(value)
         elif key == "secret_key":
-            langfuse.secret_key = str(value)
+            # Write-only secret: the page never renders it, so a blank value
+            # means "keep the stored secret".
+            if value:
+                langfuse.secret_key = str(value)
         elif key == "host":
             langfuse.host = str(value)
         elif key == "auto_trace_enabled":
@@ -2419,10 +2447,37 @@ class ConfigService:
             import json as _json
 
             projects_data = _json.loads(value) if isinstance(value, str) else value
-            langfuse.pull_projects = [
+            submitted = [
                 LangfusePullProject(**p) if isinstance(p, dict) else p
                 for p in projects_data
             ]
+            # Write-only secrets: the submitted list replaces the stored one
+            # (a removed project is removed), but a blank secret keeps the
+            # secret stored for the same public key.  The whole save is
+            # refused (nothing published) when a public key is duplicated or
+            # a project would end up with no secret key at all.
+            public_keys = [p.public_key for p in submitted]
+            duplicates = sorted({k for k in public_keys if public_keys.count(k) > 1})
+            if duplicates:
+                raise LangfusePullProjectsInvalid(
+                    "Duplicate Langfuse pull project public key(s): "
+                    + ", ".join(duplicates)
+                )
+            stored_secrets = {
+                p.public_key: p.secret_key for p in langfuse.pull_projects
+            }
+            missing = []
+            for project in submitted:
+                if not project.secret_key:
+                    project.secret_key = stored_secrets.get(project.public_key, "")
+                if not project.secret_key:
+                    missing.append(project.public_key)
+            if missing:
+                raise LangfusePullProjectsInvalid(
+                    "Langfuse pull project(s) with no secret key (enter the "
+                    "secret key for a new or changed public key): " + ", ".join(missing)
+                )
+            langfuse.pull_projects = submitted
         else:
             raise ValueError(f"Unknown langfuse setting: {key}")
 
@@ -2554,8 +2609,8 @@ class ConfigService:
         """Update a Codex CLI integration setting (Story #844).
 
         Mirrors _update_claude_cli_setting but scoped to CodexIntegrationConfig.
-        api_key is preserved when the submitted value is a masked placeholder
-        (contains '***') to prevent UI re-saves from wiping the stored key.
+        api_key is write-only: a blank value or the exact display mask that
+        get_all_settings() returns keeps the stored key.
         """
         from code_indexer.server.utils.config_manager import CodexIntegrationConfig
 
@@ -2574,11 +2629,10 @@ class ConfigService:
                 )
             cx.credential_mode = str_val
         elif key == "api_key":
-            # Preserve existing key when the submitted value is a masked placeholder
-            str_val = str(value) if value else ""
-            if "***" not in str_val:
-                cx.api_key = str_val if str_val else None
-            # else: placeholder submitted — do not overwrite the stored key
+            # Write-only secret: the form never pre-fills it, so a blank value
+            # (or a re-submitted display mask) means "keep the stored key".
+            if value and not is_display_mask(value):
+                cx.api_key = str(value)
         elif key == "lcp_url":
             cx.lcp_url = str(value) if value else None
         elif key == "lcp_vendor":

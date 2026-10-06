@@ -211,6 +211,7 @@ class TestOmniSearchCodeExcludesMetaRepoFromFanout:
             mock_limits = Mock()
             mock_limits.multi_search_max_workers = 4
             mock_limits.multi_search_timeout_seconds = 30
+            mock_limits.omni_max_results_per_repo = 100
             mock_limits.omni_wildcard_expansion_cap = 50
             mock_config = Mock()
             mock_config.multi_search_limits_config = mock_limits

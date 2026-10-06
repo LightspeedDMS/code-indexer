@@ -512,13 +512,18 @@ Example response:
   "job_queue": {
     "active_jobs": 2,
     "pending_jobs": 0,
-    "failed_jobs": 0
+    "failed_jobs": 0,
+    "failed_jobs_window": "24h"
   },
   "started_at": "2025-11-30T10:00:00Z",
   "maintenance_mode": false,
   "version": "10.141.0"
 }
 ```
+
+`failed_jobs` counts only jobs that failed within `failed_jobs_window` (the
+last 24 hours); any such failure makes the status `degraded`. Older failures
+stay visible in the job history but no longer affect health.
 
 ### Log Analysis
 

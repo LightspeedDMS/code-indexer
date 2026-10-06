@@ -110,6 +110,13 @@ AUDIT_ATTRIBUTION_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("event_uuid", "TEXT"),
 )
 
+# The user an administrator was impersonating over MCP when the action was
+# performed (NULL otherwise).  Same name and type as the PostgreSQL migration
+# 063_audit_logs_impersonated_user.sql.
+AUDIT_IMPERSONATION_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("impersonated_user", "TEXT"),
+)
+
 # (index name, indexed columns) -- same names on both backends.
 AUDIT_ATTRIBUTION_INDEXES: Tuple[Tuple[str, str], ...] = (
     ("idx_audit_logs_admin_id", "admin_id"),
@@ -125,6 +132,7 @@ _SELECT_COLUMNS = ", ".join(
     ("id", "timestamp", "admin_id", "action_type")
     + ("target_type", "target_id", "details")
     + tuple(name for name, _ in AUDIT_ATTRIBUTION_COLUMNS)
+    + tuple(name for name, _ in AUDIT_IMPERSONATION_COLUMNS)
 )
 
 _SQLITE_INSERT_EVENT_SQL = (
@@ -441,7 +449,9 @@ class AuditLogService:
             # Additive attribution columns: the table may have been created
             # by an older release or by GroupAccessManager's 7-column DDL.
             existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)")}
-            for name, ddl_type in AUDIT_ATTRIBUTION_COLUMNS:
+            for name, ddl_type in (
+                AUDIT_ATTRIBUTION_COLUMNS + AUDIT_IMPERSONATION_COLUMNS
+            ):
                 if name not in existing:
                     add_audit_column_tolerating_race(conn, name, ddl_type)
             for index_name, columns in AUDIT_ATTRIBUTION_INDEXES:

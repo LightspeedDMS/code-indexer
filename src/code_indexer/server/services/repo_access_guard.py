@@ -40,7 +40,7 @@ def normalize_repo_alias(alias: str) -> str:
     """Strip a trailing '-global' suffix to match stored (bare) repo names.
 
     Mirrors mcp/protocol.py's _check_repository_access() nested
-    _normalize() helper and AccessFilteringService._get_repo_alias()'s
+    _normalize() helper and AccessFilteringService._strip_global()'s
     identical suffix-stripping behaviour -- kept in exact sync with both;
     do not diverge.
     """

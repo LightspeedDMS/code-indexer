@@ -1633,8 +1633,9 @@ class AdmissionControlConfig:
     number of in-flight (non-exempt) requests PER WORKER PROCESS and/or
     rate-limits each caller individually, shedding excess with an immediate
     ``429 Too Many Requests`` + ``Retry-After`` so clients back off and retry
-    instead of piling up toward queue collapse. Health/docs endpoints are always
-    exempt so readiness probes and schema fetches are never rejected.
+    instead of piling up toward queue collapse. Health endpoints are always
+    exempt so readiness probes are never rejected; API documentation requires
+    an authenticated session or token and is admitted like any other request.
 
     Opt-in (both switches default False) because the right cap is
     deployment-specific (roughly timeout x per-worker service rate). The two

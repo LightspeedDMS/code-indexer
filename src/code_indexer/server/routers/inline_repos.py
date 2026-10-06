@@ -196,6 +196,18 @@ def register_repo_routes(
         unavailable; admins bypass)."""
         repo_access_http.enforce_repo_access(_access_service(), username, aliases)
 
+    def _enforce_activation_access(
+        username: str, user_alias: str, refusal: Optional[HTTPException] = None
+    ) -> None:
+        """Require the caller's grants on the source golden repositories of
+        their own activation *user_alias* (the MCP rule); *refusal* (default
+        404 not found or not activated) is the route's answer for an alias
+        the caller never activated. Called from sync routes, outside their
+        broad except."""
+        repo_access_http.enforce_activated_repo_access(
+            _access_service(), username, user_alias, refusal
+        )
+
     # Protected endpoints (require authentication)
     @app.get("/api/repos", response_model=RepositoryListResponse)
     def list_repositories(
@@ -222,6 +234,10 @@ def register_repo_routes(
         Returns:
             List of activated repositories for the user
         """
+        # One access lookup per request (fails closed before any listing).
+        access = repo_access_http.activation_access(
+            _access_service(), current_user.username
+        )
         try:
             repos = activated_repo_manager.list_activated_repositories(
                 current_user.username
@@ -234,6 +250,25 @@ def register_repo_routes(
                     if filter.lower() in repo["user_alias"].lower():
                         filtered_repos.append(repo)
                 repos = filtered_repos
+
+            # An activation whose source grants the caller lost stays listed
+            # (so it can be found and deactivated) as its alias only. The
+            # string fields released CLI clients require are "" (never null),
+            # so their listing keeps parsing.
+            repos = [
+                (
+                    repo
+                    if access.allows(repo.get("user_alias", ""))
+                    else {
+                        "user_alias": repo.get("user_alias", ""),
+                        "access_revoked": True,
+                        "current_branch": "",
+                        "activated_at": "",
+                        "last_accessed": "",
+                    }
+                )
+                for repo in repos
+            ]
 
             # AC4: Build per-repo deactivation_job lookup from in-flight jobs.
             # Limit chosen to cover all typical activated repo counts per server.
@@ -276,6 +311,8 @@ def register_repo_routes(
             # /api/repos for every user because one golden repo is
             # registry-orphaned or one lookup misbehaves).
             for repo in repos:
+                if repo.get("access_revoked"):
+                    continue
                 repo["deactivation_job"] = deact_map.get(repo.get("user_alias", ""))
                 if not include_sync_status:
                     continue
@@ -663,6 +700,7 @@ def register_repo_routes(
         Raises:
             HTTPException: If repository not found or branch switch fails
         """
+        _enforce_activation_access(current_user.username, user_alias)
         try:
             # Get repository path and validate it's not a composite repository
             repo_path = activated_repo_manager.get_activated_repo_path(
@@ -806,6 +844,7 @@ def register_repo_routes(
         Raises:
             HTTPException: If repository not found or sync operation fails
         """
+        _enforce_activation_access(current_user.username, user_alias)
         try:
             # Get repository path and validate it's not a composite repository
             repo_path = activated_repo_manager.get_activated_repo_path(
@@ -900,21 +939,30 @@ def register_repo_routes(
                         activated_repo_manager.list_activated_repositories(username)
                     )
 
-                    # Strategy 1: Look for exact user_alias match
-                    for repo in activated_repos:
-                        if repo["user_alias"] == alias:
-                            # Return the actual repository ID if available, otherwise use user_alias
-                            return str(repo.get("actual_repo_id", repo["user_alias"]))
-
-                    # Strategy 2: Look for golden_repo_alias match
-                    for repo in activated_repos:
-                        if repo.get("golden_repo_alias") == alias:
-                            return str(repo.get("actual_repo_id", repo["user_alias"]))
-
-                    # Strategy 3: Check if alias is already a repository ID
-                    for repo in activated_repos:
-                        if repo.get("actual_repo_id") == alias:
-                            return alias  # Already resolved ID
+                    # Strategy 1: exact user_alias match; Strategy 2:
+                    # golden_repo_alias match; Strategy 3: the alias is
+                    # already an activation's repository ID.
+                    activation = None
+                    for key in ("user_alias", "golden_repo_alias", "actual_repo_id"):
+                        activation = next(
+                            (r for r in activated_repos if r.get(key) == alias), None
+                        )
+                        if activation is not None:
+                            break
+                    if activation is not None:
+                        # Syncing the caller's activation requires grants on
+                        # its source golden repositories; refused exactly as
+                        # strategy 4 refuses an unknown or ungranted alias.
+                        _enforce_activation_access(
+                            username,
+                            str(activation["user_alias"]),
+                            repo_access_http.access_denied_error(alias, username),
+                        )
+                        # The actual repository ID if available, otherwise
+                        # the user_alias.
+                        return str(
+                            activation.get("actual_repo_id", activation["user_alias"])
+                        )
 
                     # Strategy 4: Fall back to repository listing manager for discovery.
                     # The alias names no activation of the caller, so it names a
@@ -1136,6 +1184,7 @@ def register_repo_routes(
         Raises:
             HTTPException: If repository not found or branch listing fails
         """
+        _enforce_activation_access(current_user.username, user_alias)
         try:
             result = activated_repo_manager.list_repository_branches(
                 username=current_user.username,
@@ -1390,6 +1439,10 @@ def register_repo_routes(
         # group access to (admins see all); fails closed without the access
         # service.
         _enforce_repo_access(current_user.username, None)
+        # One access lookup per request (fails closed before any work).
+        access = repo_access_http.activation_access(
+            _access_service(), current_user.username
+        )
         try:
             # Get activated repository manager
             activated_manager = activated_repo_manager
@@ -1398,12 +1451,23 @@ def register_repo_routes(
             golden_manager = golden_repo_manager
 
             # Get activated repositories for current user
-            activated_repos = activated_manager.list_activated_repositories(
+            all_activated = activated_manager.list_activated_repositories(
                 current_user.username
             )
+            # An activation whose source grants the caller lost is listed by
+            # alias only (so it can be found and deactivated); its dates and
+            # status never enter the summary.
+            activated_repos = [
+                r for r in all_activated if access.allows(r.get("user_alias", ""))
+            ]
+            revoked_activations = [
+                {"user_alias": r.get("user_alias", ""), "access_revoked": True}
+                for r in all_activated
+                if not access.allows(r.get("user_alias", ""))
+            ]
 
             # Calculate activated repository statistics
-            total_activated = len(activated_repos)
+            total_activated = len(all_activated)
             synced_count = 0
             needs_sync_count = 0
             conflict_count = 0
@@ -1458,7 +1522,7 @@ def register_repo_routes(
             # Count not activated repositories
             activated_aliases = {
                 repo.get("user_alias")
-                for repo in activated_repos
+                for repo in all_activated
                 if repo.get("user_alias")
             }
             not_activated_count = sum(
@@ -1525,6 +1589,7 @@ def register_repo_routes(
                     recent_activations=recent_activations[
                         -5:
                     ],  # Last 5 recent activations
+                    revoked_activations=revoked_activations,
                 ),
                 available_repositories=AvailableRepositorySummary(
                     total_count=total_available, not_activated_count=not_activated_count
@@ -1570,11 +1635,16 @@ def register_repo_routes(
         """
         arm = activated_repo_manager
         repos = arm.list_activated_repositories(current_user.username)
+        # One access lookup per request: an activation whose source grants
+        # the caller no longer holds is omitted (never computed).
+        access = repo_access_http.activation_access(
+            _access_service(), current_user.username
+        )
 
         result: Dict[str, Any] = {}
         for repo in repos:
             alias = repo.get("user_alias")
-            if not alias:
+            if not alias or not access.allows(alias):
                 continue
             try:
                 status_info = arm.compute_sync_status(current_user.username, alias)
@@ -1628,6 +1698,7 @@ def register_repo_routes(
                 )
 
             cleaned_alias = user_alias.strip()
+            _enforce_activation_access(current_user.username, cleaned_alias)
 
             # Check if repository exists in user's activated repositories
             activated_repos = activated_repo_manager.list_activated_repositories(
@@ -1888,6 +1959,7 @@ def register_repo_routes(
             HTTPException 404: alias not activated, or scoped path does not exist
             HTTPException 500: unexpected filesystem error during scan
         """
+        _enforce_activation_access(current_user.username, user_alias)
         arm = activated_repo_manager
         metadata = arm._load_metadata(current_user.username, user_alias)
         if metadata is None:
@@ -2018,6 +2090,7 @@ def register_repo_routes(
             HTTPException 500: sync status could not be computed for any
                 other reason
         """
+        _enforce_activation_access(current_user.username, user_alias)
         arm = activated_repo_manager
         try:
             result = arm.compute_sync_status(current_user.username, user_alias)

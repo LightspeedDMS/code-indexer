@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional, Union, cast
 
 from code_indexer.utils.git_runner import run_git_command
+from code_indexer.utils.source_text_decoding import decode_source_text
 from code_indexer.server.services.git_argv_safety import (
     validate_revision,
     validate_revision_range,
@@ -655,14 +656,17 @@ class GitOperationsService:
         except subprocess.CalledProcessError:
             raise ValueError(f"Invalid revision: {revision}")
 
-        # Get file content using git show
+        # Get file content using git show. Capture BYTES and decode with the
+        # same encoding fallback indexing uses (Bug #1991): a strict UTF-8
+        # text-mode read failed on Latin-1/CP1252 files.
         cmd = ["git", "show", f"{resolved_revision}:{path}"]
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
-            content = result.stdout
+            result = run_git_command(cmd, cwd=self.repo_path, check=True, text=False)
+            raw_content: bytes = result.stdout
+            content = decode_source_text(raw_content)
         except subprocess.CalledProcessError as e:
-            stderr = e.stderr or ""
+            stderr = (e.stderr or b"").decode("utf-8", errors="replace")
             # Check for invalid revision errors (bad object, not a commit object)
             if "bad revision" in stderr or "unknown revision" in stderr:
                 raise ValueError(f"Invalid revision: {revision}")
@@ -674,7 +678,9 @@ class GitOperationsService:
             revision=revision,
             resolved_revision=resolved_revision,
             content=content,
-            size_bytes=len(content.encode("utf-8")),
+            # The blob's real size; re-encoding the decoded text would
+            # over-count Latin-1/CP1252 files (Bug #1991).
+            size_bytes=len(raw_content),
         )
 
     def get_diff(

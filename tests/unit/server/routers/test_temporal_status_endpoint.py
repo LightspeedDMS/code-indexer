@@ -27,8 +27,11 @@ def mock_user():
 
 
 @pytest.fixture
-def client(mock_user):
+def client(mock_user, tmp_path):
     """Create test client with mocked authentication."""
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
 
     def mock_get_current_user_dep():
         return mock_user
@@ -37,7 +40,10 @@ def client(mock_user):
     app.dependency_overrides[get_current_user] = mock_get_current_user_dep
 
     client = TestClient(app)
-    yield client
+    # The caller is an admin of a real access service, so the activated-repo
+    # guard passes; these tests pin the temporal-status responses.
+    with _access_service_admin(tmp_path / "access-groups.db", mock_user.username):
+        yield client
 
     # Clean up after tests
     app.dependency_overrides.clear()

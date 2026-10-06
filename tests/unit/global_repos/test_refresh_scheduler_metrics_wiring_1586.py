@@ -136,6 +136,27 @@ class TestRefreshDurationMetricFailure:
             assert dp.attributes["repository"] == "metrics-fail-repo-global"
             assert dp.attributes["status"] == "error"
 
+    def test_execute_refresh_records_cancelled_status_on_cancellation(self, scheduler):
+        """Bug #2012: a refresh stopped by its job's cancellation is recorded
+        as 'cancelled', never as an 'error'."""
+        from code_indexer.server.utils.cancellable_subprocess import (
+            SubprocessCancelledError,
+        )
+
+        with active_job_metrics_singleton() as (_metrics, reader):
+            with patch.object(
+                scheduler.alias_manager,
+                "read_alias",
+                side_effect=SubprocessCancelledError("job cancelled"),
+            ):
+                with pytest.raises(SubprocessCancelledError):
+                    scheduler._execute_refresh("metrics-cancel-repo-global")
+
+            metric = find_metric(reader, "cidx.repos.refresh.duration")
+            assert metric is not None, "cidx.repos.refresh.duration not emitted"
+            dp = list(metric.data.data_points)[0]
+            assert dp.attributes["status"] == "cancelled"
+
 
 @pytest.fixture
 def repair_failure_scheduler(tmp_path):

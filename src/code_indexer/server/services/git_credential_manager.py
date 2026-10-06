@@ -19,6 +19,7 @@ import anyio
 from code_indexer.server.clients.forge_client import get_forge_client
 from code_indexer.server.storage.protocols import GitCredentialsBackend
 from code_indexer.server.storage.sqlite_backends import GitCredentialsSqliteBackend
+from code_indexer.utils.credential_redaction import stored_secret_tail
 from .audit_outcome import conforming_details, record_outcome, record_outcome_async
 from .token_encryption import (
     derive_key_from_salt as _derive_key_from_salt_fn,
@@ -274,16 +275,15 @@ class GitCredentialManager:
         return deleted
 
     def list_credentials(self, username: str) -> List[Dict[str, Any]]:
-        """List credentials for user with token redacted to last 4 chars of plaintext."""
+        """List credentials for user; the token is reduced to ``token_suffix``
+        (its last 4 characters, or "" for a token under 20 characters)."""
         raw = self._backend.list_credentials(username)
         result = []
         for cred in raw:
             entry = {k: v for k, v in cred.items() if k != "encrypted_token"}
             try:
                 plaintext, used_fallback = self._decrypt_token(cred["encrypted_token"])
-                entry["token_suffix"] = (
-                    plaintext[-4:] if len(plaintext) >= 4 else plaintext
-                )
+                entry["token_suffix"] = stored_secret_tail(plaintext)
                 if used_fallback:
                     new_enc = self._encrypt_token(plaintext)
                     self._backend.update_encrypted_token(cred["credential_id"], new_enc)

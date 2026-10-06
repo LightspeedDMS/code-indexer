@@ -139,6 +139,48 @@ class TestIsAllowlisted:
         )
         assert is_allowlisted(entry) is True
 
+    def test_cidx_meta_first_index_hnsw_missing_warning_is_allowlisted_only_for_the_base_clone(
+        self,
+    ):
+        """A semantic query racing the session's first cidx-meta index reads the
+        base clone (cidx-meta-global points there until its first snapshot is
+        published) after the collection exists but before its HNSW is built.
+        Only that exact WARNING, for the base clone, is allowlisted."""
+        data = "/tmp/pytest-of-user/pytest-1/cidx_testclient_data0/data"
+        tail = (
+            ", model=voyage-code-3 -- Run 'cidx index' to build the index. "
+            "Returning empty results."
+        )
+
+        def warning_for(collection_dir: str) -> dict:
+            return _make_entry(
+                level="WARNING",
+                message=(
+                    "HNSW index is stale and missing. alias=None, "
+                    f"path={data}/{collection_dir}/.code-indexer/index/voyage-code-3"
+                    f"{tail}"
+                ),
+                source="code_indexer.storage.filesystem_vector_store",
+            )
+
+        assert is_allowlisted(warning_for("golden-repos/cidx-meta")) is True
+        assert (
+            is_allowlisted(warning_for("golden-repos/.versioned/cidx-meta/v_1"))
+            is False
+        )
+        assert is_allowlisted(warning_for("golden-repos/markupsafe")) is False
+        persistent = _make_entry(
+            level="ERROR",
+            message=(
+                "HNSW index is stale and missing for 700 seconds (persistent "
+                f"staleness). alias=None, path={data}/golden-repos/cidx-meta/"
+                ".code-indexer/index/voyage-code-3, model=voyage-code-3 -- Run "
+                "'cidx index' to rebuild."
+            ),
+            source="code_indexer.storage.filesystem_vector_store",
+        )
+        assert is_allowlisted(persistent) is False
+
 
 # ==========================================================================
 # AC2 + Watermark: filter_new_entries tests

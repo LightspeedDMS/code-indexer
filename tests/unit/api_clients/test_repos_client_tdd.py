@@ -163,6 +163,42 @@ class TestActivatedRepositoryOperations:
         assert repositories[0].sync_status == "unknown"
 
     @pytest.mark.asyncio
+    async def test_list_activated_repositories_lists_revoked_activation_by_alias(
+        self, mock_client
+    ):
+        """The server lists an activation whose source repositories the
+        caller lost access to by alias only (access_revoked, every other
+        field null) so it can be found and deactivated: the listing must
+        still parse, showing that alias as access-revoked."""
+        list_response_data = _build_activated_repos_list_response(["web-app"])
+        list_response_data["repositories"].append(
+            {
+                "user_alias": "revoked-repo",
+                "access_revoked": True,
+                "golden_repo_alias": None,
+                "current_branch": None,
+                "activated_at": None,
+                "last_accessed": None,
+                "deactivation_job": None,
+                "sync_status": None,
+            }
+        )
+
+        with patch.object(
+            mock_client,
+            "_authenticated_request",
+            return_value=_mock_ok_response(list_response_data),
+        ):
+            repositories = mock_client.list_activated_repositories()
+
+        assert [r.alias for r in repositories] == ["web-app", "revoked-repo"]
+        revoked = repositories[1]
+        assert revoked.sync_status == "access_revoked"
+        assert (revoked.current_branch, revoked.last_sync) == ("", "")
+        assert revoked.activation_date == ""
+        assert repositories[0].current_branch == "main"
+
+    @pytest.mark.asyncio
     async def test_list_activated_repositories_with_filter(self, mock_client):
         """Test listing activated repositories with filter parameter."""
         list_response_data = _build_activated_repos_list_response(["web-app"])

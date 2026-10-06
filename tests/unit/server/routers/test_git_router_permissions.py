@@ -61,9 +61,21 @@ ADMIN_USER = _user(UserRole.ADMIN)
 
 
 @pytest.fixture
-def client():
+def client(tmp_path):
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
+
     c = TestClient(app)
-    yield c
+    # Every caller is an admin of a real access service, so the
+    # activated-repo guard passes; these tests pin the permission tiers.
+    with _access_service_admin(
+        tmp_path / "access-groups.db",
+        NORMAL_USER.username,
+        POWER_USER.username,
+        ADMIN_USER.username,
+    ):
+        yield c
     app.dependency_overrides.pop(get_current_user, None)
 
 

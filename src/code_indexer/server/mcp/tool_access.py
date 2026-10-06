@@ -11,13 +11,38 @@ from typing import Any, Dict, Optional, Set
 _ALWAYS_AVAILABLE_TOOLS = frozenset({"authenticate"})
 
 
-def resolve_effective_user(user: Any, session_state: Any = None) -> Any:
-    """Resolve the post-impersonation principal used for every MCP check."""
+# Tools that manage the session's impersonation itself.  They are authorized
+# for, and performed by, the AUTHENTICATED principal, so an administrator can
+# always clear or change an impersonation whatever the impersonated user may
+# call.
+AUTHENTICATED_PRINCIPAL_TOOLS = frozenset({"set_session_impersonation"})
+
+
+def resolve_effective_user(
+    user: Any, session_state: Any = None, tool_name: Optional[str] = None
+) -> Any:
+    """Resolve the principal used for every MCP check of *tool_name*.
+
+    The impersonated user while the session impersonates one, except for
+    :data:`AUTHENTICATED_PRINCIPAL_TOOLS`, which always use *user* (the
+    authenticated principal).  Without *tool_name*, the impersonated user.
+    """
+    if tool_name in AUTHENTICATED_PRINCIPAL_TOOLS:
+        return user
     if session_state is not None and getattr(session_state, "is_impersonating", False):
         effective_user = getattr(session_state, "effective_user", None)
         if effective_user is not None:
             return effective_user
     return user
+
+
+def principal_for_tool(user: Any, session_state: Any, tool_name: str) -> Any:
+    """:func:`resolve_effective_user` for a HANDLER, which receives the
+    effective user: starts from the session's authenticated user (refreshed
+    with the current one on every request by the session registry), so
+    listings agree with ``tools/list``."""
+    authenticated = user if session_state is None else session_state.authenticated_user
+    return resolve_effective_user(authenticated, session_state, tool_name)
 
 
 class ToolAccessMemo:

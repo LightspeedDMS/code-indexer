@@ -110,64 +110,54 @@ class TestIndexSourceConditionalReconcile:
         assert "--fts" in source, "_index_source should use --fts flag"
 
     def test_index_source_checks_metadata_status(self):
-        """Verify _index_source() reads metadata.json to decide reconcile."""
+        """Verify _index_source() decides reconcile from the recorded index
+        status of every provider (metadata_reader.read_index_states)."""
         from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
         source = inspect.getsource(RefreshScheduler._index_source)
-        assert "metadata.json" in source, "_index_source should read metadata.json"
+        assert "read_index_states" in source, (
+            "_index_source should read the per-provider index states"
+        )
         assert "in_progress" in source, (
             "_index_source should check for in_progress status"
         )
         assert "failed" in source, "_index_source should check for failed status"
 
+    @staticmethod
+    def _needs_reconcile(source_path) -> bool:
+        """The status predicate _index_source() applies to each index state."""
+        from code_indexer.server.services.metadata_reader import read_index_states
+
+        return any(
+            state.status in ("in_progress", "failed")
+            for state in read_index_states(source_path)
+        )
+
     def test_reconcile_used_when_metadata_shows_interrupted(self, tmp_path):
-        """When metadata.json has status='in_progress', reconcile flag should be set."""
+        """When a provider's metadata has status='in_progress', reconcile is needed."""
         import json
 
-        # Create a metadata.json with interrupted state
         code_indexer_dir = tmp_path / ".code-indexer"
         code_indexer_dir.mkdir()
         metadata = {"status": "in_progress", "files_to_index": ["a.py", "b.py"]}
-        (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
+        (code_indexer_dir / "metadata-voyage-ai.json").write_text(json.dumps(metadata))
 
-        # Check the metadata reading logic
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            with open(metadata_path) as f:
-                meta = json.load(f)
-            if meta.get("status") in ("in_progress", "failed"):
-                needs_reconcile = True
-
-        assert needs_reconcile is True
+        assert self._needs_reconcile(tmp_path) is True
 
     def test_no_reconcile_when_metadata_shows_completed(self, tmp_path):
-        """When metadata.json has status='completed', no reconcile needed."""
+        """When a provider's metadata has status='completed', no reconcile needed."""
         import json
 
         code_indexer_dir = tmp_path / ".code-indexer"
         code_indexer_dir.mkdir()
         metadata = {"status": "completed"}
-        (code_indexer_dir / "metadata.json").write_text(json.dumps(metadata))
+        (code_indexer_dir / "metadata-voyage-ai.json").write_text(json.dumps(metadata))
 
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            with open(metadata_path) as f:
-                meta = json.load(f)
-            if meta.get("status") in ("in_progress", "failed"):
-                needs_reconcile = True
-
-        assert needs_reconcile is False
+        assert self._needs_reconcile(tmp_path) is False
 
     def test_no_reconcile_when_no_metadata(self, tmp_path):
-        """When no metadata.json exists, no reconcile needed (first index)."""
-        metadata_path = tmp_path / ".code-indexer" / "metadata.json"
-        needs_reconcile = False
-        if metadata_path.exists():
-            needs_reconcile = True  # shouldn't reach here
-
-        assert needs_reconcile is False
+        """When no index metadata exists, no reconcile needed (first index)."""
+        assert self._needs_reconcile(tmp_path) is False
 
 
 class TestSmartIndexerInterruptHandling:

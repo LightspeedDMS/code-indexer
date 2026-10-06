@@ -16,7 +16,7 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 logger = logging.getLogger(__name__)
 
-MAPPING_VERSION = 2
+MAPPING_VERSION = 3
 FALLBACK_EVENT_TYPE = "GENERIC_EVENT"
 BYTE_BUDGET = 2_000_000
 HARD_CEILING = 4_000_000
@@ -79,6 +79,10 @@ _ADDITIONAL_SCALARS = (
     "auth_method",
     "actor_is_system",
     "node_id",
+    # During MCP impersonation the principal is the authenticated
+    # administrator; the impersonated user (the subject) rides here, since
+    # the UDM target is the action's own target.
+    "impersonated_user",
 )
 
 

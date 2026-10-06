@@ -6,6 +6,12 @@ Story #38: Create SCIPQueryService with Unified SCIP File Discovery
 Tests the SCIPQueryService class which provides unified SCIP file discovery
 logic that can be shared between MCP handlers and REST routes.
 
+SCIP queries search only repositories the caller may access, so every
+discovery and query call needs an access filtering service and the caller's
+username. Tests here exercise discovery and query mechanics; they use
+GRANT_ALL (a caller granted every repository). Access decisions themselves
+are covered by test_scip_query_access_scoping.py.
+
 Following TDD methodology - these tests are written FIRST before implementation.
 """
 
@@ -13,6 +19,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+from tests.unit.server._scip_access import GRANT_ALL, TEST_USER
 
 
 class TestSCIPQueryServiceInitialization:
@@ -39,7 +47,8 @@ class TestSCIPQueryServiceInitialization:
         assert service.access_filtering_service is mock_access_filtering_service
 
     def test_initialization_without_access_filtering(self):
-        """Service can be initialized without access filtering (backward compatibility)."""
+        """Service can be constructed without access filtering (queries then
+        fail closed -- see TestFindScipFilesFailsClosed)."""
         from code_indexer.server.services.scip_query_service import SCIPQueryService
 
         # Create service without access filtering
@@ -65,46 +74,32 @@ class TestSCIPQueryServiceInitialization:
         assert isinstance(service.get_golden_repos_dir(), Path)
 
 
-class TestFindScipFilesWithoutAccessControl:
-    """Tests for find_scip_files() without access control (backward compatibility)."""
+class TestFindScipFilesFailsClosed:
+    """find_scip_files() searches only repositories the caller may access: with
+    no access service or no caller identity it fails closed."""
 
-    def test_find_all_scip_files_when_no_username_provided(self):
-        """Find SCIP files for all repositories when username is None."""
+    def test_find_scip_files_without_access_service_fails_closed(self):
+        """No access filtering service -> refused, nothing is listed."""
         import tempfile
         from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from code_indexer.server.services.repo_access_guard import (
+            AccessFilteringServiceUnavailableError,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Setup: Create directory structure with SCIP files
             golden_repos = Path(tmpdir) / "golden-repos"
-            golden_repos.mkdir()
-
-            # Create repo-a with SCIP index
-            repo_a = golden_repos / "repo-a" / ".code-indexer" / "scip"
-            repo_a.mkdir(parents=True)
-            (repo_a / "index.scip.db").touch()
-
-            # Create repo-b with SCIP index
-            repo_b = golden_repos / "repo-b" / ".code-indexer" / "scip"
-            repo_b.mkdir(parents=True)
-            (repo_b / "index.scip.db").touch()
-
-            # Create repo-c with SCIP index
-            repo_c = golden_repos / "repo-c" / ".code-indexer" / "scip"
-            repo_c.mkdir(parents=True)
-            (repo_c / "index.scip.db").touch()
+            for repo_name in ["repo-a", "repo-b", "repo-c"]:
+                repo_scip = golden_repos / repo_name / ".code-indexer" / "scip"
+                repo_scip.mkdir(parents=True)
+                (repo_scip / "index.scip.db").touch()
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
                 access_filtering_service=None,
             )
 
-            # Act: Find all SCIP files (no username = no access filtering)
-            scip_files = service.find_scip_files(username=None)
-
-            # Assert: All 3 SCIP files should be returned
-            assert len(scip_files) == 3
-            scip_file_names = {f.parent.parent.parent.name for f in scip_files}
-            assert scip_file_names == {"repo-a", "repo-b", "repo-c"}
+            with pytest.raises(AccessFilteringServiceUnavailableError):
+                service.find_scip_files(username=TEST_USER)
 
     def test_find_scip_files_returns_empty_when_no_scip_indexes_exist(self):
         """Returns empty list when no SCIP indexes exist."""
@@ -121,10 +116,10 @@ class TestFindScipFilesWithoutAccessControl:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
-            scip_files = service.find_scip_files()
+            scip_files = service.find_scip_files(username=TEST_USER)
 
             assert scip_files == []
 
@@ -134,10 +129,10 @@ class TestFindScipFilesWithoutAccessControl:
 
         service = SCIPQueryService(
             golden_repos_dir="/nonexistent/path/golden-repos",
-            access_filtering_service=None,
+            access_filtering_service=GRANT_ALL,
         )
 
-        scip_files = service.find_scip_files()
+        scip_files = service.find_scip_files(username=TEST_USER)
 
         assert scip_files == []
 
@@ -226,12 +221,16 @@ class TestFindScipFilesWithAccessControl:
                 "guest"
             )
 
-    def test_find_scip_files_without_username_when_access_service_exists(self):
-        """When username is None but access service exists, return all SCIP files."""
+    def test_find_scip_files_without_username_fails_closed(self):
+        """No caller identity -> refused before the access service is asked
+        or any repository is listed."""
         import tempfile
         from code_indexer.server.services.scip_query_service import SCIPQueryService
         from code_indexer.server.services.access_filtering_service import (
             AccessFilteringService,
+        )
+        from code_indexer.server.services.repo_access_guard import (
+            AccessFilteringServiceUnavailableError,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -250,11 +249,9 @@ class TestFindScipFilesWithAccessControl:
                 access_filtering_service=mock_access_filtering_service,
             )
 
-            # Act: Find SCIP files without username (backward compatibility)
-            scip_files = service.find_scip_files(username=None)
+            with pytest.raises(AccessFilteringServiceUnavailableError):
+                service.find_scip_files(username=None)
 
-            # Assert: All SCIP files returned, access filtering NOT called
-            assert len(scip_files) == 1
             mock_access_filtering_service.get_accessible_repos.assert_not_called()
 
 
@@ -278,11 +275,13 @@ class TestFindScipFilesWithRepositoryAlias:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             # Act: Find SCIP files for specific repository
-            scip_files = service.find_scip_files(repository_alias="my-repo")
+            scip_files = service.find_scip_files(
+                repository_alias="my-repo", username=TEST_USER
+            )
 
             # Assert: Only my-repo SCIP file should be returned
             assert len(scip_files) == 1
@@ -304,11 +303,13 @@ class TestFindScipFilesWithRepositoryAlias:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             # Act: Find SCIP files for nonexistent repository
-            scip_files = service.find_scip_files(repository_alias="nonexistent-repo")
+            scip_files = service.find_scip_files(
+                repository_alias="nonexistent-repo", username=TEST_USER
+            )
 
             # Assert: Empty list returned
             assert scip_files == []
@@ -373,11 +374,11 @@ class TestFindScipFilesDirectoryFiltering:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             # Act: Find SCIP files
-            scip_files = service.find_scip_files()
+            scip_files = service.find_scip_files(username=TEST_USER)
 
             # Assert: Only valid-repo SCIP file found, files are skipped
             assert len(scip_files) == 1
@@ -405,18 +406,20 @@ class TestFindScipFilesDirectoryFiltering:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             # Act: Find SCIP files
-            scip_files = service.find_scip_files()
+            scip_files = service.find_scip_files(username=TEST_USER)
 
             # Assert: Only visible-repo SCIP file found, hidden dirs are skipped
             assert len(scip_files) == 1
             assert scip_files[0].parent.parent.parent.name == "visible-repo"
 
-    def test_find_scip_files_includes_versioned_directory(self):
-        """Verify .versioned is NOT skipped (special case for versioned repos)."""
+    def test_find_scip_files_skips_versioned_directory_in_scan(self):
+        """The directory scan skips .versioned like any hidden directory:
+        versioned snapshots are reached through alias target resolution
+        (test_scip_version_consistency_bug1084.py), never scanned directly."""
         import tempfile
         from code_indexer.server.services.scip_query_service import SCIPQueryService
 
@@ -424,35 +427,28 @@ class TestFindScipFilesDirectoryFiltering:
             golden_repos = Path(tmpdir) / "golden-repos"
             golden_repos.mkdir()
 
-            # Create .versioned directory with SCIP index (should NOT be skipped)
-            versioned_scip = golden_repos / ".versioned" / ".code-indexer" / "scip"
-            versioned_scip.mkdir(parents=True)
-            (versioned_scip / "index.scip.db").touch()
+            # .versioned and .hidden carry SCIP indexes but are skipped
+            for hidden_name in [".versioned", ".hidden"]:
+                hidden_scip = golden_repos / hidden_name / ".code-indexer" / "scip"
+                hidden_scip.mkdir(parents=True)
+                (hidden_scip / "index.scip.db").touch()
 
             # Create a regular repo with SCIP index
             repo_scip = golden_repos / "regular-repo" / ".code-indexer" / "scip"
             repo_scip.mkdir(parents=True)
             (repo_scip / "index.scip.db").touch()
 
-            # Create a hidden directory (should be skipped)
-            hidden_scip = golden_repos / ".hidden" / ".code-indexer" / "scip"
-            hidden_scip.mkdir(parents=True)
-            (hidden_scip / "index.scip.db").touch()
-
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             # Act: Find SCIP files
-            scip_files = service.find_scip_files()
+            scip_files = service.find_scip_files(username=TEST_USER)
 
-            # Assert: Both .versioned and regular-repo found, .hidden skipped
-            assert len(scip_files) == 2
-            scip_file_repos = {f.parent.parent.parent.name for f in scip_files}
-            assert ".versioned" in scip_file_repos
-            assert "regular-repo" in scip_file_repos
-            assert ".hidden" not in scip_file_repos
+            # Assert: only regular-repo is listed
+            assert len(scip_files) == 1
+            assert scip_files[0].parent.parent.parent.name == "regular-repo"
 
 
 class TestGetAccessibleReposMethod:
@@ -689,7 +685,7 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             mock_engine = MagicMock()
@@ -710,7 +706,7 @@ class TestFindDefinitionMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                results = service.find_definition("UserService")
+                results = service.find_definition("UserService", username=TEST_USER)
 
             assert len(results) == 1
             assert results[0]["symbol"] == "UserService"
@@ -738,7 +734,7 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             def create_mock_engine(scip_file):
@@ -775,7 +771,7 @@ class TestFindDefinitionMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 side_effect=create_mock_engine,
             ):
-                results = service.find_definition("Config")
+                results = service.find_definition("Config", username=TEST_USER)
 
             assert len(results) == 2
             file_paths = {r["file_path"] for r in results}
@@ -798,7 +794,7 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             mock_engine = MagicMock()
@@ -808,7 +804,7 @@ class TestFindDefinitionMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                service.find_definition("ExactSymbol", exact=True)
+                service.find_definition("ExactSymbol", exact=True, username=TEST_USER)
 
             mock_engine.find_definition.assert_called_once_with(
                 "ExactSymbol", exact=True
@@ -832,7 +828,7 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             mock_engine = MagicMock()
@@ -860,7 +856,7 @@ class TestFindDefinitionMethod:
                 side_effect=track_engine,
             ):
                 results = service.find_definition(
-                    "Symbol", repository_alias="target-repo"
+                    "Symbol", repository_alias="target-repo", username=TEST_USER
                 )
 
             assert len(engine_calls) == 1
@@ -878,10 +874,10 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
-            results = service.find_definition("AnySymbol")
+            results = service.find_definition("AnySymbol", username=TEST_USER)
 
             assert results == []
 
@@ -903,7 +899,7 @@ class TestFindDefinitionMethod:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             def create_mock_engine(scip_file):
@@ -928,7 +924,7 @@ class TestFindDefinitionMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 side_effect=create_mock_engine,
             ):
-                results = service.find_definition("Good")
+                results = service.find_definition("Good", username=TEST_USER)
 
             assert len(results) == 1
             assert results[0]["project"] == "good-repo"
@@ -952,7 +948,7 @@ class TestFindReferencesMethod:
                 scip.mkdir(parents=True)
                 (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             # Return 2 results per engine call (simulating multi-repo)
             mock_engine.find_references.return_value = [
@@ -963,7 +959,7 @@ class TestFindReferencesMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                results = service.find_references("authenticate")
+                results = service.find_references("authenticate", username=TEST_USER)
 
             # 2 repos queried, 1 result each = 2 total
             assert len(results) == 2
@@ -982,7 +978,7 @@ class TestFindReferencesMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.find_references.return_value = []
 
@@ -990,7 +986,7 @@ class TestFindReferencesMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                service.find_references("symbol", limit=50)
+                service.find_references("symbol", limit=50, username=TEST_USER)
 
             mock_engine.find_references.assert_called_once_with(
                 "symbol", limit=50, exact=False
@@ -1009,7 +1005,7 @@ class TestFindReferencesMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.find_references.return_value = []
 
@@ -1017,7 +1013,7 @@ class TestFindReferencesMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                service.find_references("symbol")
+                service.find_references("symbol", username=TEST_USER)
 
             mock_engine.find_references.assert_called_once_with(
                 "symbol", limit=100, exact=False
@@ -1041,7 +1037,7 @@ class TestGetDependenciesMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.get_dependencies.return_value = [
                 QueryResult("Database", "repo", "db.py", 10, 0, "dep", "import", "ctx"),
@@ -1052,7 +1048,9 @@ class TestGetDependenciesMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                results = service.get_dependencies("PaymentProcessor")
+                results = service.get_dependencies(
+                    "PaymentProcessor", username=TEST_USER
+                )
 
             assert len(results) == 2
             symbols = {r["symbol"] for r in results}
@@ -1071,7 +1069,7 @@ class TestGetDependenciesMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.get_dependencies.return_value = []
 
@@ -1079,7 +1077,7 @@ class TestGetDependenciesMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                service.get_dependencies("Symbol", depth=3)
+                service.get_dependencies("Symbol", depth=3, username=TEST_USER)
 
             mock_engine.get_dependencies.assert_called_once_with(
                 "Symbol", depth=3, exact=False
@@ -1103,7 +1101,7 @@ class TestGetDependentsMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.get_dependents.return_value = [
                 QueryResult(
@@ -1118,7 +1116,7 @@ class TestGetDependentsMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                results = service.get_dependents("PaymentProcessor")
+                results = service.get_dependents("PaymentProcessor", username=TEST_USER)
 
             assert len(results) == 2
             symbols = {r["symbol"] for r in results}
@@ -1137,7 +1135,7 @@ class TestGetDependentsMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_engine = MagicMock()
             mock_engine.get_dependents.return_value = []
 
@@ -1145,7 +1143,7 @@ class TestGetDependentsMethod:
                 "code_indexer.scip.query.primitives.SCIPQueryEngine",
                 return_value=mock_engine,
             ):
-                service.get_dependents("Symbol", depth=2)
+                service.get_dependents("Symbol", depth=2, username=TEST_USER)
 
             mock_engine.get_dependents.assert_called_once_with(
                 "Symbol", depth=2, exact=False
@@ -1173,7 +1171,7 @@ class TestAnalyzeImpactMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_result = ImpactAnalysisResult(
                 target_symbol="DbConn",
                 target_location=None,
@@ -1192,7 +1190,7 @@ class TestAnalyzeImpactMethod:
                 "code_indexer.scip.query.composites.analyze_impact",
                 return_value=mock_result,
             ) as mock_analyze:
-                result = service.analyze_impact("DbConn")
+                result = service.analyze_impact("DbConn", username=TEST_USER)
 
             assert result["target_symbol"] == "DbConn"
             assert result["depth_analyzed"] == 3
@@ -1213,14 +1211,14 @@ class TestAnalyzeImpactMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_result = ImpactAnalysisResult("Sym", None, 5, [], [], False, 0)
 
             with patch(
                 "code_indexer.scip.query.composites.analyze_impact",
                 return_value=mock_result,
             ) as mock_analyze:
-                service.analyze_impact("Symbol", depth=5)
+                service.analyze_impact("Symbol", depth=5, username=TEST_USER)
 
             call_kwargs = mock_analyze.call_args[1]
             assert call_kwargs.get("depth") == 5
@@ -1240,7 +1238,7 @@ class TestTraceCallchainMethod:
         scip = golden_repos / "repo" / ".code-indexer" / "scip"
         scip.mkdir(parents=True)
         (scip / "index.scip.db").touch()
-        return SCIPQueryService(str(golden_repos), None)
+        return SCIPQueryService(str(golden_repos), GRANT_ALL)
 
     def test_trace_callchain_returns_call_chains(self, service):
         """AC: Trace call chain between symbols."""
@@ -1260,7 +1258,9 @@ class TestTraceCallchainMethod:
             "code_indexer.scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
-            results, timeout_errors = service.trace_callchain("handleReq", "sanitize")
+            results, timeout_errors = service.trace_callchain(
+                "handleReq", "sanitize", username=TEST_USER
+            )
 
         assert len(results) == 1
         assert results[0]["path"] == ["handleReq", "validate", "sanitize"]
@@ -1278,7 +1278,9 @@ class TestTraceCallchainMethod:
             "code_indexer.scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
-            results, timeout_errors = service.trace_callchain("from", "to", max_depth=5)
+            results, timeout_errors = service.trace_callchain(
+                "from", "to", max_depth=5, username=TEST_USER
+            )
 
         assert results == []
         assert timeout_errors == []
@@ -1310,7 +1312,9 @@ class TestTraceCallchainMethod:
             "code_indexer.scip.query.primitives.SCIPQueryEngine",
             return_value=mock_engine,
         ):
-            results, timeout_errors = service.trace_callchain("from", "to")
+            results, timeout_errors = service.trace_callchain(
+                "from", "to", username=TEST_USER
+            )
 
         assert results == []
         assert timeout_errors == ["Query exceeded 30-second timeout."]
@@ -1331,10 +1335,10 @@ class TestGetContextMethodFastFail:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
-            result = service.get_context("some_symbol")
+            result = service.get_context("some_symbol", username=TEST_USER)
 
             assert result == {
                 "target_symbol": "some_symbol",
@@ -1358,13 +1362,13 @@ class TestGetContextMethodFastFail:
 
             service = SCIPQueryService(
                 golden_repos_dir=str(golden_repos),
-                access_filtering_service=None,
+                access_filtering_service=GRANT_ALL,
             )
 
             with patch(
                 "code_indexer.scip.query.composites.get_smart_context"
             ) as mock_get_smart_context:
-                service.get_context("some_symbol")
+                service.get_context("some_symbol", username=TEST_USER)
 
             mock_get_smart_context.assert_not_called()
 
@@ -1374,10 +1378,10 @@ class TestGetContextMethodFastFail:
 
         service = SCIPQueryService(
             golden_repos_dir="/nonexistent/path/golden-repos",
-            access_filtering_service=None,
+            access_filtering_service=GRANT_ALL,
         )
 
-        result = service.get_context("my_symbol")
+        result = service.get_context("my_symbol", username=TEST_USER)
 
         assert result == {
             "target_symbol": "my_symbol",
@@ -1410,7 +1414,7 @@ class TestGetContextMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_result = SmartContextResult(
                 target_symbol="UserService",
                 summary="Read these 1 file(s)",
@@ -1434,7 +1438,7 @@ class TestGetContextMethod:
                 "code_indexer.scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ):
-                result = service.get_context("UserService")
+                result = service.get_context("UserService", username=TEST_USER)
 
             assert result["target_symbol"] == "UserService"
             assert result["total_files"] == 1
@@ -1454,14 +1458,16 @@ class TestGetContextMethod:
             scip.mkdir(parents=True)
             (scip / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
             mock_result = SmartContextResult("Sym", "", [], 0, 0, 0.0)
 
             with patch(
                 "code_indexer.scip.query.composites.get_smart_context",
                 return_value=mock_result,
             ) as mock_ctx:
-                service.get_context("Symbol", limit=10, min_score=0.5)
+                service.get_context(
+                    "Symbol", limit=10, min_score=0.5, username=TEST_USER
+                )
 
             call_kwargs = mock_ctx.call_args[1]
             assert call_kwargs.get("limit") == 10
@@ -1516,12 +1522,15 @@ class TestAccessControlForQueryMethods:
             assert "accessible-repo" in engine_calls[0]
             assert "forbidden-repo" not in engine_calls[0]
 
-    def test_query_without_access_service_returns_all_repos(self):
-        """When no access service, all repositories are queried."""
+    def test_query_without_access_service_fails_closed(self):
+        """With no access service, a query is refused and no repository is
+        queried."""
         import tempfile
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from code_indexer.server.services.scip_query_service import SCIPQueryService
-        from code_indexer.scip.query.primitives import QueryResult
+        from code_indexer.server.services.repo_access_guard import (
+            AccessFilteringServiceUnavailableError,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             golden_repos = Path(tmpdir) / "golden-repos"
@@ -1534,24 +1543,14 @@ class TestAccessControlForQueryMethods:
 
             # No access filtering service
             service = SCIPQueryService(str(golden_repos), None)
-            engine_calls = []
-
-            def track_engine(scip_file):
-                engine_calls.append(str(scip_file))
-                mock = MagicMock()
-                mock.find_definition.return_value = [
-                    QueryResult("Sym", "repo", "f.py", 1, 0, "def", None, "c")
-                ]
-                return mock
 
             with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                side_effect=track_engine,
-            ):
-                service.find_definition("Symbol", username="user")
+                "code_indexer.scip.query.primitives.SCIPQueryEngine"
+            ) as engine_cls:
+                with pytest.raises(AccessFilteringServiceUnavailableError):
+                    service.find_definition("Symbol", username="user")
 
-            # Both repos should be queried
-            assert len(engine_calls) == 2
+            engine_cls.assert_not_called()
 
 
 # ============================================================================
@@ -1582,11 +1581,13 @@ class TestAliasNormalizationBug661:
             scip_dir.mkdir(parents=True)
             (scip_dir / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
 
             # Before fix: returns [] because 'flask-large' != 'flask-large-global'
             # After fix: returns 1 result
-            scip_files = service.find_scip_files(repository_alias="flask-large-global")
+            scip_files = service.find_scip_files(
+                repository_alias="flask-large-global", username=TEST_USER
+            )
 
             assert len(scip_files) == 1
             assert scip_files[0].parent.parent.parent.name == "flask-large"
@@ -1604,11 +1605,13 @@ class TestAliasNormalizationBug661:
             scip_dir.mkdir(parents=True)
             (scip_dir / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
 
             # Caller passes full path e.g. '/home/user/.cidx/golden-repos/my-repo'
             full_path_alias = str(golden_repos / "my-repo")
-            scip_files = service.find_scip_files(repository_alias=full_path_alias)
+            scip_files = service.find_scip_files(
+                repository_alias=full_path_alias, username=TEST_USER
+            )
 
             assert len(scip_files) == 1
             assert scip_files[0].parent.parent.parent.name == "my-repo"
@@ -1626,10 +1629,12 @@ class TestAliasNormalizationBug661:
             scip_dir.mkdir(parents=True)
             (scip_dir / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
 
             # Plain name must keep working (no regression)
-            scip_files = service.find_scip_files(repository_alias="my-repo")
+            scip_files = service.find_scip_files(
+                repository_alias="my-repo", username=TEST_USER
+            )
 
             assert len(scip_files) == 1
             assert scip_files[0].parent.parent.parent.name == "my-repo"
@@ -1647,16 +1652,17 @@ class TestAliasNormalizationBug661:
             scip_dir.mkdir(parents=True)
             (scip_dir / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
 
             scip_files = service.find_scip_files(
-                repository_alias="does-not-exist-global"
+                repository_alias="does-not-exist-global", username=TEST_USER
             )
 
             assert scip_files == []
 
-    def test_unfiltered_query_still_returns_all_repos(self):
-        """Omitting repository_alias returns all repos (no regression)."""
+    def test_unfiltered_query_returns_every_granted_repo(self):
+        """Omitting repository_alias returns every repository the caller is
+        granted (here: all of them)."""
         import tempfile
         from code_indexer.server.services.scip_query_service import SCIPQueryService
 
@@ -1669,9 +1675,9 @@ class TestAliasNormalizationBug661:
                 scip_dir.mkdir(parents=True)
                 (scip_dir / "index.scip.db").touch()
 
-            service = SCIPQueryService(str(golden_repos), None)
+            service = SCIPQueryService(str(golden_repos), GRANT_ALL)
 
-            scip_files = service.find_scip_files()
+            scip_files = service.find_scip_files(username=TEST_USER)
 
             assert len(scip_files) == 3
 
@@ -1684,7 +1690,7 @@ class TestAnalyzeImpactScoping:
         from code_indexer.server.services.scip_query_service import SCIPQueryService
 
         return SCIPQueryService(
-            golden_repos_dir="/data/golden-repos", access_filtering_service=None
+            golden_repos_dir="/data/golden-repos", access_filtering_service=GRANT_ALL
         )
 
     def test_early_out_when_no_index_for_alias(self):
@@ -1699,11 +1705,14 @@ class TestAnalyzeImpactScoping:
             ) as mock_composite,
         ):
             result = service.analyze_impact(
-                "LSAuthenticator", depth=3, repository_alias="example-repo-global"
+                "LSAuthenticator",
+                depth=3,
+                repository_alias="example-repo-global",
+                username=TEST_USER,
             )
 
         mock_find.assert_called_once_with(
-            repository_alias="example-repo-global", username=None
+            repository_alias="example-repo-global", username=TEST_USER
         )
         mock_composite.assert_not_called()  # the expensive scan must be skipped
         assert result["total_affected"] == 0
@@ -1720,7 +1729,10 @@ class TestAnalyzeImpactScoping:
 
         with pytest.raises(ValueError, match="depth must be at least 1"):
             service.analyze_impact(
-                "LSAuthenticator", depth=0, repository_alias="example-repo-global"
+                "LSAuthenticator",
+                depth=0,
+                repository_alias="example-repo-global",
+                username=TEST_USER,
             )
 
     def test_scopes_composite_to_project_scip_dir(self):
@@ -1751,7 +1763,12 @@ class TestAnalyzeImpactScoping:
                 return_value=empty,
             ) as mock_composite,
         ):
-            service.analyze_impact("X", depth=3, repository_alias="example-repo-global")
+            service.analyze_impact(
+                "X",
+                depth=3,
+                repository_alias="example-repo-global",
+                username=TEST_USER,
+            )
 
         # composite called with the scoped .code-indexer/scip dir
         called_dir = mock_composite.call_args.args[1]

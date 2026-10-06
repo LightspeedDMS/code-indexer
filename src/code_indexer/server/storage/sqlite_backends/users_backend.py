@@ -47,9 +47,10 @@ class UsersSqliteBackend:
         def operation(conn):
             conn.execute(
                 """INSERT INTO users
-                   (username, password_hash, role, email, created_at, password_changed_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (username, password_hash, role, email, now, now),
+                   (username, password_hash, role, email, created_at,
+                    password_changed_at, account_created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (username, password_hash, role, email, now, now, now),
             )
             return None
 
@@ -62,7 +63,7 @@ class UsersSqliteBackend:
 
         cursor = conn.execute(
             """SELECT username, password_hash, role, email, created_at,
-                      oidc_identity, password_changed_at
+                      oidc_identity, password_changed_at, account_created_at
                FROM users WHERE username = ?""",
             (username,),
         )
@@ -78,6 +79,7 @@ class UsersSqliteBackend:
             "created_at": row[4],
             "oidc_identity": json.loads(row[5]) if row[5] else None,
             "password_changed_at": row[6],
+            "account_created_at": row[7],
             "api_keys": self._get_api_keys(conn, username),
             "mcp_credentials": self._get_mcp_credentials(conn, username),
         }

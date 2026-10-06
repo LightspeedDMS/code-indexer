@@ -1277,9 +1277,9 @@ class JobTracker:
 
         Bug #1950: writes status='interrupted' (not 'failed') -- a job
         orphaned by this same process's own restart is a restart artifact,
-        never a genuine failure, so it must not poison /health's
-        get_failed_job_count() (which counts ONLY status='failed', with no
-        time window) forever.
+        never a genuine failure, so it must not count toward /health's
+        failed jobs (status='failed' rows completed within the last 24h,
+        Bug #1964).
         """
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"

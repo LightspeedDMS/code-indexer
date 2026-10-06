@@ -8,6 +8,10 @@ background job integration, and proper resource management.
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+from code_indexer.utils.content_availability import (
+    CONTENT_UNAVAILABLE_KEY,
+    CONTENT_UNAVAILABLE_MARKER,
+)
 
 import contextvars
 import json
@@ -34,6 +38,7 @@ from code_indexer.services.query_strategy import (
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 from .parallel_query_executor import get_global_parallel_query_executor
+from ..models.api_models import MAX_CANDIDATE_LIMIT
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
@@ -98,6 +103,12 @@ class QueryResult:
     # Fusion metadata (Story #618 - Score/Provenance Transparency)
     fusion_score: Optional[float] = None
     contributing_providers: Optional[List[str]] = None
+    # public #1984: golden repos this row's activation was created from. Set
+    # only on rows searched from a user activation; the access filter checks
+    # these grants instead of trusting the row's alias label.
+    activation_source_repos: Optional[List[str]] = None
+    # Bug #1991: the chunk's content could not be read (code_snippet is "").
+    content_unavailable: bool = False
 
     @classmethod
     def from_search_result(
@@ -138,6 +149,12 @@ class QueryResult:
             result["fusion_score"] = self.fusion_score
         if self.contributing_providers is not None:
             result["contributing_providers"] = self.contributing_providers
+        # Bug #1991: only present when set, so existing responses are unchanged.
+        if self.content_unavailable:
+            result["content_unavailable"] = True
+        # public #1984: activation provenance, only on activation-derived rows.
+        if self.activation_source_repos is not None:
+            result["activation_source_repos"] = list(self.activation_source_repos)
         return result
 
 
@@ -410,7 +427,7 @@ class SemanticQueryManager:
         background_job_manager: Optional[BackgroundJobManager] = None,
         query_timeout_seconds: int = 30,
         max_concurrent_queries_per_user: int = 5,
-        max_results_per_query: int = 100,
+        max_results_per_query: int = MAX_CANDIDATE_LIMIT,
     ):
         """
         Initialize semantic query manager.
@@ -421,7 +438,9 @@ class SemanticQueryManager:
             background_job_manager: Background job manager instance
             query_timeout_seconds: Query timeout in seconds
             max_concurrent_queries_per_user: Maximum concurrent queries per user
-            max_results_per_query: Maximum results per query
+            max_results_per_query: Maximum results per query. Defaults to
+                MAX_CANDIDATE_LIMIT so internal rerank/access-filter
+                over-fetch (above the public 100 cap) is not trimmed here.
         """
         if data_dir:
             self.data_dir = data_dir
@@ -1432,6 +1451,17 @@ class SemanticQueryManager:
                     query_strategy or "primary_only"
                 ):
                     _effective_strategy = _strat_out[0]
+                if _tracking_alias is not None:
+                    # public #1984: rows from a user activation record the
+                    # golden repos it was created from (empty when unknown).
+                    if repo_info.get("is_composite"):
+                        _sources = list(repo_info.get("golden_repo_aliases") or [])
+                    else:
+                        _single = repo_info.get("golden_repo_alias")
+                        _sources = [_single] if _single else []
+                    for _row in results:
+                        if isinstance(_row, QueryResult):
+                            _row.activation_source_repos = [str(s) for s in _sources]
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:
@@ -1618,6 +1648,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,
                     source_provider="multimodal",
+                    content_unavailable=item.content_unavailable,
                 )
             )
         merged.sort(key=lambda r: r.similarity_score, reverse=True)
@@ -1855,6 +1886,7 @@ class SemanticQueryManager:
                     chunk_id=f"{r.file_path}:{r.line_number}",
                     repository_alias=r.repository_alias,
                     source_provider=r.source_provider,
+                    metadata={CONTENT_UNAVAILABLE_KEY: r.content_unavailable},
                 )
 
             def _primary_strategy() -> List[StrategyQueryResult]:
@@ -1877,6 +1909,9 @@ class SemanticQueryManager:
                         similarity_score=s.score,
                         repository_alias=s.repository_alias,
                         source_provider=s.source_provider,
+                        content_unavailable=bool(
+                            s.metadata.get(CONTENT_UNAVAILABLE_KEY, False)
+                        ),
                     )
                 )
 
@@ -2264,6 +2299,7 @@ class SemanticQueryManager:
                     chunk_id=f"{r.file_path}:{r.line_number}",
                     repository_alias=r.repository_alias,
                     source_provider=r.source_provider,
+                    metadata={CONTENT_UNAVAILABLE_KEY: r.content_unavailable},
                 )
 
             # Build one original_map keyed by the same key fuse_* uses:
@@ -2322,6 +2358,9 @@ class SemanticQueryManager:
                             source_provider=s.source_provider,
                             fusion_score=s.fusion_score,
                             contributing_providers=s.contributing_providers,
+                            content_unavailable=bool(
+                                s.metadata.get(CONTENT_UNAVAILABLE_KEY, False)
+                            ),
                         )
                     )
 
@@ -2480,13 +2519,15 @@ class SemanticQueryManager:
             # SEMANTIC SEARCH
             # Import SemanticSearchService and related models
             from ..services.search_service import SemanticSearchService
-            from ..models.api_models import SemanticSearchRequest
+            from ..models.api_models import InternalSemanticSearchRequest
 
             # Create search service instance
             search_service = SemanticSearchService()
 
-            # Create search request — Story #375: wire filter params through
-            search_request = SemanticSearchRequest(
+            # Create search request — Story #375: wire filter params through.
+            # Internal type: `limit` may carry rerank/access-filter over-fetch
+            # above the public 100 cap (up to MAX_CANDIDATE_LIMIT).
+            search_request = InternalSemanticSearchRequest(
                 query=query_text,
                 limit=limit,
                 include_source=True,
@@ -2533,6 +2574,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,  # Single repository, no source_repo
                     source_provider=preferred_provider or "primary",
+                    content_unavailable=search_item.content_unavailable,
                 )
                 semantic_results.append(query_result)
 
@@ -2601,10 +2643,11 @@ class SemanticQueryManager:
             List of QueryResult objects from this repository
         """
         from ..services.search_service import SemanticSearchService
-        from ..models.api_models import SemanticSearchRequest
+        from ..models.api_models import InternalSemanticSearchRequest
 
         search_service = SemanticSearchService()
-        search_request = SemanticSearchRequest(
+        # Internal type: `limit` may include over-fetch above the public cap.
+        search_request = InternalSemanticSearchRequest(
             query=query_text,
             limit=limit,
             include_source=True,
@@ -2643,6 +2686,7 @@ class SemanticQueryManager:
                     repository_alias=repository_alias,
                     source_repo=None,
                     source_provider=provider_name or "",
+                    content_unavailable=search_item.content_unavailable,
                 )
             )
         return results
@@ -2935,15 +2979,18 @@ class SemanticQueryManager:
 
                 # Combine code snippet
                 code_snippet = "\n".join(code_lines) if code_lines else ""
+                # Bug #1991: the CLI prints a marker for unreadable content.
+                unavailable = code_snippet.strip() == CONTENT_UNAVAILABLE_MARKER
 
                 # Create QueryResult with source_repo populated
                 result = QueryResult(
                     file_path=file_path,
                     line_number=line_start,
-                    code_snippet=code_snippet,
+                    code_snippet="" if unavailable else code_snippet,
                     similarity_score=score,
                     repository_alias=repo_alias,
                     source_repo=source_repo,  # NEW: Extract from file path
+                    content_unavailable=unavailable,
                 )
                 results.append(result)
 
@@ -3401,6 +3448,7 @@ class SemanticQueryManager:
                     similarity_score=rrf_scores[key],
                     repository_alias=result.repository_alias,
                     source_repo=result.source_repo,
+                    content_unavailable=result.content_unavailable,
                 )
                 merged_results.append(merged_result)
 

@@ -99,15 +99,17 @@ class FakeRateLimiter:
 
 
 class FakeLockoutLimiter:
-    """Never locks out."""
+    """Never throttles: every attempt is admitted."""
 
-    def is_locked(self, username):
-        return False, 0.0
+    def begin_attempt(self, username, scope=None):
+        from code_indexer.server.auth.login_rate_limiter import AttemptOutcome
 
-    def record_success(self, username):
+        return AttemptOutcome(True, 0.0, False)
+
+    def record_success(self, username, scope=None):
         pass
 
-    def check_and_record_failure(self, username):
+    def clear_completed_login(self, username, scope=None):
         pass
 
 

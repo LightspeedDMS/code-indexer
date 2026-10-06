@@ -268,6 +268,13 @@ def initialize_services() -> Dict[str, Any]:
 
     elevated_session_manager.set_sqlite_path(str(db_path))
 
+    # Login throttle: keep per-username failure/backoff state in the shared
+    # cidx_server.db so every worker on the node sees it (lifespan switches
+    # it to PostgreSQL in cluster mode).
+    from code_indexer.server.auth.login_rate_limiter import login_rate_limiter
+
+    login_rate_limiter.set_sqlite_path(str(db_path))
+
     # Bug #1224: Configure OIDC StateManager default SQLite path so all
     # StateManager() instances subsequently constructed in lifespan.py
     # (and late-init cluster paths) automatically use the shared cidx_server.db
@@ -451,6 +458,20 @@ def initialize_services() -> Dict[str, Any]:
         algorithm="HS256",
     )
 
+    # Deleting an account removes every row keyed to its name, in the store
+    # the server actually uses (any non-postgres mode runs the SQLite stores,
+    # matching the backend selection above).
+    from code_indexer.server.services.account_data_purge import (
+        build_account_data_purger,
+    )
+
+    _purge_mode = "postgres" if _storage_mode == "postgres" else "sqlite"
+    account_data_purger = build_account_data_purger(
+        _purge_mode,
+        Path(server_data_dir),
+        _backend_registry.connection_pool if _backend_registry else None,
+    )
+
     # Bug #83-2 Fix: Pass password_security_config to UserManager
     user_manager = UserManager(
         users_file_path=users_file_path,
@@ -458,6 +479,7 @@ def initialize_services() -> Dict[str, Any]:
         use_sqlite=True,
         db_path=str(db_path),
         storage_backend=_backend_registry.users if _backend_registry else None,
+        account_data_purger=account_data_purger,
     )
     refresh_token_manager = RefreshTokenManager(
         jwt_manager=jwt_manager,
@@ -671,6 +693,14 @@ def initialize_services() -> Dict[str, Any]:
 
     # Inject ActivatedRepoManager for cascade deletion support
     golden_repo_manager.activated_repo_manager = activated_repo_manager
+
+    # Deleting an account removes its repositories; its name cannot be
+    # created again until they are gone (no clone is ever adopted).
+    from code_indexer.server.services.account_activations import (
+        AccountActivations,
+    )
+
+    user_manager.set_account_activations(AccountActivations(activated_repo_manager))
 
     # Inject RepoCategoryService for auto-assignment (Story #181)
     from code_indexer.server.services.repo_category_service import RepoCategoryService

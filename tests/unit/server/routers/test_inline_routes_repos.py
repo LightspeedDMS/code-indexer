@@ -19,6 +19,7 @@ from tests.unit.server.routers.inline_routes_test_helpers import (
     admin_client,  # noqa: F401
     user_client,  # noqa: F401
     anon_client,  # noqa: F401
+    caller_is_access_admin,  # noqa: F401
 )
 
 

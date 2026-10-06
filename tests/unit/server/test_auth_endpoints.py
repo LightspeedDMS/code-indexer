@@ -305,15 +305,16 @@ class TestGlobalAuthenticationMiddleware:
             response_data = response.json()
             assert "expired" in response_data["detail"].lower()
 
-    def test_public_endpoints_dont_require_auth(self, client):
-        """Test that public endpoints don't require authentication."""
-        # Docs endpoint should be public
-        response = client.get("/docs")
-        assert response.status_code != 401
+    def test_api_docs_require_auth(self, client):
+        """API documentation requires an authenticated session or token."""
+        # Swagger UI page redirects an anonymous browser to the login page
+        response = client.get("/docs", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/login?redirect_to=")
 
-        # OpenAPI spec should be public
+        # OpenAPI spec answers 401 without credentials
         response = client.get("/openapi.json")
-        assert response.status_code != 401
+        assert response.status_code == 401
 
     def test_auth_login_endpoint_is_public(self, client):
         """Test that /auth/login endpoint doesn't require authentication."""
@@ -516,9 +517,19 @@ class TestSwaggerDocumentation:
 
     @pytest.fixture
     def client(self):
-        """Create FastAPI test client."""
+        """Create an authenticated FastAPI test client.
+
+        API documentation requires an authenticated session or token, so the
+        client logs in as the seeded admin and sends the bearer token.
+        """
         app = create_app()
-        return TestClient(app)
+        client = TestClient(app)
+        login = client.post(
+            "/auth/login", json={"username": "admin", "password": "admin"}
+        )
+        assert login.status_code == 200, login.text
+        client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+        return client
 
     def test_docs_endpoint_accessible(self, client):
         """Test that /docs endpoint is accessible."""
@@ -585,9 +596,17 @@ class TestSwaggerDocumentation:
         assert found_terms >= 3  # Should contain multiple role-related terms
 
     def test_swagger_ui_allows_authentication(self, client):
-        """Test that Swagger UI includes authentication capability."""
-        response = client.get("/docs")
-        content = response.text.lower()
+        """Swagger UI offers authorization for the bearer scheme in its schema.
 
-        # Should include authorization/authentication elements
-        assert "auth" in content or "bearer" in content or "token" in content
+        Swagger UI renders its Authorize control from the security schemes
+        of the schema it loads, so the page must load /openapi.json and that
+        schema must declare the bearer scheme.
+        """
+        response = client.get("/docs")
+        assert response.status_code == 200
+        assert "/openapi.json" in response.text
+
+        schemes = client.get("/openapi.json").json()["components"]["securitySchemes"]
+        assert any(
+            scheme.get("scheme", "").lower() == "bearer" for scheme in schemes.values()
+        )

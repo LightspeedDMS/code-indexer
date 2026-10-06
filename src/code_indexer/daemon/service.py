@@ -273,10 +273,17 @@ class CIDXDaemonService(Service):
                 }
                 for e in enhanced_items
             }
+            from code_indexer.utils.content_availability import (
+                staleness_after_local_check,
+            )
+
             for result in results:
                 file_path = result.get("payload", {}).get("path")
                 if file_path and file_path in staleness_map:
-                    result["staleness"] = staleness_map[file_path]
+                    # Bug #1991: the store's content-unavailable state wins.
+                    result["staleness"] = staleness_after_local_check(
+                        result, staleness_map[file_path]
+                    )
 
         except Exception as e:
             logger.debug(f"Staleness detection failed in daemon mode: {e}")

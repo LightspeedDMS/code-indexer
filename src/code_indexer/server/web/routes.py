@@ -54,7 +54,11 @@ from .auth import (
     get_session_manager,
     SessionData,
 )
-from ..services.ci_token_manager import CITokenManager, TokenValidationError
+from ..services.ci_token_manager import (
+    CITokenManager,
+    TokenData,
+    TokenValidationError,
+)
 from ..services.config_service import (
     BootstrapFileNotWritten,
     ConfigChangeConflict,
@@ -336,6 +340,22 @@ def _get_token_manager() -> CITokenManager:
         storage_backend=storage_backend,
         storage_mode=storage_mode,
     )
+
+
+def _ci_token_display(
+    token_data: Optional[TokenData],
+) -> Optional[Dict[str, Optional[str]]]:
+    """What the Config page may show of a stored CI token: the masked token
+    (at most its last 4 characters) and the base URL. The raw token never
+    enters the template context. None when no token is stored."""
+    if token_data is None:
+        return None
+    from code_indexer.utils.credential_redaction import mask_stored_secret
+
+    return {
+        "masked_token": mask_stored_secret(token_data.token),
+        "base_url": token_data.base_url,
+    }
 
 
 def _get_ssh_key_manager():
@@ -2004,7 +2024,7 @@ async def delete_user(
     """Delete a user (PRG: redirects to /admin/users with status query)."""
     from urllib.parse import quote
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2026,42 +2046,17 @@ async def delete_user(
         )
 
     try:
-        # Account write plus its durable audit row: off the event loop.
+        # Account write plus its durable audit row: off the event loop.  The
+        # shared deletion step deletes the account row first, then removes
+        # every row keyed to the name (group membership, SSO links, MFA,
+        # tokens, credentials) in the configured store and submits removal of
+        # the account's repositories.
         deleted = await asyncio.to_thread(
             user_manager.delete_user_audited, username, actor=session.username
         )
         if not deleted:
-            # Nothing was deleted: no identity-link or membership cleanup.
             return RedirectResponse(
                 url="/admin/users?error=user_not_found", status_code=303
-            )
-
-        # Clean up OIDC identity link if OIDC manager exists
-        from ..auth.oidc import routes as oidc_routes
-
-        if oidc_routes.oidc_manager:
-            import aiosqlite
-
-            async with aiosqlite.connect(oidc_routes.oidc_manager.db_path) as db:
-                await db.execute(
-                    "DELETE FROM oidc_identity_links WHERE username = ?", (username,)
-                )
-                await db.commit()
-
-        # Clean up group membership (Bug fix: prevent orphaned group memberships)
-        try:
-            group_manager = _get_group_manager()
-            # Synchronous group store work: off the event loop.
-            await asyncio.to_thread(
-                _remove_deleted_user_membership, group_manager, username
-            )
-        except RuntimeError:
-            # group_manager not available - skip cleanup
-            logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-041",
-                    f"group_manager not available, skipped group cleanup for: {username}",
-                )
             )
 
         return RedirectResponse(
@@ -2070,14 +2065,6 @@ async def delete_user(
         )
     except ValueError:
         return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
-
-
-def _remove_deleted_user_membership(group_manager: Any, username: str) -> None:
-    """Remove a deleted user's group membership (synchronous store work)."""
-    user_group = group_manager.get_user_group(username)
-    if user_group:
-        group_manager.remove_user_from_group(username, user_group.id)
-        logger.info(f"Cleaned up group membership for deleted user: {username}")
 
 
 @web_router.get(
@@ -2528,13 +2515,35 @@ def assign_user_to_group(
             request, session, active_tab="users", error_message="Invalid CSRF token"
         )
 
-    from code_indexer.server.services.group_access_manager import GroupNotFoundError
+    from code_indexer.server.services.group_access_manager import (
+        GroupNotFoundError,
+        UnknownAccountError,
+    )
+
+    user_manager = dependencies.user_manager
+    if user_manager is None:
+        return _create_groups_page_response(
+            request,
+            session,
+            active_tab="users",
+            error_message="User manager not available",
+        )
 
     try:
         group_manager = _get_group_manager()
         try:
             new_group = group_manager.assign_user_to_group_audited(
-                user_id, group_id, actor=session.username
+                user_id,
+                group_id,
+                actor=session.username,
+                account_exists=lambda name: user_manager.get_user(name) is not None,
+            )
+        except UnknownAccountError:
+            return _create_groups_page_response(
+                request,
+                session,
+                active_tab="users",
+                error_message=f"User '{user_id}' not found",
             )
         except GroupNotFoundError:
             return _create_groups_page_response(
@@ -2844,7 +2853,7 @@ async def grant_repo_access(
 
     Supports both AJAX (JSON) and form POST requests (Story #199).
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -2921,7 +2930,7 @@ async def revoke_repo_access(
         CidxMetaCannotBeRevokedError,
     )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -4024,7 +4033,7 @@ async def change_golden_repo_branch(
     alias: str,
 ):
     """Change the active branch of a golden repository async (Story #308)."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Authentication required"},
@@ -5519,6 +5528,7 @@ def _create_query_page_response(
     regex: bool = False,
     scip_query_type: str = "definition",
     scip_exact: bool = False,
+    warning_message: Optional[str] = None,
 ) -> HTMLResponse:
     """Create query page response with all necessary context."""
     csrf_token = generate_csrf_token()
@@ -5547,6 +5557,7 @@ def _create_query_page_response(
             "results": results,
             "query_executed": query_executed,
             "error_message": error_message,
+            "warning_message": warning_message,
             "success_message": success_message,
             "time_range_all": time_range_all,
             "time_range": time_range,
@@ -5686,8 +5697,11 @@ def query_submit(
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
 
     backend_registry = getattr(request.app.state, "backend_registry", None)
+
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
     try:
         # Handle SCIP query mode
@@ -5924,15 +5938,11 @@ def query_submit(
                             error_message = f"SCIP query failed for repository '{user_alias}': {str(e)}. Try regenerating the index with: `cidx scip generate`"
 
         else:
-            # Handle semantic/FTS/temporal queries
+            # Handle semantic/FTS/hybrid/temporal queries
             query_manager = _get_semantic_query_manager()
-            if not query_manager:
-                error_message = "Query service not available"
-            else:
-                # Find the username for this repository
-                # Repository format is "user_alias (username)"
-                repo_parts = repository.split(" (")
-                user_alias = repo_parts[0] if repo_parts else repository
+            # Repository format is "user_alias (username)"
+            repo_parts = repository.split(" (")
+            user_alias = repo_parts[0] if repo_parts else repository
 
             # Get the repository from all available repos (including global)
             all_repos = _get_all_activated_repos_for_query(backend_registry)
@@ -5942,106 +5952,38 @@ def query_submit(
                     target_repo = repo
                     break
 
-            if not target_repo:
+            if not query_manager:
+                error_message = "Query service not available"
+            elif not target_repo:
                 error_message = f"Repository '{user_alias}' not found"
-            elif target_repo.get("is_global"):
-                # Handle global repository query
-                import os
-                from code_indexer.global_repos.alias_manager import AliasManager
-                from ..services.search_service import (
-                    SemanticSearchService,
-                    SemanticSearchRequest,
-                )
-
-                server_data_dir = os.environ.get(
-                    "CIDX_SERVER_DATA_DIR",
-                    os.path.expanduser("~/.cidx-server"),
-                )
-                aliases_dir = (
-                    Path(server_data_dir) / "data" / "golden-repos" / "aliases"
-                )
-                alias_manager = AliasManager(str(aliases_dir))
-
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
-                if not target_path:
-                    error_message = f"Global repository '{user_alias}' alias not found"
-                else:
-                    # Use SemanticSearchService for direct path query
-                    search_service = SemanticSearchService()
-                    search_request = SemanticSearchRequest(
-                        query=query_text.strip(),
-                        limit=limit,
-                        include_source=True,
-                        language=language if language else None,
-                        path_filter=path_pattern if path_pattern else None,
-                    )
-
-                    try:
-                        search_response = search_service.search_repository_path(
-                            target_path, search_request
-                        )
-
-                        # Convert results to template format
-                        for result in search_response.results:
-                            results.append(
-                                {
-                                    "file_path": result.file_path,
-                                    "line_numbers": str(result.line_start or 1),
-                                    "content": result.content or "",
-                                    "score": result.score,
-                                    "language": _detect_language_from_path(
-                                        result.file_path
-                                    ),
-                                }
-                            )
-                    except Exception as e:
-                        logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-034", f"Global repo query failed: {e}"
-                            ),
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        error_message = f"Query failed: {str(e)}"
             else:
-                repo_username = target_repo.get("username", session.username)
-
-                # Execute query for user-activated repositories
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
                     )
+                except (SemanticQueryError, ValueError) as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # shown to the user; _execute_text_query logged it.
+                    error_message = f"Query failed: {str(e)}"
+                else:
+                    results.extend(text_rows)
 
     except Exception as e:
         logger.error(
@@ -6072,6 +6014,7 @@ def query_submit(
         regex=regex,
         scip_query_type=scip_query_type,
         scip_exact=scip_exact,
+        warning_message=warning_message,
     )
 
 
@@ -6319,6 +6262,99 @@ def _execute_scip_query(
     return results, None
 
 
+def _execute_text_query(
+    query_manager: Any,
+    target_repo: Dict[str, Any],
+    user_alias: str,
+    session_username: str,
+    query_text: str,
+    *,
+    limit: int,
+    min_score: Optional[float],
+    language: str,
+    path_filter: str,
+    search_mode: str,
+    time_range: str,
+    time_range_all: bool,
+    at_commit: str,
+    case_sensitive: bool,
+    fuzzy: bool,
+    regex: bool,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Run a semantic/FTS/hybrid/temporal Web query.
+
+    Returns ``(template rows, warning)``; the warning is the query layer's
+    own (e.g. no temporal index), the same text REST and MCP return.
+
+    Shared by both Web query handlers. Activated and global repositories go
+    through the same mode-aware ``query_user_repositories`` path REST and
+    MCP use, with every form parameter. A global repository is queried as
+    the signed-in user, so the normal per-user repository access narrowing
+    applies (a repository the user cannot access is refused like an unknown
+    one); an activated repository is queried as its owner. Failures raise;
+    a query the query layer did not complete (SemanticQueryError, ValueError)
+    is logged here once, at WARNING, before it is re-raised.
+    """
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
+
+    if target_repo.get("is_global"):
+        username = session_username
+    else:
+        username = target_repo.get("username", session_username)
+
+    try:
+        query_response = query_manager.query_user_repositories(
+            username=username,
+            query_text=query_text.strip(),
+            repository_alias=user_alias,
+            limit=limit,
+            min_score=min_score,
+            language=language if language else None,
+            path_filter=path_filter if path_filter else None,
+            search_mode=search_mode,
+            time_range=time_range if time_range else None,
+            time_range_all=time_range_all,
+            at_commit=at_commit if at_commit else None,
+            case_sensitive=case_sensitive,
+            fuzzy=fuzzy,
+            regex=regex,
+        )
+    except (SemanticQueryError, ValueError) as e:
+        # Only a repository-not-found refusal (also how a repository the user
+        # cannot access is refused) is logged with its message: it names just
+        # the repository and the user. Other messages can carry a provider's
+        # error text, so only the class is logged; the user sees the reason.
+        message = str(e)
+        not_found = (
+            message.startswith("Repository '") and "' not found for user '" in message
+        ) or message.startswith("No activated repositories found for user '")
+        detail = message if not_found else "reason shown to the user, not logged"
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-053",
+                f"Query not completed: {type(e).__name__}: {detail}",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        raise
+
+    rows = [
+        {
+            "file_path": result.get("file_path", ""),
+            "line_numbers": f"{result.get('line_number', 1)}",
+            "content": result.get("code_snippet", ""),
+            "score": result.get("similarity_score", 0.0),
+            "language": _detect_language_from_path(result.get("file_path", "")),
+            "repository_alias": result.get("repository_alias", ""),
+            "source_repo": result.get("source_repo"),
+            "metadata": result.get("metadata"),
+            "temporal_context": result.get("temporal_context"),
+        }
+        for result in query_response.get("results", [])
+    ]
+    return rows, query_response.get("warning")
+
+
 @web_router.post("/partials/query-results", response_class=HTMLResponse)
 def query_results_partial_post(
     request: Request,
@@ -6404,7 +6440,10 @@ def query_results_partial_post(
     results = []
     query_executed = True
     error_message = None
+    warning_message: Optional[str] = None
     backend_registry = getattr(request.app.state, "backend_registry", None)
+
+    from code_indexer.server.query.semantic_query_manager import SemanticQueryError
 
     try:
         query_manager = _get_semantic_query_manager()
@@ -6441,104 +6480,34 @@ def query_results_partial_post(
                 results.extend(scip_results)
                 if scip_error:
                     error_message = scip_error
-            elif target_repo.get("is_global"):
-                # Handle global repository query
-                import os
-                from code_indexer.global_repos.alias_manager import AliasManager
-                from ..services.search_service import (
-                    SemanticSearchService,
-                    SemanticSearchRequest,
-                )
-
-                server_data_dir = os.environ.get(
-                    "CIDX_SERVER_DATA_DIR",
-                    os.path.expanduser("~/.cidx-server"),
-                )
-                aliases_dir = (
-                    Path(server_data_dir) / "data" / "golden-repos" / "aliases"
-                )
-                alias_manager = AliasManager(str(aliases_dir))
-
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
-                if not target_path:
-                    error_message = f"Global repository '{user_alias}' alias not found"
-                else:
-                    # Use SemanticSearchService for direct path query
-                    search_service = SemanticSearchService()
-                    search_request = SemanticSearchRequest(
-                        query=query_text.strip(),
-                        limit=limit,
-                        include_source=True,
-                        language=language if language else None,
-                        path_filter=path_pattern if path_pattern else None,
-                    )
-
-                    try:
-                        search_response = search_service.search_repository_path(
-                            target_path, search_request
-                        )
-
-                        # Convert results to template format
-                        for result in search_response.results:
-                            results.append(
-                                {
-                                    "file_path": result.file_path,
-                                    "line_numbers": str(result.line_start or 1),
-                                    "content": result.content or "",
-                                    "score": result.score,
-                                    "language": _detect_language_from_path(
-                                        result.file_path
-                                    ),
-                                }
-                            )
-                    except Exception as e:
-                        logger.error(
-                            format_error_log(
-                                "STORE-GENERAL-040", f"Global repo query failed: {e}"
-                            ),
-                            exc_info=True,
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        error_message = f"Query failed: {str(e)}"
             else:
-                # Execute query for user-activated repositories
-                repo_username = target_repo.get("username", session.username)
-
-                query_response = query_manager.query_user_repositories(
-                    username=repo_username,
-                    query_text=query_text.strip(),
-                    repository_alias=user_alias,
-                    limit=limit,
-                    min_score=parsed_min_score,
-                    language=language if language else None,
-                    path_filter=path_pattern if path_pattern else None,
-                    search_mode=search_mode,
-                    time_range=time_range if time_range else None,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit if at_commit else None,
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    regex=regex,
-                )
-
-                # Convert results to template format with full metadata
-                for result in query_response.get("results", []):
-                    results.append(
-                        {
-                            "file_path": result.get("file_path", ""),
-                            "line_numbers": f"{result.get('line_number', 1)}",
-                            "content": result.get("code_snippet", ""),
-                            "score": result.get("similarity_score", 0.0),
-                            "language": _detect_language_from_path(
-                                result.get("file_path", "")
-                            ),
-                            "repository_alias": result.get("repository_alias", ""),
-                            "source_repo": result.get("source_repo"),
-                            "metadata": result.get("metadata"),
-                            "temporal_context": result.get("temporal_context"),
-                        }
+                # Activated and global repositories: the same mode-aware path.
+                try:
+                    text_rows, warning_message = _execute_text_query(
+                        query_manager,
+                        target_repo,
+                        user_alias,
+                        session.username,
+                        query_text,
+                        limit=limit,
+                        min_score=parsed_min_score,
+                        language=language,
+                        path_filter=path_pattern,
+                        search_mode=search_mode,
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        regex=regex,
                     )
+                except (SemanticQueryError, ValueError) as e:
+                    # The query was not completed (access refused, invalid
+                    # parameters, provider outage, timeout, missing index):
+                    # shown to the user; _execute_text_query logged it.
+                    error_message = f"Query failed: {str(e)}"
+                else:
+                    results.extend(text_rows)
 
     except Exception as e:
         logger.error(
@@ -6558,6 +6527,7 @@ def query_results_partial_post(
             "query_executed": query_executed,
             "query_text": query_text,
             "error_message": error_message,
+            "warning_message": warning_message,
             "search_mode": search_mode,
         },
     )
@@ -8359,9 +8329,9 @@ def _create_config_page_response(
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
 
-    # Get token data for masking in template
-    github_token_data = token_manager.get_token("github")
-    gitlab_token_data = token_manager.get_token("gitlab")
+    # Only the masked display form reaches the template.
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
     response = templates.TemplateResponse(
         request,
@@ -8640,11 +8610,11 @@ async def discovery_start(
     Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
     Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    provider, err = _resolve_provider(request, platform)
+    provider, err = await asyncio.to_thread(_resolve_provider, request, platform)
     if err is not None:
         return err
     if not provider.is_configured():
@@ -8713,7 +8683,7 @@ async def discovery_result(
     Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
     Auth required.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
@@ -8760,7 +8730,7 @@ async def discovery_enrich(
     Accepts JSON body: {"clone_urls": ["https://..."]}
     Returns a dict mapping each clone_url to its commit info.
     """
-    provider, error = _resolve_provider(request, platform)
+    provider, error = await asyncio.to_thread(_resolve_provider, request, platform)
     if error is not None:
         return error
 
@@ -8977,7 +8947,7 @@ async def _validate_discovery_hide_request(
     Returns (error_response, repo_identifier). If error_response is not None,
     the caller should return it immediately.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=status.HTTP_401_UNAUTHORIZED), ""
 
@@ -9076,7 +9046,7 @@ async def fetch_discovery_branches(request: Request):
         }
     """
     # Require admin authentication
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             status_code=401,
@@ -9358,9 +9328,12 @@ async def update_langfuse_pull_config(
     csrf_token: Optional[str] = Form(None),
 ):
     """Update Langfuse Trace Pull configuration (Story #164)."""
-    from ..services.config_service import get_config_service
+    from ..services.config_service import (
+        LangfusePullProjectsInvalid,
+        get_config_service,
+    )
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9403,13 +9376,28 @@ async def update_langfuse_pull_config(
         projects_json = form_data.get("pull_projects", "[]")
         if projects_json:
             updates.append(("langfuse", "pull_projects", projects_json))
-        await asyncio.to_thread(
-            functools.partial(
-                config_service.update_settings_audited,
-                updates,
-                actor=session.username,
+        try:
+            await asyncio.to_thread(
+                functools.partial(
+                    config_service.update_settings_audited,
+                    updates,
+                    actor=session.username,
+                )
             )
-        )
+        except LangfusePullProjectsInvalid as rejected:
+            # The project list was refused (a project with no secret key or
+            # a duplicate public key): nothing was published.
+            logger.warning(
+                f"Langfuse pull config save rejected: {rejected}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"Configuration not saved: {rejected}",
+                validation_errors={"langfuse_pull": str(rejected)},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
 
         return _create_config_page_response(
             request,
@@ -9454,7 +9442,7 @@ async def update_cidx_meta_backup_config(
     from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
     from ..services.config_service import get_config_service
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -9599,7 +9587,7 @@ async def set_siem_delivery_credential(request: Request):
     from ..services.siem_delivery.config_view import credential_text_from_inputs
     from ..services.siem_delivery.credential import MAX_CREDENTIAL_JSON_BYTES
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
@@ -9641,7 +9629,7 @@ async def remove_siem_delivery_credential(request: Request):
     """Remove the stored SecOps service-account key."""
     from ..services.siem_delivery.admin import remove_credential
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
@@ -9711,7 +9699,7 @@ async def set_siem_delivery_trusted_ca(request: Request):
     from ..services.siem_delivery.config_view import ca_text_from_inputs
     from ..services.siem_delivery.trust import MAX_CA_PEM_BYTES, set_trusted_ca
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     form, refused = await _read_siem_form(request, session, max_files=1, max_fields=2)
@@ -9753,7 +9741,7 @@ async def remove_siem_delivery_trusted_ca(request: Request):
     """Remove the additional trusted CA (back to the default trust only)."""
     from ..services.siem_delivery.trust import remove_trusted_ca
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
     _form, refused = await _read_siem_form(request, session, max_files=0, max_fields=1)
@@ -9843,7 +9831,7 @@ async def update_config_section(
     """Update configuration for a specific section."""
     from ..services.config_service import get_config_service
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -10111,8 +10099,8 @@ def config_section_partial(
     # Load API keys status
     token_manager = _get_token_manager()
     api_keys_status = token_manager.list_tokens()
-    github_token_data = token_manager.get_token("github")
-    gitlab_token_data = token_manager.get_token("gitlab")
+    github_token_data = _ci_token_display(token_manager.get_token("github"))
+    gitlab_token_data = _ci_token_display(token_manager.get_token("gitlab"))
 
     response = templates.TemplateResponse(
         request,
@@ -10576,7 +10564,7 @@ def _build_git_credential_manager() -> Any:
 )
 async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -10908,7 +10896,7 @@ async def user_git_credentials_add(request: Request):
     Requires TOTP plus the caller's own elevation window when enforcement is
     on, matching the admin route and the MCP twin configure_git_credential.
     """
-    session = _require_authenticated_session(request)
+    session = await asyncio.to_thread(_require_authenticated_session, request)
     if not session:
         return JSONResponse(
             {"success": False, "error": "Session expired"}, status_code=401
@@ -11049,10 +11037,31 @@ def user_logout(request: Request):
 # SSH Keys Management Page
 @web_router.get("/ssh-keys", response_class=HTMLResponse)
 def ssh_keys_page(request: Request):
-    """SSH Keys management page - view migration status and manage SSH keys."""
+    """SSH Keys management page - view migration status and manage SSH keys.
+
+    Listing key metadata requires the caller's own elevation window, like
+    the REST twin ``GET /api/ssh-keys`` (``require_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards (query string kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
+    """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+
+    if dependencies._is_elevation_enforcement_enabled():
+        from . import mfa_routes
+
+        # Error dict when no valid window exists; None when the window is valid.
+        elev_err = mfa_routes._check_elevation_window(request, session.username)
+        if elev_err is not None:
+            return_to = request.url.path
+            if request.url.query:
+                return_to = f"{return_to}?{request.url.query}"
+            return RedirectResponse(
+                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
 
     # Generate fresh CSRF token
     csrf_token = generate_csrf_token()
@@ -11340,10 +11349,30 @@ def logs_page(
         search: Search by message text
         node_id: Filter by cluster node ID (Story #501 AC4)
         page: Page number for pagination
+
+    Reading server logs requires the caller's own elevation window, like
+    the MCP twin ``admin_logs_query`` (``@require_mcp_elevation()``): with
+    enforcement on and no window, the admin is sent to the elevation page,
+    which returns here afterwards (filters kept; the elevate page's
+    ``_sanitize_next`` bounds the target). Enforcement off passes through.
     """
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
+
+    if dependencies._is_elevation_enforcement_enabled():
+        from . import mfa_routes
+
+        # Error dict when no valid window exists; None when the window is valid.
+        elev_err = mfa_routes._check_elevation_window(request, session.username)
+        if elev_err is not None:
+            return_to = request.url.path
+            if request.url.query:
+                return_to = f"{return_to}?{request.url.query}"
+            return RedirectResponse(
+                f"{mfa_routes._ELEVATE_PAGE}?next={quote(return_to, safe='')}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
 
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
@@ -11397,7 +11426,11 @@ def logs_page(
     return response
 
 
-@web_router.get("/partials/logs-list", response_class=HTMLResponse)
+@web_router.get(
+    "/partials/logs-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def logs_list_partial(
     request: Request,
     level: Optional[str] = None,
@@ -11408,6 +11441,11 @@ def logs_list_partial(
 ):
     """
     Partial endpoint for logs list - used by HTMX for dynamic updates (Story #664 AC2, Story #501 AC4).
+
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``, which the shared elevation interceptor turns
+    into the TOTP modal. Enforcement off passes through.
 
     Args:
         request: FastAPI request object
@@ -11472,7 +11510,10 @@ def logs_list_partial(
     return response
 
 
-@web_router.get("/logs/export")
+@web_router.get(
+    "/logs/export",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def export_logs_web(
     request: Request,
     format: str = "json",
@@ -11483,6 +11524,9 @@ def export_logs_web(
     Export logs to file in JSON or CSV format (Story #667 AC1).
 
     Web UI endpoint that triggers browser download of log export file.
+    Elevation-gated (``require_elevation()``) like the logs page and the MCP
+    twin ``admin_logs_query``: without a window it answers 403
+    ``elevation_required``. Enforcement off passes through.
 
     Args:
         request: FastAPI request object
@@ -11680,20 +11724,10 @@ def unified_login_submit(
             detail="User manager not available",
         )
 
-    # Authenticate user (any role accepted)
-    user = user_manager.authenticate_user(username, password)
-
-    if user is None:
-        # The attempt's one outcome row; the typed name is recorded only
-        # when it names an existing account.
-        reject_login(
-            username,
-            account_exists=user_manager.get_user(username) is not None,
-            method=_WEB_LOGIN_METHOD,
-            stage="credentials",
-            reason="bad_credentials",
-        )
-        # Invalid credentials - show error with new CSRF token
+    def _form_error(
+        message: str, status_code: int = 200, headers: Optional[dict] = None
+    ) -> Response:
+        # Re-render the form with the error and a new CSRF token.
         new_csrf_token = generate_csrf_token()
 
         # Check if OIDC is enabled
@@ -11710,13 +11744,69 @@ def unified_login_submit(
                 "request": request,
                 "csrf_token": new_csrf_token,
                 "redirect_to": redirect_to,
-                "error": "Invalid username or password",
+                "error": message,
                 "sso_enabled": sso_enabled,
             },
-            status_code=200,
+            status_code=status_code,
+            headers=headers,
         )
         set_csrf_cookie(error_response, new_csrf_token, path="/")
         return error_response
+
+    # Per-username progressive throttle, shared with REST /auth/login and
+    # OAuth authorize.  The attempt is RESERVED before the password is
+    # checked (one row-locked transaction), so concurrent requests cannot
+    # slip past it; while the backoff window runs every attempt -- a correct
+    # password included -- is refused (no audit row, so refusals cannot
+    # flood the store).  There is no lock state: a throttled username can
+    # still authenticate with an API key, MCP credentials or SSO, and every
+    # window ends on its own (cap 120 s).
+    import math
+
+    from ..auth import login_rate_limiter as _login_throttle
+
+    throttle = _login_throttle.login_rate_limiter
+    try:
+        attempt = throttle.begin_attempt(username)
+    except _login_throttle.ThrottleStoreBusy:
+        return _form_error(
+            "Login is busy, try again shortly.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {"Retry-After": "1"},
+        )
+    if not attempt.admitted:
+        wait = math.ceil(attempt.retry_after_seconds)
+        return _form_error(
+            f"Too many attempts, try again in {wait} seconds",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            {"Retry-After": str(wait)},
+        )
+
+    # Authenticate user (any role accepted)
+    user = user_manager.authenticate_user(username, password)
+
+    if user is None:
+        account_exists = user_manager.get_user(username) is not None
+        if not account_exists:
+            # An unknown name costs one password hash too (same helper as
+            # REST), so response time does not reveal whether it exists.
+            from ..auth.auth_error_handler import auth_error_handler
+
+            auth_error_handler.perform_dummy_password_work()
+        # The attempt's one outcome row (the attempt is already counted);
+        # the typed name is recorded only when it names an existing account.
+        reject_login(
+            username,
+            account_exists=account_exists,
+            method=_WEB_LOGIN_METHOD,
+            stage="credentials",
+            reason=_login_throttle.failure_reason(attempt),
+        )
+        return _form_error("Invalid username or password")
+
+    # Every MFA code at a login challenge is reserved on the account's login
+    # throttle key before it is checked; only a completed login clears the
+    # key (below), so a correct password with MFA pending clears nothing.
 
     # Story #565: Password expiry check -- before session creation
     config_svc = get_config_service()
@@ -11761,6 +11851,7 @@ def unified_login_submit(
                 role=user.role.value,
             ),
         )
+        throttle.clear_completed_login(user.username)
         return expiry_response
 
     # Validate redirect_to URL (prevent open redirect)
@@ -11812,6 +11903,7 @@ def unified_login_submit(
             role=user.role.value,
         ),
     )
+    throttle.clear_completed_login(user.username)
 
     return redirect_response
 
@@ -12389,7 +12481,7 @@ async def save_self_monitoring_config(
 
     Requires authenticated admin session and valid CSRF token.
     """
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
@@ -12507,7 +12599,7 @@ async def trigger_manual_scan(
     """
     logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: Entry - endpoint called")
 
-    session = _require_admin_session(request)
+    session = await asyncio.to_thread(_require_admin_session, request)
     if not session:
         logger.debug("[SELF-MON-DEBUG] trigger_manual_scan: No admin session found")
         raise HTTPException(

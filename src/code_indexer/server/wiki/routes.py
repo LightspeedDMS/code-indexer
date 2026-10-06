@@ -13,6 +13,7 @@ from starlette import status
 from ...global_repos.alias_manager import AliasManager
 from ..auth.dependencies import get_current_user_hybrid
 from ..auth.user_manager import User
+from ..routers import repo_access_http
 from ..services.deactivation_query_drain import track_activated_repo_query
 from ..utils.registry_factory import resolve_backend_registry_attr
 from .wiki_cache import WikiCache
@@ -139,13 +140,19 @@ def _check_user_wiki_access(
     """Validate user wiki access; return resolved filesystem path. 404 on any failure.
 
     Only the repo owner and admin users may access a user wiki (Story #291, AC4).
+    The owner must still hold grants on the activation's source golden
+    repositories (the MCP rule); another user's wiki is readable only by an
+    admin -- a member of the admins group, never by role. Every route using
+    this is a sync def (threadpool), so the lookups never block the loop.
     """
-    access_svc = request.app.state.access_filtering_service
-    if current_user.username != username and not (
-        access_svc.is_admin_user(current_user.username)
-        or current_user.has_permission("manage_users")
-    ):
-        raise HTTPException(status_code=404, detail="Not found")
+    access_svc = getattr(request.app.state, "access_filtering_service", None)
+    not_found = HTTPException(status_code=404, detail="Not found")
+    if current_user.username == username:
+        repo_access_http.enforce_activated_repo_access(
+            access_svc, username, alias, refusal=not_found
+        )
+    elif not repo_access_http.is_access_admin(access_svc, current_user.username):
+        raise not_found
 
     activated_repo_manager = request.app.state.activated_repo_manager
     if not activated_repo_manager.get_wiki_enabled(username, alias):

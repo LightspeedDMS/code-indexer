@@ -38,6 +38,7 @@ from ..services.group_access_manager import (
     GroupHasUsersError,
     GroupNotFoundError,
     CidxMetaCannotBeRevokedError,
+    UnknownAccountError,
 )
 from ..mcp.tools import TOOL_REGISTRY
 from ..mcp.tool_access import _ALWAYS_AVAILABLE_TOOLS
@@ -58,6 +59,17 @@ def get_group_manager() -> GroupAccessManager:
             detail="Group manager not initialized",
         )
     return _group_manager
+
+
+def _account_exists(name: str) -> bool:
+    """Whether *name* has an account (no user store configured: refuse)."""
+    user_manager = dependencies.user_manager
+    if user_manager is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="User manager not initialized",
+        )
+    return user_manager.get_user(name) is not None
 
 
 def set_group_manager(manager: GroupAccessManager) -> None:
@@ -219,6 +231,8 @@ class AuditLogResponse(BaseModel):
     actor_is_authenticated: Optional[bool] = None
     pairing_state: Optional[str] = None
     submitted_only: Optional[bool] = None
+    # The user an administrator was impersonating over MCP (the subject).
+    impersonated_user: Optional[str] = None
 
 
 class AuditAggregateGroupResponse(BaseModel):
@@ -585,7 +599,15 @@ def assign_user_to_group(
     """
     try:
         group = group_manager.assign_user_to_group_audited(
-            request.user_id, group_id, actor=current_user.username
+            request.user_id,
+            group_id,
+            actor=current_user.username,
+            account_exists=_account_exists,
+        )
+    except UnknownAccountError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User '{request.user_id}' not found",
         )
     except GroupNotFoundError:
         raise HTTPException(
@@ -902,7 +924,15 @@ def move_user_to_group(
 
     try:
         target_group = group_manager.assign_user_to_group_audited(
-            user_id, request.group_id, actor=current_user.username
+            user_id,
+            request.group_id,
+            actor=current_user.username,
+            account_exists=_account_exists,
+        )
+    except UnknownAccountError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User '{user_id}' not found",
         )
     except GroupNotFoundError:
         raise HTTPException(

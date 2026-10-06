@@ -153,19 +153,37 @@ def test_web_repo_access_grant_and_revoke_run_off_the_loop(web, caplog) -> None:
     assert capture_errors(caplog) == []
 
 
-def test_web_user_delete_runs_its_group_cleanup_off_the_loop(
-    web, store, caplog
+def test_web_user_delete_runs_its_account_cleanup_off_the_loop(
+    web, store, caplog, tmp_path: Path, monkeypatch
 ) -> None:
+    """The Web deletion's removal of every row keyed to the name (here the
+    group membership in groups.db) runs off the event loop."""
+    from code_indexer.server.services.account_data_purge import (
+        SqliteAccountDataPurger,
+    )
+
+    log = _CallLog()
+
+    class _RecordingPurger(SqliteAccountDataPurger):
+        def purge_deleted(self, username: str) -> int:
+            log.note("purge")
+            # This fixture's accounts DB sits outside the server layout the
+            # live-account check reads; the test is about threading only, so
+            # remove the (already deleted) name's rows directly.
+            return super().purge(username)
+
     client, groups, users = web
     users.create_user("example-user", _PASSWORD, UserRole.NORMAL_USER)
     group = groups.create_group(name="example-group", description="")
     groups.assign_user_to_group("example-user", group.id, _ADMIN)
+    monkeypatch.setattr(users, "_account_data_purger", _RecordingPurger(tmp_path))
     resp = client.post(
         "/admin/users/example-user/delete", data={}, follow_redirects=False
     )
     assert resp.status_code == 303, resp.text
-    names = [name for name, _ in _RecordingGroupManager.log.calls]
-    assert {"get_user_group", "remove_user_from_group"} <= set(names)
+    assert [name for name, _ in log.calls] == ["purge"]
+    assert log.on_loop() == []
+    assert groups.get_user_group("example-user") is None
     assert _RecordingGroupManager.log.on_loop() == []
     assert capture_errors(caplog) == []
     assert [r.outcome for r in store.rows("user_deleted")] == ["success"]

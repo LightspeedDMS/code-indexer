@@ -24,6 +24,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
     ActivatedRepoManager,
 )
+from code_indexer.server.services.access_filtering_service import _ActivationSource
 from code_indexer.server.wiki.wiki_cache import WikiCache
 from code_indexer.server.wiki.routes import (
     wiki_router,
@@ -98,10 +99,18 @@ def _make_user_wiki_app(
         parents=True, exist_ok=True
     )
 
-    # Access filtering service mock
+    # Access filtering service mock. The owner's activation ``alias`` was
+    # created from golden-repo, which the owner is granted: the owner path
+    # requires those source grants (A15c), as the real service decides via
+    # AccessFilteringService.alias_granted over these two lookups.
     app.state.access_filtering_service = MagicMock()
     app.state.access_filtering_service.is_admin_user.return_value = is_admin
-    app.state.access_filtering_service.get_accessible_repos.return_value = set()
+    app.state.access_filtering_service.get_accessible_repos.return_value = {
+        "golden-repo"
+    }
+    app.state.access_filtering_service.caller_activation_sources.return_value = {
+        alias: _ActivationSource(golden=("golden-repo",), collides=False)
+    }
 
     # Activated repo manager mock
     activated_mgr = MagicMock()

@@ -4412,12 +4412,6 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
-    "STORE-GENERAL-034": ErrorDefinition(
-        code="STORE-GENERAL-034",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
     "STORE-GENERAL-035": ErrorDefinition(
         code="STORE-GENERAL-035",
         description="TODO",
@@ -4444,12 +4438,6 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "STORE-GENERAL-039": ErrorDefinition(
         code="STORE-GENERAL-039",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
-    "STORE-GENERAL-040": ErrorDefinition(
-        code="STORE-GENERAL-040",
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
@@ -4525,6 +4513,22 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         description="TODO",
         severity=Severity.WARNING,
         action="TODO",
+    ),
+    "STORE-GENERAL-053": ErrorDefinition(
+        code="STORE-GENERAL-053",
+        description=(
+            "Web Query page query not completed: the repository was not found "
+            "or not accessible, a query parameter is invalid, or the search "
+            "could not run (e.g. embedding provider outage, timeout, missing "
+            "index). Logged with the exception class; the message is logged "
+            "only for a repository not found. The reason is shown to the user"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "None for a repository not found or an invalid parameter; if "
+            "valid queries keep failing, check embedding provider health and "
+            "the repository's indexes"
+        ),
     ),
     "SVC-GENERAL-015": ErrorDefinition(
         code="SVC-GENERAL-015",

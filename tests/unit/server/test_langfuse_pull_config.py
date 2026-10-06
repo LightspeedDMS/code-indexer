@@ -244,7 +244,9 @@ class TestConfigServiceIntegration:
             assert langfuse_settings["pull_enabled"] is True
             assert len(langfuse_settings["pull_projects"]) == 1
             assert langfuse_settings["pull_projects"][0]["public_key"] == "pk-test"
-            assert langfuse_settings["pull_projects"][0]["secret_key"] == "sk-test"
+            # Stored secrets are write-only: only a set/not-set flag is exposed.
+            assert "secret_key" not in langfuse_settings["pull_projects"][0]
+            assert langfuse_settings["pull_projects"][0]["secret_key_set"] is True
             assert langfuse_settings["pull_sync_interval_seconds"] == 600
             assert langfuse_settings["pull_trace_age_days"] == 60
 

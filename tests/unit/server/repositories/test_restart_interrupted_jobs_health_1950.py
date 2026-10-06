@@ -25,8 +25,10 @@ reclassified, while a GENUINE failure still writes status='failed' and
 still trips /health's degraded computation.
 
 This module covers the core acceptance criterion end to end through
-BackgroundJobManager (the real server-startup path, service_init.py):
-get_failed_job_count() is the EXACT scalar /health reads.
+BackgroundJobManager (the real server-startup path, service_init.py).
+Since Bug #1964, /health reads get_recent_failed_job_count() (the same
+status='failed' rows, limited to the last 24h); get_failed_job_count() is
+their all-time count, so a restart artifact excluded here is excluded there.
 """
 
 from __future__ import annotations
@@ -105,9 +107,9 @@ def test_health_failed_job_count_converges_to_zero_after_restart(
     )
 
     assert manager.get_failed_job_count() == 0, (
-        "Bug #1950: /health computes degraded from get_failed_job_count() "
-        "with NO time window -- a restart artifact must never be counted "
-        "here, or 'degraded' never converges."
+        "Bug #1950: /health computes degraded from status='failed' rows -- "
+        "a restart artifact must never be counted as one, or a restart "
+        "alone degrades health."
     )
 
 

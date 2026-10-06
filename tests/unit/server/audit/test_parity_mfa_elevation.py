@@ -34,8 +34,11 @@ from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
 from _audit_mfa_login_support import AuditStore, bound_audit_store
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.totp_service import TOTPService
+from code_indexer.server.auth.user_manager import UserManager, UserRole
+from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.middleware.audit_request_context import (
     AuditRequestContextMiddleware,
 )
@@ -209,6 +212,30 @@ class TestActivation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def accounts(tmp_path: Path, monkeypatch) -> UserManager:
+    users_db = str(tmp_path / "users.db")
+    DatabaseSchema(users_db).initialize_database()
+    manager = UserManager(use_sqlite=True, db_path=users_db)
+    manager.create_user(_ADMIN, "Example-Passw0rd!x", UserRole.ADMIN)
+    manager.create_user(_OTHER, "Example-Passw0rd!x", UserRole.ADMIN)
+    manager.create_user(_USER, "Example-Passw0rd!x", UserRole.NORMAL_USER)
+    monkeypatch.setattr(dependencies, "user_manager", manager)
+    return manager
+
+
+def _page_csrf(client: TestClient, page: str) -> str:
+    """GET the recovery-code page (sets the signed CSRF cookie); return its token."""
+    match = re.search(r'name="csrf_token" value="([^"]+)"', client.get(page).text)
+    assert match is not None
+    return match.group(1)
+
+
+_ADMIN_RECOVERY = "/admin/mfa/recovery-codes"
+_USER_RECOVERY = "/user/mfa/recovery-codes"
+
+
+@pytest.mark.usefixtures("accounts")
 class TestRecoveryCodeRegeneration:
     def test_admin_self_regeneration_writes_one_row(
         self, web, totp, sessions, esm, store
@@ -216,8 +243,9 @@ class TestRecoveryCodeRegeneration:
         _enroll(totp, _ADMIN)
         cookie = _login(web, sessions, _ADMIN, "admin")
         _elevate(esm, cookie, _ADMIN, "totp_repair")
+        token = _page_csrf(web, _ADMIN_RECOVERY)
 
-        resp = web.get("/admin/mfa/recovery-codes")
+        resp = web.post(_ADMIN_RECOVERY, data={"csrf_token": token})
 
         assert resp.status_code == 200, resp.text
         codes = _recovery_codes(resp.text)
@@ -236,8 +264,9 @@ class TestRecoveryCodeRegeneration:
         _enroll(totp, _OTHER)
         cookie = _login(web, sessions, _ADMIN, "admin")
         _elevate(esm, cookie, _ADMIN, "full")
+        token = _page_csrf(web, f"{_ADMIN_RECOVERY}?user={_OTHER}")
 
-        resp = web.get(f"/admin/mfa/recovery-codes?user={_OTHER}")
+        resp = web.post(_ADMIN_RECOVERY, data={"user": _OTHER, "csrf_token": token})
 
         assert resp.status_code == 200, resp.text
         rows = store.rows(*_MFA_TYPES)
@@ -246,12 +275,14 @@ class TestRecoveryCodeRegeneration:
         ]
 
     def test_user_self_service_regeneration_writes_one_row(
-        self, web, totp, sessions, store
+        self, web, totp, sessions, esm, store
     ):
         _enroll(totp, _USER)
-        _login(web, sessions, _USER, "normal_user")
+        cookie = _login(web, sessions, _USER, "normal_user")
+        _elevate(esm, cookie, _USER, "totp_repair")
+        token = _page_csrf(web, _USER_RECOVERY)
 
-        resp = web.get("/user/mfa/recovery-codes")
+        resp = web.post(_USER_RECOVERY, data={"csrf_token": token})
 
         assert resp.status_code == 200, resp.text
         rows = store.rows(*_MFA_TYPES)
@@ -263,10 +294,13 @@ class TestRecoveryCodeRegeneration:
     def test_refused_regeneration_writes_no_row(self, web, totp, sessions, store):
         _enroll(totp, _ADMIN)
         _login(web, sessions, _ADMIN, "admin")
+        token = _page_csrf(web, _ADMIN_RECOVERY)
 
-        resp = web.get("/admin/mfa/recovery-codes")  # no elevation window
+        # valid form token, no elevation window
+        resp = web.post(_ADMIN_RECOVERY, data={"csrf_token": token})
 
         assert resp.status_code == 403, resp.text
+        assert "Elevation Required" in resp.text
         assert store.rows(*_MFA_TYPES) == []
 
 
@@ -747,9 +781,11 @@ class TestStepUpEdgeCases:
         self, enrolled, store
     ):
         from code_indexer.server.auth.elevation_step_up import StepUpOutcome
+        from code_indexer.server.auth.login_rate_limiter import SCOPE_STEP_UP
 
         _svc, secret, limiter = enrolled
-        limiter.record_failure(f"192.0.2.10:{_USER}")
+        key = _USER  # the step-up throttle is keyed by the username only
+        limiter.begin_attempt(key, scope=SCOPE_STEP_UP)
 
         result = self._step_up(
             enrolled, _UnreadableWindows(), totp_code=_next_step_code(secret)
@@ -761,7 +797,11 @@ class TestStepUpEdgeCases:
         assert [(r.action_type, r.outcome) for r in rows] == [
             ("elevation_failed", "failure")
         ]
-        assert len(limiter._failures[f"192.0.2.10:{_USER}"]) == 1
+        # The history was kept (not cleared): the seeded attempt plus the
+        # step-up's own reserved attempt make 2, so with the default
+        # threshold of 5 the third further reservation starts the throttle.
+        more = [limiter.begin_attempt(key, scope=SCOPE_STEP_UP) for _ in range(3)]
+        assert [o.throttle_started for o in more] == [False, False, True]
 
     def test_window_creation_error_records_failure_and_propagates(
         self, enrolled, store
@@ -782,10 +822,13 @@ class TestStepUpEdgeCases:
     def test_failure_history_reset_error_still_records_the_granted_window(
         self, enrolled, store, tmp_path
     ):
-        from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
+        from code_indexer.server.auth.login_rate_limiter import (
+            SCOPE_LOGIN,
+            LoginRateLimiter,
+        )
 
         class _ResetFails(LoginRateLimiter):
-            def record_success(self, username: str) -> None:
+            def record_success(self, subject: str, *, scope: str = SCOPE_LOGIN) -> None:
                 raise RuntimeError("limiter store unavailable")
 
         windows = ElevatedSessionManager(
@@ -886,8 +929,7 @@ _ELEVATION_DOOR_MODULES = (
 _STEP_UP_ONLY_CALLS = (
     "verify_enabled_code(",
     "verify_recovery_code(",
-    "check_and_record_failure(",
-    "record_failure(",
+    "begin_attempt(",
     "record_success(",
     ".create(",
 )

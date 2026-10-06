@@ -814,6 +814,12 @@ class DatabaseSchema:
             )
 
             create_refresh_failure_backoff_table(conn)
+            # remove_repo also deletes from the forced-reconcile state table.
+            from code_indexer.server.storage.sqlite_backends._forced_reconcile_state_mixin import (
+                create_forced_reconcile_state_table,
+            )
+
+            create_forced_reconcile_state_table(conn)
             conn.execute(self.CREATE_BACKGROUND_JOBS_TABLE)
             # Story #72: Self-monitoring tables
             conn.execute(self.CREATE_SELF_MONITORING_SCANS_TABLE)
@@ -920,6 +926,7 @@ class DatabaseSchema:
             self._migrate_node_metrics_table(conn)
             # Story #565: Password expiry - add password_changed_at column
             self._migrate_users_password_changed_at(conn)
+            self._migrate_users_account_created_at(conn)
             # Story #578: Server config centralization (migration for existing DBs)
             self._migrate_server_config_table(conn)
             # Bug #573/#574: Rate limiting tables (migration for existing DBs)
@@ -1091,6 +1098,23 @@ class DatabaseSchema:
             conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
             conn.commit()
             logger.info("Migrated users schema: added password_changed_at column")
+
+    def _migrate_users_account_created_at(self, conn: sqlite3.Connection) -> None:
+        """
+        Add account_created_at column to users table (additive, nullable).
+
+        Records the instant each account was created; credentials issued
+        before it belong to an earlier account with the same name.  Accounts
+        that predate the column keep NULL (no restriction).
+        Idempotent: checks for existing column before adding.
+        """
+        cursor = conn.execute("PRAGMA table_info(users)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "account_created_at" not in existing_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN account_created_at TEXT")
+            conn.commit()
+            logger.info("Migrated users schema: added account_created_at column")
 
     def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
         """

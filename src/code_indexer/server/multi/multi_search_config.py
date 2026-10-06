@@ -70,7 +70,10 @@ class MultiSearchConfig:
         return cls(
             max_workers=multi_search_limits.multi_search_max_workers,
             query_timeout_seconds=multi_search_limits.multi_search_timeout_seconds,
-            # These settings are not yet in MultiSearchLimitsConfig, use defaults
+            # Operator-configured per-repo result cap (Web UI setting).
+            # Semantic per-repo searches are additionally bounded by
+            # MAX_CANDIDATE_LIMIT in MultiSearchService._search_semantic_sync.
+            max_results_per_repo=multi_search_limits.omni_max_results_per_repo,
+            # Not yet in MultiSearchLimitsConfig, use default
             max_repos_per_query=50,
-            max_results_per_repo=100,
         )

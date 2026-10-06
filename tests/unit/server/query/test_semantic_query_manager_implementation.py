@@ -187,62 +187,60 @@ class TestSemanticQueryManagerImplementation:
 
     def test_search_repository_creates_proper_search_request(self):
         """
-        Test that _search_single_repository creates proper SemanticSearchRequest.
+        _search_single_repository builds the INTERNAL search request type.
 
-        This test verifies the request parameters are properly formatted.
+        The internal type allows a retrieval limit above the public request
+        cap (rerank/access-filter over-fetch), so a limit of 150 must reach the
+        search service unchanged; the public SemanticSearchRequest is never
+        used on this path.
         """
+        from code_indexer.server.models.api_models import (
+            InternalSemanticSearchRequest,
+        )
+
         with patch(
             "code_indexer.server.services.search_service.SemanticSearchService"
         ) as mock_class:
-            with patch(
-                "code_indexer.server.models.api_models.SemanticSearchRequest"
-            ) as mock_request_class:
-                mock_service = Mock()
-                mock_class.return_value = mock_service
-                mock_request = Mock()
-                mock_request_class.return_value = mock_request
+            mock_service = Mock()
+            mock_class.return_value = mock_service
 
-                # Mock empty response
-                mock_response = Mock()
-                mock_response.results = []
-                mock_service.search_repository_path.return_value = mock_response
+            # Mock empty response
+            mock_response = Mock()
+            mock_response.results = []
+            mock_service.search_repository_path.return_value = mock_response
 
-                query_manager = SemanticQueryManager()
+            query_manager = SemanticQueryManager()
 
-                # Patch _both_providers_configured to ensure primary_only path is tested
-                # regardless of which API keys happen to be set in the test environment.
-                with patch.object(
-                    query_manager, "_both_providers_configured", return_value=False
-                ):
-                    # This will fail because the request creation doesn't exist yet
-                    query_manager._search_single_repository(
-                        repo_path=self.test_repo_path,
-                        repository_alias="test-repo",
-                        query_text="test query",
-                        limit=15,
-                        min_score=0.8,
-                        file_extensions=[".py", ".js"],
-                    )
-
-                # Verify SemanticSearchRequest was created with correct parameters
-                mock_request_class.assert_called_once_with(
-                    query="test query",
-                    limit=15,
-                    include_source=True,
-                    path_filter=None,
-                    language=None,
-                    exclude_language=None,
-                    exclude_path=None,
-                    accuracy=None,
-                    # Story #1108 (S4): per-request cache bypass field added to SemanticSearchRequest
-                    no_embedding_cache_shortcut=False,
-                )
-
-                # Verify search_repository_path was called with correct parameters
-                # Story #883 Phase C: precomputed_query_vector=None when no vector supplied
-                mock_service.search_repository_path.assert_called_once_with(
+            # Patch _both_providers_configured to ensure primary_only path is tested
+            # regardless of which API keys happen to be set in the test environment.
+            with patch.object(
+                query_manager, "_both_providers_configured", return_value=False
+            ):
+                query_manager._search_single_repository(
                     repo_path=self.test_repo_path,
-                    search_request=mock_request,
-                    precomputed_query_vector=None,
-                    activation_id=None,
+                    repository_alias="test-repo",
+                    query_text="test query",
+                    limit=150,
+                    min_score=0.8,
+                    file_extensions=[".py", ".js"],
                 )
+
+        # Story #883 Phase C: precomputed_query_vector=None when no vector supplied
+        mock_service.search_repository_path.assert_called_once()
+        call = mock_service.search_repository_path.call_args.kwargs
+        assert call["repo_path"] == self.test_repo_path
+        assert call["precomputed_query_vector"] is None
+        assert call["activation_id"] is None
+
+        request = call["search_request"]
+        assert type(request) is InternalSemanticSearchRequest
+        assert request.query == "test query"
+        assert request.limit == 150
+        assert request.include_source is True
+        assert request.path_filter is None
+        assert request.language is None
+        assert request.exclude_language is None
+        assert request.exclude_path is None
+        assert request.accuracy is None
+        # Story #1108 (S4): per-request cache bypass field
+        assert request.no_embedding_cache_shortcut is False

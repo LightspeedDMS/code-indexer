@@ -62,7 +62,7 @@ _CLEANUP_ACTION_TYPE = "git_cleanup"
 _SELECT_COLS = (
     "id, timestamp, admin_id, action_type, target_type, target_id, details, "
     "outcome, source, ip_address, correlation_id, node_id, auth_method, "
-    "actor_is_system, event_uuid"
+    "actor_is_system, event_uuid, impersonated_user"
 )
 
 _INSERT_EVENT_SQL = (

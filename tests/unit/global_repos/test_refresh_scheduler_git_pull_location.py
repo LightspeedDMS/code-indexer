@@ -120,7 +120,7 @@ class TestGitPullLocation:
 
         captured_git_pull_paths = []
 
-        def capture_git_pull(path):
+        def capture_git_pull(path, cancel_check=None):
             captured_git_pull_paths.append(path)
             mock_updater = Mock()
             mock_updater.has_changes.return_value = True
@@ -181,7 +181,7 @@ class TestGitPullLocation:
 
         captured_git_pull_paths = []
 
-        def capture_git_pull(path):
+        def capture_git_pull(path, cancel_check=None):
             captured_git_pull_paths.append(path)
             mock_updater = Mock()
             mock_updater.has_changes.return_value = True

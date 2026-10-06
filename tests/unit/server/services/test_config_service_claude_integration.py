@@ -10,6 +10,14 @@ from code_indexer.server.services.config_service import ConfigService
 from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
 
+def _set_llm_creds_field(service: ConfigService, name: str, value: str) -> None:
+    """Commit one LLM-creds field as the llm-creds route does (its own
+    mutator); the generic claude_cli setter refuses these fields."""
+    service.apply_system_change(
+        lambda c: setattr(c.claude_integration_config, name, value)
+    )
+
+
 def test_get_claude_integration_config_returns_config(tmp_path):
     """Test that get_claude_integration_config returns the claude integration config."""
     # Arrange
@@ -84,7 +92,7 @@ class TestGetAllSettingsSubscriptionFields:
         """Test that when claude_auth_mode is 'subscription', it appears as 'subscription'."""
         service = ConfigService(server_dir_path=str(tmp_path))
         # Set auth mode to subscription
-        service.update_setting("claude_cli", "claude_auth_mode", "subscription")
+        _set_llm_creds_field(service, "claude_auth_mode", "subscription")
 
         settings = service.get_all_settings()
 
@@ -104,8 +112,8 @@ class TestGetAllSettingsSubscriptionFields:
     def test_get_all_settings_llm_creds_provider_url_reflects_value(self, tmp_path):
         """Test that llm_creds_provider_url reflects the configured value."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting(
-            "claude_cli", "llm_creds_provider_url", "https://creds.example.com"
+        _set_llm_creds_field(
+            service, "llm_creds_provider_url", "https://creds.example.com"
         )
 
         settings = service.get_all_settings()
@@ -120,8 +128,8 @@ class TestGetAllSettingsSubscriptionFields:
     ):
         """Test that llm_creds_provider_api_key is present and masked in get_all_settings()."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        service.update_setting(
-            "claude_cli", "llm_creds_provider_api_key", "sk-secret-key-12345"
+        _set_llm_creds_field(
+            service, "llm_creds_provider_api_key", "sk-secret-key-12345"
         )
 
         settings = service.get_all_settings()
@@ -135,9 +143,10 @@ class TestGetAllSettingsSubscriptionFields:
         assert "sk-secret-key-12345" != api_key_value, (
             "llm_creds_provider_api_key must be masked in get_all_settings() output"
         )
-        # Should end with *** masking
-        assert api_key_value.endswith("***"), (
-            f"Expected masked key ending with ***, got: {api_key_value}"
+        # A key under 20 characters reveals none of its characters, only
+        # that one is configured.
+        assert api_key_value == "configured", (
+            f"Expected 'configured' for a 19-character key, got: {api_key_value}"
         )
 
     def test_get_all_settings_llm_creds_provider_api_key_none_when_empty(
@@ -180,8 +189,19 @@ class TestGetAllSettingsSubscriptionFields:
             == "my-custom-consumer"
         )
 
-    def test_update_setting_claude_auth_mode_rejects_invalid_value(self, tmp_path):
-        """update_setting rejects invalid claude_auth_mode values."""
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("claude_auth_mode", "subscription"),
+            ("llm_creds_provider_url", "https://creds.example.com"),
+            ("llm_creds_provider_api_key", "example-provider-key"),
+        ],
+    )
+    def test_update_setting_refuses_llm_creds_fields(self, tmp_path, key, value):
+        """Only /api/llm-creds/save-config (which binds the provider key to
+        its URL) may change these; the generic setter refuses them."""
         service = ConfigService(server_dir_path=str(tmp_path))
-        with pytest.raises(ValueError, match="Invalid claude_auth_mode"):
-            service.update_setting("claude_cli", "claude_auth_mode", "oauth2")
+        before = service.get_config().claude_integration_config
+        with pytest.raises(ValueError, match="/api/llm-creds/save-config"):
+            service.update_setting("claude_cli", key, value)
+        assert service.get_config().claude_integration_config == before

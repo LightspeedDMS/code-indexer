@@ -111,6 +111,7 @@ from tests.fixtures import real_server_home_guard as _real_home_guard
 import code_indexer.server.app as _server_app_module
 import code_indexer.server.auth.dependencies as _auth_dependencies_module
 from code_indexer.server.auth.login_rate_limiter import (
+    _SqliteStore as _LoginThrottleSqliteStore,
     login_rate_limiter as _login_lockout_limiter,
 )
 from code_indexer.server.auth.token_bucket import rate_limiter as _login_token_bucket
@@ -217,10 +218,22 @@ def _reset_login_rate_limiter_state() -> None:
         _login_token_bucket._buckets.clear()
         _login_token_bucket._last_access.clear()
         _login_token_bucket._pool = None
+    # The login throttle keeps its state in a DB-backed store; a test (or a
+    # create_app() run) may have wired it to a SQLite file or a PG pool, so
+    # the reset swaps in a fresh private in-memory store.
     with _login_lockout_limiter._lock:
-        _login_lockout_limiter._failures.clear()
-        _login_lockout_limiter._lockout_until.clear()
         _login_lockout_limiter._pool = None
+        _login_lockout_limiter._store = _LoginThrottleSqliteStore(None)
+    # The per-process reservation rate cap (10/s, burst 10) would make
+    # login-heavy tests in this one process answer 503 "busy"; each test gets
+    # a fresh, effectively unlimited bucket.  The shipped cap is pinned by the
+    # dedicated tests in tests/unit/server/auth/test_login_throttle.py.
+    from code_indexer.server.auth import login_rate_limiter as _throttle_module
+    from code_indexer.server.auth.token_bucket import TokenBucket
+
+    _throttle_module._RESERVATION_BUCKET = TokenBucket(
+        capacity=10**9, refill_rate=10**9
+    )
 
 
 @pytest.fixture(autouse=True)

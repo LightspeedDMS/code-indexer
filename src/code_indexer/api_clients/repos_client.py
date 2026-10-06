@@ -176,12 +176,20 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 # status for) omits the field.
                 mapped_repositories = []
                 for repo_data in repositories_data:
+                    # An activation whose source repositories the caller lost
+                    # access to is listed by alias only (every other field
+                    # empty or null) so it can still be found and deactivated.
+                    revoked = bool(repo_data.get("access_revoked"))
                     mapped_repo = ActivatedRepository(
                         alias=repo_data["user_alias"],
-                        current_branch=repo_data["current_branch"],
-                        sync_status=repo_data.get("sync_status") or "unknown",
-                        last_sync=repo_data.get("last_accessed", ""),
-                        activation_date=repo_data.get("activated_at", ""),
+                        current_branch=repo_data["current_branch"] or "",
+                        sync_status=(
+                            "access_revoked"
+                            if revoked
+                            else repo_data.get("sync_status") or "unknown"
+                        ),
+                        last_sync=repo_data.get("last_accessed") or "",
+                        activation_date=repo_data.get("activated_at") or "",
                         # The dedicated GET .../sync-status routes (per-repo
                         # and bulk) DO return real conflict_details text
                         # (compute_sync_status computes it); this bulk LIST

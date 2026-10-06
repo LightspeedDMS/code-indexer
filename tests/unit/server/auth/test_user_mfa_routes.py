@@ -7,7 +7,9 @@ never accept a target_user parameter.
 """
 
 import os
+import re
 import tempfile
+from unittest.mock import patch
 
 import pyotp
 import pytest
@@ -122,8 +124,8 @@ def test_user_mfa_disable_requires_auth(client):
 
 
 def test_user_mfa_recovery_requires_auth(client):
-    """GET /user/mfa/recovery-codes without session redirects to /login."""
-    resp = client.get("/user/mfa/recovery-codes")
+    """POST /user/mfa/recovery-codes without session redirects to /login."""
+    resp = client.post("/user/mfa/recovery-codes")
     assert resp.status_code == 303
     assert resp.headers["location"] == "/login"
 
@@ -269,7 +271,10 @@ def test_user_mfa_disable_with_valid_code(client, totp_service):
 
 
 def test_user_mfa_recovery_codes_page(client, totp_service):
-    """GET /user/mfa/recovery-codes returns codes with done link to /user/api-keys."""
+    """POST /user/mfa/recovery-codes returns codes with done link to /user/api-keys.
+
+    Elevation enforcement is pinned off, so the gate passes through.
+    """
     username = "regularuser"
     cookie_val = _create_user_session_cookie(username, "user")
     totp_service.generate_secret(username)
@@ -277,10 +282,19 @@ def test_user_mfa_recovery_codes_page(client, totp_service):
     code = pyotp.TOTP(secret).now()
     totp_service.activate_mfa(username, code)
 
-    resp = client.get(
-        "/user/mfa/recovery-codes",
-        cookies={"session": cookie_val},
-    )
+    page = client.get("/user/mfa/recovery-codes", cookies={"session": cookie_val})
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+    assert token is not None, page.text
+    with patch(
+        "code_indexer.server.auth.dependencies._is_elevation_enforcement_enabled",
+        return_value=False,
+    ):
+        resp = client.post(
+            "/user/mfa/recovery-codes",
+            data={"csrf_token": token.group(1)},
+            cookies={"session": cookie_val},
+        )
     assert resp.status_code == 200
-    assert "recovery codes" in resp.text.lower()
+    codes = re.findall(r"[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}", resp.text)
+    assert len(codes) == 10
     assert "href='/user/api-keys'" in resp.text

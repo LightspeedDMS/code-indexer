@@ -220,7 +220,13 @@ def _actor_view(row: CanonicalAuditRow) -> Dict[str, Any]:
         kind = "not_system"
     else:
         kind = "human"
-    return {"name": row.admin_id, "kind": kind}
+    # During MCP impersonation the actor is the administrator and this is
+    # the impersonated user (the subject); None otherwise.
+    return {
+        "name": row.admin_id,
+        "kind": kind,
+        "impersonated_user": row.impersonated_user,
+    }
 
 
 def _details_view(raw: Optional[str]) -> Dict[str, Any]:

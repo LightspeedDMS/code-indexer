@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any, List, Optional, Set, Dict, cast
 
-from .primitives import QueryResult, SCIPQueryEngine
+from .primitives import QueryResult, SCIPIndexOutsideRepositoryError, SCIPQueryEngine
 from .backends import CallChain as BackendCallChain
 from ..database.queries import QueryTimeoutError
 
@@ -231,21 +231,55 @@ class SmartContextResult:
     avg_relevance: float
 
 
-def _find_target_definition(symbol: str, scip_dir: Path) -> Optional[QueryResult]:
-    """Find the definition location for the target symbol."""
+def _warn_refused_indexes(refused: int, scip_dir: Path) -> None:
+    """Log ONE WARNING per query call for index files refused because they
+    do not resolve inside their own repository (never one per file)."""
+    if refused:
+        logger.warning(
+            "Skipped %d SCIP index file(s) under %s that do not resolve "
+            "inside their repository",
+            refused,
+            scip_dir,
+        )
+
+
+def _index_files(scip_dir: Path, scip_files: Optional[List[Path]]) -> List[Path]:
+    """The index files a composite query searches: exactly ``scip_files``
+    when the caller supplies them (a server caller passes only the indexes
+    of repositories the user may access), else every ``.scip.db`` under
+    ``scip_dir``."""
+    if scip_files is not None:
+        return list(scip_files)
     # CRITICAL: .scip protobuf files are DELETED after database conversion
     # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    return list(scip_dir.glob("**/*.scip.db"))
 
+
+def _find_target_definition(
+    symbol: str,
+    scip_dir: Path,
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
+) -> Optional[QueryResult]:
+    """Find the definition location for the target symbol."""
+    scip_files = _index_files(scip_dir, scip_files)
+
+    found: Optional[QueryResult] = None
+    refused = 0
     for scip_file in scip_files:
         # Skip empty database files (size == 0)
         if scip_file.stat().st_size == 0:
             continue
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(
+                scip_file, confine_to_repo_root=confine_to_repo_root
+            )
             definitions = engine.find_definition(symbol, exact=False)
             if definitions:
-                return definitions[0]
+                found = definitions[0]
+                break
+        except SCIPIndexOutsideRepositoryError:
+            refused += 1
         except (FileNotFoundError, KeyError) as e:
             logger.debug(f"No definition in {scip_file}: {e}")
         except sqlite3.OperationalError as e:
@@ -253,7 +287,8 @@ def _find_target_definition(symbol: str, scip_dir: Path) -> Optional[QueryResult
         except Exception as e:
             logger.error(f"Error searching {scip_file}: {e}")
 
-    return None
+    _warn_refused_indexes(refused, scip_dir)
+    return found
 
 
 def _bfs_traverse_dependents(
@@ -264,6 +299,8 @@ def _bfs_traverse_dependents(
     exclude: Optional[str],
     include: Optional[str],
     kind: Optional[str],
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> List[AffectedSymbol]:
     """Find all affected symbols using database transitive query.
 
@@ -272,18 +309,19 @@ def _bfs_traverse_dependents(
     the need for Python BFS traversal (256-567x faster).
     """
     affected_symbols: List[AffectedSymbol] = []
-    # CRITICAL: .scip protobuf files are DELETED after database conversion
-    # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    scip_files = _index_files(scip_dir, scip_files)
 
     # Query all SCIP files for transitive dependents
     # Database CTE handles the traversal, returning all dependents with depth info
+    refused = 0
     for scip_file in scip_files:
         # Skip empty database files (size == 0)
         if scip_file.stat().st_size == 0:
             continue
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(
+                scip_file, confine_to_repo_root=confine_to_repo_root
+            )
 
             # Single call to get ALL transitive dependents up to specified depth
             # Database CTE does the traversal - no Python BFS needed
@@ -322,6 +360,8 @@ def _bfs_traverse_dependents(
                 )
                 affected_symbols.append(affected)
 
+        except SCIPIndexOutsideRepositoryError:
+            refused += 1
         except (FileNotFoundError, KeyError) as e:
             logger.debug(f"No dependents in {scip_file} for {symbol}: {e}")
         except sqlite3.OperationalError as e:
@@ -329,6 +369,7 @@ def _bfs_traverse_dependents(
         except Exception as e:
             logger.error(f"Error querying {scip_file} for {symbol}: {e}")
 
+    _warn_refused_indexes(refused, scip_dir)
     return affected_symbols
 
 
@@ -401,6 +442,8 @@ def analyze_impact(
     exclude: Optional[str] = None,
     include: Optional[str] = None,
     kind: Optional[str] = None,
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> ImpactAnalysisResult:
     """
     Analyze impact of changes to a symbol.
@@ -415,6 +458,12 @@ def analyze_impact(
         exclude: Exclude pattern (e.g., "*/tests/*")
         include: Include pattern
         kind: Filter by symbol kind
+        confine_to_repo_root: True (default) skips index files that do not
+            resolve inside their own repository; the local CLI passes False
+            (see SCIPQueryEngine).
+        scip_files: When given, exactly these index files are searched and
+            ``scip_dir`` is not globbed (server callers pass only the indexes
+            of repositories the user may access).
 
     Returns:
         ImpactAnalysisResult with affected symbols and file summary
@@ -442,7 +491,12 @@ def analyze_impact(
         depth = MAX_TRAVERSAL_DEPTH
 
     # Find target definition
-    target_location = _find_target_definition(symbol, scip_dir)
+    target_location = _find_target_definition(
+        symbol,
+        scip_dir,
+        confine_to_repo_root=confine_to_repo_root,
+        scip_files=scip_files,
+    )
 
     # Early-out: a symbol with no definition anywhere in the index cannot have
     # dependents, so skip the (expensive) BFS pass. Without this guard an
@@ -462,7 +516,15 @@ def analyze_impact(
 
     # BFS traversal to find affected symbols
     affected_symbols = _bfs_traverse_dependents(
-        symbol, scip_dir, depth, project, exclude, include, kind
+        symbol,
+        scip_dir,
+        depth,
+        project,
+        exclude,
+        include,
+        kind,
+        confine_to_repo_root=confine_to_repo_root,
+        scip_files=scip_files,
     )
 
     # Aggregate by file
@@ -606,6 +668,7 @@ def trace_call_chain(
     scip_dir: Path,
     max_depth: int = 10,
     project: Optional[str] = None,
+    confine_to_repo_root: bool = True,
 ) -> CallChainResult:
     """
     Find call chains between two symbols across all indexed projects.
@@ -616,6 +679,9 @@ def trace_call_chain(
         scip_dir: Directory containing SCIP indexes
         max_depth: Maximum chain length (default 10, max 10)
         project: Optional project filter
+        confine_to_repo_root: True (default) skips index files that do not
+            resolve inside their own repository; the local CLI passes False
+            (see SCIPQueryEngine).
 
     Returns:
         CallChainResult with found call chains and metadata
@@ -634,7 +700,9 @@ def trace_call_chain(
             continue
 
         try:
-            engine = SCIPQueryEngine(scip_file)
+            engine = SCIPQueryEngine(
+                scip_file, confine_to_repo_root=confine_to_repo_root
+            )
 
             # Find definitions for fuzzy matching
             from_defs = engine.find_definition(from_symbol, exact=False)
@@ -677,6 +745,8 @@ def get_smart_context(
     min_score: float = 0.0,
     project: Optional[str] = None,
     timeout_seconds: int = 30,
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> SmartContextResult:
     """
     Get smart context for a symbol - curated file list with relevance scoring.
@@ -692,6 +762,12 @@ def get_smart_context(
         project: Filter to specific project path
         timeout_seconds: Maximum seconds to spend on the query (default 30).
             Raises QueryTimeoutError if exceeded. Set to 0 to disable.
+        confine_to_repo_root: True (default) skips index files that do not
+            resolve inside their own repository; the local CLI passes False
+            (see SCIPQueryEngine).
+        scip_files: When given, exactly these index files are searched and
+            ``scip_dir`` is not globbed (server callers pass only the indexes
+            of repositories the user may access).
 
     Returns:
         SmartContextResult with prioritized file list
@@ -714,6 +790,8 @@ def get_smart_context(
                 limit=limit,
                 min_score=min_score,
                 project=project,
+                confine_to_repo_root=confine_to_repo_root,
+                scip_files=scip_files,
             )
         except BaseException as e:
             exc_holder[0] = e
@@ -741,6 +819,8 @@ def _get_smart_context_impl(
     limit: int = 20,
     min_score: float = 0.0,
     project: Optional[str] = None,
+    confine_to_repo_root: bool = True,
+    scip_files: Optional[List[Path]] = None,
 ) -> SmartContextResult:
     """
     Internal implementation of get_smart_context (no timeout logic).
@@ -749,9 +829,7 @@ def _get_smart_context_impl(
     can abandon this function by letting the daemon thread complete naturally
     while the caller raises QueryTimeoutError.
     """
-    # CRITICAL: .scip protobuf files are DELETED after database conversion
-    # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-    scip_files = list(scip_dir.glob("**/*.scip.db"))
+    scip_files = _index_files(scip_dir, scip_files)
 
     # Collect all related symbols with relationships
     context_data: Dict[
@@ -765,7 +843,9 @@ def _get_smart_context_impl(
             if scip_file.stat().st_size == 0:
                 continue
             try:
-                engine = SCIPQueryEngine(scip_file)
+                engine = SCIPQueryEngine(
+                    scip_file, confine_to_repo_root=confine_to_repo_root
+                )
                 definitions = engine.find_definition(symbol, exact=False)
                 for defn in definitions:
                     fp = (
@@ -789,7 +869,14 @@ def _get_smart_context_impl(
 
     # 2. Dependencies (what symbol uses - score 0.8)
     try:
-        impact_result = analyze_impact(symbol, scip_dir, depth=1, project=project)
+        impact_result = analyze_impact(
+            symbol,
+            scip_dir,
+            depth=1,
+            project=project,
+            confine_to_repo_root=confine_to_repo_root,
+            scip_files=scip_files,
+        )
         for affected in impact_result.affected_symbols:
             fp = (
                 Path(affected.file_path)
@@ -811,7 +898,9 @@ def _get_smart_context_impl(
             if scip_file.stat().st_size == 0:
                 continue
             try:
-                engine = SCIPQueryEngine(scip_file)
+                engine = SCIPQueryEngine(
+                    scip_file, confine_to_repo_root=confine_to_repo_root
+                )
                 refs = engine.find_references(symbol, exact=False)
                 for ref in refs[:10]:  # Limit to top 10 references
                     fp = (
