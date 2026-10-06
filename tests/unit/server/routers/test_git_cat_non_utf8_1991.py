@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import Mock, patch
 
 import pytest
@@ -48,13 +49,20 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
     from code_indexer.server.app import create_app
     from code_indexer.server.auth.dependencies import get_current_user
+    from tests.unit.server.routers.inline_routes_test_helpers import (
+        _access_service_admin,
+    )
 
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: ADMIN
-    return TestClient(app)
+    # The caller is an admin of a real access service, so the activated-repo
+    # guard passes; these tests pin decoding, not access control.
+    groups_db = tmp_path_factory.mktemp("access") / "groups.db"
+    with _access_service_admin(groups_db, ADMIN.username):
+        yield TestClient(app)
 
 
 def _cat(client: TestClient, repo: Path, path: str) -> str:

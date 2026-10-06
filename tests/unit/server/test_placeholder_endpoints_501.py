@@ -33,8 +33,24 @@ class TestPlaceholderEndpoints501:
         self.auth_token = token_data["access_token"]
         self.headers = {"Authorization": f"Bearer {self.auth_token}"}
 
-    def test_list_repositories_is_implemented(self):
+    def test_list_repositories_is_implemented(self, tmp_path):
         """Test /api/repos is implemented (no longer returns 501)."""
+        from code_indexer.server.services.access_filtering_service import (
+            AccessFilteringService,
+        )
+        from code_indexer.server.services.group_access_manager import (
+            GroupAccessManager,
+        )
+
+        # The listing judges the caller's activations through the access
+        # service (fails closed without one); the lifespan that installs it
+        # never runs here, so wire a real one with the caller in admins.
+        groups = GroupAccessManager(tmp_path / "groups.db")
+        admins = groups.get_group_by_name("admins")
+        assert admins is not None
+        groups.assign_user_to_group("admin", admins.id, assigned_by="test")
+        self.app.state.access_filtering_service = AccessFilteringService(groups)
+
         response = self.client.get("/api/repos", headers=self.headers)
         assert response.status_code == status.HTTP_200_OK
 

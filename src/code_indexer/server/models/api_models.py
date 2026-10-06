@@ -409,6 +409,14 @@ class ActivatedRepositorySummary(BaseModel):
     recent_activations: List[Dict[str, Any]] = Field(
         ..., description="Recently activated repositories"
     )
+    revoked_activations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Activations whose source repositories the caller no longer has "
+            "access to: user_alias and access_revoked only, so they can be "
+            "found and deactivated"
+        ),
+    )
 
 
 class AvailableRepositorySummary(BaseModel):

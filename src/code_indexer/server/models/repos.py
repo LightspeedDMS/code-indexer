@@ -177,8 +177,14 @@ class ActivatedRepositoryInfo(BaseModel):
     user_alias: str
     golden_repo_alias: Optional[str] = None  # Optional for composite repos
     current_branch: Optional[str] = None  # Optional for composite repos
-    activated_at: str
-    last_accessed: str
+    # "" only for an activation listed with access_revoked=True: released
+    # CLI clients read these as required strings, so never null.
+    activated_at: str = ""
+    last_accessed: str = ""
+    # True when the caller no longer holds grants on every golden repository
+    # this activation was created from: the entry then carries only
+    # user_alias (so its owner can find and deactivate it), never metadata.
+    access_revoked: bool = False
     # AC4: In-flight deactivation job info, null when no active deactivation
     deactivation_job: Optional[Dict[str, Any]] = None
     # Bug #1740: real sync status (synced/needs_sync/conflict), computed via

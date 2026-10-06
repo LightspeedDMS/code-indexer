@@ -50,6 +50,7 @@ from code_indexer.server.routers.git_models import (
     GitBranchDeleteResponse,
 )
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.routers import repo_access_http
 from code_indexer.utils.source_text_decoding import decode_source_bytes
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,16 @@ def _get_activated_repo_manager() -> ActivatedRepoManager:
     return manager
 
 
+def _require_activation_access(alias: str, user: User) -> None:
+    """Every route here serves the caller's own activation *alias*: require
+    the caller's grants on that activation's source golden repositories
+    (the MCP rule), refusing exactly like an alias never activated.
+    Called first in each (sync) route body, outside its broad except."""
+    repo_access_http.enforce_activated_repo_access(
+        repo_access_http.module_app_access_filtering_service(), user.username, alias
+    )
+
+
 # Every route below is gated by Depends(require_permission("...")) on its
 # `user` parameter, mirroring this route's MCP twin's `required_permission`
 # (mcp/tool_docs/git/*.md). Depends(get_current_user) alone verifies
@@ -131,6 +142,7 @@ def git_status(
     alias: str, user: User = Depends(require_permission("repository:read"))
 ) -> GitStatusResponse:
     """Get git status of the repository."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.get_status(repo_alias=alias, username=user.username)
@@ -190,6 +202,7 @@ def git_diff(
     user: User = Depends(require_permission("query_repos")),
 ) -> GitDiffResponse:
     """Get git diff of the repository."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         # Build kwargs for optional parameters
@@ -280,6 +293,7 @@ def git_log(
     user: User = Depends(require_permission("query_repos")),
 ) -> GitLogResponse:
     """Get git log of the repository."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         # Build kwargs for optional parameters
@@ -358,6 +372,7 @@ def git_stage(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitStageResponse:
     """Stage files for commit."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.stage_files(
@@ -414,6 +429,7 @@ def git_unstage(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitUnstageResponse:
     """Unstage files."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.unstage_files(
@@ -470,6 +486,7 @@ def git_commit(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitCommitResponse:
     """Create a git commit."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.create_commit(
@@ -533,6 +550,7 @@ def git_push(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitPushResponse:
     """Push commits to remote."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.push_to_remote(
@@ -594,6 +612,7 @@ def git_pull(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitPullResponse:
     """Pull commits from remote."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.pull_from_remote(
@@ -653,6 +672,7 @@ def git_fetch(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitFetchResponse:
     """Fetch from remote."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.fetch_from_remote(
@@ -714,6 +734,7 @@ def git_reset(
     user: User = Depends(require_permission("repository:admin")),
 ) -> GitResetResponse:
     """Reset repository to a specific state."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.reset_repository(
@@ -781,6 +802,7 @@ def git_clean(
     user: User = Depends(require_permission("repository:admin")),
 ) -> GitCleanResponse:
     """Clean untracked files from repository."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.clean_repository(
@@ -835,6 +857,7 @@ def git_merge_abort(
     alias: str, user: User = Depends(require_permission("repository:write"))
 ) -> GitMergeAbortResponse:
     """Abort an in-progress merge."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.abort_merge(repo_alias=alias, username=user.username)
@@ -879,6 +902,7 @@ def git_checkout_file(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitCheckoutFileResponse:
     """Restore a file to its last committed state."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.checkout_file(
@@ -926,6 +950,7 @@ def git_branch_list(
     alias: str, user: User = Depends(require_permission("repository:read"))
 ) -> GitBranchListResponse:
     """List all branches."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.list_branches(repo_alias=alias, username=user.username)
@@ -972,6 +997,7 @@ def git_branch_create(
     user: User = Depends(require_permission("repository:write")),
 ) -> GitBranchCreateResponse:
     """Create a new branch."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.create_branch(
@@ -1032,6 +1058,7 @@ def git_branch_switch(
     alias: str, name: str, user: User = Depends(require_permission("repository:write"))
 ) -> GitBranchSwitchResponse:
     """Switch to a different branch."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.switch_branch(
@@ -1088,6 +1115,7 @@ def git_branch_delete(
     user: User = Depends(require_permission("repository:admin")),
 ) -> GitBranchDeleteResponse:
     """Delete a branch."""
+    _require_activation_access(alias, user)
     try:
         service = git_operations_service
         result = service.delete_branch(
@@ -1161,6 +1189,7 @@ def git_cat(
             detail="Invalid path: must be a relative path with no traversal components",
         )
 
+    _require_activation_access(alias, user)
     try:
         repo_path = _get_activated_repo_manager().get_activated_repo_path(
             user.username, alias
@@ -1310,6 +1339,7 @@ def git_blame(
             detail="Invalid path: must be a relative path with no traversal components",
         )
 
+    _require_activation_access(alias, user)
     try:
         repo_path = _get_activated_repo_manager().get_activated_repo_path(
             user.username, alias
@@ -1445,6 +1475,7 @@ def git_file_history(
             detail="Invalid path: must be a relative path with no traversal components",
         )
 
+    _require_activation_access(alias, user)
     try:
         repo_path = _get_activated_repo_manager().get_activated_repo_path(
             user.username, alias

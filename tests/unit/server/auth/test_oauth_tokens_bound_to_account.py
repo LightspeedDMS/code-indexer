@@ -36,7 +36,24 @@ BEARER_PAGE = "/api/repos"
 @pytest.fixture(scope="module")
 def client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[TestClient]:
     """The real app over an isolated server home (never ~/.cidx-server)."""
-    with isolated_app(tmp_path_factory.mktemp("oauth-account-app")) as app:
+    from code_indexer.server.services.access_filtering_service import (
+        AccessFilteringService,
+    )
+    from code_indexer.server.services.group_access_manager import (
+        GroupAccessManager,
+    )
+
+    root = tmp_path_factory.mktemp("oauth-account-app")
+    with isolated_app(root) as app:
+        # The Bearer probe (GET /api/repos) judges the caller's activations
+        # through the access service and fails closed without one; the
+        # lifespan that installs it never runs here. A real one over its own
+        # group store and the app's activated repo manager: the accounts
+        # these tests create are ordinary (non-admin) members.
+        app.state.access_filtering_service = AccessFilteringService(
+            GroupAccessManager(root / "groups.db"),
+            activated_repo_manager=app.state.activated_repo_manager,
+        )
         yield TestClient(app, follow_redirects=False)
 
 
