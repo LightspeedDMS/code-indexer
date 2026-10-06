@@ -112,7 +112,13 @@ class GitCredentialHelper:
         # HTTPS/HTTP: https://host/path or http://host/path
         match = re.match(r"^https?://([^/]+)", url)
         if match:
-            return match.group(1)
+            # The authority may carry a userinfo component (user:secret@host). Return
+            # ONLY the host: the host is the credential-lookup key, so anything else
+            # here both fails to match a stored credential and travels into logs and
+            # error messages. rsplit keeps the last '@' so a userinfo containing '@'
+            # still resolves to the correct host.
+            host = match.group(1).rsplit("@", 1)[-1]
+            return host or None
 
         # SSH: ssh://git@host(:port)?/path
         match = re.match(r"^ssh://git@([^:/]+)", url)

@@ -419,3 +419,55 @@ class TestExtractHostFromRemoteUrl:
             "https://gitlab.com/group/subgroup/repo.git"
         )
         assert host == "gitlab.com"
+
+    def test_https_with_userinfo_returns_host_only(self):
+        """Returns only the host when the URL carries a userinfo component.
+
+        The host is the credential-lookup key, so an authority that still carried
+        userinfo would never match a credential stored for the host, and would travel
+        onward into logs and error messages.
+        """
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
+
+        host = GitCredentialHelper.extract_host_from_remote_url(
+            "https://user:token-value@gitlab.example.com/group/repo.git"
+        )
+        assert host == "gitlab.example.com"
+        assert "token-value" not in (host or "")
+        assert "@" not in (host or "")
+
+    def test_https_with_userinfo_containing_at_sign(self):
+        """A userinfo component may itself contain '@'; the host is still the last part."""
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
+
+        host = GitCredentialHelper.extract_host_from_remote_url(
+            "https://user:a@b@gitlab.example.com/group/repo.git"
+        )
+        assert host == "gitlab.example.com"
+
+    def test_https_with_userinfo_and_port_keeps_port(self):
+        """Port is part of the lookup key and is preserved; userinfo is not."""
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
+
+        host = GitCredentialHelper.extract_host_from_remote_url(
+            "https://user:token-value@git.example.com:8443/group/repo.git"
+        )
+        assert host == "git.example.com:8443"
+        assert "token-value" not in (host or "")
+
+    def test_https_with_only_username_userinfo(self):
+        """A userinfo with no password is stripped the same way."""
+        from code_indexer.server.services.git_credential_helper import (
+            GitCredentialHelper,
+        )
+
+        host = GitCredentialHelper.extract_host_from_remote_url(
+            "https://someuser@git.example.com/group/repo.git"
+        )
+        assert host == "git.example.com"
