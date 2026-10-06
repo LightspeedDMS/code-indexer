@@ -27,7 +27,8 @@ otherwise `healthy`:
 |-------|---------------|----------------|
 | RAM | 80 percent or more used | 90 percent or more used |
 | CPU | above 95 percent for 30 seconds | above 95 percent for 60 seconds |
-| Each mounted local volume (network and virtual filesystems such as `nfs`, `nfs4`, `cifs`, `smbfs`, `tmpfs`, `overlay` are skipped) | 80 percent or more used | 90 percent or more used |
+| Each mounted local volume (the general scan skips network and virtual filesystems such as `nfs`, `nfs4`, `cifs`, `smbfs`, `tmpfs`, `overlay`) | 80 percent or more used | 90 percent or more used |
+| Cluster mode only: the NFS mount that holds the golden-repos directory, reported as `Golden Repos (NFS)` | 80 percent or more used | 90 percent or more used |
 | `storage` service: the filesystem holding the server data directory (`server_dir`) | 80 percent or more used | 90 percent or more used |
 | Database connectivity (SQLite, or PostgreSQL in cluster mode) | response 1 to 5 seconds | response over 5 seconds, or connection failure |
 | Server databases (per-database checks) | a database reports a warning | a database reports an error |
@@ -41,9 +42,10 @@ The RAM, CPU and disk percentages above are defaults. They come from the runtime
 Health Check Thresholds section. The health service reads them when it is created, so a change applies after the
 next server restart.
 
-Because network filesystems are skipped, a full NFS-mounted `/mnt/cow-storage` never degrades health on an NFS
-client node; watch free space on the CoW daemon host itself. If that host also runs cidx-server, its health checks
-cover that storage, because there it is a local or bind-mounted filesystem.
+In cluster mode the server detects the `nfs`/`nfs4` mount that contains the golden-repos directory at startup and
+checks its usage like a local volume, so a full shared `/mnt/cow-storage` degrades health on NFS client nodes. A
+standalone server does not add that check. On the CoW daemon host the storage is a local or bind-mounted filesystem,
+covered by the general volume scan if that host also runs cidx-server.
 
 `unhealthy` drains the node from a load balancer that probes `/healthz`. Note that sustained RAM use at or above the
 critical threshold (90 percent by default) is enough for that.
