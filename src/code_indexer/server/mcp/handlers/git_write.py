@@ -14,6 +14,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from . import _utils
+from ._git_seam import remote_get_url as _remote_get_url
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.telemetry.correlation_bridge import (
@@ -153,16 +155,12 @@ def _get_pat_credential_for_remote(
         (credential, remote_url, error_msg) tuple.
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
-    from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
 
     remote_url = ""
     try:
-        url_result = _run_git_cmd(
-            ["git", "remote", "get-url", remote],
-            cwd=Path(repo_path),
-            check=True,
+        remote_url = _remote_get_url(
+            str(repo_path), remote, app_module=_utils.app_module
         )
-        remote_url = url_result.stdout.strip()
     except Exception as e:
         logger.warning(f"Failed to get remote URL for '{remote}': {e}")
         return None, None, f"Failed to get remote URL for '{remote}': {e}"

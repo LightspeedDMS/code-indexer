@@ -13,7 +13,6 @@ Stories: #390, #446, #447, #448, #449, #450, #451, #452.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Dict
 
 from code_indexer.server.auth.user_manager import User
@@ -22,7 +21,9 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 
+from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
+from ._git_seam import remote_get_url as _remote_get_url
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,6 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
         from code_indexer.server.clients.forge_client import (
             detect_forge_type,
             extract_owner_repo,
@@ -131,11 +131,7 @@ def create_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type (AC3)
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -261,8 +257,6 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -284,11 +278,7 @@ def list_pull_requests(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -414,8 +404,6 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -437,11 +425,7 @@ def get_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get remote URL to detect forge type
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -563,8 +547,6 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -586,11 +568,7 @@ def list_pull_request_comments(args: Dict[str, Any], user: User) -> Dict[str, An
 
         # Get remote URL to detect forge type
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -727,8 +705,6 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -747,11 +723,7 @@ def comment_on_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -895,8 +867,6 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -915,11 +885,7 @@ def update_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             logger.warning(
                 format_error_log(
@@ -1048,8 +1014,6 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -1068,11 +1032,7 @@ def merge_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             return _mcp_response(
                 {"success": False, "error": f"Failed to get remote URL: {e}"}
@@ -1189,8 +1149,6 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-
         leg = _get_legacy()
         _resolve_git_repo_path = leg._resolve_git_repo_path
         _get_pat_credential_for_remote = leg._get_pat_credential_for_remote
@@ -1209,11 +1167,7 @@ def close_pull_request(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         token = credential["token"]
 
         try:
-            url_result = _run_git_cmd(
-                ["git", "remote", "get-url", "origin"],
-                cwd=Path(repo_path),
-            )
-            remote_url = url_result.stdout.strip()
+            remote_url = _remote_get_url(str(repo_path), app_module=_utils.app_module)
         except Exception as e:
             return _mcp_response(
                 {"success": False, "error": f"Failed to get remote URL: {e}"}
