@@ -1,623 +1,295 @@
-# CoW Storage Daemon Setup for CIDX Clusters
+# CoW Storage Daemon Setup
 
-This guide covers configuring a CIDX Server cluster to use the CoW Storage Daemon as its shared storage backend. The CoW daemon provides FlexClone-equivalent functionality using filesystem-level Copy-on-Write (reflinks), replacing the ONTAP/FSx dependency for non-production environments.
+This guide configures CIDX cluster nodes to use the CoW Storage Daemon (`clone_backend: cow-daemon`) as shared
+storage. The daemon runs on one host with a reflink-capable filesystem, creates copy-on-write clones through a
+REST API, and exports its storage over NFS so every CIDX node sees the same files.
 
-For general cluster setup (PostgreSQL, HAProxy, node joining), see [Cluster Setup Guide](cluster-setup.md). For the architecture explanation, see [Cluster Architecture Guide](../architecture/cluster.md).
+General cluster procedure (PostgreSQL, node identity, load balancer): [Cluster Setup](cluster-setup.md).
+Architecture: [Cluster Architecture](../architecture/cluster.md).
 
----
+## Storage layout
 
-## Architecture Overview
-
-The CoW Storage Daemon runs on a single host with a reflink-capable filesystem (XFS or btrfs). It exposes a REST API for clone lifecycle management (create, delete, list, inspect). NFS exports the storage directory so that all cluster nodes can read clone contents at the filesystem level.
+This is the only layout the installer (`scripts/install-cidx-server.sh`) creates and the auto-updater
+(`DeploymentExecutor` in `src/code_indexer/server/auto_update/deployment_executor.py`) maintains:
 
 ```
-                            +---------------------------+
-                            |   CoW Daemon Host         |
-                            |                           |
-                            |  cow-storage-daemon:8081  |
-                            |  (REST API for cloning)   |
-                            |                           |
-                            |  /srv/cow-storage/        |
-                            |  (XFS reflink=1)          |
-                            |  NFS-exported             |
-                            +-----------+---------------+
-                                        |
-                       NFS mount: /mnt/cow-storage
-                                        |
-              +-------------------------+-------------------------+
-              |                         |                         |
-   +----------+----------+  +----------+----------+  +-----------+---------+
-   |  CIDX Node 1        |  |  CIDX Node 2        |  |  CIDX Node 3        |
-   |  clone_backend:      |  |  clone_backend:      |  |  clone_backend:      |
-   |    "cow-daemon"      |  |    "cow-daemon"      |  |    "cow-daemon"      |
-   |  mount: /mnt/cow-    |  |  mount: /mnt/cow-    |  |  mount: /mnt/cow-    |
-   |    storage           |  |    storage           |  |    storage           |
-   +----------------------+  +----------------------+  +----------------------+
+CoW daemon host
+  <base_path>/                 reflink-capable filesystem (XFS reflink=1 or btrfs), NFS-exported
+    golden-repos/              golden repository clones and indexes
+    activated-repos/           per-user activations
+    cidx/ ...                  clones the daemon creates (namespaces)
+
+Every CIDX node
+  /mnt/cow-storage             ONE mount of <base_path>:
+                                 - NFS client nodes: nfs, _netdev,vers=3,nolock,soft,timeo=30,retrans=3
+                                 - the daemon host, if it also runs CIDX: bind mount of <base_path>
+  ~/.cidx-server/data/golden-repos     -> /mnt/cow-storage/golden-repos     (symlink)
+  ~/.cidx-server/data/activated-repos  -> /mnt/cow-storage/activated-repos  (symlink)
 ```
 
-**Two channels**: CIDX nodes send clone create/delete requests to the daemon's REST API. They read clone file contents via NFS from the shared mount point.
+Rules that follow from the code:
 
-**Clone path resolution**: The daemon returns relative paths (e.g., `cidx/my-clone`). CIDX prepends the NFS mount point to get the absolute filesystem path (`/mnt/cow-storage/cidx/my-clone`).
+- **There is one shared mount per node.** Golden repositories are not mounted separately. The server derives the
+  golden-repos directory as `<server_dir>/data/golden-repos` with no setting to move it, so that path must be a
+  symlink into the CoW mount.
+- **Golden repositories and activations must live on the daemon's filesystem.** Per-user activation asks the
+  daemon to `cp --reflink` a golden repository into `activated-repos/<user>/`; reflink requires source and target on
+  the same filesystem. `CowDaemonBackend._translate_to_daemon_path` resolves each path with `os.path.realpath()`
+  and accepts it only under `cow_daemon.mount_point` or `cow_daemon.daemon_storage_path`. A directory that is
+  itself a mount point (a bind or NFS mount placed directly at `~/.cidx-server/data/golden-repos`) resolves to its
+  own path and fails with `... cannot translate to daemon view`.
+- **Symlinks always target the `mount_point` form**, on every node including the daemon host
+  (`_resolve_golden_repos_symlink_target`, installer `_resolve_cow_symlink_target`).
+- **NFS is version 3 with `nolock`.** The installer writes `vers=3,nolock`; the auto-updater's
+  `_ensure_cow_storage_mount_options()` rewrites any `/etc/fstab` entry for `cow_daemon.mount_point` that lacks
+  them (it changes the type to `nfs` and replaces any `vers=` option). NFSv4 is not supported: it handles locking
+  inside the protocol, so `nolock` has no effect there.
+- **The mount is `soft,timeo=30,retrans=3`.** That is what the installer sets (`add_fstab_entry`,
+  `setup_nfs_mount`). The auto-updater's rewrite keeps whatever `soft`/`hard` option the entry already has. A
+  `soft` mount returns an I/O error after its retries instead of blocking a process indefinitely when the daemon
+  host is unreachable.
 
-**Golden repos live on the same shared disk**: In this dev model the cow-storage-daemon host acts as the shared disk -- an ONTAP-like emulator for development. Both cow-daemon clones AND golden repositories live on it. The server hard-codes the golden-repos directory as `<server_dir>/data/golden-repos` (`src/code_indexer/server/startup/lifespan.py:134`); it is not independently configurable, so on every node that path must resolve to this shared storage. See [Golden Repos on the Shared Mount](#golden-repos-on-the-shared-mount) below. The single cow-storage host is therefore a single point of failure -- acceptable for development installs only. If it goes down, the cluster loses its shared storage and is effectively down.
-
----
+The daemon host is a single point of failure: when it is down, every node loses golden repositories and
+activations. `/healthz` on each node then reports `unhealthy` (HTTP 503) through its golden-repos readability
+probe (see [Observability](observability.md)).
 
 ## Prerequisites
 
-### Daemon Host
+Daemon host:
 
-- Linux with a **reflink-capable filesystem**: XFS formatted with `reflink=1`, or btrfs. The daemon hard-fails at startup if reflink is not supported -- no fallback.
-- Python 3.9+
-- Sufficient disk space for golden repo clones (each clone initially shares blocks with the source via reflink; disk usage grows only as files are modified)
+- A reflink-capable filesystem for `base_path`. Check:
 
-Verify reflink support:
+  ```bash
+  echo test > /srv/cow-storage/.reflink-src
+  cp --reflink=always /srv/cow-storage/.reflink-src /srv/cow-storage/.reflink-dst && echo SUPPORTED
+  rm -f /srv/cow-storage/.reflink-src /srv/cow-storage/.reflink-dst
+  xfs_info /srv/cow-storage | grep reflink    # XFS: expect reflink=1
+  ```
 
-```bash
-echo test > /tmp/reflink-src
-cp --reflink=always /tmp/reflink-src /tmp/reflink-dst && echo "SUPPORTED" || echo "NOT SUPPORTED"
-rm -f /tmp/reflink-src /tmp/reflink-dst
-```
+- An NFS server, and the firewall open from the CIDX nodes for NFS (2049, plus rpcbind 111 and mountd for NFSv3)
+  and the daemon API port (default 8081).
 
-For XFS, verify the filesystem was formatted with reflink:
+CIDX nodes: NFS client packages (the installer installs `nfs-utils` or `nfs-common`) and network access to the
+daemon host on those ports.
 
-```bash
-xfs_info /srv/cow-storage | grep reflink
-# Expected: reflink=1
-```
+## Step 1: Install the daemon
 
-### CIDX Cluster Nodes
-
-- A working CIDX Server cluster (see [Cluster Setup Guide](cluster-setup.md) for PostgreSQL, HAProxy, and node setup)
-- NFS client packages (`nfs-utils` on Rocky/RHEL, `nfs-common` on Ubuntu)
-- Network connectivity to the daemon host on ports 8081 (REST API) and 2049 (NFS)
-
----
-
-## Step 1: Install the CoW Storage Daemon
-
-On the host that will run the daemon (must have a reflink-capable filesystem):
+The daemon lives in its own repository (cow-storage-daemon). On the daemon host:
 
 ```bash
-# Clone the cow-storage-daemon repository
-git clone <cow-storage-daemon-repo-url> cow-storage-daemon
+git clone <cow-storage-daemon repository URL> cow-storage-daemon
 cd cow-storage-daemon
-
-# Run the production installer
-./scripts/install-cow-daemon.sh --storage-path /srv/cow-storage [--port 8081] [--api-key YOUR_KEY]
+./scripts/install-cow-daemon.sh --storage-path /srv/cow-storage --service-group <cidx service user's primary group>
 ```
 
-The installer:
+The installer also accepts `--port` (default 8081), `--api-key` (generated when omitted) and `--dry-run`. It
+writes `/etc/cow-storage-daemon/config.json` and a `cow-storage-daemon` systemd unit.
 
-1. Validates reflink support on the storage filesystem
-2. Installs system packages (python3, pip)
-3. Installs Python dependencies from the repository
-4. Generates an API key if not provided (save this -- shown only once)
-5. Creates `/etc/cow-storage-daemon/config.json`
-6. Creates and enables a systemd service (`cow-storage-daemon`)
-7. Starts the daemon and validates health
-8. Prints NFS export instructions
+Daemon configuration fields (`DaemonConfig`): `base_path` (required), `api_key` (required), `db_path` (default
+`<base_path>/.cow-daemon.db`), `health_requires_auth` (default `false`), `allowed_source_roots` (default empty,
+meaning any source path); the daemon also reads `port` (default 8081), `host`, and `service_group`. Environment
+variables with the `COW_DAEMON_` prefix override the file.
 
-The script is idempotent and supports Rocky Linux, RHEL, and Ubuntu.
-
-### Verify Installation
+Verify:
 
 ```bash
-# Service status
 sudo systemctl status cow-storage-daemon
-
-# Health check
-curl http://localhost:8081/api/v1/health
+curl -s http://localhost:8081/api/v1/health
 ```
 
-Expected health response:
+The health response carries `status`, `version`, `filesystem_type`, `cow_method`, disk usage and `uptime_seconds`.
+CIDX refuses to start against a daemon whose reported `version` is missing or older than `0.2.0`.
 
-```json
-{
-  "status": "healthy",
-  "filesystem_type": "xfs",
-  "cow_method": "reflink",
-  "disk_total_bytes": 319026491392,
-  "disk_used_bytes": 143545552896,
-  "disk_available_bytes": 175480938496,
-  "uptime_seconds": 42.5
-}
-```
+### Service group
 
-### Daemon Configuration
+Two OS users write into each per-user directory `activated-repos/<user>/`: cidx-server (creates it, mode `2775`,
+group = the service user's primary group) and the daemon (creates and removes the clone `<user>/<alias>` through
+group permissions). Therefore:
 
-The installer creates `/etc/cow-storage-daemon/config.json`:
+- The daemon's `service_group` must be exactly the cidx service user's primary group.
+- The daemon's OS user must be a member of that group, and the running daemon must have started after the
+  membership existed.
 
-```json
-{
-    "base_path": "/srv/cow-storage",
-    "port": 8081,
-    "api_key": "your-api-key",
-    "health_requires_auth": false,
-    "allowed_source_roots": []
-}
-```
+On the daemon host (the node where `/etc/cow-storage-daemon/config.json` exists), both the installer
+(`ensure_cow_daemon_service_group_membership`) and the auto-updater (`_ensure_cow_daemon_user_in_service_group`)
+add the daemon user to the group when missing and restart `cow-storage-daemon` when its running process lacks the
+group. The installer stops with an error on an unreadable config, a missing or unknown `service_group`, or a group
+that differs from the service user's primary group; the auto-updater logs an ERROR and skips. On every other node
+the step does nothing.
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `base_path` | Yes | -- | Root directory for clone storage. Must be on a reflink-capable filesystem. |
-| `api_key` | Yes | -- | Bearer token for API authentication. Restart daemon to change. |
-| `port` | No | `8081` | TCP port to listen on. |
-| `host` | No | `0.0.0.0` | Bind address. |
-| `db_path` | No | `{base_path}/.cow-daemon.db` | Path to SQLite metadata database. |
-| `health_requires_auth` | No | `false` | When `false`, `/api/v1/health` is unauthenticated (for load balancer probes). |
-| `allowed_source_roots` | No | `[]` (allow all) | List of directory prefixes that clone source paths must be under. Empty allows any source. |
+## Step 2: Export the storage over NFS
 
-Settings can also be set via environment variables with the `COW_DAEMON_` prefix (e.g., `COW_DAEMON_BASE_PATH`), but the config file is recommended.
-
-### Restricting Source Roots (Production)
-
-For production clusters, restrict which directories can be cloned by setting `allowed_source_roots` to the golden repo base directory:
-
-```json
-{
-    "base_path": "/srv/cow-storage",
-    "api_key": "your-api-key",
-    "allowed_source_roots": ["/home/cidx/.cidx-server/data/golden-repos"]
-}
-```
-
-Clone requests with a `source_path` not under any listed root will be rejected with HTTP 400 `PATH_NOT_ALLOWED`.
-
-### Daemon User and the Service Group
-
-Two OS users write into each per-user activation directory `activated-repos/<user>/`:
-
-| Actor | Runs as | Needs on `activated-repos/<user>/` | Why |
-|-------|---------|-------------------------------------|-----|
-| cidx-server | the service user | owner rwx | creates the directory, writes `<alias>_metadata.json` |
-| CoW daemon | its own OS user (the `User=` of the `cow-storage-daemon` unit) | write + search via the group | creates the clone `<user>/<alias>` (REST `POST /api/v1/clones`) and removes it on deactivation |
-
-cidx-server creates the directory with an explicit mode `2775` (owner rwx, group rwx plus setgid, others r-x; never world-writable) and sets its group to the service user's primary group, independent of the process umask and of any setgid parent. The daemon reaches it through its configured `service_group`, so:
-
-- `service_group` must be exactly the cidx service user's primary group (the group every new user directory carries; a supplementary group is not enough). Nothing sets this automatically: the daemon's own installer takes `--service-group` from the operator. A mismatch is reported loudly by both tools below, naming both groups.
-- The daemon's OS user must be a member of `service_group`, and the running daemon must have been started after the membership existed (supplementary groups are fixed at process start).
-
-The daemon user is taken from the unit's `User=` (falling back to the running daemon's real uid) and must be an existing, non-root account with a conservative name; if it cannot be determined safely, the step logs an ERROR and makes no change. Automation runs on the daemon host (the node where `/etc/cow-storage-daemon/config.json` exists); every other node is a no-op:
-
-- Fresh install: `scripts/install-cidx-server.sh` (`ensure_cow_daemon_service_group_membership`, cow-daemon backend only) runs `usermod -aG <service_group> <daemon-user>` when the membership is missing, and restarts `cow-storage-daemon` when the running daemon does not carry the group's gid. It fails loudly on an unreadable config, a missing or unknown `service_group`, or a group mismatch.
-- Already-deployed hosts: the auto-updater (`DeploymentExecutor._ensure_cow_daemon_user_in_service_group`) applies the same checks and changes, logging an ERROR and skipping on any problem (including a daemon config that exists but cannot be read or stat-ed). After one convergence it is a read-only check.
-
-Per-user directories created by an older server (mode `0755`, or a group other than the service user's primary group) are repaired to `2775` with the primary group the next time the server touches them, for example on the next activation attempt for that user. Directories owned by another user are left as they are.
-
----
-
-## Step 2: Configure NFS
-
-NFS provides filesystem-level access to clone contents. The daemon creates clones via its REST API; NFS makes the resulting directories visible to all cluster nodes.
-
-### Server Side (Daemon Host)
-
-**Install NFS server:**
+On the daemon host, export `base_path` to the cluster subnet (example uses the RFC 5737 documentation range):
 
 ```bash
-# Rocky Linux / RHEL
-sudo dnf install -y nfs-utils
-sudo systemctl enable --now nfs-server
-
-# Ubuntu / Debian
-sudo apt install -y nfs-kernel-server
-sudo systemctl enable --now nfs-kernel-server
-```
-
-**Export the storage directory:**
-
-```bash
-# Development/test -- open to all (async: see note below)
-echo '/srv/cow-storage  *(rw,async,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
-
-# Development -- restrict to cluster subnet (still async)
-echo '/srv/cow-storage  10.0.0.0/24(rw,async,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
-
-# Apply and verify
+echo '/srv/cow-storage  192.0.2.0/24(rw,async,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
 sudo exportfs -ra
 showmount -e localhost
 ```
 
-**Use `async`, not `sync`, for dev clusters**: `sync` forces a server-side commit on every write, which makes golden-repo indexing pathologically slow (measured ~65x slower). `async` acknowledges writes before they reach stable storage. This is acceptable for dev-only installs, where the single cow-storage host is already a single point of failure (if it goes down the cluster is lost). Do not use `async` where write durability matters.
+`async` acknowledges writes before they reach stable storage. It makes indexing over NFS much faster than `sync`
+and is acceptable only where losing the last writes on a daemon-host crash is acceptable.
 
-**Open firewall ports:**
+## Step 3: Install each CIDX node
 
-| Port | Protocol | Service |
-|------|----------|---------|
-| 2049 | TCP/UDP | NFS |
-| 111 | TCP/UDP | rpcbind |
-| 8081 | TCP | Daemon REST API |
+Run the installer in cluster mode with the cow-daemon backend. It mounts the storage, creates both symlinks, and
+writes the `cow_daemon` section of `config.json`. Preview with `--dry-run` first.
 
-```bash
-# firewalld (Rocky/RHEL)
-sudo firewall-cmd --permanent --add-service=nfs
-sudo firewall-cmd --permanent --add-service=rpc-bind
-sudo firewall-cmd --permanent --add-service=mountd
-sudo firewall-cmd --permanent --add-port=8081/tcp
-sudo firewall-cmd --reload
-
-# ufw (Ubuntu)
-sudo ufw allow from 10.0.0.0/24 to any port nfs
-sudo ufw allow from 10.0.0.0/24 to any port 111
-sudo ufw allow from 10.0.0.0/24 to any port 8081
-```
-
-### Client Side (Remote CIDX Nodes)
-
-Every CIDX node that is NOT the daemon host needs an NFS mount:
+NFS client node:
 
 ```bash
-# Install NFS client
-sudo dnf install -y nfs-utils     # Rocky/RHEL
-sudo apt install -y nfs-common    # Ubuntu
-
-# Create mount point and mount
-sudo mkdir -p /mnt/cow-storage
-sudo mount -t nfs -o vers=3,nolock cow-host:/srv/cow-storage /mnt/cow-storage
-
-# Persist in fstab
-echo 'cow-host:/srv/cow-storage  /mnt/cow-storage  nfs  vers=3,nolock,_netdev  0  0' | sudo tee -a /etc/fstab
+bash scripts/install-cidx-server.sh \
+  --branch master \
+  --node-id node-2 \
+  --postgres-dsn "postgresql://cidx:<password>@192.0.2.10:5432/cidx_server" \
+  --clone-backend cow-daemon \
+  --cow-daemon-url "http://192.0.2.20:8081" \
+  --cow-daemon-api-key <daemon api key> \
+  --nfs-server 192.0.2.20 \
+  --nfs-export /srv/cow-storage \
+  --cow-daemon-storage-path /srv/cow-storage
 ```
 
-Replace `cow-host` with the hostname or IP of the daemon host.
+Pass `--cow-daemon-storage-path` on every node, including the daemon host. It sets
+`cow_daemon.daemon_storage_path`, the daemon's own `base_path`, which every clone request uses to translate a
+`/mnt/cow-storage/...` path into the daemon's local path. Without the flag the installer falls back to the
+`CIDX_COW_DAEMON_STORAGE_PATH` environment variable, then to the `base_path` in
+`/etc/cow-storage-daemon/config.json`. That file exists only on the daemon host, and the daemon installer writes it
+mode 600 for the daemon's own user, so it is used only when the cidx-server user can read it. When nothing
+resolves the field stays unset (the installer prints a WARNING) and every CoW clone fails. The auto-updater
+resolves the value from the same two sources, so it cannot repair such a node unless `CIDX_COW_DAEMON_STORAGE_PATH`
+is set in the `cidx-auto-update` unit's environment.
 
-**Verify:**
+The daemon host, if it also runs CIDX (it cannot NFS-mount its own export), adds `--cow-local-bind`; `--nfs-export`
+is then the local source directory and `--nfs-server` is not needed. Keep `--cow-daemon-storage-path` there too.
+
+`--nfs-mount` changes the mount point (default `/mnt/cow-storage`).
+
+What the installer does for the storage:
+
+1. Mounts the storage and adds the `/etc/fstab` line, then proves the mount is writable with a write/read/remove
+   probe (and stops if it is not). On an NFS client node:
+
+   ```
+   192.0.2.20:/srv/cow-storage /mnt/cow-storage nfs _netdev,vers=3,nolock,soft,timeo=30,retrans=3 0 0
+   ```
+
+   With `--cow-local-bind` it is a bind mount instead (see
+   [Bind Mount on the Daemon Host](#bind-mount-on-the-daemon-host)).
+
+2. Creates the symlinks `~/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos` and
+   `~/.cidx-server/data/activated-repos -> /mnt/cow-storage/activated-repos`. An empty existing directory is
+   replaced; a non-empty one is moved to `<dir>.legacy.bug1337` (golden-repos) or `<dir>.legacy.bug1052`
+   (activated-repos) and the symlink is created, with rollback if that fails; a symlink to another target is
+   re-pointed. Other nodes that already migrated into the same shared directory are not affected.
+
+3. Writes `config.json` (merged into any existing file, which is backed up first, mode 600):
+
+   ```json
+   {
+     "host": "0.0.0.0",
+     "port": 8000,
+     "log_level": "INFO",
+     "storage_mode": "postgres",
+     "postgres_dsn": "postgresql://cidx:<password>@192.0.2.10:5432/cidx_server",
+     "workers": 1,
+     "cluster": { "node_id": "node-2" },
+     "clone_backend": "cow-daemon",
+     "cow_daemon": {
+       "daemon_url": "http://192.0.2.20:8081",
+       "api_key": "<daemon api key>",
+       "mount_point": "/mnt/cow-storage",
+       "poll_interval_seconds": 2,
+       "timeout_seconds": 600,
+       "daemon_storage_path": "/srv/cow-storage"
+     }
+   }
+   ```
+
+   `host`, `port`, `log_level` and `workers` are first-boot seeds only; the server moves them into its runtime
+   configuration on first start (see [Deployment](deployment.md#bootstrap-configuration-configjson)).
+
+### Bind Mount on the Daemon Host
+
+A CIDX node on the daemon host cannot NFS-mount its own export. With `--cow-local-bind` the installer bind-mounts
+`--nfs-export` onto `--nfs-mount` and adds:
+
+```
+/srv/cow-storage  /mnt/cow-storage  none  bind  0  0
+```
+
+The node then sees the same files at the same `/mnt/cow-storage` path as every NFS client, and its symlinks point
+into `/mnt/cow-storage` like every other node's. `df -T /mnt/cow-storage` shows the underlying filesystem (for
+example `xfs`), not `nfs`, on that host.
+
+### Bootstrap keys
+
+`clone_backend` and `cow_daemon` are bootstrap keys: they are read at startup, and a change needs a restart. Use the
+same `daemon_url`, `api_key`, `mount_point` and `daemon_storage_path` on every node.
+
+| `cow_daemon` field | Default | Meaning |
+|--------------------|---------|---------|
+| `daemon_url` | `""` | Daemon REST base URL |
+| `api_key` | `""` | Bearer token matching the daemon's `api_key` |
+| `mount_point` | `""` | Where this node sees the daemon's storage (`/mnt/cow-storage`) |
+| `daemon_storage_path` | unset | The daemon's `base_path`; used to translate `mount_point` paths into daemon-local paths |
+| `poll_interval_seconds` | `2` | Initial poll interval while waiting for a clone job |
+| `timeout_seconds` | `600` | Overall wait for one clone job |
+| `request_timeout_seconds` | `30` | Timeout of each individual HTTP call to the daemon |
+
+Nodes installed before these steps existed are repaired by the auto-updater on its next deployment (symlinks:
+`_ensure_golden_repos_symlink_for_cow_daemon`, `_ensure_activated_repos_symlink_for_cow_daemon`; mount options:
+`_ensure_cow_storage_mount_options`). `_ensure_daemon_storage_path` fills an empty storage path only when
+`CIDX_COW_DAEMON_STORAGE_PATH` is set for the auto-updater or the daemon's config file is readable by the
+cidx-server user (daemon host only); otherwise set it yourself. See
+[Auto-Update](auto-update.md#deployment-steps).
+
+## Step 4: Verify
+
+On each node:
 
 ```bash
-df -h /mnt/cow-storage
-ls /mnt/cow-storage/
+mount | grep /mnt/cow-storage                 # nfs with vers=3,nolock,soft (or a bind mount on the daemon host)
+ls -l ~/.cidx-server/data/ | grep -- '->'     # golden-repos and activated-repos symlinks
+journalctl -u cidx-server | grep -E "CoW daemon health check|NFS mount validation"
+curl -s http://localhost:8000/healthz
 ```
 
-### Bind Mount on the Daemon Host (When CIDX Runs There Too)
+At startup with `clone_backend: cow-daemon`, the server checks:
 
-If one of the CIDX cluster nodes runs on the same machine as the CoW daemon, that node cannot NFS-mount from itself. Instead, create a bind mount so the storage directory is available at the same `/mnt/cow-storage` path:
+1. `GET <daemon_url>/api/v1/health` returns HTTP 200 within 10 seconds and reports version 0.2.0 or later
+   (log: `CoW daemon health check: OK (version=...)`).
+2. The mount point passes NFS validation (log: `NFS mount validation: OK (latency=...ms)`).
 
-```bash
-# Create mount point
-sudo mkdir -p /mnt/cow-storage
+Either failure raises `RuntimeError` and the server does not start. There is no fallback backend.
 
-# Bind mount
-sudo mount --bind /srv/cow-storage /mnt/cow-storage
+Then register a golden repository and activate it as a regular user; the activation is a daemon clone under
+`/mnt/cow-storage/activated-repos/<user>/`.
 
-# Persist in fstab
-echo '/srv/cow-storage  /mnt/cow-storage  none  bind  0  0' | sudo tee -a /etc/fstab
-```
+## Daemon REST API
 
-This ensures all nodes -- whether remote NFS clients or the local daemon host -- see clone contents at `/mnt/cow-storage`.
+All paths are under `/api/v1`; authentication is `Authorization: Bearer <api_key>`.
 
-Note: `df -T /mnt/cow-storage` will show the underlying filesystem type (`xfs`) on the daemon host, not `nfs`. This is expected for a bind mount -- it exposes the same filesystem, not a network mount.
-
-### Golden Repos on the Shared Mount
-
-The server derives the golden-repos directory as `<server_dir>/data/golden-repos`: `golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"` (`src/code_indexer/server/startup/lifespan.py:134`). This subpath is hard-coded and NOT independently configurable.
-
-**Golden-repos MUST be a SYMLINK into the CoW mount, never a direct bind/NFS mount at that exact path (Bug #1337).** A previous version of this guide recommended bind/NFS-mounting a filesystem directly AT `~/.cidx-server/data/golden-repos`. That gives cross-node query visibility (every node sees the same bytes) but it is NOT sufficient for per-user repo activation: `CowDaemonBackend._translate_to_daemon_path` validates a golden repo's path by calling `os.path.realpath()` and checking that the result falls under `cow_daemon.mount_point` or `cow_daemon.daemon_storage_path`. A directory that is itself a mount point resolves to its own path (`~/.cidx-server/data/golden-repos`), which is never under either root, so translation fails with `... is not under mount_point ... or daemon_storage_path ... cannot translate to daemon view` and activation errors out. Worse, `cp --reflink` (what the CoW daemon uses to clone a golden repo per-user) requires source and destination to be on the SAME filesystem -- a separately-mounted golden-repos filesystem, however it is mounted, can never support reflink cloning regardless of path translation. Golden-repo bytes must physically live on the CoW daemon's own storage filesystem.
-
-The fix is a SYMLINK from `~/.cidx-server/data/golden-repos` to a `golden-repos` subdirectory of the SAME CoW mount already used for clones (`/mnt/cow-storage`), or, on the co-located daemon host, directly to a `golden-repos` subdirectory of the daemon's own `base_path` (no bind-mount indirection needed there). Both the installer (`scripts/install-cidx-server.sh`, function `ensure_golden_repos_symlink`) and the auto-updater (`DeploymentExecutor._ensure_golden_repos_symlink_for_cow_daemon`) provision and self-heal this symlink automatically for `clone_backend=cow-daemon` deployments -- manual setup below is only needed for troubleshooting or a deployment that bypasses both tools.
-
-**Daemon host** (symlink directly to the daemon's own storage path -- no bind mount needed, since this node IS the daemon host):
-
-```bash
-mkdir -p /srv/cow-storage/golden-repos
-ln -s /srv/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
-```
-
-**Every other (NFS-client) node** (symlink into the already-mounted `/mnt/cow-storage`):
-
-```bash
-mkdir -p /mnt/cow-storage/golden-repos
-ln -s /mnt/cow-storage/golden-repos ~/.cidx-server/data/golden-repos
-```
-
-On startup the server runs an NFS atomic-create self-check against its `cidx-meta` subdirectory (`lifespan.py:1386`), so the resolved path must be a working shared filesystem -- confirm `/mnt/cow-storage` is mounted and writable (see the write-probe checks earlier in this guide) before creating the symlink.
-
-Historical note on mount options: an earlier deployment placed golden-repos on a SEPARATE NFS export mounted `vers=3,nolock,hard` specifically to avoid a `git index-pack` failure (`fatal: write error: Bad file descriptor`) seen over NFSv4 soft mounts during golden-repo clone+index. That separate-mount approach is superseded by the symlink fix above (a second filesystem can never support `cp --reflink` cloning), but the underlying lesson stands: if golden-repo indexing hits `git index-pack`/mmap failures on the CoW mount, check whether `/mnt/cow-storage` itself is mounted NFSv4-soft and consider NFSv3 `nolock,hard` (or a bind mount, on the daemon host) for that mount.
-
-Failure mode if golden-repos stays on local disk (plain directory, not a symlink into the CoW mount): global/`-global` query still works (it never invokes the clone backend), but per-user activation fails loud with the translation error above; and if golden-repos is a local-only directory not shared cross-node at all, queries routed to a different node return 0 results because that node's local `golden-repos` has no index.
-
----
-
-## Step 3: Configure CIDX Server
-
-On each CIDX cluster node, update `~/.cidx-server/config.json` to use the cow-daemon clone backend.
-
-### Required config.json Changes
-
-Add the `clone_backend` and `cow_daemon` fields alongside your existing cluster configuration:
-
-```json
-{
-  "host": "0.0.0.0",
-  "port": 8000,
-  "log_level": "INFO",
-  "storage_mode": "postgres",
-  "postgres_dsn": "postgresql://cidx:password@db-host:5432/cidx_server",
-  "cluster": {
-    "node_id": "node-1"
-  },
-  "clone_backend": "cow-daemon",
-  "cow_daemon": {
-    "daemon_url": "http://cow-host:8081",
-    "api_key": "your-cow-daemon-api-key",
-    "mount_point": "/mnt/cow-storage",
-    "poll_interval_seconds": 2,
-    "timeout_seconds": 600
-  }
-}
-```
-
-### CowDaemonConfig Fields
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `daemon_url` | Yes | `""` | Base URL of the CoW daemon REST API (e.g., `http://cow-host:8081`). |
-| `api_key` | Yes | `""` | Bearer token matching the daemon's `api_key` config. |
-| `mount_point` | Yes | `""` | Local NFS mount path where clone contents are visible (e.g., `/mnt/cow-storage`). |
-| `poll_interval_seconds` | No | `2` | Initial poll interval (seconds) when waiting for async clone creation. Exponential backoff up to 30s. |
-| `timeout_seconds` | No | `600` | Maximum time (seconds) to wait for a clone creation job to complete before raising `TimeoutError`. |
-
-### Clone Backend Field
-
-| Value | Description |
-|-------|-------------|
-| `"local"` | Default. Filesystem CoW via `cp --reflink=auto`. No external dependencies. |
-| `"cow-daemon"` | REST client for the CoW Storage Daemon. Requires `cow_daemon` config. |
-| `"ontap"` | ONTAP FlexClone volumes. Requires `ontap` config (production/FSx environments). |
-
-### Apply on All Nodes
-
-The `clone_backend` and `cow_daemon` settings must be identical on all cluster nodes (same `daemon_url`, same `api_key`, same `mount_point`). Only `cluster.node_id` differs per node.
-
-After editing config on each node:
-
-```bash
-sudo systemctl restart cidx-server
-```
-
----
-
-## Step 4: Verify Startup
-
-On each CIDX node, check the server logs for successful clone backend initialization:
-
-```bash
-journalctl -u cidx-server -f
-```
-
-Expected log messages:
-
-```
-INFO Building VersionedSnapshotManager with clone_backend='cow-daemon'
-INFO Checking CoW daemon health at http://cow-host:8081/api/v1/health
-INFO CoW daemon health check: OK
-INFO Validating NFS mount at /mnt/cow-storage
-INFO NFS mount validation: OK (latency=1.2ms)
-INFO VersionedSnapshotManager: using CowDaemonBackend (daemon=http://cow-host:8081, mount=/mnt/cow-storage)
-```
-
-### Fail-Fast Behavior
-
-CIDX enforces a fail-fast policy for the cow-daemon backend. At startup, two checks must pass:
-
-1. **Daemon health check**: `GET /api/v1/health` must return HTTP 200 within 10 seconds.
-2. **NFS mount validation**: The mount point must be accessible and writable (a probe file is written and read back).
-
-If either check fails, the server raises `RuntimeError` and refuses to start. There is no fallback to a different backend. Fix the underlying issue (daemon not running, NFS not mounted) and restart.
-
----
-
-## Step 5: Test Clone Lifecycle
-
-Verify end-to-end clone creation by adding a golden repository through the CIDX admin interface or REST API. The server will use the CoW daemon to create versioned snapshots.
-
-Monitor the daemon logs:
-
-```bash
-sudo journalctl -u cow-storage-daemon -f
-```
-
-Verify clones appear on the shared mount:
-
-```bash
-ls /mnt/cow-storage/
-```
-
----
-
-## cow-cli Reference
-
-The `cow-cli` command-line tool wraps all daemon API endpoints. It is installed alongside the daemon.
-
-### Connection Management
-
-```bash
-# Register a daemon
-cow-cli connect prod http://cow-host:8081 --token <api-key>
-
-# List connections (* = active)
-cow-cli connections
-
-# Switch active daemon
-cow-cli activate prod
-```
-
-Connections are stored in `~/.cow-storage/config.json` (chmod 600, atomic writes).
-
-### Clone Operations
-
-```bash
-# Create a clone (waits for completion by default)
-cow-cli clone /path/to/source --namespace cidx --name my-clone
-
-# Fire-and-forget (returns job ID immediately)
-cow-cli clone /path/to/source --namespace cidx --name my-clone --nowait
-
-# Check async job status
-cow-cli job <job-id>
-
-# List all clones
-cow-cli list
-
-# Filter by namespace
-cow-cli list --namespace cidx
-
-# Inspect a specific clone
-cow-cli info cidx my-clone
-
-# Delete a clone
-cow-cli delete cidx my-clone --force
-```
-
-### Health and Stats
-
-```bash
-# Health check (active daemon)
-cow-cli health
-
-# Health check all registered daemons
-cow-cli health --all
-
-# Storage statistics
-cow-cli stats
-```
-
-All commands support `--json` for scripting: `cow-cli --json list`.
-
----
-
-## REST API Quick Reference
-
-All endpoints are prefixed with `/api/v1`. Authentication via `Authorization: Bearer <api_key>`.
-
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/health` | Optional | Health check (unauthenticated when `health_requires_auth=false`). |
-| `GET` | `/stats` | Yes | Storage statistics (disk usage, clone counts by namespace). |
-| `POST` | `/clones` | Yes | Submit async clone creation job. Returns 202 with `job_id`. |
-| `GET` | `/jobs/{job_id}` | Yes | Poll job status (`pending`, `running`, `completed`, `failed`). |
-| `GET` | `/clones` | Yes | List all clones. Optional `?namespace=X` filter. |
-| `GET` | `/clones/{ns}/{name}` | Yes | Get info for a specific clone. |
-| `DELETE` | `/clones/{ns}/{name}` | Yes | Delete a clone (removes from disk and metadata). |
-
-### Clone Creation Flow
-
-1. `POST /clones` with `{"source_path": "...", "namespace": "...", "name": "..."}` returns 202 with `job_id`.
-2. Poll `GET /jobs/{job_id}` until `status` is `completed` or `failed`.
-3. On `completed`, `clone_path` contains the relative path (e.g., `cidx/my-clone`).
-4. The CIDX `CowDaemonBackend` prepends `mount_point` to get the absolute filesystem path.
-
----
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Health (unauthenticated when `health_requires_auth` is false) |
+| GET | `/stats` | Storage statistics |
+| POST | `/clones` | Submit a clone job; returns 202 with a `job_id` |
+| GET | `/jobs/{job_id}` | Clone job status |
+| GET | `/clones` | List clones |
+| GET | `/clones/{namespace}/{name}` | One clone |
+| DELETE | `/clones/{namespace}/{name}` | Delete a clone |
 
 ## Troubleshooting
 
-### Daemon Issues
-
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Daemon fails to start | Reflink not supported | Verify: `cp --reflink=always` test. Format with `mkfs.xfs -m reflink=1`. |
-| Health check fails | Daemon not running | `sudo systemctl start cow-storage-daemon` |
-| Clone creation fails | Source path not allowed | Add directory to `allowed_source_roots` in daemon config. |
-| Clone creation fails | Source path does not exist | Verify golden repo is cloned at the expected path on the daemon host. |
-| Job stuck in `pending` | Daemon overloaded | Check daemon logs: `sudo journalctl -u cow-storage-daemon -n 50`. |
-| New users cannot activate any repo (`Permission denied` creating the clone); existing users still work | Daemon user not in its `service_group`, or daemon not restarted since | See [Daemon User and the Service Group](#daemon-user-and-the-service-group); the next auto-update converges it. |
-
-### NFS Issues
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `mount` hangs | Firewall blocking port 2049 | Open NFS ports on daemon host. |
-| `access denied` | Wrong subnet in `/etc/exports` | Fix exports, run `sudo exportfs -ra`. |
-| Clones not visible | NFS attribute cache | Run `ls` on the directory, or mount with `actimeo=1`. |
-| `Permission denied` | UID/GID mismatch | Use `no_root_squash` in exports or match UIDs across nodes. |
-| `Stale file handle` | Handle invalidated after restart | `sudo umount -f /mnt/cow-storage && sudo mount -a`. |
-| `df` shows `xfs` not `nfs` | Bind mount (daemon host) | Expected for bind mounts -- the underlying filesystem type is shown. |
-
-### CIDX Server Startup Issues
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `RuntimeError: CoW daemon not reachable` | Daemon down or wrong URL | Start daemon, verify `daemon_url` in config.json. |
-| `RuntimeError: NFS mount is not healthy` | Mount not present or not writable | Run `mount -a`, check `df -h /mnt/cow-storage`. |
-| `cow_daemon_config is required` | Missing `cow_daemon` section | Add `cow_daemon` object to config.json. |
-| `TimeoutError: CoW daemon job ... did not complete` | Clone took longer than `timeout_seconds` | Increase `timeout_seconds` or investigate daemon performance. |
-
-### Verifying Clone Backend at Runtime
-
-Check the server logs for the backend type at startup:
-
-```bash
-journalctl -u cidx-server | grep "VersionedSnapshotManager"
-```
-
-Expected output for cow-daemon:
-
-```
-INFO VersionedSnapshotManager: using CowDaemonBackend (daemon=http://cow-host:8081, mount=/mnt/cow-storage)
-```
-
-### Systemd Service Management
-
-```bash
-# Daemon
-sudo systemctl {start|stop|restart|status} cow-storage-daemon
-sudo journalctl -u cow-storage-daemon -f
-
-# CIDX Server
-sudo systemctl {start|stop|restart|status} cidx-server
-sudo journalctl -u cidx-server -f
-```
-
-### Known Limitation: Temporal Indexing over NFS
-
-Per-commit dual-embedder TEMPORAL indexing (Epic #1289) over the NFS golden-repos mount is latency-bound: it performs many small HNSW quarterly-shard writes, and over NFS this is currently slow enough that a temporal-index job can exceed the background `JobReconciliationService` `max_execution_time` and be reaped/failed.
-
-Regular SEMANTIC golden-repo indexing over NFS works correctly and is cross-node-queryable. Temporal-on-NFS performance is an open issue. Until it is optimized, run temporal indexing on local storage or raise the job timeout.
-
----
-
-## Appendix: Storage Layout
-
-The daemon organizes clones under `base_path` by namespace:
-
-```
-/srv/cow-storage/                   # base_path (daemon config)
-  .cow-daemon.db                    # SQLite metadata (jobs, clones)
-  cidx/                             # Namespace (used by CIDX Server)
-    cidx_clone_my-repo_1700000000/  # Clone directory (reflink copy)
-    cidx_clone_other-repo_170000/   # Another clone
-  claude/                           # Another namespace
-    claude_clone_abc_170000/        # Clone used by Claude Server
-```
-
-All cluster nodes see this layout at `/mnt/cow-storage/` via NFS (or bind mount on the daemon host).
-
----
-
-## Appendix: Full config.json Example
-
-A complete CIDX Server `config.json` for a cluster node using CoW daemon storage:
-
-```json
-{
-  "host": "0.0.0.0",
-  "port": 8000,
-  "log_level": "INFO",
-  "storage_mode": "postgres",
-  "postgres_dsn": "postgresql://cidx:password@db-host:5432/cidx_server",
-  "server_dir": "~/.cidx-server",
-  "cluster": {
-    "node_id": "node-1"
-  },
-  "clone_backend": "cow-daemon",
-  "cow_daemon": {
-    "daemon_url": "http://cow-host:8081",
-    "api_key": "your-cow-daemon-api-key",
-    "mount_point": "/mnt/cow-storage",
-    "poll_interval_seconds": 2,
-    "timeout_seconds": 600
-  }
-}
-```
-
-Fields not shown retain their defaults. See [Configuration Guide](../getting-started/configuration.md) for all available settings.
+| `RuntimeError: CoW daemon not reachable at ...` at startup | Daemon down, wrong `daemon_url`, or firewall | Start the daemon; check `daemon_url` and port 8081 |
+| `CoW Daemon at ... is version ...; CIDX requires 0.2.0+` | Daemon too old | Upgrade the daemon |
+| `RuntimeError: NFS mount is not healthy at ...` | Mount missing or not writable | `sudo mount -a`; check the export and permissions |
+| Activation fails with `cannot translate to daemon view` | `golden-repos` or `activated-repos` is a real directory or its own mount, not a symlink into `mount_point` | Remove the separate mount; let the installer or the next auto-update create the symlink |
+| Per-user activation AND versioned-snapshot publish both fail with `CoW daemon_storage_path is not configured` | `cow_daemon.daemon_storage_path` unset (typical on an NFS client node installed without `--cow-daemon-storage-path`) | Re-run the installer with the full flag set plus `--cow-daemon-storage-path <daemon base_path>`, or set the field in `config.json` and restart |
+| New users cannot activate (`Permission denied`); existing users can | Daemon user not in `service_group`, or daemon not restarted since | See [Service group](#service-group); the next auto-update converges it |
+| `TimeoutError: CoW daemon job ... did not complete within ...` | Clone slower than `timeout_seconds` | Check the daemon journal; raise `timeout_seconds` |
+| Queries fail with `Input/output error` and `/healthz` is 503 | Daemon host or NFS unreachable (soft mount timed out) | Restore the daemon host; the mount recovers when the server answers |
+| `Stale file handle` | Export changed or daemon host rebooted | `sudo umount -f /mnt/cow-storage && sudo mount -a` |

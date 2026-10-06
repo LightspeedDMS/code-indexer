@@ -1,724 +1,298 @@
-# CIDX Server Deployment Guide
+# CIDX Server Deployment
 
-This guide covers deploying and configuring the CIDX server for multi-user team collaboration with server-side performance optimizations.
+This guide installs a single CIDX Server node (standalone mode, SQLite storage) on Linux with systemd. It covers
+what the installer does, the files and units it creates, the bootstrap `config.json`, the first start, and the
+seeded administrator account.
 
-Note: This guide covers standalone (single-node) deployment with SQLite storage. For multi-node cluster deployment with PostgreSQL, see [Cluster Architecture](../architecture/cluster.md) and [Cluster Setup Guide](cluster-setup.md).
+Related guides:
 
-## Overview
+- Multi-node cluster (PostgreSQL, shared storage): [Cluster Setup](cluster-setup.md)
+- Upgrading an installed node: [Upgrading](upgrading.md)
+- The auto-updater the installer provisions: [Auto-Update](auto-update.md)
+- Health endpoints, logs and metrics: [Observability](observability.md)
 
-CIDX server provides:
-- Multi-user semantic code search
-- Server-side HNSW index caching (100-1800x speedup)
-- OAuth 2.0 authentication
-- RESTful API and MCP protocol support
-- Per-repository isolation
-- Automatic cache management with TTL-based eviction
+## Requirements
 
-## System Requirements
+- Linux with systemd. The installer detects `dnf`, `yum` or `apt-get` (Rocky Linux, RHEL, Ubuntu).
+- A regular user account with `sudo` rights. The installer refuses to run as root and calls `sudo` only for
+  package installs, `/etc/systemd/system` writes and `systemctl`.
+- Python 3.9 to 3.12 (`requires-python = ">=3.9,<3.13"` in `pyproject.toml`).
+- A C/C++ compiler (`gcc`, `g++`): the custom hnswlib fork is compiled at install time. The installer installs it.
+- Outbound HTTPS to:
+  - your embedding provider (VoyageAI or Cohere);
+  - GitHub: the repository, the hnswlib fork, pace-maker, and ripgrep release downloads;
+  - the Python package index (`pip install`);
+  - and, for the first auto-update deployment (see [Auto-Update](auto-update.md#deployment-steps)):
+    `nodejs.org` (pinned Node.js tarball), `sh.rustup.rs` plus the Rust toolchain servers rustup downloads from
+    and the crates registry used by `cargo` to build `xray-cli`, the npm registry (Claude CLI, Codex CLI,
+    scip-python), and `claude.ai/install.sh` (Claude CLI installer). The Rust toolchain and `xray-cli` build step
+    is fatal: without that access the deployment stops and the server is not restarted.
 
-### Minimum Requirements
-- Python 3.10 or later
-- 4GB RAM (8GB+ recommended for large repositories)
-- 10GB disk space (scales with repository size)
-- Linux/macOS/Windows (Linux recommended for production)
+## Install
 
-### Network Requirements
-- Port 8090 for HTTP API and MCP protocol (configurable; MCP is served on the same port as the HTTP API)
-- Outbound HTTPS for VoyageAI API or Cohere API (embedding generation)
+The installer is `scripts/install-cidx-server.sh` in this repository. It is idempotent: re-running it on an
+installed node pulls the tracked branch and re-applies each step.
 
-## Installation
-
-### Option 1: pipx (Recommended)
-
-```bash
-# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
-
-# Verify installation
-cidx --version
-```
-
-### Option 2: pip with virtual environment
+Preview every action first. `--dry-run` prints the package installs, clone, pip commands, `config.json`, systemd
+units and service restart without executing any of them:
 
 ```bash
-# Create virtual environment
-python3 -m venv cidx-venv
-source cidx-venv/bin/activate
-
-# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
-
-# Verify installation
-cidx --version
+bash scripts/install-cidx-server.sh --dry-run
 ```
 
-## First Start -- Change the Seeded Admin Password
-
-SECURITY: on its first start against an empty user store, the server seeds a single
-administrator account with a well-known default password (`UserManager.seed_initial_admin`).
-This exists so a fresh install is reachable at all; it is NOT safe to leave in place.
-
-Change it before the server is reachable from any untrusted network:
-
-1. Start the server and log in as the seeded administrator.
-2. Immediately set a new password for that account (Web UI user settings, or
-   `PUT /api/users/change-password`).
-3. Confirm the old password no longer authenticates.
-
-Treat a server that still accepts the seeded password as unauthenticated: the account holds the
-`admin` role, which can register golden repositories, read every indexed repository, and manage
-users. If the deployment is internet-facing, do this before opening the firewall, not after.
-
-Consider also enabling TOTP MFA on the administrator account -- the server supports step-up
-elevation for sensitive admin operations (see `docs/server/auth/login-and-elevation.md`).
-
-## Configuration
-
-### Environment Variables
-
-Create `/etc/cidx-server/config.env` (or `~/.cidx-server/config.env` for user-level):
+Then install:
 
 ```bash
-# VoyageAI API Key (required for embedding generation)
-VOYAGE_API_KEY=your-voyage-api-key-here
-
-# Server Data Directory
-CIDX_SERVER_DATA_DIR=/var/lib/cidx-server  # Default: ~/.cidx-server
-
-# Server Port (HTTP API and MCP protocol share the same port)
-CIDX_SERVER_PORT=8090     # Default: 8090
-
-# Logging level
-CIDX_LOG_LEVEL=INFO       # DEBUG, INFO, WARNING, ERROR
-# Note: server application logs are stored in ~/.cidx-server/logs.db (SQLite), not a log file.
+bash scripts/install-cidx-server.sh --branch master --port 8000 --voyage-key <voyage-api-key>
 ```
 
-### Configuration File
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--branch` | `master` | Branch to clone and, unless `--auto-update-branch` is given, the branch the auto-updater tracks |
+| `--port` | `8000` | Port written into the `cidx-server` unit's `ExecStart` and the initial `config.json` |
+| `--voyage-key` | none | Written into the unit as `Environment="VOYAGE_API_KEY=..."` (optional, see [Embedding provider keys](#embedding-provider-keys)) |
+| `--install-dir` | `~/code-indexer` | Where the repository is cloned |
+| `--repo-url` | the public GitHub repository | Repository to clone |
+| `--repo-token` | none | Token for a private repository, stored in `~/.git-credentials` (mode 600), never in the remote URL |
+| `--auto-update-branch` | value of `--branch` | Branch the auto-updater tracks (`CIDX_AUTO_UPDATE_BRANCH`) |
+| `--workers` | `1` | uvicorn worker count in `ExecStart` |
+| `--dry-run` | off | Print what would happen, change nothing |
 
-Alternative to environment variables, create `~/.cidx-server/config.json`.
+Cluster flags (`--node-id`, `--postgres-dsn`, `--clone-backend`, `--cow-daemon-*`, `--nfs-*`, `--cow-local-bind`)
+are covered in [Cluster Setup](cluster-setup.md). Run `bash scripts/install-cidx-server.sh --help` for the full list.
 
-`config.json` is for bootstrap-only settings that must be available before the database is
-accessible. All runtime settings (cache TTL, embedding config, etc.) belong in the database
-and are managed via the Web UI Config Screen.
+### What the installer does (standalone)
 
-Bootstrap keys supported in `config.json`:
+In order, as printed by `--dry-run`:
 
-```json
-{
-  "host": "0.0.0.0",
-  "port": 8090,
-  "server_dir": "/var/lib/cidx-server",
-  "log_level": "INFO",
-  "storage_mode": "sqlite"
-}
-```
+1. Installs system packages: `git nfs-utils gcc gcc-c++ python3-pip python3-devel jq` (dnf/yum, after enabling
+   EPEL and CRB) or `git nfs-common gcc g++ python3-pip python3-dev libpq-dev jq` (apt).
+2. Clones the repository into `--install-dir` (or fetches, checks out and pulls the branch if already cloned) and
+   initializes the `third_party/hnswlib` submodule.
+3. Runs `python3 -m pip install --break-system-packages -e .` and installs `psycopg[binary] psycopg-pool requests numpy`.
+4. Creates `~/.cidx-server/data/golden-repos`, `~/.cidx-server/logs` and `~/.cidx-server/locks`, and writes a
+   default `~/.cidx-server/config.json` only if none exists.
+5. Clones and installs pace-maker into `~/claude-pace-maker`; on a fresh install it switches pace-maker's master
+   switch off and records `pace_maker_clone_path` in `config.json` (see [Auto-Update](auto-update.md#pace-maker)).
+6. Writes `/etc/systemd/system/cidx-server.service` and enables it.
+7. Adds a `safe.directory = *` entry to the service user's global git config.
+8. Installs `cidx-auto-update.service` and `cidx-auto-update.timer` from
+   `src/code_indexer/server/auto_update/templates/` and starts the timer.
+9. Restarts `cidx-server` and polls `GET http://localhost:<port>/docs` until it returns HTTP 200 (up to 30 seconds).
 
-For PostgreSQL cluster mode, add:
-
-```json
-{
-  "host": "0.0.0.0",
-  "port": 8090,
-  "server_dir": "/var/lib/cidx-server",
-  "log_level": "INFO",
-  "storage_mode": "postgres",
-  "postgres_dsn": "postgresql://user:pass@db-host:5432/cidx"
-}
-```
-
-## HNSW Index Cache Configuration
-
-The server includes automatic HNSW index caching for massive query performance improvements.
-
-### Cache Behavior
-
-**Without Cache (CLI Mode)**:
-- Each query loads HNSW index from disk
-- Typical HNSW lookup time: 200-400ms (with OS page cache)
-- Suitable for individual developers, single-user workflows
-
-**With Cache (Server Mode)**:
-- HNSW indexes cached in memory after first query
-- Cold HNSW lookup (cache miss): ~277ms
-- Warm HNSW lookup (cache hit): <1ms
-- HNSW lookup speedup: 100-1800x for repeated queries
-- Suitable for multi-user teams, high-query workloads
-
-> **Note**: the numbers above measure the **in-process HNSW index lookup component only** (Story #526 cache benchmark). End-to-end query latency also includes the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) on every query, plus HTTP and auth overhead in server / cluster modes. Treat these figures as cache-effectiveness signal, not user-observed query time.
-
-### Cache Configuration Options
-
-#### TTL (Time-To-Live)
-
-Configure how long HNSW indexes remain in cache via the Web UI Configuration Screen or `config.json`:
-
-```json
-{
-  "cache": {
-    "ttl_minutes": 10.0
-  }
-}
-```
-
-**Recommendations**:
-- **Small teams (1-5 users)**: 600 seconds (10 minutes)
-- **Medium teams (5-20 users)**: 1800 seconds (30 minutes)
-- **Large teams (20+ users)**: 3600 seconds (1 hour)
-- **High-frequency queries**: 7200 seconds (2 hours)
-
-**Memory Considerations**:
-- Each cached HNSW index: 50-500MB (depends on repository size)
-- Monitor memory usage and adjust TTL accordingly
-- Longer TTL = better performance but higher memory usage
-
-#### Per-Repository Isolation
-
-Cache automatically isolates HNSW indexes by repository path:
-- Each repository has independent cache entry
-- No cross-repository cache contamination
-- Independent TTL tracking per repository
-
-Example:
-```bash
-# Repository A and Repository B each have separate cache entries
-# Query to Repo A doesn't affect Repo B's cache
-```
-
-#### Background Cleanup
-
-Automatic background thread removes expired cache entries:
-
-```json
-{
-  "cache": {
-    "enable_auto_cleanup": true,
-    "cleanup_interval_seconds": 60  # Check every 60 seconds
-  }
-}
-```
-
-### Monitoring Cache Performance
-
-#### Cache Statistics Endpoint
-
-Query real-time cache statistics:
+The installer opens a firewalld port only in cluster mode. On a standalone node open the port yourself if a
+firewall is active:
 
 ```bash
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
+sudo firewall-cmd --permanent --add-port=8000/tcp
+sudo firewall-cmd --reload
 ```
 
-Response:
-```json
-{
-  "hit_count": 1234,
-  "miss_count": 56,
-  "hit_ratio": 0.957,
-  "cached_repositories": 12,
-  "total_memory_mb": 480.5,
-  "eviction_count": 3,
-  "per_repository_stats": {
-    "/path/to/repo1": {
-      "access_count": 510,
-      "last_accessed": "2025-11-30T12:34:56Z",
-      "created_at": "2025-11-30T10:00:00Z",
-      "ttl_remaining_seconds": 423
-    }
-  }
-}
-```
+## Installed layout
 
-#### Key Metrics
+| Path | Contents |
+|------|----------|
+| `~/code-indexer/` | Repository checkout the server runs from (`WorkingDirectory`, `PYTHONPATH=<checkout>/src`) |
+| `~/.cidx-server/config.json` | Bootstrap configuration (see below) |
+| `~/.cidx-server/data/cidx_server.db` | Users, settings (runtime configuration row), jobs, golden-repo metadata |
+| `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db` | Groups and audit log, OAuth clients, refresh tokens, SCIP audit |
+| `~/.cidx-server/logs.db` | Application log database (see [Observability](observability.md)) |
+| `~/.cidx-server/.jwt_secret` | JWT signing secret (standalone mode) |
+| `~/.cidx-server/.encryption_key_salt` | Needed to decrypt stored git credentials and CI tokens; back it up with the database |
+| `~/.cidx-server/data/golden-repos/` | Golden repository clones and their indexes |
+| `~/.cidx-server/data/activated-repos/` | Per-user activated repositories |
+| `~/.cidx-server/launch.json`, `applied_launch.json` | Target and applied host/port/workers (written by the server and the auto-updater) |
+| `~/claude-pace-maker/` | pace-maker checkout |
 
-- **hit_ratio**: Percentage of queries served from cache (target: >80%)
-- **hit_count**: Number of cache hits (warm queries)
-- **miss_count**: Number of cache misses (cold queries)
-- **cached_repositories**: Number of repositories currently cached
+The server data directory is `~/.cidx-server` unless the `CIDX_SERVER_DATA_DIR` environment variable is set.
 
-#### Performance Expectations
+## systemd units
 
-| Scenario | HNSW lookup | Cache Status | Notes |
-|----------|-------------|--------------|-------|
-| First query to repository | 200-400ms | Miss | Loads from disk, benefits from OS cache |
-| Subsequent queries (within TTL) | <1ms | Hit | Served from memory cache |
-| Query after TTL expiration | 200-400ms | Miss | Cache rebuild required |
-| Concurrent queries to same repo | <1ms | Hit | Shared cache across users |
-
-HNSW lookup is the in-process index-search component of a query. End-to-end query response time is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the table above isolates the cache effect, not user-observed query speed.
-
-### Troubleshooting Cache Issues
-
-#### Cache Not Activating
-
-**Symptom**: All queries show cache miss behavior (slow)
-
-**Diagnosis**:
-```bash
-# 1. Check cache configuration via Web UI Configuration Screen
-
-# 2. Verify process is running
-PID=$(pgrep -f "code_indexer.server.app")
-
-# 3. Check cache stats endpoint
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
-# If "cached_repositories" is always 0, cache is not working
-```
-
-**Solution**:
-```bash
-# 1. Configure cache TTL via Web UI Configuration Screen
-
-# 2. Reload systemd configuration
-sudo systemctl daemon-reload
-
-# 3. Restart service
-sudo systemctl restart cidx-server
-
-# 4. Verify cache is configured
-# Check Web UI Configuration Screen for cache settings
-
-# 5. Test cache activation
-# Make a query, then check /cache/stats for hit_count > 0
-```
-
-#### High Memory Usage
-
-**Symptom**: Server consuming excessive memory
-
-**Diagnosis**:
-```bash
-# Check number of active cache entries
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.cached_repositories'
-
-# Monitor memory usage
-ps aux | grep cidx-server
-```
-
-**Solutions**:
-1. Reduce TTL to evict entries more frequently via Web UI Configuration Screen (set cache TTL to 300 seconds / 5 minutes)
-
-2. Restart server to clear cache:
-   ```bash
-   systemctl restart cidx-server
-   ```
-
-3. Limit number of repositories indexed on server
-
-#### Low Hit Ratio
-
-**Symptom**: hit_ratio below 50%
-
-**Diagnosis**:
-```bash
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.hit_ratio'
-```
-
-**Possible Causes**:
-1. TTL too short (entries evicted before reuse)
-2. Low query volume (few repeat queries)
-3. Many different repositories queried (cache fragmentation)
-
-**Solutions**:
-1. Increase TTL for high-query-volume environments
-2. Analyze query patterns to optimize cache usage
-3. Consider increasing server memory to cache more repositories
-
-## Running the Server
-
-### Development Mode
-
-```bash
-# Start server in foreground (for testing)
-python3 -m code_indexer.server.app
-```
-
-### Production Deployment with systemd
-
-**RECOMMENDED**: Use the provided deployment script and template:
-
-```bash
-cd deployment/
-sudo ./deploy-server.sh YOUR_VOYAGE_API_KEY
-```
-
-This script automatically handles deployment configuration and verification.
-
-**Manual Installation** (if automated script cannot be used):
-
-Create `/etc/systemd/system/cidx-server.service`:
+`/etc/systemd/system/cidx-server.service`, as written by the installer (port 8000, one worker):
 
 ```ini
-[Unit]
-Description=CIDX Semantic Code Search Server
-After=network.target
-
 [Service]
 Type=simple
-User=cidx-server
-Group=cidx-server
-WorkingDirectory=/var/lib/cidx-server
-
-# Load additional environment variables from file
-EnvironmentFile=/etc/cidx-server/config.env
-
-ExecStart=/usr/local/bin/python3 -m code_indexer.server.app
-
+User=<install user>
+WorkingDirectory=<install dir>
+Environment="PATH=<home>/.cargo/bin:<home>/.local/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+Environment="PYTHONPATH=<install dir>/src"
+Environment="CIDX_SERVER_MODE=1"
+Environment="CIDX_ISSUER_URL=http://localhost:8000"
+Environment="CIDX_REPO_ROOT=<install dir>"
+Environment="CIDX_AUTO_UPDATE_BRANCH=master"
+ExecStart=python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000 --log-level info --workers 1
 Restart=always
 RestartSec=10
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/cidx-server /var/log/cidx-server
-
-StandardOutput=append:/var/log/cidx-server/server.log
-StandardError=append:/var/log/cidx-server/error.log
-
-[Install]
-WantedBy=multi-user.target
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cidx-server
 ```
 
+`CIDX_ISSUER_URL` is the OAuth issuer the server advertises in its discovery documents
+(`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`). If MCP or OAuth clients reach
+the server through a public URL, set it to that URL, for example with a drop-in (`sudo systemctl edit cidx-server`):
 
-Start and enable service:
+```ini
+[Service]
+Environment="CIDX_ISSUER_URL=https://cidx.example.com"
+```
+
+The auto-updater manages parts of this unit on every deploy (the `--host`/`--port`/`--workers` flags of
+`ExecStart`, `PATH` entries, `CIDX_REPO_ROOT`, `MALLOC_ARENA_MAX`); see [Auto-Update](auto-update.md). Do not edit
+those by hand.
+
+Service management:
+
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable cidx-server
-sudo systemctl start cidx-server
 sudo systemctl status cidx-server
-```
-
-### Server Management
-
-```bash
-# Start server
-sudo systemctl start cidx-server
-
-# Stop server
-sudo systemctl stop cidx-server
-
-# Restart server (clears cache)
 sudo systemctl restart cidx-server
-
-# Check status
-sudo systemctl status cidx-server
-
-# View logs
-sudo journalctl -u cidx-server -f
+journalctl -u cidx-server -f
 ```
 
-## Security Considerations
+## Bootstrap configuration (config.json)
 
-### Authentication
+`~/.cidx-server/config.json` holds only the settings the server needs before its database is open. Everything else
+is a runtime setting stored in the database and changed through the Web UI configuration screen (`/admin/config`).
+The authoritative bootstrap list is `BOOTSTRAP_KEYS` in `src/code_indexer/server/services/config_service.py`:
 
-CIDX server uses OAuth 2.0 with JWT tokens:
+| Key | Purpose |
+|-----|---------|
+| `server_dir` | Server data directory |
+| `storage_mode` | `sqlite` (standalone, default) or `postgres` (cluster) |
+| `postgres_dsn` | PostgreSQL connection string (cluster) |
+| `cluster` | `node_id` (cluster node identity) and `sharding_enabled` |
+| `clone_backend`, `cow_daemon`, `ontap` | Clone backend for versioned snapshots and activations (cluster storage) |
+| `pace_maker_clone_path` | pace-maker checkout path, written by the installer and the auto-updater |
+| `enable_malloc_arena_max`, `enable_malloc_trim` | glibc memory mitigations (both default `true`) |
+| `server_threadpool_size`, `mcp_dispatch_pool_size`, `query_executor_pool_size` | Startup thread-pool sizes |
+| `fault_injection_enabled`, `fault_injection_nonprod_ack` | Fault-injection harness gate (non-production only, see [Fault Injection](fault-injection.md)) |
+| `enable_graph_channel_repair`, `graph_repair_*` | Dependency-map graph repair switches |
+| `enable_predeactivation_leak_scan`, `orphan_trash_sweep_per_startup_cap` | Startup cleanup controls |
+
+Bootstrap keys are read at startup; restart the service after changing one.
+
+Every settings save in the Web UI rewrites `config.json` from the bootstrap values the running process loaded at
+its start. A hand edit made after the server started is therefore overwritten by the next save. Edit
+`config.json`, then restart the server promptly, without saving any settings in between.
+
+`host`, `port`, `workers` and `log_level` are not bootstrap keys. The installer writes them into the initial
+`config.json` only as first-boot seeds. On the first start the server copies every non-bootstrap key into the
+runtime configuration row in the database (filling `host`, `port` and `workers` from the unit's `ExecStart` when
+`config.json` lacks them), then rewrites `config.json` to bootstrap keys only. The original file is kept as
+`~/.cidx-server/config-migration-backup/config.json.pre-centralization`. From then on change these four values in
+the Web UI (Configuration, Server section). Saving them restarts nothing:
+
+- `host`, `port` and `workers` are flags of the unit's `ExecStart`. They change only when a restart is requested
+  through the Web UI (`POST /admin/restart`, the restart action) or, in cluster mode, by the cluster-wide restart
+  generation bump that action makes. The auto-updater then rewrites `ExecStart` and restarts the server. A manual
+  `systemctl restart cidx-server` or a routine code deployment keeps the current flags.
+- `log_level` is read from `~/.cidx-server/launch.json`, which every settings save rewrites, so it applies at the
+  next restart of any kind. `launch.json` is per node: in cluster mode the node that served the save rewrites its
+  own file at once, and every other node rewrites its file when it next re-reads the shared configuration (every
+  30 seconds).
+
+See [Auto-Update](auto-update.md#restart-requests-and-launch-settings).
+
+## Embedding provider keys
+
+The server needs a VoyageAI or Cohere API key to index and query. Two sources exist:
+
+- Web UI, Configuration, Provider API Keys. A key stored there is exported to the server process environment at
+  startup and takes precedence.
+- The process environment, for example `VOYAGE_API_KEY` written into the unit by `--voyage-key`. Used when the Web
+  UI field is empty.
+
+## First start and the administrator account
+
+When no account named `admin` exists at startup, the server creates one with the `admin` role and a default
+password defined in `UserManager.seed_initial_admin` (`src/code_indexer/server/auth/user_manager.py`). Treat a
+server that still accepts that password as unauthenticated: the account can register golden repositories, read
+every repository and manage users.
+
+Before the server is reachable from any untrusted network:
+
+1. Log in to the Web UI at `http://<host>:8000/admin` as `admin`.
+2. Change the password in the Web UI user settings, or through the REST API:
+
+   ```bash
+   TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username": "admin", "password": "<current password>"}' | jq -r .access_token)
+
+   curl -s -X PUT http://localhost:8000/api/users/change-password \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"old_password": "<current password>", "new_password": "<new password>"}'
+   ```
+
+3. Confirm the old password no longer authenticates.
+
+Change the password of the `admin` account rather than deleting the account. Enabling TOTP MFA on administrator
+accounts adds step-up elevation for sensitive operations; see [Login and Elevation](auth/login-and-elevation.md).
+
+## Verify the installation
 
 ```bash
-# User authentication flow
-1. User logs in via browser
-2. Server issues JWT access token
-3. Client includes token in API requests
-4. Server validates token on each request
+systemctl status cidx-server
+systemctl list-timers cidx-auto-update.timer
+curl -s http://localhost:8000/healthz
 ```
 
-### Network Security
+`/healthz` is unauthenticated and returns `{"status": "healthy"}` (HTTP 200), `{"status": "degraded"}` (HTTP 200)
+or `{"status": "unhealthy"}` (HTTP 503). See [Observability](observability.md) for what each status means.
 
-Recommended production setup:
+## Ports and network
 
-```bash
-# Run server behind reverse proxy (nginx/haproxy)
-# Terminate SSL at proxy level
-# Forward to CIDX server on localhost:8090
+One port (default 8000) serves everything: REST API, MCP (`/mcp`), the Web UI (`/admin`), OAuth endpoints and the
+OpenAPI page (`/docs`). The default comes from the installer (`PORT=8000`) and the `ServerConfig.port` default.
 
-# Example nginx config
+To serve TLS, terminate it at a reverse proxy and forward to the node:
+
+```nginx
 server {
     listen 443 ssl;
     server_name cidx.example.com;
 
-    ssl_certificate /etc/ssl/certs/cidx.crt;
+    ssl_certificate     /etc/ssl/certs/cidx.crt;
     ssl_certificate_key /etc/ssl/private/cidx.key;
 
+    # Maintenance-mode switches are for the local auto-updater only.
+    location = /api/admin/maintenance/enter { return 403; }
+    location = /api/admin/maintenance/exit  { return 403; }
+
     location / {
-        proxy_pass http://localhost:8090;
+        proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
-### File Permissions
+The two maintenance endpoints accept only loopback peers (`require_localhost`). A proxy on the same host connects
+from loopback, so the proxy itself must refuse those paths; see [Maintenance and Jobs](maintenance-and-jobs.md).
+When the proxy publishes a public URL, set `CIDX_ISSUER_URL` to it (see [systemd units](#systemd-units)).
 
-```bash
-# Create dedicated user for server
-sudo useradd -r -s /bin/false cidx-server
+## Backups
 
-# Set directory permissions
-sudo mkdir -p /var/lib/cidx-server
-sudo chown cidx-server:cidx-server /var/lib/cidx-server
-sudo chmod 700 /var/lib/cidx-server
+Stop the service (or use `sqlite3 <db> ".backup <dest>"` per database) for a consistent copy of:
 
-# Set log permissions
-sudo mkdir -p /var/log/cidx-server
-sudo chown cidx-server:cidx-server /var/log/cidx-server
-sudo chmod 750 /var/log/cidx-server
-```
+- `~/.cidx-server/config.json` and `~/.cidx-server/.jwt_secret`
+- `~/.cidx-server/.encryption_key_salt`, together with the database. A restore without this file cannot decrypt
+  the stored git credentials and CI tokens.
+- `~/.cidx-server/data/cidx_server.db`
+- `~/.cidx-server/groups.db`, `oauth.db`, `refresh_tokens.db`, `scip_audit.db`
 
-## Performance Tuning
-
-### Cache Optimization
-
-For maximum cache benefit:
-
-1. **Monitor hit ratio**: Target >80% for high-query environments
-2. **Adjust TTL**: Balance memory usage vs. cache effectiveness
-3. **Pre-warm cache**: Query common repositories during server startup
-4. **Memory allocation**: Ensure sufficient RAM for expected cache size
-
-### Repository Management
-
-Best practices:
-
-1. **Index frequently-queried repositories**: Priority indexing for active projects
-2. **Schedule re-indexing**: Off-hours re-indexing to minimize cache disruption
-3. **Repository isolation**: Separate large monorepos to independent cache entries
-
-### Scaling Considerations
-
-For large deployments:
-
-1. **Horizontal scaling**: Run multiple server instances behind load balancer
-2. **Shared storage**: Use shared filesystem for repository data
-3. **Cache distribution**: Each server maintains independent cache (no shared cache needed)
-4. **Monitoring**: Track per-server cache statistics and memory usage
-
-## Monitoring and Maintenance
-
-### Health Check Endpoint
-
-```bash
-# Check server health (authentication required)
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/health
-```
-
-Example response:
-```json
-{
-  "status": "healthy",
-  "message": "Server is running normally",
-  "uptime": 3600.5,
-  "active_jobs": 2,
-  "job_queue": {
-    "active_jobs": 2,
-    "pending_jobs": 0,
-    "failed_jobs": 0,
-    "failed_jobs_window": "24h"
-  },
-  "started_at": "2025-11-30T10:00:00Z",
-  "maintenance_mode": false,
-  "version": "10.141.0"
-}
-```
-
-`failed_jobs` counts only jobs that failed within `failed_jobs_window` (the
-last 24 hours); any such failure makes the status `degraded`. Older failures
-stay visible in the job history but no longer affect health.
-
-### Log Analysis
-
-Server application logs are stored in `~/.cidx-server/logs.db` (SQLite). Monitor logs with:
-
-```bash
-# View recent error logs
-sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, level, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"
-
-# Search for cache-related logs
-sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, message FROM logs WHERE message LIKE '%cache%' ORDER BY id DESC LIMIT 50"
-
-# Count recent errors
-sqlite3 ~/.cidx-server/logs.db "SELECT COUNT(*) FROM logs WHERE level='ERROR'"
-```
-
-### Backup and Recovery
-
-Critical data to backup:
-
-1. **Repository indexes**: `~/.cidx-server/golden-repos/`
-2. **Configuration**: `~/.cidx-server/config.json`
-3. **Database**: `~/.cidx-server/cidx_server.db` (users, settings, job history)
-
-Cache data (HNSW indexes) can be rebuilt, no backup needed.
+`~/.cidx-server/data/golden-repos/` can be rebuilt by re-registering and re-indexing the repositories, at the cost
+of the indexing time and embedding-provider calls; back it up if that cost matters.
 
 ## Troubleshooting
 
-### Common Issues
-
-#### Server Won't Start
-
-```bash
-# Check logs
-sudo journalctl -u cidx-server -n 50
-
-# Common causes:
-# - Missing VOYAGE_API_KEY
-# - Port already in use
-# - Permission issues
-```
-
-#### Slow Query Performance
-
-```bash
-# Check if cache is working
-curl http://localhost:8090/cache/stats
-
-# If hit_ratio is low:
-# 1. Increase TTL
-# 3. Monitor memory usage
-```
-
-#### Memory Issues
-
-```bash
-# Check memory usage
-free -h
-ps aux | grep cidx-server
-
-# If high memory usage:
-# 1. Reduce TTL
-# 2. Reduce number of cached repositories
-# 3. Restart server to clear cache
-```
-
-## Post-Generation Verification Pass
-
-The cidx-server supports an optional post-generation verification pass that
-re-reads generated dependency-map artifacts and repo descriptions against
-their actual source code and produces a corrected version with evidence
-citations.
-
-**Default: disabled.** Enable via the Admin Web UI Config Screen, Claude
-CLI Integration section, "Post-generation verification pass (fact-check)"
-toggle.
-
-### Latency cost
-
-Verification invokes Claude CLI once per generated document. Expected cost:
-
-- Per-invocation: approximately 20-45 seconds (within the configured timeout).
-- Per refresh cycle: adds verification time multiplied by the number of
-  generated artifacts (per-domain for dependency maps, once for descriptions).
-
-Before enabling in production, run the baseline measurement procedure
-described in the story: measure the fabrication rate on a fixed 3-repo corpus
-both with and without verification to confirm the corrections justify the cost.
-
-### Configuration fields
-
-- `dep_map_fact_check_enabled` (bool, default `false`): master toggle.
-- `fact_check_timeout_seconds` (int, default `600`): per-invocation timeout.
-  Accepts 60-3600.
-
-### Known limitations
-
-- Changes to `max_concurrent_claude_cli` require a service restart to take
-  effect. The shared subprocess semaphore that bounds total Claude CLI
-  concurrency is initialized once at process start and does not resize at
-  runtime. Restart the `cidx-server` systemd unit after changing this field.
-- Verification is a heuristic second pass using the same model class as the
-  generator. It reduces hallucinated claims but does not guarantee factual
-  correctness.
-- Source-code bugs found by verification are NOT automatically corrected in
-  deployed code; the feature only corrects the generated markdown artifacts.
-  Code-level bugs are filed as GitHub issues per the existing bug-report flow.
-
-## cidx-meta backup to remote git
-
-The cidx-meta directory holds description files and metadata for every registered
-golden repository.  You can configure the server to keep a continuous git backup
-of this directory in a remote repository so that the metadata can be recovered
-after data loss.
-
-### Configuration
-
-1. Navigate to the Web UI Config Screen: `/admin/config`.
-2. Open the "cidx-meta backup" section.
-3. Set "Enabled" to `true`.
-4. Enter the remote URL in the "Remote URL" field (see URL formats below).
-5. Click Save.
-
-URL formats accepted:
-
-- `git@github.com:org/repo.git` — SSH (requires SSH key, see below)
-- `https://github.com/org/repo.git` — HTTPS
-- `file:///path/to/bare.git` — local bare repository (useful for testing)
-
-### SSH key prerequisite
-
-For `git@host:` URLs, the server must have an SSH key registered for that
-hostname before saving the configuration.  To add a key:
-
-1. Go to the SSH Keys page in the admin UI.
-2. Create or import a key and assign it to the target hostname.
-3. Return to the Config Screen and save the cidx-meta backup settings.
-
-`file://` and `https://` URLs skip the SSH key check.
-
-### Bootstrap behavior
-
-The first time a remote URL is saved (or when the URL changes), the server
-runs `CidxMetaBackupBootstrap.bootstrap()`:
-
-- If `.git/` does not exist in the cidx-meta directory, git is initialized,
-  all current files are committed, and a force-push is made to the remote.
-- If `.git/` exists and the remote URL is unchanged, the call is a no-op.
-- If the URL changed, `git remote set-url` is issued and a force-push is made.
-
-Bootstrap is idempotent: running it multiple times with the same URL is safe.
-
-### Sync on refresh
-
-Every time the cidx-meta refresh job runs and backup is enabled:
-
-1. `MetaDirectoryUpdater` creates or removes description files on disk.
-2. `CidxMetaBackupSync` stages all changes (`git add -A`), commits, fetches
-   from origin, rebases local commits on top of remote changes, and pushes.
-3. If the rebase produces conflicts, Claude CLI is invoked to resolve them
-   (600 s timeout; SIGTERM then SIGKILL after 30 s if exceeded).
-4. If conflict resolution fails, `git rebase --abort` reverts the repo and
-   the refresh job is marked FAILED with the resolution error as the reason.
-5. If the push itself fails (e.g. network error), the job is also marked FAILED
-   but indexing still runs (deferred-failure pattern).
-
-### Recovery procedure
-
-To recover cidx-meta from the remote backup:
-
-1. Stop the `cidx-server` service.
-2. Remove or rename the existing cidx-meta directory:
-   `mv ~/.cidx-server/data/golden-repos/cidx-meta ~/.cidx-server/data/golden-repos/cidx-meta.bak`
-3. Clone the remote backup into that location:
-   `git clone <remote-url> ~/.cidx-server/data/golden-repos/cidx-meta`
-4. Restart `cidx-server`.
-5. Trigger a manual refresh for `cidx-meta-global` from the admin UI to
-   re-index the recovered metadata.
-
-### Operational notes
-
-- URL change idempotency: changing the URL in the Web UI triggers
-  `CidxMetaBackupBootstrap.bootstrap()` at Save time.  The next scheduled
-  refresh cycle also runs bootstrap at the start so URL changes applied via
-  direct DB edits are picked up automatically.
-- Deferred-failure pattern: indexing always runs after sync regardless of
-  whether push succeeded.  A failed push surfaces as a FAILED job with the
-  push error included in the failure reason.
-- Claude conflict resolver timeout: 600 s per invocation.  On timeout,
-  SIGTERM is sent first; SIGKILL follows after a 30 s grace period.
-- The mutable base path for cidx-meta is always
-  `<server_data_dir>/data/golden-repos/cidx-meta/`.  Git operations NEVER
-  run inside `.versioned/` snapshot directories.
-
-## Additional Resources
-
-- [Main README](../../README.md) - Project overview and features
-- [GitHub Repository](https://github.com/LightspeedDMS/code-indexer) - Source code and issues
+| Symptom | Check |
+|---------|-------|
+| Installer ends with `Health check FAIL: GET http://localhost:<port>/docs did not return 200` | `journalctl -u cidx-server --no-pager -n 30` |
+| `No module named 'code_indexer'` in the journal | The unit's `PYTHONPATH` must point at `<install dir>/src` |
+| Service exits immediately | Port already in use: `ss -ltnp | grep 8000` |
+| A changed host, port or worker count in the Web UI never applies | No restart was requested through the Web UI restart action (a manual `systemctl restart` does not apply them), or the auto-update timer is not running: `systemctl status cidx-auto-update.timer` |
+| Startup log ERROR about hnswlib missing `check_integrity()`/`repair_orphans()` | [Custom hnswlib Build](hnswlib-custom-build.md) |
+| `/healthz` returns 503 | `GET /api/system/health` (authenticated) lists `failure_reasons`; see [Observability](observability.md) |
