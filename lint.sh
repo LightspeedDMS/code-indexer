@@ -73,6 +73,15 @@ main() {
         all_passed=false
     fi
 
+    # Story #2079: no dangling doc references (Markdown links, docs/ paths, include_str!)
+    echo -e "${BLUE}Running Story #2079 doc reference check...${NC}"
+    if python3 scripts/check_doc_references.py; then
+        echo -e "${GREEN}✅ Doc reference check passed${NC}"
+    else
+        echo -e "${RED}❌ Doc reference check failed${NC}"
+        all_passed=false
+    fi
+
     if $all_passed; then
         echo -e "${GREEN}🎉 All linting checks passed!${NC}"
         exit 0
