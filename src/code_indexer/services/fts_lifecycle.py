@@ -144,10 +144,11 @@ def open_fts_index_for_run(
         fts_manager = TantivyIndexManager(index_dir)
         exists, needs_rebuild = _rebuild_decision(fts_manager, index_dir)
         rebuilt = force_full or not exists or needs_rebuild
-        if rebuilt:
-            # Before anything is replaced: a run dying from here on leaves
-            # the index "not current", so the next run rebuilds it.
-            invalidate_fts_content_marker(index_dir)
+        # Before anything is written, reused index or not: a run dying from
+        # here on leaves the index "not current", so the next run rebuilds
+        # it (a resumed run replays its work list, never its deletions).
+        # Only a completed run marks it again (_settle_fts_content).
+        invalidate_fts_content_marker(index_dir)
         if needs_rebuild:
             logger.info(
                 f"FTS index at {index_dir} has a stale schema, no current "
@@ -240,7 +241,6 @@ def _replace_from_disk(
 def _settle_fts_content(
     index_dir: Path,
     *,
-    rebuilt: bool,
     committed: int,
     missing_files: int,
     first_error: str,
@@ -250,15 +250,16 @@ def _settle_fts_content(
     empty guard. Same rule as semantic indexing: the run fails only when no
     file could be indexed. Otherwise files missing from FTS leave the index
     without a current content marker (the next run rebuilds it from disk)
-    and are reported in the returned message, logged once as a WARNING. A
-    complete rebuild is marked content-current.
+    and are reported in the returned message, logged once as a WARNING. Any
+    completed run with no file missing -- rebuild, incremental or no-op --
+    marks the index content-current again (open_fts_index_for_run dropped
+    the marker; a run that raised or was killed never gets here).
 
     Raises:
         FtsRebuildIncompleteError: files are missing and nothing is indexed.
     """
     if not missing_files:
-        if rebuilt:
-            mark_fts_content_current(index_dir)
+        mark_fts_content_current(index_dir)
         return None
     invalidate_fts_content_marker(index_dir)
     message = (
@@ -276,7 +277,6 @@ def finish_fts_run(
     fts_manager: "TantivyIndexManager",
     config: "Config",
     *,
-    rebuilt: bool,
     run_raised: bool,
     source_files: Iterable[Path],
     failed_files: Sequence[FailedFile] = (),
@@ -339,7 +339,6 @@ def finish_fts_run(
     )
     warning = _settle_fts_content(
         index_dir,
-        rebuilt=rebuilt,
         committed=committed,
         missing_files=len(missing) + unknown_failures,
         first_error=(
@@ -410,7 +409,6 @@ def open_fts_index_for_watch(
         warning = finish_fts_run(
             fts_manager,
             config,
-            rebuilt=True,
             run_raised=False,
             failed_files=failed,
             source_files=files,
@@ -471,7 +469,6 @@ def rebuild_fts_index(
         )
         warning = _settle_fts_content(
             index_dir,
-            rebuilt=True,
             committed=committed,
             missing_files=len(failed),
             first_error=f"{failed[0][0]}: {failed[0][1]}" if failed else "",

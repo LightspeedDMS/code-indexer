@@ -870,7 +870,6 @@ class SmartIndexer(HighThroughputProcessor):
                 if fts_manager is not None:
                     self._finish_fts_run(
                         fts_manager,
-                        rebuilt=create_new_fts,
                         run_raised=run_raised,
                         bootstrap_failures=fts_bootstrap_failures,
                         progress_callback=progress_callback,
@@ -883,7 +882,6 @@ class SmartIndexer(HighThroughputProcessor):
         self,
         fts_manager: "TantivyIndexManager",
         *,
-        rebuilt: bool,
         run_raised: bool,
         bootstrap_failures: List[Tuple[Path, str]],
         progress_callback: Optional[Callable],
@@ -903,7 +901,6 @@ class SmartIndexer(HighThroughputProcessor):
             finish_fts_run(
                 fts_manager,
                 self.config,
-                rebuilt=rebuilt,
                 run_raised=run_raised,
                 failed_files=bootstrap_failures,
                 retry_files=sorted(retry_files),

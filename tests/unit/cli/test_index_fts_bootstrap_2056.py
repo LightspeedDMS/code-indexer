@@ -1069,3 +1069,83 @@ class TestWatchFrontDoor2056:
         assert "No indexes found" not in text, text
         assert "Semantic index" in text and "FTS index" in text, text
         assert _WATCH_READY in text, text
+
+
+#: How long the fake provider holds the killed run's embedding request;
+#: the fixture's stop() releases it early.
+_HELD_REQUEST_SECONDS = 60
+_HELD_REQUEST_WAIT_SECONDS = 90
+
+
+class TestFtsMarkerSurvivesOnlyCompletedRuns2056:
+    """Every `--fts` run drops the content marker when it opens the index and
+    writes it back only once it completes. A killed run leaves the index
+    unmarked, so the next run rebuilds it from disk -- a resumed run replays
+    its stored work list but never its deletions. A completed run, a no-op
+    one included, leaves the index current: no rebuild per refresh."""
+
+    def test_killed_incremental_run_with_a_deletion_heals_next_run(
+        self, tmp_path: Path, fake_provider
+    ) -> None:
+        import signal
+
+        repo = _make_repo(tmp_path, fake_provider)
+        repo.cidx("index", "--fts")
+        assert repo.fts_paths_for("CARTTOKEN") == ["src/cart.js"]
+        repo.write(
+            "src/auth.py", "def check_password(pw):\n    return pw == 'NEWAUTHTOKEN'\n"
+        )
+        repo.write("src/brand_new.py", "BRANDNEWTOKEN = 1\n")
+        (repo.path / "src" / "cart.js").unlink()
+        repo.commit("change")
+
+        fake_provider.ledger.begin_run(
+            f"{repo.run_label_prefix}-killed", hold_seconds=_HELD_REQUEST_SECONDS
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "code_indexer.cli", "index", "--fts"],
+            cwd=repo.path,
+            env=repo.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            assert fake_provider.ledger.wait_for_held(1, _HELD_REQUEST_WAIT_SECONDS), (
+                "the run never reached its embedding request"
+            )
+        finally:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=30)
+        assert not (repo.fts_dir / _CONTENT_MARKER_FILE).exists()
+
+        repo.cidx("index", "--fts")
+
+        assert repo.fts_paths_for("CARTTOKEN") == [], "deleted file still in FTS"
+        assert repo.fts_paths_for("NEWAUTHTOKEN") == ["src/auth.py"]
+        assert repo.fts_paths_for("BRANDNEWTOKEN") == ["src/brand_new.py"]
+        assert repo.fts_paths_for("AUTHTOKEN") == []
+        assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("index", "--fts"),
+            ("index", "--fts", "--reconcile"),
+            ("index", "--fts", *_SERVER_LAYOUT_ARGS),
+        ],
+        ids=["incremental", "reconcile", "server-layout"],
+    )
+    def test_no_op_run_keeps_the_index_current(
+        self, tmp_path: Path, fake_provider, args: Tuple[str, ...]
+    ) -> None:
+        repo = _make_repo(tmp_path, fake_provider)
+        _backdate_all_files(repo)
+        repo.cidx(*args)
+        documents = repo.fts_documents()
+
+        for _ in range(2):
+            assert repo.cidx(*args) == 0, "nothing changed: no embedding"
+            assert _REBUILT not in repo.last_output, repo.last_output[-2000:]
+            assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+            assert repo.fts_documents() == documents

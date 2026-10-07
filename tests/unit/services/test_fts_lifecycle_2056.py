@@ -74,14 +74,19 @@ def _count(index_dir: Path) -> int:
 
 
 class TestOpenFtsIndexForRun2056:
-    def test_current_index_is_reopened_not_rebuilt(self, tmp_path: Path) -> None:
+    def test_current_index_is_reused_unmarked_until_the_run_completes(
+        self, tmp_path: Path
+    ) -> None:
         config = Config(codebase_dir=tmp_path)
         index_dir = _current_index(config, ["a.py"])
 
         fts, rebuilt = open_fts_index_for_run(config, force_full=False)
+        marked_while_open = fts_content_version_is_current(index_dir)
+        finish_fts_run(fts, config, run_raised=False, source_files=[])
         fts.close()
 
         assert rebuilt is False
+        assert not marked_while_open, "a run killed now must leave it unmarked"
         assert fts_content_version_is_current(index_dir)
         assert _count(index_dir) == 1
 
@@ -124,9 +129,7 @@ class TestFinishFtsRun2056:
         config = Config(codebase_dir=tmp_path)
         fts = self._open(config, ["a.py"])
 
-        warning = finish_fts_run(
-            fts, config, rebuilt=True, run_raised=False, source_files=[]
-        )
+        warning = finish_fts_run(fts, config, run_raised=False, source_files=[])
         fts.close()
 
         assert warning is None
@@ -142,7 +145,6 @@ class TestFinishFtsRun2056:
             warning = finish_fts_run(
                 fts,
                 config,
-                rebuilt=True,
                 run_raised=False,
                 failed_files=[(tmp_path / "b.py", "boom")],
                 source_files=[],
@@ -163,7 +165,6 @@ class TestFinishFtsRun2056:
             finish_fts_run(
                 fts,
                 config,
-                rebuilt=True,
                 run_raised=False,
                 failed_files=[(tmp_path / "b.py", "boom")],
                 source_files=[],
@@ -181,7 +182,6 @@ class TestFinishFtsRun2056:
         warning = finish_fts_run(
             fts,
             config,
-            rebuilt=False,
             run_raised=False,
             unknown_failures=1,
             source_files=[],
@@ -205,7 +205,6 @@ class TestFinishFtsRun2056:
         warning = finish_fts_run(
             fts,
             config,
-            rebuilt=False,
             run_raised=False,
             retry_files=[retried],
             source_files=[],
@@ -229,7 +228,6 @@ class TestFinishFtsRun2056:
             warning = finish_fts_run(
                 fts,
                 config,
-                rebuilt=False,
                 run_raised=False,
                 retry_files=[retried],
                 source_files=[],
@@ -253,7 +251,6 @@ class TestFinishFtsRun2056:
             warning = finish_fts_run(
                 fts,
                 config,
-                rebuilt=True,
                 run_raised=False,
                 failed_files=[(locked, "bootstrap: permission denied")],
                 retry_files=[locked],
@@ -277,7 +274,6 @@ class TestFinishFtsRun2056:
         warning = finish_fts_run(
             fts,
             config,
-            rebuilt=True,
             run_raised=False,
             failed_files=[(healed, "bootstrap: transient read error")],
             retry_files=[healed],
@@ -298,11 +294,9 @@ class TestFinishFtsRun2056:
         fts.close()  # the writer is gone: commit() fails for real
 
         with pytest.raises(FtsIndexError):
-            finish_fts_run(
-                fts, config, rebuilt=False, run_raised=False, source_files=[]
-            )
+            finish_fts_run(fts, config, run_raised=False, source_files=[])
         # A run already propagating its own exception is never masked.
-        finish_fts_run(fts, config, rebuilt=True, run_raised=True, source_files=[])
+        finish_fts_run(fts, config, run_raised=True, source_files=[])
         assert not fts_content_version_is_current(fts_index_dir(config))
 
     def test_fts_errors_exit_with_the_generic_code(self) -> None:
