@@ -13,9 +13,9 @@
 # postgres_dsn, cluster.node_id) to enable cluster mode.
 
 # ---- Build stage ----
-# Pin bookworm: it ships openjdk-17 (trixie, the current `slim` default, does
-# not) which the runtime stage needs for scip-java + Gradle 7.x compatibility.
-# Both stages must match so the copied site-packages/glibc are consistent.
+# Pin bookworm on BOTH stages so the copied site-packages/glibc stay consistent.
+# (It was additionally pinned for openjdk-17; that reason is gone -- the Java SCIP
+# toolchain now lives in sandbox-mcp. See the runtime stage.)
 FROM python:3.11-slim-bookworm AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -171,55 +171,35 @@ ENV PYTHONUNBUFFERED=1 \
     CIDX_SERVER_DATA_DIR=/data \
     DEBIAN_FRONTEND=noninteractive
 
-# Runtime deps: git (GitPython + golden-repo clone/refresh), libgomp1 (hnswlib OpenMP),
-# tini (PID 1 signal handling / zombie reaping).
+# Runtime deps, and why each one is here:
+#  - git      : cidx still runs git IN THIS IMAGE on paths the git-mcp seam does
+#               not cover -- git-aware indexing (services/git_topology_service.py,
+#               services/file_identifier.py), temporal indexing
+#               (services/temporal/), and parts of global_repos/refresh_scheduler.py
+#               (see the "EVO-64678: left raw" note there: the seam's symbolic_ref()
+#               cannot express refs/remotes/origin/HEAD). Those modules shell out to
+#               `git` directly and hold ZERO git_backend references, so removing the
+#               binary breaks indexing even with git_backend='delegated'. Removing it
+#               is a seam-coverage task, not a Dockerfile one.
+#  - libgomp1 : hnswlib OpenMP runtime.
+#  - tini     : PID 1 signal handling / zombie reaping.
+#  - ripgrep  : REQUIRED for /api/regex/search. RegexSearchService prefers rg
+#               (rg --json over a gitignored tree is sub-second) and silently falls
+#               back to a linear `grep -r` scan when `which("rg")` is falsy. On a 14G
+#               working tree that fallback always hits the 30s search timeout.
+#  - curl + ca-certificates : TLS trust store for outbound HTTPS (embedding provider);
+#               curl itself is kept as the in-pod debug client.
 #
-# C11: a headless JDK + Coursier (`cs`) so Java/Kotlin SCIP works. scip-java is
-# launched on demand via Coursier and runs the target project's gradle/maven
-# build, both of which need a JDK. curl fetches the Coursier launcher.
-#
-# Java SCIP needs TWO JDKs:
-#  - JDK 17 (openjdk-17, apt) is the Gradle LAUNCHER. The JDK that runs a
-#    project's Gradle must be old enough for that Gradle version: Gradle 7.x
-#    (still common) only supports Java <=17 (Java 21 -> "Unsupported class file
-#    major version 65"), and Java 17 also runs Gradle 8.x and scip-java itself.
-#  - JDK 21 (Temurin, tarball at /opt/jdk-21) is available as a Gradle TOOLCHAIN
-#    for projects that compile at languageVersion=21 (e.g. the Evolution
-#    monolith). Gradle launched with 17 picks 21 up via installations.paths
-#    (set in the cidx user's gradle.properties below).
+# NO JAVA TOOLCHAIN HERE. The headless JDK 17, the Temurin JDK 21 toolchain at
+# /opt/jdk-21, Coursier (`cs`) and Gradle 8.5 were all carried solely for local
+# scip-java. SCIP generation is delegated to sandbox-mcp (scip_backend='delegated'),
+# whose scip image ships JDK 17 + Coursier + scip-java 0.11.1 -- the same version
+# scip/indexers/java.py pins. startup/scip_backend_wiring.py is fail-loud: an
+# unreachable sandbox-mcp raises rather than falling back to a local build, so this
+# image has no reachable path to a JVM. Re-adding one means re-adding a fallback.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git libgomp1 tini openjdk-17-jdk-headless curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://github.com/coursier/launchers/raw/master/cs-x86_64-pc-linux.gz \
-         | gzip -d > /usr/local/bin/cs \
-    && chmod +x /usr/local/bin/cs \
-    && mkdir -p /opt/jdk-21 \
-    && curl -fsSL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse" \
-         | tar -xz -C /opt/jdk-21 --strip-components=1
-
-# Bake Gradle so scip-java can build + index Gradle projects. The image had
-# scip-java + JDK but NO build tool (gradle/maven), so scip-java's build step
-# failed and Java SCIP generation produced empty .scip.db -- the observed
-# "SCIP fast-but-empty" pathology. Gradle 8.5 runs on the JDK 17 launcher and
-# supports the JDK 21 toolchain (installations.paths, set below).
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip \
-    && unzip -q /tmp/gradle.zip -d /opt \
-    && ln -sf /opt/gradle-8.5/bin/gradle /usr/local/bin/gradle \
-    && rm /tmp/gradle.zip
-
-# ripgrep (rg) is REQUIRED for /api/regex/search: RegexSearchService prefers rg
-# (rg --json over a gitignored tree is sub-second) and silently falls back to a
-# linear `grep -r` scan when `which("rg")` is falsy. On a 14G working tree that
-# fallback always hits the 30s search timeout, so the binary must be present.
-# Kept as its own layer (after the heavy JDK/coursier/gradle steps) so adding it
-# does not invalidate their build cache.
-RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
+        git libgomp1 tini ripgrep curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# JAVA_HOME points at the 17 launcher; 21 is a toolchain (installations.paths).
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 # ---- xray-cli + its query-time Rust toolchain ----
 # ORDERING: this whole block sits ABOVE the site-packages COPY below on
@@ -394,25 +374,6 @@ RUN set -eux; \
 RUN useradd -m -u 1000 cidx && mkdir -p /data && chown -R cidx:cidx /data
 USER cidx
 WORKDIR /home/cidx
-
-# Gradle setup for the cidx user so scip-java indexing works out-of-the-box:
-#  - installations.paths=/opt/jdk-21: expose the Java 21 toolchain (see above) so
-#    projects requiring languageVersion=21 compile without "No matching toolchains".
-#  - init.d repositoriesMode=PREFER_PROJECT: let scip-java's SemanticdbGradlePlugin
-#    add its own repository (to fetch semanticdb-javac) on projects that set
-#    dependencyResolutionManagement FAIL_ON_PROJECT_REPOS (e.g. Evolution). cidx
-#    only runs Gradle for SCIP indexing, so relaxing this globally is safe.
-RUN mkdir -p /home/cidx/.gradle/init.d \
-    && printf 'org.gradle.java.installations.paths=/opt/jdk-21\n' \
-         > /home/cidx/.gradle/gradle.properties \
-    && printf 'settingsEvaluated { s -> s.dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.PREFER_PROJECT) } }\n' \
-         > /home/cidx/.gradle/init.d/cidx-scip.gradle
-
-# C11: pre-fetch the scip-java artifact into the runtime user's Coursier cache so
-# index-time `cs launch` is offline-safe (no Maven Central round-trip per index).
-# Non-fatal: if the build host can't reach Maven Central, index-time falls back
-# to an on-demand download.
-RUN cs fetch com.sourcegraph:scip-java_2.13:0.11.1 || true
 
 EXPOSE 8090
 
