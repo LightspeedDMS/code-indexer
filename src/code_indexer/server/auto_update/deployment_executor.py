@@ -158,7 +158,10 @@ def ensure_single_safe_directory(
     git = ["sudo", "-u", sudo_user] if sudo_user else []
     git += ["git", "config", "--global"]
     listed = subprocess.run(
-        [*git, "--get-all", "safe.directory"], capture_output=True, text=True
+        [*git, "--get-all", "safe.directory"],
+        capture_output=True,
+        text=True,
+        env=build_non_interactive_git_env(),
     )
     if listed.returncode == 0:
         count = listed.stdout.splitlines().count(path)
@@ -177,7 +180,12 @@ def ensure_single_safe_directory(
     else:
         command = [*git, "--replace-all", "safe.directory", path]
         command.append(_posix_ere_literal(path))
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env=build_non_interactive_git_env(),
+    )
     if result.returncode != 0:
         return result.stderr or f"git config exited {result.returncode}"
     if count > 1:
@@ -945,6 +953,7 @@ class DeploymentExecutor:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -976,6 +985,7 @@ class DeploymentExecutor:
                         cwd=self.repo_path,
                         capture_output=True,
                         text=True,
+                        env=build_non_interactive_git_env(),
                     )
 
                     if result.returncode != 0:
@@ -1585,6 +1595,7 @@ class DeploymentExecutor:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=build_non_interactive_git_env(),
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
@@ -4732,6 +4743,7 @@ class DeploymentExecutor:
                     capture_output=True,
                     text=True,
                     timeout=PACE_MAKER_GIT_TIMEOUT,
+                    env=build_non_interactive_git_env(),
                 )
                 if result.returncode != 0:
                     logger.warning(
@@ -4747,6 +4759,7 @@ class DeploymentExecutor:
                     capture_output=True,
                     text=True,
                     timeout=PACE_MAKER_GIT_TIMEOUT,
+                    env=build_non_interactive_git_env(),
                 )
                 if result.returncode != 0:
                     logger.warning(
