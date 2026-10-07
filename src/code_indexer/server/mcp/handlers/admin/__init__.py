@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
+from .._utils import _get_access_filtering_service
+from .._global_clone import published_global_clone_path
 from code_indexer.server.auth import dependencies as dependencies
 from code_indexer.server.auth.login_outcome import complete_login, reject_login
 from code_indexer.server.logging_utils import format_error_log
@@ -558,10 +565,52 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 _utils.app_module.app.state, "activated_repo_manager", None
             ),
         )
-        status_data = index_manager.get_index_status(
-            repo_alias=repo_alias,
-            username=user.username,
-        )
+        try:
+            status_data = index_manager.get_index_status(
+                repo_alias=repo_alias,
+                username=user.username,
+            )
+        except FileNotFoundError:
+            # A globally-activated repo has no activated-repos/<user>/ directory --
+            # it lives under the golden clone. list_repositories publishes its alias
+            # as "<alias>-global", so without this the published alias reports a
+            # missing activated-repo path that was never going to exist.
+            #
+            # Resolve FIRST, enforce access SECOND. Order matters: an alias that is
+            # not a published global repo must keep reporting "not found" exactly as
+            # before, rather than being answered by the access guard -- otherwise a
+            # genuinely missing repo reports an access problem instead.
+            _grm = _utils.app_module.golden_repo_manager
+            global_clone = published_global_clone_path(repo_alias, _grm)
+            if global_clone is None:
+                raise
+
+            # The activated lookup above is implicitly user-scoped (it resolves under
+            # activated-repos/<user>/); the golden clone is not. Handing it over
+            # without a check would let any caller with repository:read reach a repo
+            # the listing would have filtered out.
+            try:
+                require_repo_access(
+                    _get_access_filtering_service(), user.username, repo_alias
+                )
+            except RepoAccessDeniedError as access_err:
+                return _mcp_response(  # type: ignore[no-any-return]
+                    {"success": False, "error": str(access_err)}
+                )
+            except AccessFilteringServiceUnavailableError:
+                return _mcp_response(  # type: ignore[no-any-return]
+                    {
+                        "success": False,
+                        "error": (
+                            "Access filtering unavailable; refusing repository access"
+                        ),
+                    }
+                )
+            status_data = index_manager.get_index_status_for_path(
+                global_clone,
+                repo_alias=repo_alias,
+                username=user.username,
+            )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(

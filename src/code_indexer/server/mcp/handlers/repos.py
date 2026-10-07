@@ -34,6 +34,12 @@ from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
 from . import _utils
+from ._global_clone import published_global_clone_path
+from code_indexer.server.services.repo_access_guard import (
+    AccessFilteringServiceUnavailableError,
+    RepoAccessDeniedError,
+    require_repo_access,
+)
 from ._utils import (
     _admin_role_first,
     _admin_role_required_response,
@@ -427,13 +433,38 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         force_refresh = params.get("force_refresh", False)
 
-        repo = _utils.app_module.golden_repo_manager.get_golden_repo(repository_alias)
-        if not repo:
+        # Enforce repo access before resolving anything. This handler previously
+        # accepted a bare alias with no check at all; the guard normalises the
+        # "-global" suffix itself, bypasses for admins, and fails CLOSED when the
+        # access service is unwired.
+        try:
+            require_repo_access(
+                _get_access_filtering_service(),
+                user.username,
+                repository_alias,
+            )
+        except RepoAccessDeniedError as access_err:
+            return _mcp_response({"success": False, "error": str(access_err)})
+        except AccessFilteringServiceUnavailableError:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Access filtering unavailable; refusing repository access",
+                }
+            )
+
+        _grm = _utils.app_module.golden_repo_manager
+        repo = _grm.get_golden_repo(repository_alias)
+        clone_path = Path(repo.clone_path) if repo else None
+        if clone_path is None:
+            # list_repositories publishes a globally-activated repo as
+            # "<alias>-global", but the golden repo is registered under the bare
+            # alias -- so the published alias would otherwise be rejected here.
+            clone_path = published_global_clone_path(repository_alias, _grm)
+        if clone_path is None:
             return _mcp_response(
                 {"success": False, "error": f"Repository not found: {repository_alias}"}
             )
-
-        clone_path = Path(repo.clone_path)
         index_base_path = clone_path / ".code-indexer" / "index"
 
         if _utils.app_module.background_job_manager is None:

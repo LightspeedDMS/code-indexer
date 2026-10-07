@@ -3351,7 +3351,9 @@ class GoldenRepoManager:
                 )
 
                 if result.returncode != 0:
-                    combined_output = redact_url_credentials(result.stdout) + redact_url_credentials(result.stderr)
+                    combined_output = redact_url_credentials(
+                        result.stdout
+                    ) + redact_url_credentials(result.stderr)
                     if self._is_recoverable_init_error(combined_output):
                         logging.warning(
                             f"Recoverable configuration conflict during init. "
@@ -4345,11 +4347,13 @@ class GoldenRepoManager:
             )
             if result.stdout:
                 logger.debug(
-                    "[change_branch] cidx index stdout:\n%s", redact_url_credentials(result.stdout)[-2000:]
+                    "[change_branch] cidx index stdout:\n%s",
+                    redact_url_credentials(result.stdout)[-2000:],
                 )
             if result.stderr:
                 logger.warning(
-                    "[change_branch] cidx index stderr:\n%s", redact_url_credentials(result.stderr)[-2000:]
+                    "[change_branch] cidx index stderr:\n%s",
+                    redact_url_credentials(result.stderr)[-2000:],
                 )
         except subprocess.CalledProcessError as e:
             logger.error(
@@ -5274,7 +5278,9 @@ class GoldenRepoManager:
                     text=True,
                     env=build_cidx_subprocess_env(),
                 )
-                init_output = (redact_url_credentials(init_result.stdout) or "") + (redact_url_credentials(init_result.stderr) or "")
+                init_output = (redact_url_credentials(init_result.stdout) or "") + (
+                    redact_url_credentials(init_result.stderr) or ""
+                )
                 if (
                     init_result.returncode != 0
                     and "already exists" not in init_output.lower()
@@ -5288,9 +5294,13 @@ class GoldenRepoManager:
                         f"Failed to initialize repo before indexing: {error_details}"
                     )
                 if init_result.stdout:
-                    all_stdout += f"[init] {redact_url_credentials(init_result.stdout)}\n"
+                    all_stdout += (
+                        f"[init] {redact_url_credentials(init_result.stdout)}\n"
+                    )
                 if init_result.stderr:
-                    all_stderr += f"[init] {redact_url_credentials(init_result.stderr)}\n"
+                    all_stderr += (
+                        f"[init] {redact_url_credentials(init_result.stderr)}\n"
+                    )
 
                 # Run each requested index type sequentially
                 for index_type in index_types:

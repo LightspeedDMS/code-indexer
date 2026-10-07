@@ -327,8 +327,26 @@ class ActivatedRepoIndexManager:
                 )
             raise
 
-        repo_path = Path(repo_path_str)
+        return self.get_index_status_for_path(
+            Path(repo_path_str), repo_alias=repo_alias, username=username
+        )
 
+    def get_index_status_for_path(
+        self,
+        repo_path: Path,
+        repo_alias: str,
+        username: str,
+    ) -> Dict[str, Any]:
+        """Index status for an explicit repository path.
+
+        Split out of :meth:`get_index_status` so a caller that has already
+        resolved the path -- a globally-activated repo lives under the golden
+        clone, not under ``activated-repos/<user>/`` -- can reuse the same
+        per-index-type reporting instead of reimplementing it.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist.
+        """
         if not repo_path.exists():
             raise FileNotFoundError(f"Repository directory not found: {repo_path}")
 
