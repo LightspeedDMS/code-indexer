@@ -143,3 +143,31 @@ def test_no_raw_hash_object_subprocess_remains(module: str) -> None:
                     if isinstance(e, ast.Constant) and isinstance(e.value, str)
                 ]
                 assert "hash-object" not in rest, f"{module} re-grew a hash-object exec"
+
+
+def test_truncated_mid_read_returns_none_rather_than_a_fictional_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Header length and hashed bytes must describe the same content.
+
+    Simulates the file shrinking after its size is taken: the function must
+    refuse instead of returning a hash of a length/content pair that never
+    existed on disk.
+    """
+    import code_indexer.utils.blob_hash as mod
+
+    target = tmp_path / "f"
+    target.write_bytes(b"x" * 100)
+
+    real_fstat = mod.os.fstat
+
+    def lying_fstat(fd):  # type: ignore[no-untyped-def]
+        st = real_fstat(fd)
+
+        class _S:
+            st_size = st.st_size + 10  # claim more than the file holds
+
+        return _S()
+
+    monkeypatch.setattr(mod.os, "fstat", lying_fstat)
+    assert mod.git_blob_hash(target) is None

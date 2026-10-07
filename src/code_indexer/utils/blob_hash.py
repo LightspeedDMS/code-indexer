@@ -38,6 +38,7 @@ If git-lfs is ever added, or a working tree ever holds CRLF content under
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union
 
@@ -55,15 +56,27 @@ def git_blob_hash(path: Union[str, Path]) -> Optional[str]:
     unset and falls back to its own content hash.
     """
     try:
-        size = Path(path).stat().st_size
-        digest = hashlib.sha1()
-        digest.update(b"blob %d\0" % size)
         with open(path, "rb") as handle:
+            # fstat the OPEN descriptor, not the path: the length baked into the
+            # header and the bytes hashed after it must describe the same inode,
+            # or a file replaced between the two steps yields a hash of nothing
+            # real. Streaming (rather than reading the file whole) keeps a large
+            # file out of memory, so the size has to be known up front.
+            size = os.fstat(handle.fileno()).st_size
+            digest = hashlib.sha1()
+            digest.update(b"blob %d\0" % size)
+            read = 0
             while True:
                 chunk = handle.read(_CHUNK)
                 if not chunk:
                     break
+                read += len(chunk)
                 digest.update(chunk)
+            if read != size:
+                # Truncated or appended to while being read. Refuse rather than
+                # return a hash that matches no actual content; the caller falls
+                # back to its own file hash exactly as it does for an OSError.
+                return None
         return digest.hexdigest()
     except OSError:
         return None

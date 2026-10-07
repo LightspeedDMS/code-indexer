@@ -1,12 +1,16 @@
 """Tests for #676 — FileIdentifier must memoize branch and commit hash.
 
 The invariant data (current branch, current commit hash) must be fetched
-exactly once per FileIdentifier instance, not once per file.  Only
-`git hash-object` is legitimately per-file.
+exactly once per FileIdentifier instance, not once per file.
+
+The blob hash used to be the one legitimately per-file subprocess. It is no
+longer a subprocess at all: it is computed in-process from the file's bytes by
+``utils.blob_hash``, so `get_file_metadata` now forks git ZERO times per file.
 
 2 test cases:
   1. git branch --show-current and git rev-parse HEAD each called exactly once
-     across two get_file_metadata() calls; git hash-object called once per file.
+     across two get_file_metadata() calls, and `git hash-object` not at all —
+     while `git_hash` still carries the real blob hash of each file.
   2. Memoized branch/commit values appear correctly in both metadata results,
      with call-count assertion confirming memoization is in effect.
 """
@@ -16,12 +20,17 @@ from typing import Dict, List, NamedTuple
 from unittest.mock import MagicMock, patch
 
 from code_indexer.services.file_identifier import FileIdentifier
+from code_indexer.utils.blob_hash import git_blob_hash
 
 
 # ---------------------------------------------------------------------------
 # Stable per-file hash map (avoids Python hash randomization)
 # ---------------------------------------------------------------------------
 
+# Deliberately WRONG sentinel values. Nothing should read these any more: the
+# blob hash is computed in-process. If a `git hash-object` subprocess is ever
+# reintroduced, the fake runner below will serve one of these and the real-hash
+# assertions will fail loudly rather than the regression passing unnoticed.
 _FILE_HASHES: Dict[str, str] = {
     "module_a.py": "aaaa1111bbbb2222",
     "module_b.py": "cccc3333dddd4444",
@@ -50,8 +59,8 @@ def _make_fake_runner(
     commit: str = "a38818c394deadbeef0000000000000000000000",
 ):
     """Return a fake run_git_command that records calls and returns the given
-    branch/commit constants.  git hash-object returns a stable per-filename
-    value from _FILE_HASHES."""
+    branch/commit constants.  The hash-object branch is retained only as a trap:
+    it returns a wrong sentinel so a reintroduced subprocess is caught."""
 
     def fake_run_git_command(cmd, cwd=None, check=False, **kwargs):
         call_log.append(list(cmd))
@@ -95,7 +104,8 @@ class TestFileIdentifierSubprocessMemoization:
         """Two get_file_metadata() calls must invoke:
         - git branch --show-current: exactly once (memoized)
         - git rev-parse HEAD: exactly once (memoized)
-        - git hash-object: once per file (2 calls total)
+        - git hash-object: never (computed in-process)
+        and must still return each file's real blob hash.
         """
         file_a = tmp_path / "module_a.py"
         file_b = tmp_path / "module_b.py"
@@ -124,10 +134,19 @@ class TestFileIdentifierSubprocessMemoization:
             f"git rev-parse HEAD must be called exactly once (memoized); "
             f"got {counts.commit}"
         )
-        assert counts.hash_object == 2, (
-            f"git hash-object must be called once per file (2 files); "
-            f"got {counts.hash_object}"
+        assert counts.hash_object == 0, (
+            f"the blob hash is computed in-process; git hash-object must not be "
+            f"forked at all, got {counts.hash_object} call(s)"
         )
+
+        # Dropping the subprocess must not drop the value: each file still
+        # carries its real blob hash, computed from the bytes on disk.
+        meta_a = identifier.get_file_metadata(file_a)
+        meta_b = identifier.get_file_metadata(file_b)
+        assert meta_a["git_hash"] == git_blob_hash(file_a)
+        assert meta_b["git_hash"] == git_blob_hash(file_b)
+        assert meta_a["git_hash"] != meta_b["git_hash"]
+        assert meta_a["git_hash"] not in _FILE_HASHES.values()
 
     def test_memoized_values_appear_in_both_metadata_results(self, tmp_path):
         """The memoized branch and commit_hash values must appear in both
