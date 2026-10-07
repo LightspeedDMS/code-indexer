@@ -9310,7 +9310,11 @@ def reset_config(
         return _create_config_page_response(
             request,
             session,
-            success_message="Configuration reset to defaults successfully",
+            success_message=(
+                "Runtime settings reset to defaults. Bootstrap settings, the "
+                "bind address, port, worker count, log level, stored keys, "
+                "security settings and deployment identity were kept."
+            ),
         )
     except Exception as e:
         logger.error(

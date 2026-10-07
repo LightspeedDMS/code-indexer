@@ -1539,9 +1539,17 @@ class ConfigService:
         return result
 
     def reset_to_defaults_audited(self, *, actor: str) -> ServerConfig:
-        """Replace the configuration with the defaults; record one row."""
+        """Reset the RUNTIME settings to their defaults; record one row.
+
+        Bug #2094: bootstrap keys, launch settings and stored credentials
+        keep their committed values (see ``config_reset``).
+        """
+        from code_indexer.server.services.config_reset import build_reset_candidate
+
         return self.apply_audited_change(
-            lambda _candidate: self.config_manager.create_default_config(),
+            lambda candidate: build_reset_candidate(
+                candidate, self.config_manager.create_default_config(), BOOTSTRAP_KEYS
+            ),
             actor=actor,
             target_id="*",
             change_kind="reset_to_defaults",
