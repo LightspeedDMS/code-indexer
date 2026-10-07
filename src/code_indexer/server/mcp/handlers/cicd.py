@@ -6,8 +6,20 @@ modularization (Story #496).
 
 from __future__ import annotations
 
+import functools
 import logging
-from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    NamedTuple,
+    Optional,
+    Tuple,
+    TypeVar,
+    TYPE_CHECKING,
+)
+
+import anyio.to_thread
 
 if TYPE_CHECKING:
     pass
@@ -346,6 +358,124 @@ def _resolve_cicd_write_token(
     return None, error_msg
 
 
+_T = TypeVar("_T")
+_GITLAB_DEFAULT_BASE_URL = "https://gitlab.com"
+
+_LegacyResolution = Tuple[Optional["_LegacyCiCredential"], Optional[Dict[str, Any]]]
+
+
+async def _cicd_off_loop(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Run a synchronous CI/CD resolve/access/token step on a worker thread.
+
+    Bug #2039: MCP and REST await these async handlers on the event loop, so
+    their registry/grant/credential reads must never run inline there -- at
+    fleet scale (and on a slow database) they would stall every request on
+    the worker. Every CI/CD handler makes exactly one such hop per call.
+    Same offload idiom as _run_orphan_sweep in startup/lifespan.py.
+    """
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+
+class _LegacyCiCredential(NamedTuple):
+    """Token and API base_url for a legacy gh_actions/gitlab_ci call."""
+
+    token: str
+    base_url: Optional[str]
+
+
+def _resolve_legacy_ci_request(
+    identifier: str,
+    platform: str,
+    user: Any,
+    caller_base_url: Optional[str],
+    write: bool,
+) -> _LegacyResolution:
+    """Access check + token for the 12 legacy handlers -- SYNCHRONOUS; call
+    it only through _cicd_off_loop().
+
+    Reads: a registered project the caller may see uses the shared CI token;
+    anything else must use the caller's personal credential. Writes (Story
+    #404 AC2): personal credential only.
+
+    Returns:
+        (credential, None) to proceed, else (None, ready-to-return MCP error).
+    """
+    if write:
+        access_error = _resolve_cicd_project_access(identifier, platform, user.username)
+        is_registered, matched_repo_url = False, None
+    else:
+        access_error, is_registered, matched_repo_url = (
+            _resolve_cicd_project_access_detailed(identifier, platform, user.username)
+        )
+    if access_error:
+        return None, _mcp_response({"success": False, "error": access_error})
+    if is_registered:
+        return _legacy_shared_token_credential(platform, user, matched_repo_url)
+    return _legacy_personal_credential(
+        identifier, platform, user, caller_base_url, write
+    )
+
+
+def _legacy_shared_token_credential(
+    platform: str, user: Any, matched_repo_url: Optional[str]
+) -> _LegacyResolution:
+    """Registered project: shared CI token, sent only to the project's OWN
+    host (admin access to an unregistered project: gitlab.com), never a
+    caller-chosen one."""
+    base_url: Optional[str] = None
+    if platform == "gitlab":
+        base_url = (
+            _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
+            if matched_repo_url
+            else _GITLAB_DEFAULT_BASE_URL
+        )
+    forge_host = _derive_forge_host(base_url, platform)
+    token = _resolve_cicd_read_token(platform, user, forge_host)
+    if not token:
+        env_var, title = (
+            ("GH_TOKEN", "GitHub")
+            if platform == "github"
+            else ("GITLAB_TOKEN", "GitLab")
+        )
+        return None, _mcp_response(
+            {
+                "success": False,
+                "error": f"{title} token not found. Set {env_var} environment variable or configure token storage.",
+            }
+        )
+    return _LegacyCiCredential(token, base_url), None
+
+
+def _legacy_personal_credential(
+    identifier: str,
+    platform: str,
+    user: Any,
+    caller_base_url: Optional[str],
+    write: bool,
+) -> _LegacyResolution:
+    """Personal credential only. GitHub always targets github.com (the client
+    uses api.github.com); GitLab uses the caller's base_url."""
+    if platform == "github":
+        base_url, forge_host = None, _derive_forge_host(None, "github")
+    else:
+        base_url = caller_base_url or _GITLAB_DEFAULT_BASE_URL
+        forge_host = _derive_forge_host(caller_base_url, "gitlab")
+    token, token_error = _resolve_cicd_write_token(platform, user, forge_host)
+    if token_error or token is None:
+        label = "Repository" if platform == "github" else "Project"
+        error = (
+            token_error
+            if write
+            else (
+                f"{label} '{identifier}' is not a registered CIDX golden repo. "
+                f"Configure a personal git credential for {forge_host} to query "
+                "CI/CD data for it. Use configure_git_credential tool."
+            )
+        )
+        return None, _mcp_response({"success": False, "error": error})
+    return _LegacyCiCredential(token, base_url), None
+
+
 # Story #633: GitHub Actions Monitoring Handlers
 async def handle_gh_actions_list_runs(
     args: Dict[str, Any], user: User
@@ -381,42 +511,17 @@ async def handle_gh_actions_list_runs(
                 {"success": False, "error": "Missing required parameter: repository"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
         # the shared global CI token; an unregistered repo must use the
         # caller's own personal credential, or be refused.
-        access_error, is_registered, _matched_repo_url = (
-            _resolve_cicd_project_access_detailed(repository, "github", user.username)
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=False
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        forge_host = _derive_forge_host(None, "github")
-        if is_registered:
-            token = _resolve_cicd_read_token("github", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Unregistered repo: personal PAT ONLY -- reuses the write-token
-            # resolver's never-use-global-token guarantee for this read.
-            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Repository '{repository}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Extract optional parameters
         branch = args.get("branch")
@@ -515,42 +620,17 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
         # the shared global CI token; an unregistered repo must use the
         # caller's own personal credential, or be refused.
-        access_error, is_registered, _matched_repo_url = (
-            _resolve_cicd_project_access_detailed(repository, "github", user.username)
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=False
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        forge_host = _derive_forge_host(None, "github")
-        if is_registered:
-            token = _resolve_cicd_read_token("github", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Unregistered repo: personal PAT ONLY -- reuses the write-token
-            # resolver's never-use-global-token guarantee for this read.
-            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Repository '{repository}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Create client and get run details
         client = GitHubActionsClient(token)
@@ -646,43 +726,17 @@ async def handle_gh_actions_search_logs(
                 {"success": False, "error": "Missing required parameter: pattern"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
         # the shared global CI token; an unregistered repo must use the
         # caller's own personal credential, or be refused.
-        access_error, is_registered, _matched_repo_url = (
-            _resolve_cicd_project_access_detailed(repository, "github", user.username)
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=False
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        forge_host = _derive_forge_host(None, "github")
-        if is_registered:
-            token = _resolve_cicd_read_token("github", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Unregistered repo: personal credential only (reuses the
-            # write-token resolver, which never falls back to the shared
-            # global credential).
-            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Repository '{repository}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Create client and search logs
         client = GitHubActionsClient(token)
@@ -777,43 +831,17 @@ async def handle_gh_actions_get_job_logs(
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
         # the shared global CI token; an unregistered repo must use the
         # caller's own personal credential, or be refused.
-        access_error, is_registered, _matched_repo_url = (
-            _resolve_cicd_project_access_detailed(repository, "github", user.username)
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=False
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        forge_host = _derive_forge_host(None, "github")
-        if is_registered:
-            token = _resolve_cicd_read_token("github", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitHub token not found. Set GH_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Unregistered repo: personal credential only (reuses the
-            # write-token resolver, which never falls back to the shared
-            # global credential).
-            token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Repository '{repository}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Create client and get job logs
         client = GitHubActionsClient(token)
@@ -903,20 +931,16 @@ async def handle_gh_actions_retry_run(
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Group access check (Story #404 AC1 parity with the GitLab and
-        # unified ci_* handlers) before any credential use.
-        access_error = _resolve_cicd_project_access(repository, "github", user.username)
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Mutating operations use a per-user write token only (never the
-        # shared global CI token). forge_host is always "github.com" --
-        # GitHubActionsClient targets api.github.com, so a caller-supplied
-        # args["base_url"] is not used to resolve or store this credential.
-        forge_host = _derive_forge_host(None, "github")
-        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
+        # Group access check (Story #404 AC1) then a per-user write token only
+        # (never the shared global CI token; host always github.com), off the
+        # event loop (Bug #2039).
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=True
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Story #404 AC3 parity: audit log BEFORE API call
         logger.info(
@@ -1013,20 +1037,16 @@ async def handle_gh_actions_cancel_run(
                 {"success": False, "error": "Missing required parameter: run_id"}
             )
 
-        # Group access check (Story #404 AC1 parity with the GitLab and
-        # unified ci_* handlers) before any credential use.
-        access_error = _resolve_cicd_project_access(repository, "github", user.username)
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Mutating operations use a per-user write token only (never the
-        # shared global CI token). forge_host is always "github.com" --
-        # GitHubActionsClient targets api.github.com, so a caller-supplied
-        # args["base_url"] is not used to resolve or store this credential.
-        forge_host = _derive_forge_host(None, "github")
-        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
+        # Group access check (Story #404 AC1) then a per-user write token only
+        # (never the shared global CI token; host always github.com), off the
+        # event loop (Bug #2039).
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request, repository, "github", user, None, write=True
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token = credential.token
 
         # Story #404 AC3 parity: audit log BEFORE API call
         logger.info(
@@ -1129,61 +1149,31 @@ async def handle_gitlab_ci_list_pipelines(
                 {"success": False, "error": "Missing required parameter: project_id"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
-        # the shared global CI token; anything else -- unregistered, a
-        # numeric project id, an encoded path, or a denied project under a
-        # different identifier -- must use the caller's own personal
-        # credential, or be refused.
-        access_error, is_registered, matched_repo_url = (
-            _resolve_cicd_project_access_detailed(project_id, "gitlab", user.username)
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
+        # Access check + token: _resolve_legacy_ci_request below, off the
+        # event loop (Bug #2039). Only a registered CIDX golden repo the
+        # caller is allowed to see may use the shared global CI token, and
+        # only against its OWN host; anything else -- unregistered, a numeric
+        # project id, an encoded path, or a denied project under a different
+        # identifier -- must use the caller's own personal credential, or be
+        # refused.
 
         # Extract optional parameters
         ref = args.get("ref")
         status = args.get("status")
         limit = _coerce_int(args.get("limit"), 10)
 
-        if is_registered:
-            if matched_repo_url:
-                # A real registered golden repo: target ITS OWN configured
-                # host, never a caller-supplied one, so the shared
-                # credential is never sent anywhere the caller names.
-                base_url = _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
-            else:
-                # No project actually matched (the caller qualifies only
-                # through admin access): the shared credential still never
-                # targets a caller-supplied host -- this is the only
-                # front-door behavior that ever existed for this path.
-                base_url = "https://gitlab.com"
-            forge_host = _derive_forge_host(base_url, "gitlab")
-            token = _resolve_cicd_read_token("gitlab", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitLab token not found. Set GITLAB_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Not a registered-and-allowed project: personal credential only.
-            base_url = args.get("base_url", "https://gitlab.com")
-            forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-            token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Project '{project_id}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=False,
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Create client and list pipelines (CRITICAL: keyword)
         client = GitLabCIClient(token, base_url=base_url)
@@ -1279,56 +1269,24 @@ async def handle_gitlab_ci_get_pipeline(
                 {"success": False, "error": "Missing required parameter: pipeline_id"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
-        # the shared global CI token; anything else -- unregistered, a
-        # numeric project id, an encoded path, or a denied project under a
-        # different identifier -- must use the caller's own personal
-        # credential, or be refused.
-        access_error, is_registered, matched_repo_url = (
-            _resolve_cicd_project_access_detailed(project_id, "gitlab", user.username)
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token, and only against its OWN host;
+        # anything else -- unregistered, a numeric project id, an encoded
+        # path, or a denied project under a different identifier -- must use
+        # the caller's own personal credential, or be refused.
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=False,
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        if is_registered:
-            if matched_repo_url:
-                # A real registered golden repo: target ITS OWN configured
-                # host, never a caller-supplied one, so the shared
-                # credential is never sent anywhere the caller names.
-                base_url = _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
-            else:
-                # No project actually matched (the caller qualifies only
-                # through admin access): the shared credential still never
-                # targets a caller-supplied host -- this is the only
-                # front-door behavior that ever existed for this path.
-                base_url = "https://gitlab.com"
-            forge_host = _derive_forge_host(base_url, "gitlab")
-            token = _resolve_cicd_read_token("gitlab", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitLab token not found. Set GITLAB_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Not a registered-and-allowed project: personal credential only.
-            base_url = args.get("base_url", "https://gitlab.com")
-            forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-            token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Project '{project_id}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Create client and get pipeline details (CRITICAL: keyword)
         client = GitLabCIClient(token, base_url=base_url)
@@ -1426,59 +1384,29 @@ async def handle_gitlab_ci_search_logs(
                 {"success": False, "error": "Missing required parameter: pattern"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
-        # the shared global CI token; anything else -- unregistered, a
-        # numeric project id, an encoded path, or a denied project under a
-        # different identifier -- must use the caller's own personal
-        # credential, or be refused.
-        access_error, is_registered, matched_repo_url = (
-            _resolve_cicd_project_access_detailed(project_id, "gitlab", user.username)
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
+        # Access check + token: _resolve_legacy_ci_request below, off the
+        # event loop (Bug #2039). Only a registered CIDX golden repo the
+        # caller is allowed to see may use the shared global CI token, and
+        # only against its OWN host; anything else -- unregistered, a numeric
+        # project id, an encoded path, or a denied project under a different
+        # identifier -- must use the caller's own personal credential, or be
+        # refused.
 
         # Extract optional parameters
         case_sensitive = args.get("case_sensitive", True)
 
-        if is_registered:
-            if matched_repo_url:
-                # A real registered golden repo: target ITS OWN configured
-                # host, never a caller-supplied one, so the shared
-                # credential is never sent anywhere the caller names.
-                base_url = _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
-            else:
-                # No project actually matched (the caller qualifies only
-                # through admin access): the shared credential still never
-                # targets a caller-supplied host -- this is the only
-                # front-door behavior that ever existed for this path.
-                base_url = "https://gitlab.com"
-            forge_host = _derive_forge_host(base_url, "gitlab")
-            token = _resolve_cicd_read_token("gitlab", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitLab token not found. Set GITLAB_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Not a registered-and-allowed project: personal credential only.
-            base_url = args.get("base_url", "https://gitlab.com")
-            forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-            token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Project '{project_id}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=False,
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Create client and search logs (CRITICAL: keyword)
         client = GitLabCIClient(token, base_url=base_url)
@@ -1574,56 +1502,24 @@ async def handle_gitlab_ci_get_job_logs(
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        # Access check: denied / registered-and-allowed / unregistered. Only
-        # a registered CIDX golden repo the caller is allowed to see may use
-        # the shared global CI token; anything else -- unregistered, a
-        # numeric project id, an encoded path, or a denied project under a
-        # different identifier -- must use the caller's own personal
-        # credential, or be refused.
-        access_error, is_registered, matched_repo_url = (
-            _resolve_cicd_project_access_detailed(project_id, "gitlab", user.username)
+        # Access check + token, off the event loop (Bug #2039). Only a
+        # registered CIDX golden repo the caller is allowed to see may use
+        # the shared global CI token, and only against its OWN host;
+        # anything else -- unregistered, a numeric project id, an encoded
+        # path, or a denied project under a different identifier -- must use
+        # the caller's own personal credential, or be refused.
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=False,
         )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        if is_registered:
-            if matched_repo_url:
-                # A real registered golden repo: target ITS OWN configured
-                # host, never a caller-supplied one, so the shared
-                # credential is never sent anywhere the caller names.
-                base_url = _derive_base_url_from_repo_url(matched_repo_url, "gitlab")
-            else:
-                # No project actually matched (the caller qualifies only
-                # through admin access): the shared credential still never
-                # targets a caller-supplied host -- this is the only
-                # front-door behavior that ever existed for this path.
-                base_url = "https://gitlab.com"
-            forge_host = _derive_forge_host(base_url, "gitlab")
-            token = _resolve_cicd_read_token("gitlab", user, forge_host)
-            if not token:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": "GitLab token not found. Set GITLAB_TOKEN environment variable or configure token storage.",
-                    }
-                )
-        else:
-            # Not a registered-and-allowed project: personal credential only.
-            base_url = args.get("base_url", "https://gitlab.com")
-            forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-            token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-            if token_error:
-                return _mcp_response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Project '{project_id}' is not a registered "
-                            "CIDX golden repo. Configure a personal git "
-                            f"credential for {forge_host} to query CI/CD "
-                            "data for it. Use configure_git_credential tool."
-                        ),
-                    }
-                )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Create client and get job logs (CRITICAL: keyword)
         client = GitLabCIClient(token, base_url=base_url)
@@ -1712,19 +1608,20 @@ async def handle_gitlab_ci_retry_pipeline(
                 {"success": False, "error": "Missing required parameter: pipeline_id"}
             )
 
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        access_error = _resolve_cicd_project_access(project_id, "gitlab", user.username)
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Extract optional parameters
-        base_url = args.get("base_url", "https://gitlab.com")
-
-        # Story #404 AC2: Per-user write token ONLY (never global CI token)
-        forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-        token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
+        # Story #404 AC1/AC2: group access check, then a per-user write token
+        # ONLY (never the global CI token), off the event loop (Bug #2039).
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=True,
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Story #404 AC3: Audit log BEFORE API call
         logger.info(
@@ -1823,19 +1720,20 @@ async def handle_gitlab_ci_cancel_pipeline(
                 {"success": False, "error": "Missing required parameter: pipeline_id"}
             )
 
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        access_error = _resolve_cicd_project_access(project_id, "gitlab", user.username)
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Extract optional parameters
-        base_url = args.get("base_url", "https://gitlab.com")
-
-        # Story #404 AC2: Per-user write token ONLY (never global CI token)
-        forge_host = _derive_forge_host(args.get("base_url"), "gitlab")
-        token, token_error = _resolve_cicd_write_token("gitlab", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
+        # Story #404 AC1/AC2: group access check, then a per-user write token
+        # ONLY (never the global CI token), off the event loop (Bug #2039).
+        credential, error_resp = await _cicd_off_loop(
+            _resolve_legacy_ci_request,
+            project_id,
+            "gitlab",
+            user,
+            args.get("base_url"),
+            write=True,
+        )
+        if error_resp is not None:
+            return error_resp
+        assert credential is not None  # noqa: S101
+        token, base_url = credential
 
         # Story #404 AC3: Audit log BEFORE API call
         logger.info(
@@ -2027,6 +1925,82 @@ def _resolve_repo_alias_for_cicd(
     return forge_type, project_identifier, base_url, forge_host, None
 
 
+class _CiTarget(NamedTuple):
+    """Resolved target of a unified ci_* call (Bug #2039)."""
+
+    forge_type: str
+    project_identifier: str
+    base_url: Optional[str]
+    forge_host: str
+    token: str
+
+
+def _resolve_ci_target(
+    repository_alias: str, forge: str, user: Any, write: bool
+) -> Tuple[Optional[_CiTarget], Optional[Dict[str, Any]]]:
+    """Resolve alias, enforce project access and pick the token -- SYNCHRONOUS.
+
+    Shared by all six unified ci_* handlers. Every step reads storage (the
+    golden-repo registry, the caller's grants, the token/credential stores),
+    so this must only be called through _resolve_ci_target_off_loop().
+
+    Args:
+        repository_alias: Golden repo alias name.
+        forge: 'auto', 'github', or 'gitlab'.
+        user: Authenticated user.
+        write: True for write operations (personal PAT only, Story #404 AC2);
+            False for reads (global CI token, then personal PAT).
+
+    Returns:
+        (target, None) when the call may proceed, else (None, error_response)
+        holding the ready-to-return MCP dict.
+    """
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return None, error_resp
+
+    # All three are guaranteed non-None when error_resp is None.
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
+    )
+    if access_error:
+        return None, _mcp_response({"success": False, "error": access_error})
+
+    if write:
+        # Story #404 AC2: Write operations use personal PAT ONLY
+        token, token_error = _resolve_cicd_write_token(forge_type, user, forge_host)
+        if token_error:
+            return None, _mcp_response({"success": False, "error": token_error})
+    else:
+        token = _resolve_cicd_read_token(forge_type, user, forge_host)
+        if not token:
+            return None, _mcp_response(
+                {
+                    "success": False,
+                    "error": f"{forge_type.title()} token not found. Configure token storage.",
+                }
+            )
+    # Write resolver contract: error xor token; read path returned on no token.
+    assert token is not None  # noqa: S101
+
+    target = _CiTarget(forge_type, project_identifier, base_url, forge_host, token)
+    return target, None
+
+
+async def _resolve_ci_target_off_loop(
+    repository_alias: str, forge: str, user: Any, *, write: bool
+) -> Tuple[Optional[_CiTarget], Optional[Dict[str, Any]]]:
+    """Run _resolve_ci_target() off the event loop, once per ci_* call
+    (Bug #2039; see _cicd_off_loop)."""
+    return await _cicd_off_loop(
+        _resolve_ci_target, repository_alias, forge, user, write
+    )
+
+
 def _handle_cicd_client_error(
     exc: Exception,
     project_identifier: str,
@@ -2113,30 +2087,13 @@ async def handle_ci_list_runs(args: Dict[str, Any], user: Any) -> Dict[str, Any]
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=False
+    )
     if error_resp is not None:
         return error_resp
-
-    # forge_type and project_identifier are guaranteed non-None when error_resp is None
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    token = _resolve_cicd_read_token(forge_type, user, forge_host)
-    if not token:
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"{forge_type.title()} token not found. Configure token storage.",
-            }
-        )
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     branch = args.get("branch")
     status = args.get("status")
@@ -2204,29 +2161,13 @@ async def handle_ci_get_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: run_id"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=False
+    )
     if error_resp is not None:
         return error_resp
-
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    token = _resolve_cicd_read_token(forge_type, user, forge_host)
-    if not token:
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"{forge_type.title()} token not found. Configure token storage.",
-            }
-        )
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     try:
         if forge_type == "github":
@@ -2286,29 +2227,13 @@ async def handle_ci_get_job_logs(args: Dict[str, Any], user: Any) -> Dict[str, A
             {"success": False, "error": "Missing required parameter: job_id"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=False
+    )
     if error_resp is not None:
         return error_resp
-
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    token = _resolve_cicd_read_token(forge_type, user, forge_host)
-    if not token:
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"{forge_type.title()} token not found. Configure token storage.",
-            }
-        )
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     try:
         if forge_type == "github":
@@ -2364,29 +2289,13 @@ async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, An
             {"success": False, "error": "Missing required parameter: pattern"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=False
+    )
     if error_resp is not None:
         return error_resp
-
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    token = _resolve_cicd_read_token(forge_type, user, forge_host)
-    if not token:
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"{forge_type.title()} token not found. Configure token storage.",
-            }
-        )
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     try:
         if forge_type == "github":
@@ -2443,25 +2352,14 @@ async def handle_ci_cancel_run(args: Dict[str, Any], user: Any) -> Dict[str, Any
             {"success": False, "error": "Missing required parameter: run_id"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    # Story #404 AC2: write=True -> personal PAT ONLY
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=True
+    )
     if error_resp is not None:
         return error_resp
-
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    # Story #404 AC2: Write operations use personal PAT ONLY
-    token, token_error = _resolve_cicd_write_token(forge_type, user, forge_host)
-    if token_error:
-        return _mcp_response({"success": False, "error": token_error})
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     # Story #404 AC3: Audit log BEFORE API call
     logger.info(
@@ -2530,25 +2428,14 @@ async def handle_ci_retry_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]
             {"success": False, "error": "Missing required parameter: run_id"}
         )
 
-    forge = args.get("forge", "auto")
-    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
-    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    # Story #404 AC2: write=True -> personal PAT ONLY
+    target, error_resp = await _resolve_ci_target_off_loop(
+        repository_alias, args.get("forge", "auto"), user, write=True
+    )
     if error_resp is not None:
         return error_resp
-
-    assert forge_type is not None and project_identifier is not None  # noqa: S101
-    assert forge_host is not None  # noqa: S101
-
-    access_error = _resolve_cicd_project_access(
-        project_identifier, forge_type, user.username
-    )
-    if access_error:
-        return _mcp_response({"success": False, "error": access_error})
-
-    # Story #404 AC2: Write operations use personal PAT ONLY
-    token, token_error = _resolve_cicd_write_token(forge_type, user, forge_host)
-    if token_error:
-        return _mcp_response({"success": False, "error": token_error})
+    assert target is not None  # noqa: S101
+    forge_type, project_identifier, base_url, _forge_host, token = target
 
     # Story #404 AC3: Audit log BEFORE API call
     logger.info(
