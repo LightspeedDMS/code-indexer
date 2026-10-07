@@ -29,6 +29,8 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+from code_indexer.server.services.index_freshness import record_build_commit
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -306,6 +308,10 @@ def ensure_fts_index(
     # Success: clear any stale "no files" mark so a repo that has since gained code is
     # not wrongly skipped by discovery on the next tick.
     (ci / _SKIP_MARKER).unlink(missing_ok=True)
+    # Record WHICH revision this index was built from, so the backfill engine can tell
+    # later that the clone has moved on. Best-effort: not recording costs one extra
+    # rebuild, never a wrong answer.
+    record_build_commit(ci / FTS_INDEX_DIRNAME, repo_path)
     return FtsBuildOutcome(
         FtsBuildStatus.REBUILT, alias, f"FTS index rebuilt at {ci / FTS_INDEX_DIRNAME}"
     )

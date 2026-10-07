@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+
+from code_indexer.server.services.index_freshness import build_commit_is_current
 from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
@@ -21,6 +23,7 @@ from ..fts_index_builder import (
     ensure_fts_index,
     fts_backfill_skip_present,
     fts_index_present,
+    FTS_INDEX_DIRNAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +79,14 @@ class FtsBackfillPolicy:
 
     def is_present(self, repo_path: Path) -> bool:
         return fts_index_present(repo_path)
+
+    def is_fresh(self, repo_path: Path) -> bool:
+        # The shared .build_commit convention; SCIP uses the same marker with extra
+        # rules of its own. An FTS rebuild is a cheap local tantivy build, so drift
+        # is worth acting on as soon as it is observed.
+        return build_commit_is_current(
+            repo_path, repo_path / ".code-indexer" / FTS_INDEX_DIRNAME
+        )
 
     def eligibility(self, repo_path: Path) -> Optional[Dict[str, Any]]:
         # A repo marked as having no indexable files (config/infra mirror) is a permanent

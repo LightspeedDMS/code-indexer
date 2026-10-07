@@ -2,6 +2,7 @@
 repos that have none. Opt-in, language-gated, bounded, cooldown-backed."""
 
 import os
+from pathlib import Path
 from unittest import mock
 
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
@@ -64,11 +65,30 @@ class TestScipReconcile:
         assert funnel.call_args.args[0] == "repoA"
         assert counts["enqueued"] == 1
 
-    def test_skips_when_scip_present(self, tmp_path):
+    def _mark_built_at_head(self, repo: Path, scip: Path) -> None:
+        """Record the commit the index was built at, as a real build does."""
+        from code_indexer.server.services.index_freshness import (
+            BUILD_COMMIT_MARKER,
+            current_commit,
+        )
+
+        git = repo / ".git"
+        (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+        (git / "HEAD").write_text("ref: refs/heads/master\n")
+        (git / "refs" / "heads" / "master").write_text("c" * 40 + "\n")
+        (scip / BUILD_COMMIT_MARKER).write_text(current_commit(repo) or "")
+
+    def test_skips_when_scip_present_and_fresh(self, tmp_path):
+        """Present is no longer sufficient on its own -- the index must also match
+        the commit it was built from, or a drifted index would never be rebuilt."""
         m, gr = _mgr(tmp_path)
-        scip = gr / "repoB" / ".code-indexer" / "scip"
+        repo = gr / "repoB"
+        scip = repo / ".code-indexer" / "scip"
         scip.mkdir(parents=True)
-        (scip / "x.scip.db").write_bytes(b"x")
+        # A real build writes index.scip.db; scip_db_is_fresh requires that exact
+        # name (the older presence check accepted any *.scip.db).
+        (scip / "index.scip.db").write_bytes(b"x")
+        self._mark_built_at_head(repo, scip)
         p_disc, p_funnel, p_cfg, funnel = _patches([_proj("python")])
         with (
             mock.patch.dict(os.environ, {"CIDX_SCIP_AUTO_RECONCILE_ENABLED": "true"}),
@@ -79,6 +99,30 @@ class TestScipReconcile:
             counts = m.reconcile_scip_from_filesystem()
         funnel.assert_not_called()
         assert counts["scip_present"] == 1
+
+    def test_rebuilds_when_scip_present_but_stale(self, tmp_path):
+        """An index built at a commit the clone has moved past is enqueued. Before
+        this, presence alone ended the check and the index drifted indefinitely."""
+        m, gr = _mgr(tmp_path)
+        repo = gr / "repoB"
+        scip = repo / ".code-indexer" / "scip"
+        scip.mkdir(parents=True)
+        # A real build writes index.scip.db; scip_db_is_fresh requires that exact
+        # name (the older presence check accepted any *.scip.db).
+        (scip / "index.scip.db").write_bytes(b"x")
+        self._mark_built_at_head(repo, scip)
+        # the clone moves on
+        (repo / ".git" / "refs" / "heads" / "master").write_text("d" * 40 + "\n")
+        p_disc, p_funnel, p_cfg, funnel = _patches([_proj("python")])
+        with (
+            mock.patch.dict(os.environ, {"CIDX_SCIP_AUTO_RECONCILE_ENABLED": "true"}),
+            p_disc,
+            p_funnel,
+            p_cfg,
+        ):
+            counts = m.reconcile_scip_from_filesystem()
+        funnel.assert_called_once()
+        assert counts["enqueued"] == 1
 
     def test_skips_unsupported_language(self, tmp_path):
         m, gr = _mgr(tmp_path)
