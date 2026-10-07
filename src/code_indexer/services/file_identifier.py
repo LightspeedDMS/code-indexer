@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional
 
 from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
+from ..utils.blob_hash import git_blob_hash
 
 logger = logging.getLogger(__name__)
 
@@ -282,11 +283,11 @@ class FileIdentifier:
         """
         Get git-specific metadata for a file.
 
-        Only ``git hash-object`` is invoked per file — it is legitimately per-file
-        because it computes the blob hash for the file's current on-disk content.
-        ``branch`` and ``commit_hash`` are invariant within an indexing run and
-        are returned from the memoized helpers ``_get_cached_branch`` and
-        ``_get_cached_commit_hash`` with no additional subprocess cost.
+        No subprocess runs here. The blob hash is the only genuinely per-file
+        value, and it is computed in-process from the file's bytes (see
+        ``utils/blob_hash``). ``branch`` and ``commit_hash`` are invariant within
+        an indexing run and come from the memoized helpers ``_get_cached_branch``
+        and ``_get_cached_commit_hash``.
 
         Args:
             file_path: Path to the file
@@ -300,16 +301,12 @@ class FileIdentifier:
             "commit_hash": self._get_cached_commit_hash(),
         }
 
-        try:
-            # git hash-object is legitimately per-file: computes blob hash for this file
-            result = run_git_command(
-                ["git", "hash-object", str(file_path)],
-                cwd=self.project_dir,
-            )
-            git_metadata["git_hash"] = result.stdout.strip()
-        except subprocess.CalledProcessError:
-            # Blob hash unavailable (e.g. untracked file, git error) — leave as None
-            pass
+        # The blob hash is a pure function of the file's bytes, so it is computed
+        # in-process rather than by forking git once per file. Returns None (hash
+        # left unset, caller falls back to file_hash) when the file cannot be
+        # read -- the same outcome the old non-zero git exit produced. See
+        # utils/blob_hash.py for the equivalence argument and its one limit.
+        git_metadata["git_hash"] = git_blob_hash(file_path)
 
         return git_metadata
 

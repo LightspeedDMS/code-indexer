@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from ..utils.blob_hash import git_blob_hashes
+
 logger = logging.getLogger(__name__)
 
 
@@ -464,7 +466,7 @@ class GitTopologyService:
         start_time = time.time()
         analysis = {}
 
-        # Batch git hash-object for all files
+        # Blob-hash all files (in-process; see utils/blob_hash)
         hashes = self._batch_git_hash_object(files)
 
         # Batch git log for last modified info
@@ -490,41 +492,19 @@ class GitTopologyService:
         return analysis
 
     def _batch_git_hash_object(self, files: List[str]) -> Dict[str, str]:
-        """Batch git hash-object operation for performance."""
+        """Blob-hash every file in the batch, in-process.
+
+        Replaces ``git hash-object --stdin-paths``. Beyond dropping the
+        subprocess, this is strictly more robust than the call it replaces: that
+        one discarded the WHOLE batch on a timeout, on a non-zero exit, or
+        whenever the output line count disagreed with the input count, so a
+        single unreadable file cost every hash in the batch. Here an unreadable
+        file is simply absent from the result. See utils/blob_hash.py for why
+        this needs no git and where the equivalence stops holding.
+        """
         if not files:
             return {}
-
-        try:
-            # Filter files that actually exist
-            existing_files = []
-            for file_path in files:
-                full_path = self.codebase_dir / file_path
-                if full_path.exists() and full_path.is_file():
-                    existing_files.append(file_path)
-
-            if not existing_files:
-                return {}
-
-            # Use --stdin-paths for batch processing
-            process = subprocess.run(
-                ["git", "hash-object", "--stdin-paths"],
-                input="\n".join(existing_files),
-                cwd=self.codebase_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if process.returncode == 0:
-                hashes = process.stdout.strip().split("\n")
-                if len(hashes) == len(existing_files):
-                    return dict(zip(existing_files, hashes))
-
-            return {}
-
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-            logger.warning(f"Batch git hash-object failed: {e}")
-            return {}
+        return git_blob_hashes(files, root=self.codebase_dir)
 
     def _batch_git_log_analysis(self, files: List[str]) -> Dict[str, str]:
         """Batch git log analysis for last modification times."""
