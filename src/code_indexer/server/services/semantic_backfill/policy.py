@@ -252,6 +252,17 @@ class SemanticBackfillPolicy:
         self._bjm = background_job_manager
         self._enabled = enabled
 
+    def is_fresh(self, repo_path: Path) -> bool:
+        """Opt OUT of the engine's freshness rebuild (always "fresh").
+
+        A semantic re-embed calls a paid provider, which is why this whole policy is
+        inert unless explicitly enabled. Rebuilding ~900 repos because their clones
+        moved is not a cost the sweep should incur on its own; the normal refresh
+        path re-embeds a repo whose content changed, so drift is already handled
+        where the work is already being paid for.
+        """
+        return True
+
     def is_present(self, repo_path: Path) -> bool:
         return semantic_index_present(repo_path)
 

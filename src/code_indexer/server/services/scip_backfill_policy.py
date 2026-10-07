@@ -41,6 +41,15 @@ class ScipBackfillPolicy:
     def is_present(self, repo_path: Path) -> bool:
         return self._grm._scip_present(repo_path)
 
+    def is_fresh(self, repo_path: Path) -> bool:
+        # SCIP's own freshness rules, not the generic comparison: a build where
+        # every project was an unsupported language is fresh WITHOUT a DB on disk,
+        # and a root-buildable repo requires the top-level DB so a stale
+        # per-subproject layout does not read as current.
+        from code_indexer.server.services.scip_lifecycle import scip_db_is_fresh
+
+        return scip_db_is_fresh(repo_path, repo_path / ".code-indexer" / "scip")
+
     def eligibility(self, repo_path: Path) -> Optional[dict[str, Any]]:
         # A discovery error propagates -> the engine counts it as an error (matching the
         # pre-engine behaviour: no marker written, cycle continues).

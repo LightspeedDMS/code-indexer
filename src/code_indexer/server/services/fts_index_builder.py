@@ -29,6 +29,11 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+from code_indexer.server.services.index_freshness import (
+    build_commit_is_current,
+    record_build_commit,
+)
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -208,7 +213,13 @@ def ensure_fts_index(
     """
     ci = repo_path / ".code-indexer"
 
-    if fts_index_present(repo_path):
+    # Present is not enough to skip: an index built at a commit the clone has moved
+    # past answers queries with content that no longer exists. Short-circuiting on
+    # presence alone is what made the backfill sweep's staleness rebuild inert --
+    # the engine enqueued the job and this returned PRESENT without building.
+    if fts_index_present(repo_path) and build_commit_is_current(
+        repo_path, ci / FTS_INDEX_DIRNAME
+    ):
         return FtsBuildOutcome(
             FtsBuildStatus.PRESENT,
             alias,
@@ -306,6 +317,10 @@ def ensure_fts_index(
     # Success: clear any stale "no files" mark so a repo that has since gained code is
     # not wrongly skipped by discovery on the next tick.
     (ci / _SKIP_MARKER).unlink(missing_ok=True)
+    # Record WHICH revision this index was built from, so the backfill engine can tell
+    # later that the clone has moved on. Best-effort: not recording costs one extra
+    # rebuild, never a wrong answer.
+    record_build_commit(ci / FTS_INDEX_DIRNAME, repo_path)
     return FtsBuildOutcome(
         FtsBuildStatus.REBUILT, alias, f"FTS index rebuilt at {ci / FTS_INDEX_DIRNAME}"
     )

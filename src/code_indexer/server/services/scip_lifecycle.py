@@ -45,19 +45,30 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from code_indexer.server.services.index_freshness import BUILD_COMMIT_MARKER
+
+# The shared reader, bound to the name this module has always used so the existing
+# patch seam (and every call site) is unchanged. It avoids a `git rev-parse`
+# subprocess per repo on the common clone layout -- the sweep walks ~900 repos per
+# tick -- and falls back to the subprocess for layouts it does not recognise.
+from code_indexer.server.services.index_freshness import (
+    current_commit as get_current_commit,
+)
 from code_indexer.server.services.scip_resolution_queue import (
     DelegatedScipBuild,
     DelegatedScipBuildQueue,
     get_delegated_scip_build_queue,
     record_scip_metric,
 )
-from code_indexer.utils.git_runner import get_current_commit
 
 logger = logging.getLogger(__name__)
 
 # Sidecar file under ``.code-indexer/scip/`` recording the commit the SCIP DBs
-# were built at, for the idempotency/freshness check (task #6).
-_BUILD_COMMIT_MARKER = ".build_commit"
+# were built at, for the idempotency/freshness check (task #6). The NAME lives in
+# index_freshness so FTS uses the SAME convention rather than a second one; the
+# richer rules below (no-index token, DB-shape awareness) stay here because only
+# SCIP has them.
+_BUILD_COMMIT_MARKER = BUILD_COMMIT_MARKER
 
 # Token appended to the marker (``<commit> no-index``) when a fresh-eligible
 # build produced NO index DB at all — i.e. every discovered project was an

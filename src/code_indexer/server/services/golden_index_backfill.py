@@ -23,6 +23,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
 from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,23 @@ class IndexBackfillPolicy(Protocol):
     attempt_marker: str
 
     def is_present(self, repo_path: Path) -> bool:
-        """True iff ``repo_path`` already has a built index of this type."""
+        """True iff ``repo_path`` already has a BUILT index of this type.
+
+        Existence only. Whether that index is still CURRENT is decided by the
+        engine via :meth:`index_dir`, so no policy has to remember the check.
+        """
+        ...
+
+    def is_fresh(self, repo_path: Path) -> bool:
+        """True iff an existing index still matches the clone it was built from.
+
+        Separate from :meth:`is_present` because existence and currency are
+        different questions, and conflating them is what let an index drift
+        arbitrarily far behind its clone. Policies answer with their own rules --
+        SCIP layers a no-index token and a DB-shape check on the shared
+        ``.build_commit`` convention -- and a policy that cannot be rebuilt cheaply
+        returns ``True`` to opt out.
+        """
         ...
 
     def eligibility(self, repo_path: Path) -> Optional[Any]:
@@ -67,6 +84,19 @@ class IndexBackfillPolicy(Protocol):
         """Enqueue ONE per-repo build (funnel/submit_job). Backend is the policy's
         concern — the engine only counts the enqueue."""
         ...
+
+
+def _index_is_outdated(policy: "IndexBackfillPolicy", repo_path: Path) -> bool:
+    """True when this policy's index exists but no longer matches the clone.
+
+    Applied in the engine, not repeated in each policy, for the same reason the
+    cooldown and the per-cycle bound are: it is loop mechanics every index type
+    needs, and a policy that has to remember it is one that will eventually forget.
+    """
+    try:
+        return not policy.is_fresh(repo_path)
+    except Exception:  # noqa: BLE001 - a policy hook must never abort the sweep
+        return False
 
 
 def _cooldown_active(marker: Path, cooldown_seconds: int, now: float) -> bool:
@@ -117,7 +147,7 @@ class GoldenIndexBackfillReconciler:
                 continue
             counts.scanned += 1
             try:
-                if policy.is_present(entry):
+                if policy.is_present(entry) and not _index_is_outdated(policy, entry):
                     counts.present += 1
                     continue
                 # Cooldown is checked BEFORE eligibility (which may walk NFS), so a
