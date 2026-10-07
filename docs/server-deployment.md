@@ -256,7 +256,7 @@ HNSW lookup is the in-process index-search component of a query. End-to-end quer
 # 1. Check cache configuration via Web UI Configuration Screen
 
 # 2. Verify process is running
-PID=$(pgrep -f "code_indexer.server.app")
+PID=$(pgrep -f "code_indexer.server.main")
 
 # 3. Check cache stats endpoint
 curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
@@ -324,11 +324,36 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | j
 
 ## Running the Server
 
+### Local / single machine
+
+The supported path is the CLI, which creates `~/.cidx-server`, seeds the admin
+user and writes a config:
+
+```bash
+cidx install-server           # one-time: config + admin seeding (add --systemd for a unit)
+cidx server start             # start; also: stop | restart | status
+```
+
+`cidx server start` reads `host` from `~/.cidx-server/config.json`. Note that
+`install-server` writes **`0.0.0.0`** there, so the server listens on every
+interface. On a laptop set it to `127.0.0.1` unless you actually want it
+reachable from the network:
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path.home() / ".cidx-server" / "config.json"
+c = json.loads(p.read_text()); c["host"] = "127.0.0.1"
+p.write_text(json.dumps(c, indent=2))
+EOF
+```
+
 ### Development Mode
 
 ```bash
-# Start server in foreground (for testing)
-python3 -m code_indexer.server.app
+# Foreground, for testing. `server.main` is the entry point -- `server.app`
+# only defines the app object and exits immediately when run with -m.
+python3 -m code_indexer.server.main --host 127.0.0.1 --port 8090
 ```
 
 ### Production Deployment with systemd
@@ -360,7 +385,11 @@ WorkingDirectory=/var/lib/cidx-server
 # Load additional environment variables from file
 EnvironmentFile=/etc/cidx-server/config.env
 
-ExecStart=/usr/local/bin/python3 -m code_indexer.server.app
+# NOT `-m code_indexer.server.app`: that module defines the FastAPI app object
+# and has no __main__ block, so systemd would import it, get exit 0, and -- with
+# Restart=always below -- restart every RestartSec forever while serving nothing.
+# `server.main` is the entry point that actually calls uvicorn.run().
+ExecStart=/usr/local/bin/python3 -m code_indexer.server.main --host 0.0.0.0 --port 8090
 
 Restart=always
 RestartSec=10
