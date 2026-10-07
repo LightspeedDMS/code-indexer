@@ -38,6 +38,10 @@ from typing import Iterable, List, Optional, Tuple, Union, cast
 
 import anyio.to_thread
 
+from code_indexer.server.storage.shared.ripgrep_backend import (
+    LocalRipgrepBackend,
+    RipgrepBackend,
+)
 from code_indexer.server.services.subprocess_executor import (
     SubprocessExecutor,
     ExecutionStatus,
@@ -550,6 +554,7 @@ class RegexSearchService:
         repo_path: Path,
         subprocess_max_workers: int = 2,
         alias: Optional[str] = None,
+        ripgrep_backend: Optional[RipgrepBackend] = None,
     ):
         """Initialize the regex search service.
 
@@ -557,6 +562,10 @@ class RegexSearchService:
             repo_path: Path to the repository root
             subprocess_max_workers: Maximum concurrent workers for subprocess execution
                 (default: 2, per Story #27 resource audit recommendation)
+            ripgrep_backend: where the ripgrep argv is executed. Defaults to
+                ``LocalRipgrepBackend`` -- ripgrep in this container, i.e.
+                exactly today's behaviour. A delegated backend runs it in
+                workspace-mcp instead, so this image need not ship the binary.
             alias: Issue #1601 Priority 9 (optional, server-context only):
                 the user-facing repository alias, when the caller has one
                 available (e.g. the MCP handler). A path is not
@@ -580,6 +589,11 @@ class RegexSearchService:
         self.repo_path = Path(repo_path).resolve()
         self._subprocess_max_workers = subprocess_max_workers
         self._alias = alias
+        self._ripgrep_backend: RipgrepBackend = (
+            ripgrep_backend
+            if ripgrep_backend is not None
+            else LocalRipgrepBackend(max_workers=subprocess_max_workers)
+        )
         self._search_engine = self._detect_search_engine()
         self._pcre2_supported: Optional[bool] = None  # Lazy-detected, cached
         # Issue #1601: per-call carrier set by _search_ripgrep/_search_grep/
@@ -603,6 +617,13 @@ class RegexSearchService:
         Raises:
             RuntimeError: If neither ripgrep nor grep is found
         """
+        # A delegated backend's ripgrep lives in another container, so this
+        # process's PATH says nothing about whether ripgrep is available. Probing
+        # it would "discover" no rg and silently drop to the linear grep scan --
+        # the exact degradation the warning below exists to make visible. Only a
+        # local backend's availability is a question this PATH can answer.
+        if not self._ripgrep_backend.is_local:
+            return "ripgrep"
         if shutil.which("rg"):
             return "ripgrep"
         elif shutil.which("grep"):
@@ -629,6 +650,18 @@ class RegexSearchService:
     # alive. Same reasoning as the _grep_fallback_warned class flag above.
     _pcre2_supported_global: Optional[bool] = None
     _pcre2_probe_lock = threading.Lock()
+
+    async def _pcre2_available(self) -> bool:
+        """Whether the ripgrep that will actually run supports PCRE2.
+
+        For the local backend this is the long-standing synchronous probe,
+        offloaded off the event loop exactly as before. For a delegated backend
+        the question is about ANOTHER container's binary, which this process
+        cannot answer by forking -- so the backend answers it.
+        """
+        if not self._ripgrep_backend.is_local:
+            return await self._ripgrep_backend.supports_pcre2()
+        return bool(await anyio.to_thread.run_sync(self._detect_pcre2_support))
 
     def _detect_pcre2_support(self) -> bool:
         """Detect whether ripgrep has PCRE2 support. Cached process-wide.
@@ -786,7 +819,7 @@ class RegexSearchService:
         # already async and awaited -- to be reachable from inside a
         # worker thread with no running event loop, a much larger and
         # riskier restructuring for no additional safety benefit here).
-        if pcre2 and not await anyio.to_thread.run_sync(self._detect_pcre2_support):
+        if pcre2 and not await self._pcre2_available():
             raise ValueError(
                 "PCRE2 not available. Install libpcre2 and ensure ripgrep "
                 "is built with PCRE2 support (rg --pcre2-version)."
@@ -1551,147 +1584,146 @@ class RegexSearchService:
         os.close(temp_fd)
 
         try:
-            # Execute with SubprocessExecutor for async + timeout protection.
             # Issue #1601 (Fix direction 4a): max_output_bytes makes the
-            # executor terminate rg itself if its output crosses the byte
+            # runner terminate rg itself if its output crosses the byte
             # ceiling WHILE STILL RUNNING, not merely bound a later read.
-            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
-            try:
-                result = await executor.execute_with_limits(
-                    command=cmd,
-                    working_dir=str(self.repo_path),
-                    timeout_seconds=timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS,
-                    output_file_path=temp_path,
-                    max_output_bytes=_MAX_READ_BYTES,
+            # The ripgrep argv is executed through the backend seam, so it
+            # can run here or in workspace-mcp. Everything around it -- the
+            # byte ceiling, the deadline, the JSON parsing below -- is cidx's
+            # and stays here. The backend reports the same fields this branch
+            # already reads, including ripgrep's exit-1-means-no-matches.
+            result = await self._ripgrep_backend.run(
+                argv=cmd,
+                working_dir=str(self.repo_path),
+                output_file_path=temp_path,
+                timeout_seconds=timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS,
+                max_output_bytes=_MAX_READ_BYTES,
+            )
+
+            if result.timed_out:
+                raise TimeoutError(
+                    f"Search timed out after {result.timeout_seconds} seconds "
+                    f"(pattern='{pattern}', path='{search_path}')"
                 )
 
-                if result.timed_out:
+            if result.is_error:
+                # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                if result.found_no_matches:
+                    # Exit code 1 with no stderr = no matches found (normal ripgrep behavior)
+                    logger.debug("ripgrep found no matches (exit code 1)")
+                    return [], 0
+                else:
+                    # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                    stderr = result.stderr_output or result.error_message or ""
+                    raise RipgrepExecutionError(
+                        f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
+                    )
+
+            # Issue #1601 remediation (Priority 2): the read+parse is a
+            # synchronous, potentially expensive operation (file I/O,
+            # UTF-8 decode, JSON/regex parsing) -- run it in a worker
+            # thread via anyio.to_thread.run_sync so it never blocks
+            # the asyncio event loop for the whole server.
+            #
+            # Bug #1590 review round 5 finding 2 fix: when a shared
+            # ``deadline`` was supplied, additionally bound this
+            # offloaded hop with the SAME thread-watchdog idiom used
+            # elsewhere in this file. This phase calls
+            # _to_repo_relative once PER MATCH, which resolves the
+            # reported path again (candidate.resolve()) -- a second,
+            # previously undisclosed instance of the identical
+            # Path.resolve()-on-NFS class of gap round 4's R1 fix
+            # addressed for the trigram pre-filter's resolve loop; a
+            # live reproduction proved a single wedged resolve here
+            # absorbs a full multi-second wedge past an
+            # already-exhausted budget and raises nothing. When there
+            # is no deadline, this stays the plain
+            # anyio.to_thread.run_sync offload exactly as before.
+            #
+            # Bug #1590 review round 6: floored at
+            # _MIN_PARSE_TIMEOUT_SECONDS (not 0.0) -- see that
+            # constant's comment. Without the floor, a deadline that
+            # has technically already elapsed (because the prior
+            # ripgrep-subprocess phase's ceil()-rounded-up allowance
+            # let real wall-clock time run a little past it, even
+            # though ripgrep itself finished within ITS OWN
+            # allowance) hands Thread.join(timeout=0) to the
+            # watchdog, which can never "win" even against a parse
+            # that completes in milliseconds -- spuriously discarding
+            # a fully successful, already-completed result.
+            if deadline is not None:
+                from .trigram_index_manager import _run_with_thread_watchdog
+
+                remaining_parse = max(
+                    _MIN_PARSE_TIMEOUT_SECONDS, deadline - time.monotonic()
+                )
+                parse_result, parse_timed_out = await anyio.to_thread.run_sync(
+                    _run_with_thread_watchdog,
+                    lambda: self._read_and_parse_ripgrep(
+                        temp_path, max_results, context_lines
+                    ),
+                    remaining_parse,
+                    "regex_search_read_and_parse_ripgrep",
+                )
+                if parse_timed_out:
                     raise TimeoutError(
-                        f"Search timed out after {result.timeout_seconds} seconds "
-                        f"(pattern='{pattern}', path='{search_path}')"
+                        f"Parsing ripgrep output for pattern={pattern!r} "
+                        f"path={search_path} exceeded its "
+                        f"{remaining_parse:.3f}s remaining search deadline"
                     )
-
-                if result.status == ExecutionStatus.ERROR:
-                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
-                    if result.exit_code == 1 and not result.stderr_output:
-                        # Exit code 1 with no stderr = no matches found (normal ripgrep behavior)
-                        logger.debug("ripgrep found no matches (exit code 1)")
-                        return [], 0
-                    else:
-                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
-                        stderr = result.stderr_output or result.error_message or ""
-                        raise RipgrepExecutionError(
-                            f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
-                        )
-
-                # Issue #1601 remediation (Priority 2): the read+parse is a
-                # synchronous, potentially expensive operation (file I/O,
-                # UTF-8 decode, JSON/regex parsing) -- run it in a worker
-                # thread via anyio.to_thread.run_sync so it never blocks
-                # the asyncio event loop for the whole server.
-                #
-                # Bug #1590 review round 5 finding 2 fix: when a shared
-                # ``deadline`` was supplied, additionally bound this
-                # offloaded hop with the SAME thread-watchdog idiom used
-                # elsewhere in this file. This phase calls
-                # _to_repo_relative once PER MATCH, which resolves the
-                # reported path again (candidate.resolve()) -- a second,
-                # previously undisclosed instance of the identical
-                # Path.resolve()-on-NFS class of gap round 4's R1 fix
-                # addressed for the trigram pre-filter's resolve loop; a
-                # live reproduction proved a single wedged resolve here
-                # absorbs a full multi-second wedge past an
-                # already-exhausted budget and raises nothing. When there
-                # is no deadline, this stays the plain
-                # anyio.to_thread.run_sync offload exactly as before.
-                #
-                # Bug #1590 review round 6: floored at
-                # _MIN_PARSE_TIMEOUT_SECONDS (not 0.0) -- see that
-                # constant's comment. Without the floor, a deadline that
-                # has technically already elapsed (because the prior
-                # ripgrep-subprocess phase's ceil()-rounded-up allowance
-                # let real wall-clock time run a little past it, even
-                # though ripgrep itself finished within ITS OWN
-                # allowance) hands Thread.join(timeout=0) to the
-                # watchdog, which can never "win" even against a parse
-                # that completes in milliseconds -- spuriously discarding
-                # a fully successful, already-completed result.
-                if deadline is not None:
-                    from .trigram_index_manager import _run_with_thread_watchdog
-
-                    remaining_parse = max(
-                        _MIN_PARSE_TIMEOUT_SECONDS, deadline - time.monotonic()
-                    )
-                    parse_result, parse_timed_out = await anyio.to_thread.run_sync(
-                        _run_with_thread_watchdog,
-                        lambda: self._read_and_parse_ripgrep(
-                            temp_path, max_results, context_lines
-                        ),
-                        remaining_parse,
-                        "regex_search_read_and_parse_ripgrep",
-                    )
-                    if parse_timed_out:
-                        raise TimeoutError(
-                            f"Parsing ripgrep output for pattern={pattern!r} "
-                            f"path={search_path} exceeded its "
-                            f"{remaining_parse:.3f}s remaining search deadline"
-                        )
-                else:
-                    parse_result = await anyio.to_thread.run_sync(
-                        self._read_and_parse_ripgrep,
-                        temp_path,
-                        max_results,
-                        context_lines,
-                    )
-                (
-                    matches,
-                    total,
-                    bytes_read,
-                    reader_read_capped,
-                    content_capped,
-                ) = parse_result
-                # read_capped is the OR of THREE independent signals: the
-                # executor killed the still-running subprocess because its
-                # output crossed the ceiling (result.output_capped -- a
-                # real dataclass field, accessed directly so a future
-                # rename fails loud rather than being silently masked),
-                # this read itself stopped early because the (already
-                # complete) temp file exceeded the ceiling
-                # (reader_read_capped), and/or the aggregate result-content
-                # budget stopped accumulation early (content_capped --
-                # Issue #1601 round 5 Priority 1). Any one alone means the
-                # scan was incomplete.
-                self._last_search_read_capped = (
-                    bool(result.output_capped) or reader_read_capped or content_capped
+            else:
+                parse_result = await anyio.to_thread.run_sync(
+                    self._read_and_parse_ripgrep,
+                    temp_path,
+                    max_results,
+                    context_lines,
                 )
-                # Issue #1601 Priority 9: when the SUBPROCESS itself was
-                # killed by the byte cap, the real cutoff is the output
-                # file's on-disk size at that moment -- which can be far
-                # LARGER than the reader's own bytes_read if max_results
-                # stopped parsing after only the first internal chunk.
-                # Reporting bytes_read in that case would understate the
-                # true cutoff.
-                if result.output_capped:
-                    try:
-                        self._last_read_capped_bytes = os.path.getsize(temp_path)
-                    except OSError as size_error:
-                        logger.debug(
-                            "Could not stat capped output file %s (%s); "
-                            "falling back to reader bytes_read (%d)",
-                            temp_path,
-                            size_error,
-                            bytes_read,
-                        )
-                        self._last_read_capped_bytes = bytes_read
-                else:
+            (
+                matches,
+                total,
+                bytes_read,
+                reader_read_capped,
+                content_capped,
+            ) = parse_result
+            # read_capped is the OR of THREE independent signals: the
+            # executor killed the still-running subprocess because its
+            # output crossed the ceiling (result.output_capped -- a
+            # real dataclass field, accessed directly so a future
+            # rename fails loud rather than being silently masked),
+            # this read itself stopped early because the (already
+            # complete) temp file exceeded the ceiling
+            # (reader_read_capped), and/or the aggregate result-content
+            # budget stopped accumulation early (content_capped --
+            # Issue #1601 round 5 Priority 1). Any one alone means the
+            # scan was incomplete.
+            self._last_search_read_capped = (
+                bool(result.output_capped) or reader_read_capped or content_capped
+            )
+            # Issue #1601 Priority 9: when the SUBPROCESS itself was
+            # killed by the byte cap, the real cutoff is the output
+            # file's on-disk size at that moment -- which can be far
+            # LARGER than the reader's own bytes_read if max_results
+            # stopped parsing after only the first internal chunk.
+            # Reporting bytes_read in that case would understate the
+            # true cutoff.
+            if result.output_capped:
+                try:
+                    self._last_read_capped_bytes = os.path.getsize(temp_path)
+                except OSError as size_error:
+                    logger.debug(
+                        "Could not stat capped output file %s (%s); "
+                        "falling back to reader bytes_read (%d)",
+                        temp_path,
+                        size_error,
+                        bytes_read,
+                    )
                     self._last_read_capped_bytes = bytes_read
+            else:
+                self._last_read_capped_bytes = bytes_read
 
-            finally:
-                # Issue #1601 round 5 (Priority 2): offload this
-                # synchronous, potentially-blocking call off the event loop.
-                await anyio.to_thread.run_sync(executor.shutdown, True)
         finally:
-            # Clean up temp file
+            # Clean up temp file. The executor's lifecycle (and the offloaded
+            # shutdown that used to live here) now belongs to the backend.
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 

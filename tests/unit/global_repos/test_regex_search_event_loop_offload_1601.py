@@ -103,8 +103,8 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
-            mock_which.side_effect = (
-                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/grep" if cmd == "grep" else None
             )
         return RegexSearchService(tmp_path)
 
