@@ -25,9 +25,9 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 
 - [`admin_embedding_stats_query`](admin.md#admin_embedding_stats_query) - Query embedding/reranker call tracking stats for vendor cost reconciliation.
 - [`admin_logs_export`](admin.md#admin_logs_export) - Export operational logs in JSON or CSV format for offline analysis or import.
-- [`admin_logs_query`](admin.md#admin_logs_query) - Query operational logs from SQLite database with pagination and filtering.
+- [`admin_logs_query`](admin.md#admin_logs_query) - Query the server's operational logs with pagination and filtering.
 - [`authenticate`](admin.md#authenticate) - Authenticate with username and API key to establish session.
-- [`cancel_job`](admin.md#cancel_job) - Cancel a running or pending background job. XRay jobs (xray_search, xray_explore) get real process termination; other job types use cooperative cancellation.
+- [`cancel_job`](admin.md#cancel_job) - Cancel a running or pending background job. XRay jobs (xray_search, xray_explore) have their driver processes terminated; other job types stop cooperatively.
 - [`check_health`](admin.md#check_health) - Check CIDX server health and availability.
 - [`configure_git_credential`](admin.md#configure_git_credential) - Configure a git forge personal access token with identity discovery.
 - [`create_api_key`](admin.md#create_api_key) - Create a new API key for programmatic access.
@@ -39,7 +39,7 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 - [`elevate_session`](admin.md#elevate_session) - Submit a TOTP or recovery code to open a step-up elevation window for this session.
 - [`get_group`](admin.md#get_group) - Get detailed information about a specific group.
 - [`get_job_details`](admin.md#get_job_details) - Get detailed status and progress for a specific background job using job_id.
-- [`get_job_statistics`](admin.md#get_job_statistics) - Get counts of background repository indexing jobs (active/pending/failed).
+- [`get_job_statistics`](admin.md#get_job_statistics) - Get server-wide counts of background jobs (active/pending/failed).
 - [`get_maintenance_status`](admin.md#get_maintenance_status) - Get current server maintenance mode status.
 - [`get_memory_governor_stats`](admin.md#get_memory_governor_stats) - Return the memory-governor band, pressure signal, counters, and config echoes.
 - [`list_api_keys`](admin.md#list_api_keys) - List all API keys for the authenticated user.
@@ -86,7 +86,7 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 - [`comment_on_pull_request`](git.md#comment_on_pull_request) - Add a comment to a GitHub pull request or GitLab merge request. Supports both general conversation comments and inline review comments attached to a specific file and line.
 - [`create_pull_request`](git.md#create_pull_request) - Create a GitHub pull request or GitLab merge request from a repository in write mode. Auto-detects forge type (github/gitlab) from the remote URL. Requires write mode to be active.
 - [`get_pull_request`](git.md#get_pull_request) - Get full details of a pull request / merge request including description, labels, reviewers, CI status, merge status, and diff statistics.
-- [`git_amend`](git.md#git_amend) - Amend the most recent git commit. Can update the commit message or just re-commit staged changes with the existing message. Uses PAT credential identity for author/committer attribution.
+- [`git_amend`](git.md#git_amend) - Amend the most recent git commit. Can update the commit message or just re-commit staged changes with the existing message. Keeps the original author; the committer identity comes from your stored git credential.
 - [`git_blame`](git.md#git_blame) - See who wrote each line of a file and when (line-by-line attribution).
 - [`git_branch_create`](git.md#git_branch_create) - Create a new git branch at current HEAD.
 - [`git_branch_delete`](git.md#git_branch_delete) - Delete a git branch (DESTRUCTIVE).
@@ -105,7 +105,7 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 - [`git_merge`](git.md#git_merge) - Merge a source branch into the current branch with conflict detection.
 - [`git_merge_abort`](git.md#git_merge_abort) - Cancel in-progress merge and restore pre-merge state.
 - [`git_pull`](git.md#git_pull) - Fetch and merge changes from remote repository.
-- [`git_push`](git.md#git_push) - Push local commits to remote repository using your personal access token. Requires a git credential configured via configure_git_credential. Push uses HTTPS with PAT authentication and sets author/committer from your stored forge identity.
+- [`git_push`](git.md#git_push) - Push local commits to remote repository using your personal access token. Requires a git credential configured via configure_git_credential. Push uses HTTPS with PAT authentication; it does not change the author or committer of the commits being pushed.
 - [`git_reset`](git.md#git_reset) - Reset working tree to specific state (DESTRUCTIVE).
 - [`git_search_commits`](git.md#git_search_commits) - Search commit messages for keywords, ticket numbers, or patterns.
 - [`git_search_diffs`](git.md#git_search_diffs) - Find when specific code was added/removed in git history (pickaxe search).
@@ -137,11 +137,11 @@ The server exposes 148 MCP tools in 12 categories. This catalog is generated fro
 - [`activate_repository`](repos.md#activate_repository) - Create user workspace for editing files, non-default branches, or composites.
 - [`add_golden_repo`](repos.md#add_golden_repo) - [ADMIN ONLY] Register a new repository for indexing (ASYNC operation). Requires MCP elevation when enforcement is on.
 - [`add_golden_repo_index`](repos.md#add_golden_repo_index) - [ADMIN ONLY] Add an index type to an existing golden repository. Requires MCP elevation when enforcement is on.
-- [`bulk_add_provider_index`](repos.md#bulk_add_provider_index) - [ADMIN ONLY] Add a provider's semantic index to every golden repository that lacks it.
+- [`bulk_add_provider_index`](repos.md#bulk_add_provider_index) - [ADMIN ONLY] Add a provider's semantic index to every global repository that lacks it.
 - [`change_golden_repo_branch`](repos.md#change_golden_repo_branch) - [ADMIN ONLY] Change the active branch of a golden repository with automatic re-indexing (async, returns job_id). Requires MCP elevation when enforcement is on.
 - [`check_hnsw_health`](repos.md#check_hnsw_health) - Check HNSW index health and integrity for a repository (async, returns job_id).
 - [`deactivate_repository`](repos.md#deactivate_repository) - Remove a user-specific repository activation and delete associated user indexes.
-- [`discover_repositories`](repos.md#discover_repositories) - List repos from external sources (GitHub orgs, local paths) not yet indexed.
+- [`discover_repositories`](repos.md#discover_repositories) - List the golden repositories registered on this server that the caller can access.
 - [`get_all_repositories_status`](repos.md#get_all_repositories_status) - Get status summary of ALL repositories (global and user-activated) in one call.
 - [`get_branches`](repos.md#get_branches) - List all git branches with metadata (current, last commit, index, remote).
 - [`get_global_config`](repos.md#get_global_config) - Get current auto-refresh interval for ALL global repositories.

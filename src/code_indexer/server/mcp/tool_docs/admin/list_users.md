@@ -43,10 +43,12 @@ outputSchema:
   - success
 ---
 
-TL;DR: List all users in CIDX system with roles and creation timestamps. ADMIN ONLY (requires manage_users permission). Requires MCP elevation (TOTP step-up). QUICK START: list_users() with no parameters returns all users. OUTPUT FIELDS: Each user includes username, role (admin/power_user/normal_user), created_at (ISO 8601 timestamp). Total count included. ROLE TYPES: admin (full access), power_user (can activate repos, write files, and query), normal_user (can activate personal workspaces, switch branches on own workspace, sync, query — cannot write files or manage users/golden repos). USE CASES: (1) Audit user accounts, (2) Check user roles before granting permissions, (3) Monitor user growth. NO PARAMETERS: Returns all users without filtering. TROUBLESHOOTING: Permission denied? Requires admin role with manage_users permission.
+TL;DR: List all users in CIDX system with roles and creation timestamps. ADMIN ONLY: requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`). QUICK START: list_users() with no parameters returns all users. OUTPUT FIELDS: Each user includes username, role (admin/power_user/normal_user), created_at (ISO 8601 timestamp). Total count included. ROLE TYPES: admin (full access), power_user (can activate repos, write files, and query), normal_user (can activate personal workspaces, switch branches on own workspace, sync, query — cannot write files or manage users/golden repos). USE CASES: (1) Audit user accounts, (2) Check user roles before granting permissions, (3) Monitor user growth. NO PARAMETERS: Returns all users without filtering. TROUBLESHOOTING: Permission denied? Requires admin role with manage_users permission.
 
 ERRORS:
-- elevation_required: TOTP step-up needed
+- `Permission denied: admin role required` (`{"success": false, "error": "..."}`)
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+- Any other failure: `{"success": false, "error": "<message>", "users": [], "total": 0}`
 
-RELATED TOOLS: create_user (add new user), authenticate (login).
+RELATED TOOLS: create_user (add new user), manage_group_members (change a user's group).

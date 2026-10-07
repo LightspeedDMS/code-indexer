@@ -13,7 +13,7 @@ inputSchema:
   required: []
 ---
 
-TL;DR: Create a new API key for programmatic access. Requires MCP elevation (TOTP step-up). Create a new API key for the authenticated user. Returns the full key value (one-time display - save it immediately).
+TL;DR: Create a new API key for programmatic access. Requires MCP elevation (TOTP step-up) when elevation enforcement is on. Create a new API key for the authenticated user. Returns the full key value (one-time display - save it immediately).
 
 USE CASES:
 - Generate new API key for programmatic access

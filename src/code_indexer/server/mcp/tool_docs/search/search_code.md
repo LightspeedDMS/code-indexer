@@ -17,7 +17,7 @@ inputSchema:
         items:
           type: string
       description: 'Repository alias(es) to search. String for single repo, array for multi-repo, or a wildcard pattern
-        (e.g. ''*-global'', ''pch-*-global'').'
+        (e.g. ''*-global'', ''backend-*-global'').'
     aggregation_mode:
       type: string
       enum:
@@ -39,7 +39,9 @@ inputSchema:
       maximum: 100
     min_score:
       type: number
-      description: Minimum similarity score
+      description: 'Minimum similarity score (0-1). Results scoring below it are dropped. When the field is not sent, the
+        server applies 0.3 to a single-repository search and no threshold to a multi-repository search (array or wildcard
+        repository_alias).'
       default: 0.5
       minimum: 0
       maximum: 1

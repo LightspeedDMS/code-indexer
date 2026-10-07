@@ -162,7 +162,7 @@ Search code using pre-built indexes.
 | `aggregation_mode` | string (one of: `global`, `per_repo`) | no | Multi-repo aggregation. 'global' (default): top N by score across all repos. 'per_repo': distributes N evenly across repos. |
 | `exclude_patterns` | array of string | no | Regex patterns to exclude repositories from omni-search. |
 | `limit` | integer | no | Maximum number of results. |
-| `min_score` | number | no | Minimum similarity score |
+| `min_score` | number | no | Minimum similarity score (0-1). |
 | `search_mode` | string (one of: `semantic`, `fts`, `hybrid`) | no | Search mode: 'semantic' for conceptual queries, 'fts' for exact text/identifiers, 'hybrid' runs both in parallel and merges via Reciprocal Rank Fusion (common hits ranked highest). |
 | `language` | string | no | Filter by programming language name or extension (e.g., 'python', 'py', 'js', 'typescript'). |
 | `exclude_language` | string | no | Exclude files of specified language. |

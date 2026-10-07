@@ -67,17 +67,22 @@ WHEN TO USE:
 - To refresh without waiting for scheduled analysis
 
 ASYNC BEHAVIOR:
-Returns immediately with a job_id. Analysis runs in background. Use repository_status or check cidx-meta indexing status to monitor progress.
+Returns immediately with `status: "queued"` and a job_id of the form `dep-map-<mode>-<id>-<timestamp>`. The analysis runs in the background; its outcome is reported by the job tracker and the server logs, and the refreshed dependency map appears in cidx-meta when it completes.
+
+DRY RUN:
+With `dry_run_graph_only: true`, no job is started: the graph-channel repair runs in dry-run mode synchronously and the response carries `job_id: null`, `status: "completed"` and `graph_repair_dry_run_report`. No files are changed.
 
 CONCURRENCY:
-Only one dependency map analysis can run at a time. Concurrent requests will be rejected with "already in progress" error.
+Only one dependency map analysis can run at a time. A request made while one is running returns `{"success": false, "error": "already in progress", "job_id": "<active job id>", "mode": "..."}`.
 
 REQUIREMENTS:
-- dependency_map_enabled must be True in server configuration
-- Requires admin permission (manage_golden_repos)
+- The dependency map setting (`dependency_map_enabled`, Claude integration settings in the Web UI config screen) must be on; otherwise the response is `Dependency map analysis is disabled`
+- Requires the admin role (permission manage_golden_repos)
+
+ERRORS (`{"success": false, "error": "...", "job_id": ...}`): `Invalid mode '<mode>'. Must be 'full' or 'delta'.`; `Dependency map analysis is disabled`; `Dependency map service not available`; `dry_run_graph_only must be a boolean`; `already in progress`.
 
 EXAMPLE:
-{"mode": "delta"} Returns: {"success": true, "job_id": "abc123", "mode": "delta", "status": "queued", "message": "Dependency map delta analysis started"}
+{"mode": "delta"} Returns: {"success": true, "job_id": "dep-map-delta-1a2b3c4d-1767225600", "mode": "delta", "status": "queued", "message": "Dependency map delta analysis started"}
 
 DRY-RUN EXAMPLES (pipe MCP response text to jq):
 # View per-action repair counts

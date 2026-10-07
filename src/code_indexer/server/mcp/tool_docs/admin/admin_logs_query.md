@@ -2,7 +2,7 @@
 name: admin_logs_query
 category: admin
 required_permission: manage_users
-tl_dr: Query operational logs from SQLite database with pagination and filtering.
+tl_dr: Query the server's operational logs with pagination and filtering.
 slim_description: "Query paginated operational logs with optional filters for search text, log level, and correlation_id. Each entry includes trace_id/span_id for OTEL trace correlation."
 inputSchema:
   type: object
@@ -87,10 +87,12 @@ outputSchema:
   - pagination
 ---
 
-Query operational logs from SQLite database with pagination and filtering. Requires MCP elevation (TOTP step-up). USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level, (5) Jump from a log line to its OTEL trace via trace_id/span_id. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, trace_id, span_id, user_id, request_path. trace_id/span_id are always populated -- real hex IDs when the log occurred inside an active OTEL span, or the documented zero-values ("0"*32 / "0"*16) when telemetry was disabled or no span was active. PERMISSIONS: Requires admin role (admin only).
+Query the server's operational logs with pagination and filtering. Logs are read from the same store the server writes them to: the SQLite log database in solo mode, the shared database in cluster mode. `page_size` values above 1000 are reduced to 1000; zero or negative values use the default of 50. USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level, (5) Jump from a log line to its OTEL trace via trace_id/span_id. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, trace_id, span_id, user_id, request_path. trace_id/span_id are always populated -- real hex IDs when the log occurred inside an active OTEL span, or the documented zero-values ("0"*32 / "0"*16) when telemetry was disabled or no span was active. PERMISSIONS: Requires the admin role and, when elevation enforcement is on, an active elevation window (TOTP step-up via `elevate_session`).
 
 ERRORS:
-- elevation_required: TOTP step-up needed
+- `Permission denied: admin role required` (`{"success": false, "error": "..."}`)
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
+- `Log database not configured`
 
 EXAMPLE: {"page": 1, "page_size": 50, "search": "SSO", "level": "ERROR"}

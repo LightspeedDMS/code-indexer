@@ -40,7 +40,7 @@ Export operational logs in JSON or CSV format for offline analysis or import.
 
 ## `admin_logs_query`
 
-Query operational logs from SQLite database with pagination and filtering.
+Query the server's operational logs with pagination and filtering.
 
 - Permission: `manage_users`
 - Source: [admin/admin_logs_query.md](../../../src/code_indexer/server/mcp/tool_docs/admin/admin_logs_query.md)
@@ -68,7 +68,7 @@ Authenticate with username and API key to establish session.
 
 ## `cancel_job`
 
-Cancel a running or pending background job. XRay jobs (xray_search, xray_explore) get real process termination; other job types use cooperative cancellation.
+Cancel a running or pending background job. XRay jobs (xray_search, xray_explore) have their driver processes terminated; other job types stop cooperatively.
 
 - Permission: `query_repos`
 - Source: [admin/cancel_job.md](../../../src/code_indexer/server/mcp/tool_docs/admin/cancel_job.md)
@@ -120,7 +120,7 @@ Create a new custom group for organizing users and repository access.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `name` | string | yes | Unique group name (1-100 characters) |
+| `name` | string | yes | Group name; must be unique, compared case-insensitively |
 | `description` | string | no | Optional group description |
 
 ## `create_user`
@@ -205,7 +205,7 @@ Get detailed status and progress for a specific background job using job_id.
 
 ## `get_job_statistics`
 
-Get counts of background repository indexing jobs (active/pending/failed).
+Get server-wide counts of background jobs (active/pending/failed).
 
 - Permission: `query_repos`
 - Source: [admin/get_job_statistics.md](../../../src/code_indexer/server/mcp/tool_docs/admin/get_job_statistics.md)
@@ -266,7 +266,7 @@ List MCP credentials by scope (self, user, all, system).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scope` | string (one of: `self`, `user`, `all`, `system`) | yes | Scope: 'self' (own creds), 'user' (specific user, admin), 'all' (all users, admin), 'system' (system-managed, admin) |
+| `scope` | string (one of: `self`, `user`, `all`, `system`) | yes | Scope: 'self' (own creds), 'user' (specific user, admin; your own username is served like 'self'), 'all' (all users, admin), 'system' (system-managed, admin) |
 | `username` | string | no | Required when scope='user'. |
 
 ## `list_users`
@@ -317,7 +317,7 @@ Create or delete MCP credentials for self or another user.
 | `action` | string (one of: `create`, `delete`) | yes | 'create' to generate a new credential, 'delete' to revoke an existing one. |
 | `credential_id` | string | no | Required for action='delete'. |
 | `description` | string | no | Optional label for the credential (used with action='create'). |
-| `target_user` | string | no | Username to operate on (admin only). |
+| `target_user` | string | no | Username to operate on. |
 
 ## `query_audit_logs`
 

@@ -350,7 +350,7 @@ The response above means "your evaluator found nothing dead, but 2 files had rea
 
 ### `no_supported_files` status
 
-Many repositories on this server are neither Java nor Kotlin (Vue/Spring Boot, .NET/Angular, Node/Lambda), and the graph extractor covers only those two. Running `analyze_graph` against one of them previously returned `ok: true, status: "ran_ok", findings: []` -- a response that reads as a clean bill of health when in fact the analysis had nothing to analyse at all.
+The graph extractor covers only Java and Kotlin. Running `analyze_graph` against a repository with no files in those languages has nothing to analyse, and the response says so through `status` rather than through an empty `findings[]` alone.
 
 When EVERY candidate file (after `include_patterns`/`exclude_patterns`) is an unsupported language AND none of them had a genuine parse error, `status` is `"no_supported_files"` instead of `"ran_ok"` -- a single candidate file with a real parse error keeps `status: "ran_ok"` even if every OTHER file is unsupported-language. `ok` stays `true` -- nothing failed, the request ran correctly and simply had zero supported input. Treat this status the same way you would treat `fact_graph_complete: false`: an empty `findings[]` under it is not a verified-clean result, it is "there was nothing this tool could look at".
 

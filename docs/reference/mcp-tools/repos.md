@@ -15,10 +15,10 @@ Create user workspace for editing files, non-default branches, or composites.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `golden_repo_alias` | string | no | Golden repository alias (for single repo) |
-| `golden_repo_aliases` | array of string | no | Multiple golden repos (for composite) |
-| `branch_name` | string | no | Branch to activate (optional) |
-| `user_alias` | string | no | User-defined alias (optional) |
+| `golden_repo_alias` | string | no | Golden repository alias without the -global suffix, for a single-repository workspace. |
+| `golden_repo_aliases` | array of string | no | Two or more golden repository aliases for a composite workspace. |
+| `branch_name` | string | no | Branch to activate (optional; defaults to the golden repository's default branch) |
+| `user_alias` | string | no | Alias for the new workspace (optional; defaults to the golden repository alias) |
 
 ## `add_golden_repo`
 
@@ -49,15 +49,15 @@ Create user workspace for editing files, non-default branches, or composites.
 
 ## `bulk_add_provider_index`
 
-[ADMIN ONLY] Add a provider's semantic index to every golden repository that lacks it.
+[ADMIN ONLY] Add a provider's semantic index to every global repository that lacks it.
 
 - Permission: `manage_golden_repos`
 - Source: [repos/bulk_add_provider_index.md](../../../src/code_indexer/server/mcp/tool_docs/repos/bulk_add_provider_index.md)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `provider` | string | yes | Embedding provider name to add indexes for |
-| `filter` | string | no | Optional filter pattern. |
+| `provider` | string | yes | Embedding provider name to add indexes for. |
+| `filter` | string | no | Optional. |
 
 ## `change_golden_repo_branch`
 
@@ -80,7 +80,7 @@ Check HNSW index health and integrity for a repository (async, returns job_id).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `repository_alias` | string | yes | Repository alias to check (e.g., 'backend-global', 'frontend-global') |
+| `repository_alias` | string | yes | Golden repository alias to check, without the -global suffix (e.g., 'example-repo') |
 | `force_refresh` | boolean | no | Bypass cache and perform fresh check (default false) |
 
 ## `deactivate_repository`
@@ -96,14 +96,14 @@ Remove a user-specific repository activation and delete associated user indexes.
 
 ## `discover_repositories`
 
-List repos from external sources (GitHub orgs, local paths) not yet indexed.
+List the golden repositories registered on this server that the caller can access.
 
 - Permission: `query_repos`
 - Source: [repos/discover_repositories.md](../../../src/code_indexer/server/mcp/tool_docs/repos/discover_repositories.md)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source_type` | string | no | Source type filter (optional) |
+| `source_type` | string | no | Accepted for compatibility but not used; the result is the same with or without it. |
 
 ## `get_all_repositories_status`
 
@@ -195,7 +195,7 @@ List YOUR activated repositories (user workspaces), distinct from global repos.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `category` | string | no | Filter repositories by category name. |
+| `category` | string | no | Filter repositories by category name (exact, case-sensitive match). |
 
 ## `manage_composite_repository`
 
@@ -232,7 +232,7 @@ Perform operations on composite repositories (multi-repo activations).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `alias` | string | yes | Repository alias |
+| `alias` | string | yes | Golden repository alias without the -global suffix (e.g. 'example-repo') |
 
 ## `remove_golden_repo`
 
@@ -243,7 +243,7 @@ Perform operations on composite repositories (multi-repo activations).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `alias` | string | yes | Repository alias |
+| `alias` | string | yes | Golden repository alias without the -global suffix (e.g. 'example-repo') |
 
 ## `repository_status`
 
@@ -313,6 +313,6 @@ Trigger manual re-indexing for specified index types.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `repository_alias` | string | yes | Repository alias |
-| `index_types` | array of string (one of: `semantic`, `fts`, `temporal`, `scip`) | yes | Array of index types to rebuild: semantic (embeddings), fts (full-text), temporal (git history), scip (call graphs) |
+| `repository_alias` | string | yes | Alias of one of your activated repositories (not a -global alias) |
+| `index_types` | array of string (one of: `semantic`, `fts`, `temporal`, `scip`) | yes | Array of index types to rebuild: semantic (embeddings), fts (full-text), scip (call graphs). temporal is listed but rejected for activated repositories. |
 | `clear` | boolean | no | Rebuild from scratch (true) or incremental update (false). |

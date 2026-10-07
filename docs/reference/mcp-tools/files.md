@@ -46,7 +46,7 @@ Edit existing file using exact string replacement with optimistic locking.
 | `old_string` | string | yes | Exact string to replace (must match exactly including whitespace) |
 | `new_string` | string | yes | Replacement string |
 | `content_hash` | string | yes | SHA-256 hash for optimistic locking (from get_file_content or previous edit) |
-| `replace_all` | boolean | no | Replace all occurrences of old_string (default: false - replace first only) |
+| `replace_all` | boolean | no | Replace all occurrences of old_string (default: false - old_string must then occur exactly once, otherwise the edit is rejected) |
 
 ## `enter_write_mode`
 

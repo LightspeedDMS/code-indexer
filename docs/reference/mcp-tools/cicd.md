@@ -58,7 +58,7 @@ List CI/CD runs for a repository, auto-detecting GitHub Actions or GitLab CI fro
 | `forge` | string (one of: `auto`, `github`, `gitlab`) | no | Force a specific forge type, or 'auto' to detect from remote URL |
 | `branch` | string | no | Optional branch name filter |
 | `status` | string | no | Optional status filter (e.g. completed, failed, running) |
-| `limit` | integer | no | Maximum number of runs to return (default: 20) |
+| `limit` | integer | no | Maximum number of runs to return (default: 20). |
 
 ## `ci_retry_run`
 

@@ -40,4 +40,4 @@ outputSchema:
       description: Full log text for the job
 ---
 
-TL;DR: Get complete log output for a specific CI/CD job. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_get_job_logs(repository_alias='myrepo-global', job_id=67890). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. job_id maps to GitHub Actions job_id or GitLab job_id. MIGRATION: replaces github_actions_get_job_logs(owner, repo, job_id) and gitlab_ci_get_job_logs(project_id, job_id).
+TL;DR: Get complete log output for a specific CI/CD job. Auto-detects GitHub Actions or GitLab CI from the repository remote URL. QUICK START: ci_get_job_logs(repository_alias='myrepo-global', job_id=67890). FORGE OVERRIDE: pass forge='github' or forge='gitlab' to skip auto-detection. job_id maps to GitHub Actions job_id or GitLab job_id.

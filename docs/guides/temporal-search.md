@@ -51,7 +51,7 @@ with both adapters configured looks like this (from a run against a three-commit
 
 ```
 .code-indexer/index/
-  code-indexer-temporal/                         temporal_metadata.db (shared bookkeeping)
+  code-indexer-temporal                          (directory) temporal_metadata.db, shared bookkeeping only
   code-indexer-temporal-voyage_context_4/        temporal_meta.json
   code-indexer-temporal-voyage_context_4-2025Q1/ chunks.db, hnsw_index.bin, temporal_progress.json, ...
   code-indexer-temporal-voyage_context_4-2025Q2/

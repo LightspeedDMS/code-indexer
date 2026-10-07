@@ -9,7 +9,7 @@ inputSchema:
   properties:
     category:
       type: string
-      description: Filter repositories by category name. Use "Unassigned" to show repos without a category. Omit to show all repos.
+      description: Filter repositories by category name (exact, case-sensitive match). Use "Unassigned" to show repos without a category. Omit to show all repos.
   required: []
 outputSchema:
   type: object
@@ -68,10 +68,16 @@ outputSchema:
   - success
 ---
 
-Lists a combined view: YOUR activated repositories (user-specific workspaces, both single-repo activations and composite repositories you've created, with user_alias, current_branch, and activation status) PLUS all globally accessible repositories (read-only, '{name}-global' aliases). Use the `is_global` field on each entry to distinguish the two. For a global-repos-only list, use list_global_repos instead.
+Lists a combined view: YOUR activated repositories (user-specific workspaces, both single-repo activations and composite repositories you've created) PLUS the global repositories (read-only, '{name}-global' aliases). Use the `is_global` field on each entry to distinguish the two. For a global-repos-only list, use list_global_repos instead.
+
+DETAILS:
+- Activated entries carry `user_alias`, `golden_repo_alias`, `current_branch`, `is_composite` and, for composites, `golden_repo_aliases`. An entry also carries `deactivation_job` (`{"job_id", "status"}`) while a deactivation job for it is pending or running, otherwise null.
+- Global entries carry `user_alias` (the `-global` alias), `golden_repo_alias`, `repo_url`, `last_refresh`, `current_branch: null` and `is_global: true`.
+- Every entry gets `repo_category` (null when unassigned). Entries are sorted by category priority, then by `user_alias`; unassigned entries come last.
+- When group-based access control is configured, entries whose golden repository the caller cannot access are removed.
 
 KEY DIFFERENCE FROM list_global_repos:
 - list_repositories: Combined view -- YOUR activated repos (editable, user-specific, custom branches) AND global repos
-- list_global_repos: Global repos ONLY (read-only, available to all users, default branches)
+- list_global_repos: Global repos ONLY (read-only, default branches)
 
-USE CASES: See which repositories you've activated for editing or branch-specific work. Find your custom repository aliases to use in file CRUD or git operations. Check if you have an activation before trying to edit files. Empty list means you haven't activated any repositories yet - use activate_repository first.
+USE CASES: See which repositories you've activated for editing or branch-specific work. Find your custom repository aliases to use in file CRUD or git operations. Check if you have an activation before trying to edit files. If no entry has `is_global: false`, you have no activated repositories yet - use activate_repository first.

@@ -32,10 +32,10 @@ outputSchema:
   - status
 ---
 
-TL;DR: [ADMIN ONLY] Set or clear session impersonation to execute queries on behalf of another user. 
+TL;DR: [ADMIN ONLY] Set or clear session impersonation to execute queries on behalf of another user.
 
 WHAT IT DOES:
-Allows ADMIN users to assume another user's identity for the duration of their MCP session. Requires MCP elevation (TOTP step-up). All subsequent tool calls will use the target user's permissions until impersonation is cleared.
+Allows ADMIN users to assume another user's identity for the duration of their MCP session. Requires an active elevation window (TOTP step-up via `elevate_session`) when elevation enforcement is on. All subsequent tool calls will use the target user's permissions until impersonation is cleared.
 
 USE CASES:
 (1) Support/helpdesk: Debug access issues by seeing what a user can see
@@ -62,8 +62,9 @@ RETURNS:
   "impersonating": "target_user" // or null if cleared
 }
 
-ERRORS:
-- elevation_required: TOTP step-up needed
+ERRORS (returned as `{"status": "error", "error": "..."}` except the elevation codes):
+- elevation_required: TOTP step-up needed (only when elevation enforcement is on)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 - 'Impersonation requires ADMIN role' -> Only admins can impersonate
-- 'User not found: xyz' -> Target username doesn't exist
+- 'User not found: <username>' -> Target username doesn't exist
+- 'session_state_unavailable' (with a message) -> The request has no MCP session state; impersonation needs a stateful MCP session

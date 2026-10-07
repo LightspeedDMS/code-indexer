@@ -68,4 +68,6 @@ ABOUT cidx-meta-global: This repository appears in the list but is NOT a code re
 
 DISCOVERY PATTERN: Before listing all repos, search 'cidx-meta-global' to discover which repositories are relevant to your topic: search_code('authentication', repository_alias='cidx-meta-global') returns repos that handle authentication, then query those specific repos for detailed code.
 
-Use list_global_repos() only when explicitly asked for the full repo list or to verify a repo exists. For detailed status of one repo (temporal support, refresh times), use repository_status instead.
+Use list_global_repos() only when explicitly asked for the full repo list or to verify a repo exists. For the status of one repo, use repository_status instead.
+
+RETURNS: `{"success": true, "repos": [...]}`. Each entry is a global repository record: `alias_name` (the queryable `-global` alias), `repo_name` (the golden repository alias, used by admin tools such as refresh_golden_repo), `repo_url`, `index_path`, `created_at`, `last_refresh`, `enable_temporal`, `temporal_options`, `enable_scip`, `next_refresh`. For callers without the admin role, when group-based access control is configured, only repositories their groups can access are listed. A failure returns `{"success": false, "error": "...", "repos": []}`.

@@ -143,7 +143,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path`, `language`, `line_content`, `matched_node`, and `ast_debug`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds, lowered from 120.0 by Bug #1070 -- see the `await_seconds` row in the Parameters table below).
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately when `await_seconds` is 0 (default); poll `GET /api/jobs/{job_id}` for results. Set `await_seconds > 0` to have the server poll the background job for up to that many seconds and return the inline result if it completes, falling back to `{job_id}` otherwise (inline-wait is capped at up to 45 seconds -- see the `await_seconds` row in the Parameters table below).
 
 ## Quick Start
 
@@ -187,7 +187,7 @@ Key points:
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | repository_alias | str OR list[str] | yes | -- | Single alias or array (or JSON-encoded array string) for omni multi-repo exploration. |
-| pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
+| pattern | str | yes | -- | Regular expression applied in Phase 1. (The REST search endpoint `POST /api/xray/search` names this field `driver_regex`.) |
 | evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See Evaluator API below. When omitted, default accepts all files for AST exploration. |
 | search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
@@ -199,8 +199,8 @@ Key points:
 | pcre2 | bool | no | false | PCRE2 engine for the content driver. |
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap (10..600). |
 | max_debug_nodes | int | no | 50 | Maximum AST nodes in the `ast_debug` payload per match (1..500). When the cap is hit a `{"type": "...truncated"}` sentinel appears in the children list. |
-| max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
-| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). Range 0.0..45.0 -- lowered from 120.0 by Bug #1070; async handlers risk a 504 at the ALB 60s timeout; the server enforces the 45.0 ceiling via `_AWAIT_SECONDS_MAX` in `handlers/xray.py`. Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
+| max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. |
+| await_seconds | float | no | 0 | Server-side inline-wait window (accepts floats, e.g. 2.5). Range 0.0..45.0. Values > 30.0 emit a server warning. Out-of-range or wrong-type values return error code `await_seconds_invalid`. |
 | pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
@@ -266,9 +266,9 @@ For the full cookbook of worked evaluator examples and a cross-language node typ
 
 ### Globals available in evaluator context
 
-The Rust evaluator receives the file root as `node`. The following names from the former Python XRayNode API are documented here for migration reference -- they are NOT available in the Rust evaluator. Callers who previously used the Python API (which exposed `node`, `root`, `source`, `lang`, `file_path`, and `match_positions` as globals) should migrate to the Rust `OwnedNode` API described above.
+The Rust evaluator receives the file root as its `node` argument (an `OwnedNode`). There are no `root`, `source`, `lang`, `file_path` or `match_positions` globals.
 
-The former Python API accepted evaluator code returning a dict with keys `{"matches": [...], "value": <any>}`. Node types were Python AST class names such as `Call`, `Name`, `Attribute`, `Constant`, `Subscript`, `Compare`, `BoolOp`, `UnaryOp`, `List`, `Tuple`, `Dict`, `Return`, `Expr`. The execution environment stripped builtins including `getattr`, `setattr`, `delattr`, `hasattr`, `__import__`, `eval`, `exec`, `open`, and `compile`. Dunder attribute access (e.g. `__class__`, `__bases__`, `__globals__`, `__builtins__`, `__dict__`) was blocked as sandbox escape vectors. This Python evaluator API was retired in Epic #1019 and replaced by the Rust native evaluator.
+Python-syntax evaluator code is not accepted. When porting an old Python evaluator, note that none of the following carry over: a dict return value `{"matches": [...], "value": <any>}`; Python AST class names (`Call`, `Name`, `Attribute`, `Constant`, `Subscript`, `Compare`, `BoolOp`, `UnaryOp`, `List`, `Tuple`, `Dict`, `Return`, `Expr`); Python builtins (`getattr`, `setattr`, `delattr`, `hasattr`, `__import__`, `eval`, `exec`, `open`, `compile`). Rewrite such code against the `OwnedNode` API described above.
 
 ### Rust security whitelist
 
@@ -437,7 +437,7 @@ For results larger than the server's single payload character budget (Web UI `pa
 
 To fetch the full content, use the discoverable `cidx_fetch_cached_payload` MCP tool with `cache_handle`, incrementing `page` from 1 through `total_pages` (or until `has_more` is `false`). Each page is stored as its own independent cache row and is returned WHOLE and unsliced regardless of the server's CURRENT `payload_max_fetch_size_chars` setting -- a config change between when a result was produced and when you fetch it cannot corrupt or misalign a page. Each page is an independently parseable JSON object `{"matches": [...], "evaluation_errors": [...]}` holding a whole-entry slice; concatenate every page's `matches`/`evaluation_errors` lists, in page order, to reconstruct the full arrays exactly, in original order.
 
-**Cache degradation and failure** (Bug #1928 final round): `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the run already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
+**Cache degradation and failure**: `cache_unavailable: true` means PayloadCache was down when the result was built -- you still get a bounded, honest inline page 1 (`truncated: true`, `cache_handle: null`), just no further pages to fetch until the cache is back. `success: false, error: "cache_store_failed"` means the cache was reachable but the atomic page-set write itself failed; the job result still carries every non-array metadata field the run already produced, alongside the failure -- only `matches[]`/`evaluation_errors[]` are genuinely undeliverable.
 
 ### Examples
 

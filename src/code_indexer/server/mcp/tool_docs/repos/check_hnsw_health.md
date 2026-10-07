@@ -9,7 +9,7 @@ inputSchema:
   properties:
     repository_alias:
       type: string
-      description: Repository alias to check (e.g., 'backend-global', 'frontend-global')
+      description: Golden repository alias to check, without the -global suffix (e.g., 'example-repo')
     force_refresh:
       type: boolean
       description: Bypass cache and perform fresh check (default false)
@@ -43,9 +43,11 @@ outputSchema:
     - success
 ---
 
-Comprehensive HNSW vector index health check: file existence, readability, loadability, and graph integrity validation. Submits the check as a background job and returns immediately with a job_id -- this avoids blocking on repositories with many HNSW collections (e.g. dozens of temporal quarterly shards), which previously risked exceeding the MCP handler timeout.
+Comprehensive HNSW vector index health check: file existence, readability, loadability, and graph integrity validation. Submits the check as a background job and returns immediately with a job_id, so repositories with many HNSW collections (e.g. dozens of temporal quarterly shards) do not block the call.
 
-PARAMETERS: repository_alias (required) - golden repository alias. force_refresh (optional, default false) - bypass the 5-minute health-check cache.
+PARAMETERS: repository_alias (required) - golden repository alias WITHOUT the '-global' suffix (the `repo_name` field of list_global_repos); a '-global' alias returns `Repository not found: <alias>`. Activated (user) repositories are not resolved by this tool. force_refresh (optional, default false) - bypass the 5-minute health-check cache.
+
+IMMEDIATE RESPONSE: `{"success": true, "job_id": "...", "message": "Use get_job_details to poll."}`. Errors: `Missing required parameter: repository_alias`, `Repository not found: <alias>`, `Background job manager not initialized`, or a duplicate-job conflict (see below).
 
 ASYNC: This tool returns immediately with a job_id. Use get_job_details or get_job_statistics to poll for completion; the job's `result` field (once status is "completed") is the JOB RESULT SHAPE described below.
 
@@ -69,7 +71,7 @@ JOB RESULT SHAPE: once the polled job reaches status "completed", its `result` f
       "connections_checked": integer | null,
       "min_inbound": integer | null,
       "max_inbound": integer | null,
-      "orphan_count": integer | null,  // zero-tolerance signal (Story #1359): 0 is OK, any value > 0 is ERROR (reflected in valid) -- no WARNING tier
+      "orphan_count": integer | null,  // zero-tolerance signal: 0 is OK, any value > 0 is ERROR (reflected in valid) -- no WARNING tier
       "hnswlib_capability_available": boolean | null,  // whether the installed hnswlib has the fork's orphan-repair methods; a SEPARATE signal from orphan_count/valid
       "file_size_bytes": integer | null,
       "errors": [string],
