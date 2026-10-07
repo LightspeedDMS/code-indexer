@@ -1451,13 +1451,19 @@ def make_lifespan(
                 build_configured_git_backend,
             )
 
+            # ONE selection, shared. Parked on app.state so the MCP handlers read
+            # remote state through the same backend as the repo managers instead of
+            # shelling out to the local clone (handlers/_git_seam.py).
+            configured_git_backend = build_configured_git_backend(server_config)
+            app.state.git_backend = configured_git_backend
+
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
                 background_job_manager=background_job_manager,
                 resource_config=server_config.resource_config,
                 job_tracker=job_tracker,
                 snapshot_manager=snapshot_manager,
-                git_backend=build_configured_git_backend(server_config),
+                git_backend=configured_git_backend,
                 # Bug #1390: RefreshScheduler's filesystem reconciliation needs
                 # to update golden_repos_metadata (bare-alias-keyed) alongside
                 # global_repos -- without this, cluster mode would silently
