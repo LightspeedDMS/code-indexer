@@ -2173,6 +2173,16 @@ def _provider_request_error_response(
                 "available_providers": [p["name"] for p in providers],
             }
         )
+    if kind == ops.INVALID_FILTER:
+        return _mcp_response({"success": False, "error": error.detail})
+    if kind == ops.CATEGORIES_UNAVAILABLE:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Repository category service not available; "
+                "the category filter cannot be applied",
+            }
+        )
     if kind == ops.REPO_NOT_FOUND:
         return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
     if kind == ops.JOB_MANAGER_UNAVAILABLE:

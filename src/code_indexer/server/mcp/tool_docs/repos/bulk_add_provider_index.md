@@ -12,7 +12,7 @@ inputSchema:
       description: "Embedding provider name to add indexes for"
     filter:
       type: string
-      description: "Optional filter pattern. ONLY the 'category:<name>' prefix is honored (case-insensitive substring match against the repo's category). Any other value or prefix is silently ignored (no filtering applied, no error)."
+      description: "Optional filter. The only supported form is 'category:<name>': the 'category:' prefix is case-insensitive, <name> must be non-empty and is matched exactly and case-sensitively against the repository's category name. Any other value is rejected with an error and no jobs are created. Omit (or pass an empty string) to target every repository."
   required:
     - provider
   additionalProperties: false
@@ -21,11 +21,16 @@ inputSchema:
 
 Creates background jobs for each repository missing the specified provider's index. Returns list of job IDs for progress tracking.
 
-Optionally filter repositories by category pattern.
+Optionally restrict the operation to one repository category with `filter="category:<name>"`.
 
-LIMITATION: The `filter` parameter ONLY recognizes the `category:<name>` prefix. Any other filter string (or an unrecognized prefix) is silently a no-op -- all eligible repositories are processed as if no filter were given, with no error returned.
+FILTER RULES:
+- The only supported filter is `category:<name>`. The `category:` prefix is case-insensitive.
+- `<name>` is matched exactly and case-sensitively against the category name (category names are stored case-sensitively, so `Backend` and `backend` are different categories). `category:back` does not match `Backend`.
+- Any other filter, or an empty name (`category:`), is rejected with an error before any repository config is written or any job is created.
 
 ERRORS:
+- Unsupported filter / empty category name: validation error, no jobs created
+- Repository category service not available: a category filter cannot be applied, no jobs created
 - elevation_required: TOTP step-up needed (only when elevation enforcement is on)
 - totp_setup_required: TOTP not yet configured for this account (setup_url provided)
 
