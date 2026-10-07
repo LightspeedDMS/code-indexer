@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from .conftest import executor_target
+
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 _TEST_MAX_RESULTS = 100
@@ -35,11 +37,26 @@ def _mock_executor_with_result_missing_output_capped():
         with open(kwargs["output_file_path"], "w"):
             pass  # empty output is fine -- this test only cares about
             #     output_capped attribute access, not parse results.
-        result = Mock(spec=["timed_out", "status", "exit_code", "stderr_output"])
+        # Spec lists EVERY field the read path legitimately touches except
+        # output_capped, so the AttributeError isolates that one. Omitting a
+        # field the backend reads earlier (timeout_seconds, error_message) would
+        # trip on that instead and the test would pass for the wrong reason.
+        result = Mock(
+            spec=[
+                "timed_out",
+                "status",
+                "exit_code",
+                "stderr_output",
+                "timeout_seconds",
+                "error_message",
+            ]
+        )
         result.timed_out = False
         result.status = "success"
         result.exit_code = 0
         result.stderr_output = None
+        result.timeout_seconds = 30
+        result.error_message = ""
         return result
 
     mock_executor = MagicMock()
@@ -52,8 +69,8 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
-            mock_which.side_effect = (
-                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/grep" if cmd == "grep" else None
             )
         return RegexSearchService(tmp_path)
 
@@ -76,10 +93,10 @@ class TestRegexSearchDirectAttributeAccess:
         service = _build_service(tmp_path, engine)
         mock_executor = _mock_executor_with_result_missing_output_capped()
 
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
-            return_value=mock_executor,
-        ):
+        # The executor lives in LocalRipgrepBackend for ripgrep and still at
+        # regex_search module scope for grep; executor_target() picks the one
+        # this engine actually drives.
+        with patch(executor_target(engine), return_value=mock_executor):
             search_method = getattr(service, search_attr)
             with pytest.raises(AttributeError, match="output_capped"):
                 await search_method(

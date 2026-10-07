@@ -40,6 +40,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from .conftest import executor_target
+
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 _TEST_MAX_RESULTS = 100
@@ -95,8 +97,8 @@ def _build_service(tmp_path, engine: str) -> RegexSearchService:
         if engine == "ripgrep":
             mock_which.return_value = "/usr/bin/rg"
         else:
-            mock_which.side_effect = (
-                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/grep" if cmd == "grep" else None
             )
         return RegexSearchService(tmp_path)
 
@@ -126,10 +128,10 @@ class TestExecutorShutdownOffload:
         shutdown_captured: Dict[str, int] = {}
         mock_executor = _mock_executor_copying_from(str(source_path), shutdown_captured)
 
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
-            return_value=mock_executor,
-        ):
+        # The executor lives in LocalRipgrepBackend for ripgrep and still at
+        # regex_search module scope for grep; executor_target() picks the one
+        # this engine actually drives.
+        with patch(executor_target(engine), return_value=mock_executor):
             search_method = getattr(service, search_attr)
             await search_method(
                 pattern="func",

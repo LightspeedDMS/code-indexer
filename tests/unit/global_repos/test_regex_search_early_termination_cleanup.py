@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from .conftest import FakeRipgrepBackend
+
 from code_indexer.global_repos.regex_search import RegexSearchService
 
 _TEST_MAX_RESULTS = 100
@@ -60,29 +62,27 @@ class TestEarlyTerminationCleanup:
             mock_which.return_value = "/usr/bin/rg"
             service = RegexSearchService(tmp_path)
 
-        captured_path: dict = {}
-        # Content is irrelevant to this test (it only proves cleanup +
-        # read_capped propagation, not parse correctness) -- empty avoids
-        # needing a well-formed ripgrep --json event.
-        mock_executor = _mock_output_capped_executor("", captured_path)
+        # Seam: the backend reports output_capped, so no executor mock is needed
+        # and nothing global is patched. The temp path the service created is
+        # read back off the backend's recorded call. Content is irrelevant here
+        # -- this proves cleanup + read_capped propagation, not parsing.
+        backend = FakeRipgrepBackend(output_capped=True)
+        service._ripgrep_backend = backend
 
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor",
-            return_value=mock_executor,
-        ):
-            await service._search_ripgrep(
-                pattern="func",
-                search_path=tmp_path,
-                include_patterns=None,
-                exclude_patterns=None,
-                case_sensitive=True,
-                context_lines=0,
-                max_results=_TEST_MAX_RESULTS,
-                timeout_seconds=_TEST_TIMEOUT_SECONDS,
-            )
+        await service._search_ripgrep(
+            pattern="func",
+            search_path=tmp_path,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=_TEST_MAX_RESULTS,
+            timeout_seconds=_TEST_TIMEOUT_SECONDS,
+        )
 
-        assert "path" in captured_path, "executor was never invoked"
-        assert not os.path.exists(captured_path["path"]), (
+        assert backend.calls, "the ripgrep backend was never invoked"
+        temp_path = backend.calls[0]["output_file_path"]
+        assert not os.path.exists(temp_path), (
             "temp file leaked on the early-termination (output_capped) path"
         )
         assert service._last_search_read_capped is True
@@ -92,8 +92,8 @@ class TestEarlyTerminationCleanup:
         """_search_grep must remove its temp file even when the executor
         reports output_capped=True (the subprocess was killed mid-write)."""
         with patch("code_indexer.global_repos.regex_search.shutil.which") as mock_which:
-            mock_which.side_effect = (
-                lambda cmd: "/usr/bin/grep" if cmd == "grep" else None
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/grep" if cmd == "grep" else None
             )
             service = RegexSearchService(tmp_path)
 
