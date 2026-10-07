@@ -181,6 +181,39 @@ def _require_tool_access_applied(applied: bool) -> None:
         )
 
 
+TOOL_GRANTS_NOT_ENFORCED_NOTE = (
+    "Per-group tool grants are not enforced in this version: grants are "
+    "stored, but MCP authorization uses role permissions only."
+)
+
+
+def _tool_grant_enforcement(group_manager: GroupAccessManager) -> Dict[str, Any]:
+    """Bug #2076: report whether stored tool grants are actually enforced.
+
+    Reads the SAME readiness gate MCP authorization uses
+    (ToolAccessMemo.is_allowed), so a response can never claim enforcement
+    the MCP path does not apply. Read BEFORE any write: a failing gate read
+    refuses the request instead of applying an unreported change.
+    """
+    if group_manager.is_tool_access_enforcement_ready():
+        return {"enforced": True}
+    return {"enforced": False, "enforcement_note": TOOL_GRANTS_NOT_ENFORCED_NOTE}
+
+
+def _warn_if_not_enforced(
+    enforcement: Dict[str, Any], action: str, tool_name: str, username: str
+) -> None:
+    if not enforcement["enforced"]:
+        logger.warning(
+            "Tool grant change stored but not enforced (Bug #2076): "
+            "action=%s tool=%s by=%s. %s",
+            action,
+            tool_name,
+            username,
+            TOOL_GRANTS_NOT_ENFORCED_NOTE,
+        )
+
+
 def _reject_always_available_tool(tool_name: str) -> None:
     if tool_name in _ALWAYS_AVAILABLE_TOOLS:
         raise HTTPException(
@@ -343,7 +376,7 @@ def get_tool_access(
                 ],
             }
         )
-    return {"tools": tools}
+    return {"tools": tools, **_tool_grant_enforcement(group_manager)}
 
 
 @router.post(
@@ -362,11 +395,17 @@ def bulk_disable_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Tool '{tool_name}' not found",
         )
+    enforcement = _tool_grant_enforcement(group_manager)
     # The manager records one audit row per affected group.
     affected_group_ids = group_manager.set_tool_access_all_groups(
         tool_name, False, current_user.username
     )
-    return {"tool_name": tool_name, "affected_group_ids": affected_group_ids}
+    _warn_if_not_enforced(enforcement, "bulk-disable", tool_name, current_user.username)
+    return {
+        "tool_name": tool_name,
+        "affected_group_ids": affected_group_ids,
+        **enforcement,
+    }
 
 
 @router.post(
@@ -392,11 +431,18 @@ def grant_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
+    enforcement = _tool_grant_enforcement(group_manager)
     # The manager records the change's audit row.
     _require_tool_access_applied(
         group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
     )
-    return {"tool_name": tool_name, "group_id": group_id, "allowed": True}
+    _warn_if_not_enforced(enforcement, "grant", tool_name, current_user.username)
+    return {
+        "tool_name": tool_name,
+        "group_id": group_id,
+        "allowed": True,
+        **enforcement,
+    }
 
 
 @router.delete(
@@ -422,11 +468,18 @@ def revoke_tool_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Group with ID {group_id} not found",
         )
+    enforcement = _tool_grant_enforcement(group_manager)
     # The manager records the change's audit row.
     _require_tool_access_applied(
         group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
     )
-    return {"tool_name": tool_name, "group_id": group_id, "allowed": False}
+    _warn_if_not_enforced(enforcement, "revoke", tool_name, current_user.username)
+    return {
+        "tool_name": tool_name,
+        "group_id": group_id,
+        "allowed": False,
+        **enforcement,
+    }
 
 
 @router.get("", response_model=List[GroupResponse])

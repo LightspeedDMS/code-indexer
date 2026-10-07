@@ -1338,6 +1338,11 @@ class GroupAccessManager:
         LIVE read every call, never decided once at construction, so a
         node started before seeding completed observes a later flip to
         True on its very next call with no restart.
+
+        Only an ABSENT marker table reads as not-ready (Bug #2076); any
+        other read failure propagates, so a caller never reports "not
+        enforced" from a read that did not happen. The PostgreSQL backend
+        matches this (it maps only UndefinedTable to False).
         """
         if self._backend is not None:
             return self._backend.is_tool_access_enforcement_ready()  # type: ignore[no-any-return]
@@ -1349,8 +1354,10 @@ class GroupAccessManager:
                 cursor.execute(
                     "SELECT complete FROM tool_access_migration_state WHERE id = 1"
                 )
-            except sqlite3.OperationalError:
-                return False
+            except sqlite3.OperationalError as exc:
+                if str(exc).startswith("no such table"):
+                    return False
+                raise
             row = cursor.fetchone()
             return bool(row[0]) if row is not None else False
         finally:
