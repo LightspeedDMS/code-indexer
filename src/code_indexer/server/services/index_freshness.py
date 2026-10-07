@@ -99,12 +99,24 @@ def record_build_commit(index_dir: Path, repo_path: Path) -> None:
 
     Best-effort: failing here must never fail the build that just succeeded. Not
     recording costs one extra rebuild later, never a wrong answer.
+
+    Does nothing when the index directory does not exist, so a build that produced
+    no index cannot leave a marker claiming otherwise.
     """
     commit = current_commit(repo_path)
     if not commit:
         return
+    if not index_dir.is_dir():
+        # Record BESIDE an index, never in place of one. Creating the directory
+        # here would leave a phantom index dir holding only a marker when the build
+        # produced nothing -- a repo that looks indexed to anything checking for the
+        # directory, and a marker claiming a build that never happened.
+        logger.debug(
+            "index_freshness: no index at %s; not recording a build commit",
+            index_dir,
+        )
+        return
     try:
-        index_dir.mkdir(parents=True, exist_ok=True)
         (index_dir / BUILD_COMMIT_MARKER).write_text(commit)
     except OSError as exc:
         logger.debug(

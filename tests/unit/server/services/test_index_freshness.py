@@ -86,6 +86,7 @@ def test_falls_back_for_an_unrecognised_layout(
 def test_matching_commit_is_current(tmp_path: Path) -> None:
     repo = _clone(tmp_path)
     idx = repo / ".code-indexer" / "idx"
+    idx.mkdir(parents=True)
     record_build_commit(idx, repo)
     assert recorded_build_commit(idx) == _SHA
     assert build_commit_is_current(repo, idx) is True
@@ -94,6 +95,7 @@ def test_matching_commit_is_current(tmp_path: Path) -> None:
 def test_moved_clone_is_not_current(tmp_path: Path) -> None:
     repo = _clone(tmp_path)
     idx = repo / ".code-indexer" / "idx"
+    idx.mkdir(parents=True)
     record_build_commit(idx, repo)
     (repo / ".git" / "refs" / "heads" / "master").write_text(_OTHER + "\n")
     assert build_commit_is_current(repo, idx) is False
@@ -134,3 +136,14 @@ def test_recording_is_best_effort(tmp_path: Path) -> None:
     blocked.write_text("a file, not a directory")
     record_build_commit(blocked, repo)  # must not raise
     assert recorded_build_commit(blocked) is None
+
+
+def test_recording_never_creates_a_phantom_index_dir(tmp_path: Path) -> None:
+    """A build that produced no index must not leave a directory holding only a
+    marker -- that looks indexed to anything checking for the directory, and claims
+    a build that never happened."""
+    repo = _clone(tmp_path)
+    idx = repo / ".code-indexer" / "tantivy_index"
+    record_build_commit(idx, repo)
+    assert not idx.exists()
+    assert recorded_build_commit(idx) is None
