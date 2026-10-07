@@ -1,6 +1,9 @@
 # Documentation Overhaul Plan
 
-Status: VALIDATED by Codex (5 runs, 2026-10-06) -- dispositions below are the validated ones; open decisions in section 10.
+Status: COMPLETE on `feature/docs-overhaul` (2026-10-06). Every row below is VERIFIED: reworked to its disposition,
+fact-checked claim by claim against the code by an independent reviewer, and committed. Dispositions were validated
+by Codex (5 runs) before execution. Open decisions in section 10. Defects found during the rewrite were filed
+(public issues and security findings; ids in the gitignored companion file, section D).
 Baseline: v12.83.0, 2026-10-06.
 Validation reports (gitignored): `reports/reviews/doc-overhaul-validation-{A,B,C,D1,D2}-2026-10-06.md`.
 
@@ -57,94 +60,94 @@ Status values: VALIDATED -> IN-PROGRESS -> DONE -> VERIFIED.
 
 | Doc | Proposed | Codex | Disposition | Target | Evidence / deps | Depth | Status |
 |-----|----------|-------|-------------|--------|-----------------|-------|--------|
-| README.md | UPDATE+REDUCE | AGREE | REDUCE | README.md (pitch, quickstart, link to docs map) | many fixture strings (noise) | FULL | VALIDATED |
-| CONTRIBUTING.md | UPDATE | AGREE | UPDATE | CONTRIBUTING.md; absorbs dev half of dependencies.md | 3 stale claims; lifecycle_unified.md prompt cites it | SHALLOW | VALIDATED |
-| SECURITY.md | AS-IS | CHANGE->UPDATE (rejected) | UPDATE (links only) | SECURITY.md | route already = GitHub private vulnerability reporting (enabled, verified via API); Codex conflated it with the internal tracking repo. Only repoint its doc links after moves (D-1 resolved) | FULL | VALIDATED |
-| CODE_OF_CONDUCT.md | AS-IS | AGREE | UPDATE | root | personal contact removed, reports go to GitHub Discussions / GitHub report-abuse (D-2 resolved; DONE 2026-10-06, uncommitted) | FULL | DONE |
-| CHANGELOG.md | AS-IS | - | AS-IS | root | historical record | - | VALIDATED |
-| CLAUDE.md | out of scope | - | AS-IS (repoint `-> Detail:` links only) | root | 18+ doc pointers | - | VALIDATED |
+| README.md | UPDATE+REDUCE | AGREE | REDUCE | README.md (pitch, quickstart, link to docs map) | many fixture strings (noise) | FULL | VERIFIED |
+| CONTRIBUTING.md | UPDATE | AGREE | UPDATE | CONTRIBUTING.md; absorbs dev half of dependencies.md | 3 stale claims; lifecycle_unified.md prompt cites it | SHALLOW | VERIFIED |
+| SECURITY.md | AS-IS | CHANGE->UPDATE (rejected) | UPDATE (links only) | SECURITY.md | route already = GitHub private vulnerability reporting (enabled, verified via API); Codex conflated it with the internal tracking repo. Only repoint its doc links after moves (D-1 resolved) | FULL | VERIFIED |
+| CODE_OF_CONDUCT.md | AS-IS | AGREE | UPDATE | root | personal contact removed, reports go to GitHub Discussions / GitHub report-abuse (D-2 resolved) | FULL | VERIFIED |
+| CHANGELOG.md | AS-IS | - | AS-IS | root | historical record | - | VERIFIED |
+| CLAUDE.md | out of scope | - | AS-IS (repoint `-> Detail:` links only) | root | 18+ doc pointers | - | VERIFIED |
 
 ### 3.2 Getting started and guides (run A)
 
 | Doc | Proposed | Codex | Disposition | Target | Evidence / deps | Depth | Status |
 |-----|----------|-------|-------------|--------|-----------------|-------|--------|
-| installation.md | UPDATE+REDUCE | AGREE | REDUCE | getting-started/installation.md | deprecated global-registry section; 2 stale claims | SHALLOW | VALIDATED |
-| environment-setup.md | MERGE | AGREE | MERGE | -> getting-started/configuration.md | orphan | FULL | VALIDATED |
-| dependencies.md | MERGE | AGREE | MERGE | users -> installation; devs -> CONTRIBUTING | orphan | FULL | VALIDATED |
-| configuration.md | REORG | AGREE | REORG | CLI -> getting-started/configuration.md; server -> reference/server-settings.md (GEN) | 2 stale claims | SHALLOW | VALIDATED |
-| operating-modes.md | UPDATE+REDUCE | AGREE | REDUCE | getting-started/operating-modes.md | test_docs_operating_modes_745.py pins path+content | SHALLOW | VALIDATED |
-| ai-integration.md | UPDATE | CHANGE->REORG | REORG | getting-started/teach-ai.md + getting-started/mcp-registration.md | local skill install vs remote MCP are different contracts | SHALLOW | VALIDATED |
-| mcp-registration-guide.md | MERGE | AGREE (as sub-page) | MERGE | -> getting-started/mcp-registration.md | orphan | SHALLOW | VALIDATED |
-| technical-details.md | REORG then DROP | CHANGE->MERGE | MERGE | CLI ref -> reference/cli.md (GEN); rest -> configuration / architecture | - | SHALLOW | VALIDATED |
-| src/code_indexer/query/QUERY_PARAMETERS.md | MERGE | AGREE | MERGE | -> guides/query.md + reference/cli.md | no runtime loader | FULL | VALIDATED |
-| query-guide.md | UPDATE | AGREE | UPDATE | guides/query.md | example combines --regex with --semantic (CLI rejects); CLAUDE.md, score_threshold_research.py cite it | SHALLOW | VALIDATED |
-| temporal-search.md | UPDATE | AGREE | UPDATE | guides/temporal-search.md | stale shard layout | SHALLOW | VALIDATED |
-| scip/README.md | UPDATE | AGREE | UPDATE | guides/scip.md | recommends callchain depth 5-20; cap is 3 (`scip_client.py:19`, MAX_DEPTH_CAP) | SHALLOW | VALIDATED |
-| meta-repo-discovery.md | UPDATE | AGREE | UPDATE | guides/meta-repo-discovery.md | `cidx global init-meta` x6 -- command no longer exists | SHALLOW | VALIDATED |
+| installation.md | UPDATE+REDUCE | AGREE | REDUCE | getting-started/installation.md | deprecated global-registry section; 2 stale claims | SHALLOW | VERIFIED |
+| environment-setup.md | MERGE | AGREE | MERGE | -> getting-started/configuration.md | orphan | FULL | VERIFIED |
+| dependencies.md | MERGE | AGREE | MERGE | users -> installation; devs -> CONTRIBUTING | orphan | FULL | VERIFIED |
+| configuration.md | REORG | AGREE | REORG | CLI -> getting-started/configuration.md; server -> reference/server-settings.md (GEN) | 2 stale claims | SHALLOW | VERIFIED |
+| operating-modes.md | UPDATE+REDUCE | AGREE | REDUCE | getting-started/operating-modes.md | test_docs_operating_modes_745.py pins path+content | SHALLOW | VERIFIED |
+| ai-integration.md | UPDATE | CHANGE->REORG | REORG | getting-started/teach-ai.md + getting-started/mcp-registration.md | local skill install vs remote MCP are different contracts | SHALLOW | VERIFIED |
+| mcp-registration-guide.md | MERGE | AGREE (as sub-page) | MERGE | -> getting-started/mcp-registration.md | orphan | SHALLOW | VERIFIED |
+| technical-details.md | REORG then DROP | CHANGE->MERGE | MERGE | CLI ref -> reference/cli.md (GEN); rest -> configuration / architecture | - | SHALLOW | VERIFIED |
+| src/code_indexer/query/QUERY_PARAMETERS.md | MERGE | AGREE | MERGE | -> guides/query.md + reference/cli.md | no runtime loader | FULL | VERIFIED |
+| query-guide.md | UPDATE | AGREE | UPDATE | guides/query.md | example combines --regex with --semantic (CLI rejects); CLAUDE.md, score_threshold_research.py cite it | SHALLOW | VERIFIED |
+| temporal-search.md | UPDATE | AGREE | UPDATE | guides/temporal-search.md | stale shard layout | SHALLOW | VERIFIED |
+| scip/README.md | UPDATE | AGREE | UPDATE | guides/scip.md | recommends callchain depth 5-20; cap is 3 (`scip_client.py:19`, MAX_DEPTH_CAP) | SHALLOW | VERIFIED |
+| meta-repo-discovery.md | UPDATE | AGREE | UPDATE | guides/meta-repo-discovery.md | `cidx global init-meta` x6 -- command no longer exists | SHALLOW | VERIFIED |
 
 ### 3.3 AI instruction content (run A) -- stays at source path
 
 | Doc | Proposed | Codex | Disposition | Evidence | Depth | Status |
 |-----|----------|-------|-------------|----------|-------|--------|
-| prompts/ai_instructions/cidx_instructions.md | UPDATE | CHANGE->DROP | DROP | not loaded by teach-ai (no src reference to the file) | FULL | VALIDATED |
-| prompts/ai_instructions/awareness/awareness.md | UPDATE | AGREE | UPDATE | loaded by teach_ai_templates.py | FULL | VALIDATED |
-| prompts/ai_instructions/skills/cidx/SKILL.md | UPDATE | AGREE | UPDATE | installed skill | SHALLOW | VALIDATED |
-| .../reference/semantic-search.md | UPDATE | AGREE | UPDATE | | SHALLOW | VALIDATED |
-| .../reference/fts-search.md | UPDATE | AGREE | UPDATE | 1 stale claim | SHALLOW | VALIDATED |
-| .../reference/temporal-search.md | UPDATE | AGREE | UPDATE | 1 stale claim | SHALLOW | VALIDATED |
-| .../reference/scip-intelligence.md | UPDATE | AGREE | UPDATE | same invalid callchain depths as scip guide | SHALLOW | VALIDATED |
+| prompts/ai_instructions/cidx_instructions.md | UPDATE | CHANGE->DROP | DROP | not loaded by teach-ai (no src reference to the file) | FULL | VERIFIED |
+| prompts/ai_instructions/awareness/awareness.md | UPDATE | AGREE | UPDATE | loaded by teach_ai_templates.py | FULL | VERIFIED |
+| prompts/ai_instructions/skills/cidx/SKILL.md | UPDATE | AGREE | UPDATE | installed skill | SHALLOW | VERIFIED |
+| .../reference/semantic-search.md | UPDATE | AGREE | UPDATE | | SHALLOW | VERIFIED |
+| .../reference/fts-search.md | UPDATE | AGREE | UPDATE | 1 stale claim | SHALLOW | VERIFIED |
+| .../reference/temporal-search.md | UPDATE | AGREE | UPDATE | 1 stale claim | SHALLOW | VERIFIED |
+| .../reference/scip-intelligence.md | UPDATE | AGREE | UPDATE | same invalid callchain depths as scip guide | SHALLOW | VERIFIED |
 
 ### 3.4 Architecture (run B)
 
 | Doc | Proposed | Codex | Disposition | Target | Evidence / deps | Depth | Status |
 |-----|----------|-------|-------------|--------|-----------------|-------|--------|
-| architecture.md | REORG | AGREE | REORG | architecture/overview.md | outdated storage layout; CLAUDE.md x2, xray tool_docs x2 | SHALLOW | VALIDATED |
-| architecture-invariants.md | UPDATE | CHANGE->REORG | REORG | architecture/invariants.md | CLAUDE.md x18, Python and SQL comments cite path | SHALLOW | VALIDATED |
-| server-memory-invariants.md | MERGE | AGREE | MERGE | -> architecture/invariants.md | CLAUDE.md x1 | FULL | VALIDATED |
-| repository-topology.md | UPDATE | CHANGE->REORG | REORG | architecture/repository-lifecycle.md | misses immutable snapshots, chunks.db | FULL | VALIDATED |
-| algorithms.md | DROP | AGREE | DROP | live bits -> architecture/indexing.md | self-declared deprecated | SHALLOW | VALIDATED |
-| INDEXING_ALGORITHM.md | MERGE+rewrite | AGREE | MERGE | -> architecture/indexing.md | outdated | SHALLOW | VALIDATED |
-| depmap-parser-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | README link | FULL | VALIDATED |
-| depmap-phase37-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | | FULL | VALIDATED |
-| depmap-resumable-delta-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | | FULL | VALIDATED |
-| cidx-meta-backup.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | still describes rebase/conflict resolution; code uses --force-with-lease; CLAUDE.md x1 | FULL | VALIDATED |
-| query-embedding-cache.md | UPDATE | CHANGE->REORG | REORG | architecture/query-path.md + operator section in reference/server-settings.md | serves maintainers and operators | SHALLOW | VALIDATED |
-| query-embedding-cache-empirical-study.md | ARCHIVE | AGREE after scrub | ARCHIVE | archive/ | point-in-time study | SHALLOW | VALIDATED |
-| research/hnsw-temporal-orphans-1330.md | ARCHIVE | AGREE after scrub | ARCHIVE | archive/ | tests/utils/hnsw_orphan_corpus.py + test cite it | SHALLOW | VALIDATED |
-| hnswlib-custom-build.md | UPDATE | CHANGE->REORG | REORG | server/hnswlib-custom-build.md | path in runtime error strings (3 src files) + 2 tests; disclosure review | SHALLOW | VALIDATED |
-| xray-architecture.md | UPDATE | CHANGE->REORG | REORG | architecture/xray/architecture.md | "Java only" -- Kotlin also supported; ~15 Rust refs | SHALLOW | VALIDATED |
-| xray-graph-binder-internals.md | UPDATE | AGREE | UPDATE | architecture/xray/graph-binder-internals.md | analyze_graph tool doc cites it | SHALLOW | VALIDATED |
-| xray-sandbox.md | UPDATE | CHANGE->REDUCE | REDUCE | architecture/xray/sandbox.md | mostly historical scope; CLAUDE.md x1 | FULL | VALIDATED |
-| xray-cookbook.md | UPDATE | AGREE | UPDATE | guides/xray-cookbook.md | COMPILED INTO the Rust binary: `rust/xray-core/src/dynlib.rs:1906` include_str!; move requires Rust edit + rust-automation | SHALLOW | VALIDATED |
-| docs/xray-templates/*.rs (8 files) | (not inventoried) | - | AS-IS (stay at path) | docs/xray-templates/ | include_str! in dynlib.rs:1872-1888 | - | VALIDATED |
-| adr/ADR-001..003 | AS-IS | AGREE | AS-IS + status index | adr/ | Rust + src refs to ADR-002/003 | SHALLOW/FULL | VALIDATED |
-| error-codes.md | UPDATE or GEN | CHANGE->GEN | GEN | reference/error-codes.md | registry exists but logging does not look codes up through it; stale coverage figure | FULL | VALIDATED |
+| architecture.md | REORG | AGREE | REORG | architecture/overview.md | outdated storage layout; CLAUDE.md x2, xray tool_docs x2 | SHALLOW | VERIFIED |
+| architecture-invariants.md | UPDATE | CHANGE->REORG | REORG | architecture/invariants.md | CLAUDE.md x18, Python and SQL comments cite path | SHALLOW | VERIFIED |
+| server-memory-invariants.md | MERGE | AGREE | MERGE | -> architecture/invariants.md | CLAUDE.md x1 | FULL | VERIFIED |
+| repository-topology.md | UPDATE | CHANGE->REORG | REORG | architecture/repository-lifecycle.md | misses immutable snapshots, chunks.db | FULL | VERIFIED |
+| algorithms.md | DROP | AGREE | DROP | live bits -> architecture/indexing.md | self-declared deprecated | SHALLOW | VERIFIED |
+| INDEXING_ALGORITHM.md | MERGE+rewrite | AGREE | MERGE | -> architecture/indexing.md | outdated | SHALLOW | VERIFIED |
+| depmap-parser-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | README link | FULL | VERIFIED |
+| depmap-phase37-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | | FULL | VERIFIED |
+| depmap-resumable-delta-architecture.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | | FULL | VERIFIED |
+| cidx-meta-backup.md | MERGE | AGREE | MERGE | -> architecture/dependency-map.md | still describes rebase/conflict resolution; code uses --force-with-lease; CLAUDE.md x1 | FULL | VERIFIED |
+| query-embedding-cache.md | UPDATE | CHANGE->REORG | REORG | architecture/query-path.md + operator section in reference/server-settings.md | serves maintainers and operators | SHALLOW | VERIFIED |
+| query-embedding-cache-empirical-study.md | ARCHIVE | AGREE after scrub | ARCHIVE | archive/ | point-in-time study | SHALLOW | VERIFIED |
+| research/hnsw-temporal-orphans-1330.md | ARCHIVE | AGREE after scrub | ARCHIVE | archive/ | tests/utils/hnsw_orphan_corpus.py + test cite it | SHALLOW | VERIFIED |
+| hnswlib-custom-build.md | UPDATE | CHANGE->REORG | REORG | server/hnswlib-custom-build.md | path in runtime error strings (3 src files) + 2 tests; disclosure review | SHALLOW | VERIFIED |
+| xray-architecture.md | UPDATE | CHANGE->REORG | REORG | architecture/xray/architecture.md | "Java only" -- Kotlin also supported; ~15 Rust refs | SHALLOW | VERIFIED |
+| xray-graph-binder-internals.md | UPDATE | AGREE | UPDATE | architecture/xray/graph-binder-internals.md | analyze_graph tool doc cites it | SHALLOW | VERIFIED |
+| xray-sandbox.md | UPDATE | CHANGE->REDUCE | REDUCE | architecture/xray/sandbox.md | mostly historical scope; CLAUDE.md x1 | FULL | VERIFIED |
+| xray-cookbook.md | UPDATE | AGREE | UPDATE | guides/xray-cookbook.md | COMPILED INTO the Rust binary: `rust/xray-core/src/dynlib.rs:1906` include_str!; move requires Rust edit + rust-automation | SHALLOW | VERIFIED |
+| docs/xray-templates/*.rs (8 files) | (not inventoried) | - | AS-IS (stay at path) | docs/xray-templates/ | include_str! in dynlib.rs:1872-1888 | - | VERIFIED |
+| adr/ADR-001..003 | AS-IS | AGREE | AS-IS + status index | adr/ | Rust + src refs to ADR-002/003 | SHALLOW/FULL | VERIFIED |
+| error-codes.md | UPDATE or GEN | CHANGE->GEN | GEN | reference/error-codes.md | registry exists but logging does not look codes up through it; stale coverage figure | FULL | VERIFIED |
 
 ### 3.5 Server operator (run C)
 
 | Doc | Proposed | Codex | Disposition | Target | Evidence / deps | Depth | Status |
 |-----|----------|-------|-------------|--------|-----------------|-------|--------|
-| server-deployment.md | UPDATE+REDUCE | AGREE | REDUCE | server/deployment.md | 3+ stale claims; CLAUDE.md x2, progress_subprocess_runner.py | SHALLOW | VALIDATED |
-| auto-update.md | UPDATE | AGREE | UPDATE | server/auto-update.md | self-heal model missing; CLAUDE.md x1 | FULL | VALIDATED |
-| cluster-architecture.md | UPDATE | CHANGE->REORG | REORG | architecture/cluster.md (+ operator bits -> server/cluster-setup.md) | 30-min live-job timeout no longer exists; CLAUDE.md x2 | SHALLOW | VALIDATED |
-| cluster-setup.md | UPDATE | CHANGE->REORG | REORG | server/cluster-setup.md | golden-repo mount layout conflicts with cow-storage-setup.md (decision D-3); pg_parity e2e test cites it | SHALLOW | VALIDATED |
-| cow-storage-setup.md | UPDATE | AGREE | UPDATE | server/cow-storage-setup.md | mount conflict (D-3); install-cidx-server.sh cites it | SHALLOW | VALIDATED |
-| oidc-setup-and-configuration.md | UPDATE | AGREE | UPDATE | server/auth/oidc.md | tells operators to edit config.json for DB-backed runtime settings | SHALLOW | VALIDATED |
-| totp-elevation.md | UPDATE | CHANGE->REDUCE | REDUCE | -> server/auth/login-and-elevation.md (NEW) | CLAUDE.md x1 | FULL | VALIDATED |
-| security/admin-mutation-routes.md | UPDATE or DROP | CHANGE->MERGE | MERGE | policy -> server/admin-guide.md; route list stays in code + its gate test | stale | FULL | VALIDATED |
-| fault-injection-operator-guide.md | UPDATE | AGREE | UPDATE | server/fault-injection.md | path in fault_injection/router.py response; CLAUDE.md x2 | SHALLOW | VALIDATED |
-| memory-retrieval-operator-guide.md | UPDATE | AGREE | UPDATE | server/memory-retrieval.md | wrong enabled default; CLAUDE.md x2 | FULL | VALIDATED |
-| langfuse-trace-sync.md | UPDATE | AGREE | UPDATE | server/langfuse-trace-sync.md | live feature; obsolete setting names + trace filenames | FULL | VALIDATED |
-| migration-playbook.md | UPDATE | CHANGE->REDUCE | REDUCE | server/data-migration-playbook.md | remove staging anecdotes + false config-write warning | FULL | VALIDATED |
-| migration-to-v10.md | UPDATE | CHANGE->ARCHIVE | ARCHIVE | archive/ (one current server/upgrading.md entry point instead) | | SHALLOW | VALIDATED |
-| migration-to-v8.md | ARCHIVE | AGREE | ARCHIVE | archive/ | config.py error messages x5 must be repointed | SHALLOW | VALIDATED |
-| siem-delivery.md | REORG | AGREE | REORG | server/siem/operations.md; mechanics -> architecture | CLAUDE.md x1 | SHALLOW | VALIDATED |
-| siem-secops-guide.md | REORG | CHANGE->REDUCE | REDUCE | server/siem/secops-guide.md | - | SHALLOW | VALIDATED |
-| siem-secops-curl-runbook.md | UPDATE | AGREE | UPDATE | server/siem/curl-runbook.md | 2 stale claims | SHALLOW | VALIDATED |
-| siem-secops-event-catalog.md | UPDATE or GEN | CHANGE->GEN | GEN | server/siem/event-catalog.md | - | SHALLOW | VALIDATED |
-| docs/CHANGELOG.md | DROP | AGREE | DROP | - | stub; create_test_repo.py fixture string | FULL | VALIDATED |
-| .github/workflows-disabled/ (README + publish.yml) | DROP? | CHANGE->DROP | DROP | - | not active | FULL | VALIDATED |
-| dev/tools/README.md | AS-IS | CHANGE->UPDATE | UPDATE | dev/tools/README.md | 1 stale claim | FULL | VALIDATED |
+| server-deployment.md | UPDATE+REDUCE | AGREE | REDUCE | server/deployment.md | 3+ stale claims; CLAUDE.md x2, progress_subprocess_runner.py | SHALLOW | VERIFIED |
+| auto-update.md | UPDATE | AGREE | UPDATE | server/auto-update.md | self-heal model missing; CLAUDE.md x1 | FULL | VERIFIED |
+| cluster-architecture.md | UPDATE | CHANGE->REORG | REORG | architecture/cluster.md (+ operator bits -> server/cluster-setup.md) | 30-min live-job timeout no longer exists; CLAUDE.md x2 | SHALLOW | VERIFIED |
+| cluster-setup.md | UPDATE | CHANGE->REORG | REORG | server/cluster-setup.md | golden-repo mount layout conflicts with cow-storage-setup.md (decision D-3); pg_parity e2e test cites it | SHALLOW | VERIFIED |
+| cow-storage-setup.md | UPDATE | AGREE | UPDATE | server/cow-storage-setup.md | mount conflict (D-3); install-cidx-server.sh cites it | SHALLOW | VERIFIED |
+| oidc-setup-and-configuration.md | UPDATE | AGREE | UPDATE | server/auth/oidc.md | tells operators to edit config.json for DB-backed runtime settings | SHALLOW | VERIFIED |
+| totp-elevation.md | UPDATE | CHANGE->REDUCE | REDUCE | -> server/auth/login-and-elevation.md (NEW) | CLAUDE.md x1 | FULL | VERIFIED |
+| security/admin-mutation-routes.md | UPDATE or DROP | CHANGE->MERGE | MERGE | policy -> server/admin-guide.md; route list stays in code + its gate test | stale | FULL | VERIFIED |
+| fault-injection-operator-guide.md | UPDATE | AGREE | UPDATE | server/fault-injection.md | path in fault_injection/router.py response; CLAUDE.md x2 | SHALLOW | VERIFIED |
+| memory-retrieval-operator-guide.md | UPDATE | AGREE | UPDATE | server/memory-retrieval.md | wrong enabled default; CLAUDE.md x2 | FULL | VERIFIED |
+| langfuse-trace-sync.md | UPDATE | AGREE | UPDATE | server/langfuse-trace-sync.md | live feature; obsolete setting names + trace filenames | FULL | VERIFIED |
+| migration-playbook.md | UPDATE | CHANGE->REDUCE | REDUCE | server/data-migration-playbook.md | remove staging anecdotes + false config-write warning | FULL | VERIFIED |
+| migration-to-v10.md | UPDATE | CHANGE->ARCHIVE | ARCHIVE | archive/ (one current server/upgrading.md entry point instead) | | SHALLOW | VERIFIED |
+| migration-to-v8.md | ARCHIVE | AGREE | ARCHIVE | archive/ | config.py error messages x5 must be repointed | SHALLOW | VERIFIED |
+| siem-delivery.md | REORG | AGREE | REORG | server/siem/operations.md; mechanics -> architecture | CLAUDE.md x1 | SHALLOW | VERIFIED |
+| siem-secops-guide.md | REORG | CHANGE->REDUCE | REDUCE | server/siem/secops-guide.md | - | SHALLOW | VERIFIED |
+| siem-secops-curl-runbook.md | UPDATE | AGREE | UPDATE | server/siem/curl-runbook.md | 2 stale claims | SHALLOW | VERIFIED |
+| siem-secops-event-catalog.md | UPDATE or GEN | CHANGE->GEN | UPDATE (hand-written; no generator, decided 2026-10-06) | server/siem/event-catalog.md | - | SHALLOW | VERIFIED |
+| docs/CHANGELOG.md | DROP | AGREE | DROP | - | stub; create_test_repo.py fixture string | FULL | VERIFIED |
+| .github/workflows-disabled/ (README + publish.yml) | DROP? | CHANGE->DROP | DROP | - | not active | FULL | VERIFIED |
+| dev/tools/README.md | AS-IS | CHANGE->UPDATE | UPDATE | dev/tools/README.md | 1 stale claim | FULL | VERIFIED |
 
 ### 3.6 Out of scope
 
@@ -161,6 +164,10 @@ skills/CLAUDE.md, runtime prompt templates under src/, tests/**/README.md, .gith
 Every one of the 148 docs has a HANDLER_REGISTRY entry (no orphans). Many rows are SHALLOW (mechanical schema check only).
 Per-tool rows live in the D1/D2 reports; they are copied into the tool-docs story when it is opened.
 
+Status: VERIFIED. 79 tool docs were corrected (prose only; frontmatter schema structure proven unchanged against HEAD
+by script) and fact-checked against their handlers; the rest matched. Schema-versus-handler mismatches that need a
+schema edit are filed as a code issue, not fixed here.
+
 ## 4. New docs
 
 | New doc | Content | Kind |
@@ -173,7 +180,7 @@ Per-tool rows live in the D1/D2 reports; they are copied into the tool-docs stor
 | guides/embedding-providers-and-reranking.md | Voyage/Cohere, provider indexes, reranking, provider health | NEW |
 | reference/cli.md | every command and flag | GEN (click) |
 | reference/mcp-tools.md | catalog from frontmatter, incl. effective role/elevation rules, not just required_permission | GEN |
-| reference/server-settings.md | every setting with bootstrap vs runtime column, default, restart requirement | GEN (config model + BOOTSTRAP_KEYS) |
+| reference/server-settings.md | every setting with bootstrap vs runtime column, default, restart requirement | NEW, hand-written (decided 2026-10-06: generators limited to CLI, MCP tools, error codes) |
 | reference/error-codes.md | from the registry | GEN |
 | reference/rest-api.md | endpoint guide pointing at OpenAPI | NEW (thin) |
 | server/admin-guide.md | short landing page for Web UI admin areas | NEW |
@@ -237,7 +244,7 @@ Tool-doc rewrites for affected tools wait until their fixes land.
 |----|----------|
 | D-1 | RESOLVED 2026-10-06: GitHub private vulnerability reporting (already in SECURITY.md, enabled on the public repo). |
 | D-2 | RESOLVED 2026-10-06: personal contact removed; conduct reports go to GitHub Discussions (enabled) or GitHub report-abuse. |
-| D-3 | NOT A DECISION: resolve the conflicting golden-repo mount layouts (cluster-setup vs cow-storage-setup) from installer/updater code in Wave 4. |
+| D-3 | RESOLVED in Wave 4 from the installer code: one CoW mount (`vers=3,nolock,soft,timeo=30,retrans=3`) with golden-repos and activated-repos symlinked into it; ONTAP joins mount `hard`. |
 | D-4 | RESOLVED 2026-10-06: banned-literal checker deleted outright; no replacement. |
 | D-5 | RESOLVED 2026-10-06: file the implementation findings now (security tracker + public issues per routing rule). |
 | D-6 | OPEN: author attribution (name in LICENSE / pyproject / `__author__`; personal email in pyproject `authors`) -- keep or neutralize? |
