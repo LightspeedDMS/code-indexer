@@ -15,6 +15,8 @@ Audience: CLI users and AI-agent integrators. Git-history search has its own gui
   - [Regex Search](#regex-search)
   - [Hybrid Search](#hybrid-search)
 - [Filters](#filters)
+  - [Language names](#language-names)
+  - [Exclusions](#exclusions)
 - [Result Control](#result-control)
 - [Reranking](#reranking)
 - [Multi-Provider Query Strategy](#multi-provider-query-strategy)
@@ -140,9 +142,61 @@ cidx query "user" --fts --path-filter "*/tests/*" --quiet
 
 - Globs support `*`, `**`, `?` and `[seq]`. A pattern starting with `*/` also matches at the repository root:
   `*/tests/*` matches `tests/test_login.py`.
-- Exclusions win over inclusions.
 - Run `cidx query --help` for the full list of friendly language names.
 - `--file-extensions` applies to semantic search only; see [Known Limitations](#known-limitations).
+
+### Language names
+
+`--language` and `--exclude-language` accept a friendly name, which expands to several extensions, or a bare
+extension, which matches only itself. Names are case-insensitive (`LanguageMapper` in
+`src/code_indexer/services/language_mapper.py`):
+
+| Value | Matches |
+|-------|---------|
+| `python` (or `PYTHON`) | `py`, `pyw`, `pyi` |
+| `py` | `py` only |
+| `cpp` | `cpp`, `cc`, `cxx`, `c++` |
+| `shell` | `sh`, `bash` |
+
+A value that is neither a known name nor a known extension stops the query with a suggestion:
+
+```text
+$ cidx query "authenticate user" --language pythom
+Error: Unknown language: 'pythom'. Did you mean: python, toml, py, or others?
+```
+
+The mapping lives in `.code-indexer/language-mappings.yaml`. `cidx init` creates it with the defaults, and a query
+creates it on first use if it is missing. Each entry maps a name to a list of extensions:
+
+```yaml
+python: [py, pyw, pyi]
+pysource: [py]          # a custom name
+```
+
+- The file replaces the built-in table instead of extending it: a name you delete from the file is no longer known.
+  Add custom names beside the existing entries.
+- The file is read once per process. A standalone `cidx query` sees an edit on its next run; a running daemon keeps
+  the table it loaded until it is restarted (`cidx stop`, then `cidx start`).
+
+### Exclusions
+
+- Exclusions win: a file matching any `--exclude-path` or `--exclude-language` is dropped even when it also matches
+  an inclusion. Excluding an extension removes only that extension: `--language python --exclude-language py`
+  still matches `.pyw` and `.pyi` files. The same language given to both (`--language python --exclude-language
+  python`) is reported as a filter conflict (`Language 'python' is both included and excluded. Exclusion will
+  override inclusion, resulting in no python files.`) and the query returns no python files.
+- The same pattern given to both `--path-filter` and `--exclude-path` is reported as a filter conflict
+  (`Path pattern '*/tests/*' is both included and excluded`) and the query returns no results.
+- A pattern starting with `*/` matches at any depth, including the repository root: `*/tests/*` matches
+  `tests/test_app.py` and `src/a/tests/b/c.py`. `**/tests/**` is equivalent. A pattern without a directory part,
+  such as `*.min.js`, matches the file name anywhere (`PathPatternMatcher` in
+  `src/code_indexer/services/path_pattern_matcher.py`).
+
+```bash
+cidx query "production code" --exclude-path "*/tests/*" --exclude-path "*_test.py" --quiet
+cidx query "application logic" --exclude-path "*/node_modules/*" --exclude-path "*/vendor/*" --quiet
+cidx query "database models" --language python --path-filter "*/src/*" --exclude-path "*/tests/*" --quiet
+```
 
 ## Result Control
 
@@ -172,7 +226,8 @@ cidx query "user" --fts --rerank-query "" --quiet       # disable reranking for 
 - `--rerank-query TEXT` sets the reranker query. `--rerank-instruction TEXT` is passed to the reranker with it and
   has no effect without a rerank query.
 - When `--rerank-query` is omitted and `rerank.auto_populate_rerank_query` is true (the default), the search query
-  itself is used as the rerank query. An empty string (`--rerank-query ""`) disables reranking.
+  itself is used as the rerank query. An empty string (`--rerank-query ""`) disables reranking, except for temporal
+  queries (`--time-range`, `--time-range-all`), where an empty value counts as not given and auto-populate applies.
 - Reranking calls Voyage or Cohere and needs `VOYAGE_API_KEY` or `CO_API_KEY`. With no key, or when every reranker
   fails, results are returned in retrieval order.
 - CLI reranker settings live in a per-user file, created with defaults on first use: `$CIDX_GLOBAL_CONFIG_PATH`
@@ -185,11 +240,13 @@ cidx query "user" --fts --rerank-query "" --quiet       # disable reranking for 
     "auto_populate_rerank_query": true,
     "cohere_reranker_model": "rerank-v3.5",
     "overfetch_multiplier": 5,
-    "preferred_vendor_order": ["voyage", "cohere"],
     "voyage_reranker_model": "rerank-2.5"
   }
 }
 ```
+
+Rerankers are tried in a fixed order, VoyageAI then Cohere; the file may also contain a `preferred_vendor_order` key,
+which does not change that order.
 
 On the server, REST `POST /api/query` and MCP `search_code` accept `rerank_query` and `rerank_instruction`; without
 `rerank_query` the server does not rerank.
@@ -233,9 +290,8 @@ embedder with `--temporal-embedder` instead (see [Temporal Search](temporal-sear
 repositories registered there. `--repo` and `--repos` are mutually exclusive.
 
 In remote mode (`cidx init --remote`), `cidx query` runs a semantic search on the server for the linked repository.
-FTS, regex, hybrid and temporal queries run in local mode only. Remote mode sends only the query text, `--limit`,
-the first `--language`, the first `--path-filter`, `--min-score` and `--accuracy`; `--exclude-language`,
-`--exclude-path`, `--file-extensions` and the rerank flags are not sent.
+FTS, regex, hybrid and temporal queries run in local mode only. Which options a remote query sends is listed in
+[Remote CLI: Querying in remote mode](remote-cli.md#querying-in-remote-mode).
 
 ## Query Parameter Inventory
 
