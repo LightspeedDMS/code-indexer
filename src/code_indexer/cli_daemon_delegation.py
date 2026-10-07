@@ -1484,11 +1484,15 @@ def rebuild_fts_via_daemon(config_manager, console) -> int:
     # Extract data BEFORE closing connection (RPyC proxies become invalid after close)
     status = str(result.get("status", "unknown"))
     error_msg = str(result.get("error", ""))
+    # Bug #2056: files missing from FTS (the rebuild still succeeded).
+    warning = str(result.get("warning", ""))
 
     conn.close()
 
     if status == "success":
         console.print("✅ FTS index rebuilt successfully!", style="green")
+        if warning:
+            console.print(f"⚠️  {warning}", style="yellow")
         return 0
     else:
         console.print(f"❌ Rebuild failed: {error_msg or 'Unknown error'}", style="red")

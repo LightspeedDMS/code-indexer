@@ -2401,6 +2401,23 @@ class RefreshScheduler:
                     regate, covered_generation = failure_recovery.begin_refresh_cycle(
                         self.golden_repo_metadata, alias_name
                     )
+                    # Bug #2056: an FTS index built before the cached-chunk
+                    # fix may be partly emptied, undetectably; it carries no
+                    # current content marker. Its next `cidx index --fts`
+                    # rebuilds it once from disk (no embedding), so a cycle
+                    # with no upstream change must index instead of skipping
+                    # (used by every "No changes detected" check below).
+                    # Checked on the mutable base clone, never .versioned/.
+                    from code_indexer.services.fts_lifecycle import (
+                        fts_content_rebuild_due,
+                    )
+
+                    fts_rebuild_due = fts_content_rebuild_due(Path(master_path))
+                    if fts_rebuild_due:
+                        logger.info(
+                            f"FTS index of {alias_name} has no current content "
+                            f"marker; this refresh rebuilds it once from disk"
+                        )
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -2606,7 +2623,9 @@ class RefreshScheduler:
                                     master_path, _branch, cancel_check=cancel_check
                                 ).sync()
 
-                                if _sync_result.skipped and not (force_reset or regate):
+                                if _sync_result.skipped and not (
+                                    force_reset or regate or fts_rebuild_due
+                                ):
                                     logger.info(
                                         "No cidx-meta backup changes detected for %s, "
                                         "skipping refresh",
@@ -2635,7 +2654,7 @@ class RefreshScheduler:
                                 force_reconcile = self._check_extension_drift(
                                     source_path, alias_name
                                 )
-                                if not (force_reconcile or regate):
+                                if not (force_reconcile or regate or fts_rebuild_due):
                                     logger.info(
                                         f"No changes detected for local repo {alias_name}, skipping refresh"
                                     )
@@ -2735,7 +2754,9 @@ class RefreshScheduler:
                             sync_result = CidxMetaBackupSync(
                                 master_path, branch, cancel_check=cancel_check
                             ).sync()
-                            if sync_result.skipped and not (force_reset or regate):
+                            if sync_result.skipped and not (
+                                force_reset or regate or fts_rebuild_due
+                            ):
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
                                     alias_name,
@@ -2940,7 +2961,9 @@ class RefreshScheduler:
                                                 else None
                                             )
                                             force_reconcile = forced_signal is not None
-                                        if not (force_reconcile or regate):
+                                        if not (
+                                            force_reconcile or regate or fts_rebuild_due
+                                        ):
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )

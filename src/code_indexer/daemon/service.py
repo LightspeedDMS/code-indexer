@@ -2245,10 +2245,9 @@ class CIDXDaemonService(Service):
         logger.info(f"exposed_rebuild_fts_index: project={project_path}")
 
         from pathlib import Path
-        import shutil
         from code_indexer.config import ConfigManager
         from code_indexer.indexing.file_finder import FileFinder
-        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+        from code_indexer.services.fts_lifecycle import rebuild_fts_index
 
         # Check if indexing progress file exists
         progress_file = Path(project_path) / ".code-indexer" / "indexing_progress.json"
@@ -2293,119 +2292,50 @@ class CIDXDaemonService(Service):
                     info=f"Found {len(discovered_files)} files",
                 )
 
-            # Initialize Tantivy manager
-            fts_index_dir = Path(project_path) / ".code-indexer" / "tantivy_index"
+            # Bug #2056: THE one rebuild (fts_lifecycle) -- under the repo
+            # indexing lock, normal indexing's chunk-level documents, the
+            # empty guard, marked content-current only when every file was
+            # indexed.
+            total = len(discovered_files)
+            done = 0
 
-            # Clear existing FTS index
-            if fts_index_dir.exists():
+            def _on_file(file_path: Path, error: Optional[str]) -> None:
+                nonlocal done
+                done += 1
+                if error is not None:
+                    logger.warning(f"Failed to index {file_path}: {error}")
                 if callback:
                     callback(
-                        0,
-                        len(discovered_files),
-                        Path(""),
-                        info="Clearing existing FTS index...",
-                    )
-                shutil.rmtree(fts_index_dir)
-
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=True)
-
-            if callback:
-                callback(
-                    0, len(discovered_files), Path(""), info="FTS index initialized"
-                )
-
-            # Index all files
-            indexed_count = 0
-            failed_count = 0
-
-            for i, file_path in enumerate(discovered_files, start=1):
-                try:
-                    # Read file content
-                    if not file_path.exists():
-                        failed_count += 1
-                        if callback:
-                            callback(
-                                i,
-                                len(discovered_files),
-                                file_path,
-                                info=f"Indexing files... ({i}/{len(discovered_files)})",
-                            )
-                        continue
-
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-
-                    # Detect language from file extension
-                    extension = file_path.suffix.lstrip(".")
-                    language = extension if extension else "unknown"
-
-                    # Create FTS document
-                    doc: Dict[str, Any] = {
-                        "path": str(file_path),
-                        "content": content,
-                        "content_raw": content,
-                        "identifiers": [],
-                        "line_start": 1,
-                        "line_end": len(content.splitlines()),
-                        "language": language,
-                    }
-
-                    # Add to FTS index
-                    tantivy_manager.add_document(doc)
-                    indexed_count += 1
-
-                except Exception as e:
-                    failed_count += 1
-                    logger.warning(f"Failed to index {file_path}: {e}")
-
-                # Send progress callback
-                if callback:
-                    callback(
-                        i,
-                        len(discovered_files),
+                        done,
+                        total,
                         file_path,
-                        info=f"Indexing files... ({i}/{len(discovered_files)})",
+                        info=f"Indexing files... ({done}/{total})",
                     )
 
-            # Commit all documents
-            if callback:
-                callback(
-                    len(discovered_files),
-                    len(discovered_files),
-                    Path(""),
-                    info="Committing FTS index...",
-                )
-            tantivy_manager.commit()
+            result = rebuild_fts_index(config, discovered_files, _on_file)
+            failed_count = len(result.failed_files)
 
             if callback:
                 callback(
-                    len(discovered_files),
-                    len(discovered_files),
+                    total,
+                    total,
                     Path(""),
-                    info=f"Complete: {indexed_count} indexed, {failed_count} failed",
+                    info=f"Complete: {result.indexed_files} indexed, {failed_count} failed",
                 )
 
-            # Total-failure guard (Bug #1218 residual): if no files were indexed
-            # but some failed, this is a complete failure — report it loudly.
-            if indexed_count == 0 and failed_count > 0:
-                error_msg = (
-                    f"FTS rebuild failed: all {failed_count} file(s) failed to index. "
-                    "Check file permissions and content encoding."
-                )
-                logger.error(error_msg)
-                return {
-                    "status": "error",
-                    "error": error_msg,
-                    "files_indexed": 0,
-                    "files_failed": failed_count,
-                }
-
-            return {
+            # Files missing from FTS follow fts_lifecycle's per-file rule
+            # (#2056): the rebuild succeeds, stays unmarked so the next
+            # `cidx index --fts` retries it, and the lifecycle logged its
+            # one WARNING. A rebuild that indexed no file raised instead
+            # (Bug #1218 residual: "error" from the except below).
+            response: Dict[str, Any] = {
                 "status": "success",
-                "files_indexed": indexed_count,
+                "files_indexed": result.indexed_files,
                 "files_failed": failed_count,
             }
+            if result.missing_message:
+                response["warning"] = result.missing_message
+            return response
 
         except Exception as e:
             logger.error(f"Failed to rebuild FTS index: {e}", exc_info=True)

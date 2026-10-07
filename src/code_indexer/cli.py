@@ -21,7 +21,6 @@ from typing import (
     List,
     Literal,
     cast,
-    TYPE_CHECKING,
 )
 
 import click
@@ -32,12 +31,6 @@ from rich.table import Table
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
 from .config import ConfigManager, Config, ConfigCorruptionError
-
-# CRITICAL: TYPE_CHECKING-only import -- Tantivy must NOT load eagerly at
-# CLI-startup import time (see the "Tantivy lazy import" perf rule).
-# TYPE_CHECKING imports are erased at runtime (mypy-only), so this is safe.
-if TYPE_CHECKING:
-    from .services.tantivy_index_manager import TantivyIndexManager
 from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
 from .disabled_commands import get_command_mode_icons
 from .utils.enhanced_messaging import (
@@ -4311,7 +4304,9 @@ def index(
                 sys.exit(1)
 
             # Lazy import FTS components
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import (
+                rebuild_fts_index as rebuild_fts_index_from_disk,
+            )
             from .indexing.file_finder import FileFinder
 
             console.print("🔍 Discovering files...")
@@ -4332,21 +4327,9 @@ def index(
             console.print("🔧 Rebuilding FTS index...")
             console.print(f"📄 Found {len(discovered_files)} files")
 
-            # Initialize Tantivy manager
-            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-
-            # Clear and recreate FTS index
-            import shutil
-
-            if fts_index_dir.exists():
-                console.print("🧹 Clearing existing FTS index...")
-                shutil.rmtree(fts_index_dir)
-
-            tantivy_manager.initialize_index(create_new=True)
-            console.print("✅ FTS index initialized")
-
-            # Re-index all completed files to FTS
+            # Bug #2056: THE one rebuild (fts_lifecycle) -- under the repo
+            # indexing lock, normal indexing's chunk-level documents, marked
+            # content-current only when every file was indexed.
             from rich.progress import (
                 Progress,
                 BarColumn,
@@ -4365,57 +4348,28 @@ def index(
                     "Rebuilding FTS index...", total=len(discovered_files)
                 )
 
-                indexed_count = 0
-                failed_count = 0
-
-                for file_path in discovered_files:
-                    try:
-                        # Read file content (file_path is already a Path object from FileFinder)
-                        if not file_path.exists():
-                            failed_count += 1
-                            progress.advance(task)
-                            continue
-
-                        with open(
-                            file_path, "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            content = f.read()
-
-                        # Detect language from file extension
-                        extension = file_path.suffix.lstrip(".")
-                        language = extension if extension else "unknown"
-
-                        # Create FTS document
-                        doc = {
-                            "path": str(file_path),
-                            "content": content,
-                            "content_raw": content,
-                            "identifiers": [],  # Empty for now
-                            "line_start": 1,
-                            "line_end": len(content.splitlines()),
-                            "language": language,
-                        }
-
-                        # Add to FTS index
-                        tantivy_manager.add_document(doc)
-                        indexed_count += 1
-
-                    except Exception as e:
-                        failed_count += 1
+                def _on_file(file_path: Path, error: Optional[str]) -> None:
+                    if error is not None:
                         console.print(
-                            f"⚠️  Failed to index {file_path}: {e}", style="yellow"
+                            f"⚠️  Failed to index {file_path}: {error}", style="yellow"
                         )
-
                     progress.advance(task)
 
-                # Commit all documents
-                tantivy_manager.commit()
+                fts_rebuild_result = rebuild_fts_index_from_disk(
+                    config, discovered_files, _on_file
+                )
+
+            # Files missing from FTS (fts_lifecycle's per-file rule): the
+            # rebuild succeeded but stays unmarked; it raised (exit 1 below)
+            # when it could index no file at all.
+            if fts_rebuild_result.missing_message:
+                console.print(
+                    f"⚠️  {fts_rebuild_result.missing_message}", style="yellow"
+                )
 
             # Show completion summary
             console.print("\n✅ FTS index rebuilt successfully")
-            console.print(f"📄 Files indexed: {indexed_count}")
-            if failed_count > 0:
-                console.print(f"⚠️  Failed files: {failed_count}", style="yellow")
+            console.print(f"📄 Files indexed: {fts_rebuild_result.indexed_files}")
 
             sys.exit(0)
 
@@ -5016,66 +4970,6 @@ def index(
         _index_mutation_lock_ctx.__exit__(None, None, None)
 
 
-def _populate_fts_index_from_disk(
-    config: Config,
-    fts_manager: "TantivyIndexManager",
-    console: Optional[Console] = None,
-) -> int:
-    """Bug #1763 (CRITICAL-2, code review): fully repopulate an FTS index
-    from every file currently on disk.
-
-    Used by `cidx watch`'s FTS handler initialization when a stale-schema
-    or brand-new Tantivy index was just wiped/created empty (see the
-    fts_needs_full_population check in watch() below). This watch-mode
-    entry point does not always run through smart_index() first (e.g.
-    semantic indexing disabled, or this is not the initial sync), so it
-    cannot rely on SmartIndexer._populate_fts_from_all_files() having
-    already repopulated the index -- this mirrors that method's discover
-    + add_document approach as a standalone helper since no SmartIndexer
-    instance is guaranteed to exist here.
-
-    Args:
-        config: Loaded Config instance (codebase_dir + file discovery
-            rules).
-        fts_manager: An initialized TantivyIndexManager (writer already
-            created via initialize_index()).
-        console: Optional Rich console for a completion message.
-
-    Returns:
-        Number of files successfully added to the FTS index.
-    """
-    from .indexing.file_finder import FileFinder
-
-    file_finder = FileFinder(config)
-    discovered_files = list(file_finder.find_files())
-    codebase = Path(config.codebase_dir)
-    count = 0
-    for file_path in discovered_files:
-        try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-            rel_path = str(file_path.relative_to(codebase))
-            language = file_path.suffix.lstrip(".") or "txt"
-            fts_manager.add_document(
-                {
-                    "path": rel_path,
-                    "content": text,
-                    "content_raw": text,
-                    "identifiers": text.split(),
-                    "line_start": 1,
-                    "line_end": max(len(lines), 1),
-                    "language": language,
-                }
-            )
-            count += 1
-        except Exception as e:
-            logger.warning(f"FTS: skipping {file_path}: {e}")
-    fts_manager.commit()
-    if console is not None:
-        console.print(f"✅ FTS index repopulated from {count} files", style="green")
-    return count
-
-
 @cli.command()
 @click.option(
     "--debounce", default=2.0, help="Seconds to wait before processing changes"
@@ -5141,7 +5035,7 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
     # Auto-detect existing indexes
     from .cli_watch_helpers import detect_existing_indexes
 
-    available_indexes = detect_existing_indexes(project_root)
+    available_indexes = detect_existing_indexes(project_root, config_manager.load())
     detected_count = sum(available_indexes.values())
 
     if detected_count == 0:
@@ -5302,71 +5196,24 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         if available_indexes["fts"] or fts:
             # Lazy import FTS components
             from .services.fts_watch_handler import FTSWatchHandler
-            from .services.tantivy_index_manager import TantivyIndexManager
+            from .services.fts_lifecycle import open_fts_index_for_watch
 
-            fts_index_dir = config.codebase_dir / ".code-indexer" / "tantivy_index"
-            tantivy_manager = TantivyIndexManager(fts_index_dir)
-
-            # Initialize or open existing index. Bug #1763: an existing
-            # index built before Bug #1761 introduced _PATH_EXACT_FIELD
-            # lacks that field forever unless forced through a one-time
-            # rebuild -- self-heal it here too, same as smart_indexer.py.
-            fts_index_exists = (fts_index_dir / "meta.json").exists()
-            fts_schema_stale = (
-                fts_index_exists and tantivy_manager.schema_needs_rebuild()
-            )
-            # CRITICAL-2 (#1763 code review): this init runs independently
-            # of smart_index()'s own initial-sync FTS bootstrap -- e.g.
-            # when semantic indexing is disabled, or this is not the
-            # initial sync -- so it cannot assume that path already
-            # repopulated a wiped/brand-new index. Track whether a full
-            # from-disk repopulation is needed here too.
-            fts_needs_full_population = fts_schema_stale or not fts_index_exists
-            if fts_schema_stale:
-                logger.warning(
-                    f"FTS index at {fts_index_dir} has a stale pre-#1761 "
-                    f"schema -- clearing for a one-time rebuild so the "
-                    f"dedup fix takes effect (existing entries will be "
-                    f"re-added from disk)"
-                )
+            # Bugs #1763/#2056: the SAME decision and rebuild as
+            # `cidx index --fts` (fts_lifecycle) -- a stale schema, no
+            # current content marker, an empty or absolute-path index is
+            # rebuilt from disk with normal indexing's documents and marked.
+            # Any failure propagates to this command's error handling.
+            tantivy_manager, watch_fts_rebuild = open_fts_index_for_watch(config)
+            if watch_fts_rebuild is not None:
                 console.print(
-                    "🔧 FTS index has a stale schema -- rebuilding from "
-                    "disk (existing entries will be re-added)...",
-                    style="yellow",
+                    f"✅ FTS index rebuilt from "
+                    f"{watch_fts_rebuild.indexed_files} files",
+                    style="green",
                 )
-                import shutil
-
-                try:
-                    shutil.rmtree(fts_index_dir)
-                except OSError as e:
-                    # MEDIUM-4-equivalent hardening: a mid-rmtree failure
-                    # (disk full, EACCES) must not propagate raw and
-                    # unhandled -- log distinctly (the index directory may
-                    # be left partially deleted) before re-raising. The
-                    # surrounding try/except at the bottom of this command
-                    # already prints "Git-aware watch failed" and exits
-                    # non-zero on any exception here, so this re-raise is
-                    # still caught loudly rather than crashing raw.
-                    logger.error(
-                        f"FTS stale-schema rebuild failed while clearing "
-                        f"{fts_index_dir} -- the index directory may be "
-                        f"left in a partially-deleted state: {e}"
+                if watch_fts_rebuild.missing_message:
+                    console.print(
+                        f"⚠️  {watch_fts_rebuild.missing_message}", style="yellow"
                     )
-                    raise
-
-            tantivy_manager.initialize_index(
-                create_new=(not fts_index_exists) or fts_schema_stale
-            )
-
-            # CRITICAL-1/2 (#1763 code review): a stale-schema or
-            # brand-new FTS index was just wiped/created empty above --
-            # repopulate ALL files from disk now so untouched files' FTS
-            # entries aren't silently lost. This watch-mode entry point
-            # has no SmartIndexer instance available when FTS is enabled
-            # without semantic indexing, so it cannot delegate to
-            # SmartIndexer._populate_fts_from_all_files().
-            if fts_needs_full_population:
-                _populate_fts_index_from_disk(config, tantivy_manager, console)
 
             fts_watch_handler = FTSWatchHandler(
                 tantivy_index_manager=tantivy_manager,
