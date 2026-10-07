@@ -472,7 +472,7 @@ Any new background job MUST: (1) integrate with `BackgroundJobManager` + `JobTra
 - GAP (follow-up): `execute_refresh_for_claimed_job` (cluster-reclaimed refreshes run by `DistributedJobWorkerService`) passes NO `cancel_check`, so those refreshes still cannot stop their subprocesses on cancel.
 - Publish rechecks: cancellation is re-checked before indexing, after indexing, after the integrity gate, before snapshot creation and before the alias swap. A snapshot created but not yet published goes to `cleanup_manager.schedule_cleanup`, and the job ends `cancelled`.
 - A failed cancel-flag read never stops a job (no wall-clock limit). It logs WARNING with traceback on the 1st and every `CANCEL_READ_WARN_EVERY`-th consecutive failure, ERROR once at `CANCEL_READ_ESCALATE_AFTER`, and a successful read resets the streak.
-- Process-group termination has ONE implementation, `code_indexer/utils/process_group.py`. It watches the whole group through the grace period, SIGKILLs survivors (a grandchild ignoring SIGTERM), and never signals the caller's own process group.
+- Process-group termination belongs in ONE implementation, `code_indexer/utils/process_group.py`; route all group termination through it (some call sites still carry their own copy -- consolidation pending, do not add another). It watches the whole group through the grace period, SIGKILLs survivors (a grandchild ignoring SIGTERM), and never signals the caller's own process group.
 
 -> Detail: docs/architecture/invariants/cluster-and-jobs.md#background-jobs
 

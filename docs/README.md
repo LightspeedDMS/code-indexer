@@ -20,6 +20,9 @@ overview is in the [repository README](../README.md).
 - [SCIP code intelligence](guides/scip.md): definitions, references, dependencies, call chains and impact analysis.
 - [X-Ray cookbook](guides/xray-cookbook.md): example X-Ray AST evaluators and patterns (compiled into the X-Ray binary).
 - [Meta-repo discovery](guides/meta-repo-discovery.md): cross-repository discovery and the dependency map through the server.
+- [Remote CLI](guides/remote-cli.md): using the `cidx` CLI against a CIDX server, which commands run where, and elevation prompts.
+- [Forge and write tools](guides/forge-and-write-tools.md): MCP write mode, file and git write tools, git credentials, SSH keys, CI and pull-request tools.
+- [Embedding providers and reranking](guides/embedding-providers-and-reranking.md): VoyageAI and Cohere models, keys, multi-provider indexes, reranking and provider health.
 
 ## Server operators
 
@@ -29,6 +32,7 @@ overview is in the [repository README](../README.md).
 - [Maintenance and jobs](server/maintenance-and-jobs.md): maintenance mode and draining, the jobs dashboard, job cancellation.
 - [Observability](server/observability.md): health endpoints, logs, admin log queries and OpenTelemetry export.
 - [Login and elevation](server/auth/login-and-elevation.md): password, MFA and SSO sign-in, TOTP step-up elevation, login throttling.
+- [Accounts and access](server/auth/accounts-and-access.md): roles, groups and repository access, API keys, MCP credentials, SSO-linked accounts and impersonation.
 - [OIDC](server/auth/oidc.md): single sign-on with an OpenID Connect provider.
 - [Auto-update](server/auto-update.md): the job-aware auto-updater and its self-healing deployment steps.
 - [Cluster setup](server/cluster-setup.md): install and operate a multi-node cluster on PostgreSQL.
@@ -38,6 +42,9 @@ overview is in the [repository README](../README.md).
 - [Fault injection](server/fault-injection.md): the non-production fault-injection harness.
 - [Memory retrieval](server/memory-retrieval.md): the semantic memory retrieval pipeline and its settings.
 - [Langfuse trace sync](server/langfuse-trace-sync.md): pulling Langfuse traces into searchable repositories.
+- [Wiki](server/wiki.md): rendering repository Markdown as a wiki, access rules, caching and view analytics.
+- [Research Assistant](server/research-assistant.md): the admin chat that runs a Claude CLI session to investigate and repair the server.
+- [Self-monitoring](server/self-monitoring.md): scheduled Claude analysis of the server's logs that files GitHub issues.
 - [SIEM operations](server/siem/operations.md): operating SIEM event delivery.
 - [SIEM SecOps guide](server/siem/secops-guide.md): setting up the Google SecOps side of SIEM delivery.
 - [SIEM curl runbook](server/siem/curl-runbook.md): checking SIEM delivery by hand with curl.
@@ -48,6 +55,8 @@ overview is in the [repository README](../README.md).
 - [CLI reference](reference/cli/README.md): every `cidx` command and option (generated).
 - [MCP tool catalog](reference/mcp-tools/README.md): every MCP tool by category, with parameters and permissions (generated).
 - [Error codes](reference/error-codes/README.md): the server's error-code registry (generated).
+- [Server settings](reference/server-settings.md): every Web UI runtime setting and `config.json` bootstrap key, with defaults, allowed values and restart needs.
+- [REST API](reference/rest-api.md): authentication, the OpenAPI schema, the main endpoint families and error responses.
 - MCP tools: one document per tool in [src/code_indexer/server/mcp/tool_docs/](../src/code_indexer/server/mcp/tool_docs/).
 
 ## Architecture
@@ -60,6 +69,8 @@ overview is in the [repository README](../README.md).
 - [Query path](architecture/query-path.md): query embedding cache, coalescing, provider calls and the REST/MCP seams.
 - [Repository lifecycle](architecture/repository-lifecycle.md): golden clones, aliases, immutable snapshots, retention and activation.
 - [Cluster](architecture/cluster.md): multi-node design on PostgreSQL and shared storage.
+- [Jobs and cluster state](architecture/jobs-and-cluster-state.md): background jobs, deduplication, cancellation and where cross-request state lives.
+- [Configuration state](architecture/config-state.md): bootstrap keys vs runtime settings, compare-and-set writes and change propagation.
 - [Dependency map](architecture/dependency-map.md): the cross-repository dependency map pipeline and the cidx-meta backup.
 - [X-Ray architecture](architecture/xray/architecture.md): the X-Ray AST search engine.
 - [X-Ray graph binder internals](architecture/xray/graph-binder-internals.md): how X-Ray graph mode binds symbols.
@@ -67,6 +78,8 @@ overview is in the [repository README](../README.md).
 - [X-Ray templates](xray-templates/): evaluator templates compiled into the X-Ray binary (Rust sources, not prose).
 
 ## Architecture decision records
+
+The [ADR index](adr/README.md) lists each decision with its status and where the implementation has since moved on.
 
 - [ADR-001: X-Ray evaluator execution modes](adr/ADR-001-xray-evaluator-execution-modes.md)
 - [ADR-002: X-Ray graph handle FFI](adr/ADR-002-xray-graph-handle-ffi.md)

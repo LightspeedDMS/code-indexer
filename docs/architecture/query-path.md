@@ -223,8 +223,10 @@ Clients fetch the rest of a search result with the MCP tool `get_cached_content`
 
 ## Runtime settings
 
-Every setting below is a runtime setting stored in the database and changed through the Web UI config screen; none
-of them is a `config.json` bootstrap key.
+Every setting below is a runtime setting stored in the database; none of them is a `config.json` bootstrap key. The
+query-embedding cache and `cache_config` fields are changed through the Web UI config screen. The `coalesce_*`
+settings and `query_provider_max_concurrency` have no Web UI control (see
+[Server settings: Not editable in the Web UI](../reference/server-settings.md#not-editable-in-the-web-ui)).
 
 | Setting | Default | Read |
 |---------|---------|------|
