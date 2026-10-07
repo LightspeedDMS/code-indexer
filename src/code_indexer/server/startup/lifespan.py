@@ -1456,6 +1456,18 @@ def make_lifespan(
             # shelling out to the local clone (handlers/_git_seam.py).
             configured_git_backend = build_configured_git_backend(server_config)
             app.state.git_backend = configured_git_backend
+            # Log the PARKED backend, not just the constructed one. Construction is
+            # already logged by git_backend_wiring, but nothing recorded whether the
+            # handlers actually got it -- and app.state cannot be inspected from
+            # outside the process, so a parking that silently failed would leave them
+            # falling back to LocalGitBackend: correct-looking, wrong backend, and
+            # invisible. This is the only external evidence that the seam is live.
+            logger.info(
+                "GitBackend parked on app.state for MCP handlers: %s "
+                "(owns_credentials=%s)",
+                type(configured_git_backend).__name__,
+                getattr(configured_git_backend, "owns_credentials", "unknown"),
+            )
 
             global_lifecycle_manager = GlobalReposLifecycleManager(
                 str(golden_repos_dir),
