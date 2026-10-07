@@ -1741,48 +1741,6 @@ class GoldenRepoManager:
         activator = GlobalActivator(self.golden_repos_dir)
         return bool(activator.is_globally_active(alias))
 
-    def resolve_global_clone_path(self, alias: str) -> Optional["Path"]:
-        """Clone path for a globally-activated repo addressed by either alias form.
-
-        ``list_repositories`` publishes the USER-facing alias of a globally-activated
-        repo as ``<alias>-global``, while the golden repo itself is registered under
-        the bare ``<alias>``. A handler handed the published alias therefore cannot
-        look it up directly. This maps either form onto the golden clone.
-
-        This is a plain lookup, NOT the bare-to-global promotion in
-        ``mcp/handlers/_global_fallback.py``: it never widens access, it only
-        resolves an alias the caller already supplied. It is therefore safe for the
-        admin/health handlers that are explicitly forbidden from importing that
-        module.
-
-        Resolution is by REGISTRATION, deliberately not by global-activation state.
-        Gating on ``is_globally_active`` would make this inert wherever the global
-        registry is not populated, even though the golden repo is registered and its
-        clone is on disk -- and the activation state adds nothing here: the suffixed
-        form resolves to the same golden repo the bare form already resolves to, for
-        handlers that accept the bare form anyway. So this strips the suffix and
-        looks the repo up; it grants nothing the bare alias would not.
-
-        Args:
-            alias: Bare (``"example-repo"``) or suffixed (``"example-repo-global"``).
-
-        Returns:
-            The golden clone path, or ``None`` when the alias names no registered
-            golden repo.
-        """
-        from pathlib import Path as _Path
-
-        if not alias:
-            return None
-        bare = alias[: -len("-global")] if alias.endswith("-global") else alias
-        if not bare:
-            return None
-        repo = self.get_golden_repo(bare)
-        if repo is None:
-            return None
-        clone_path = getattr(repo, "clone_path", None)
-        return _Path(clone_path) if clone_path else None
-
     def register_local_repo(
         self,
         alias: str,
