@@ -114,7 +114,8 @@ def _rebuild_decision(
 ) -> Tuple[bool, bool]:
     """THE rebuild decision: (index exists, existing index needs a one-time
     rebuild from disk -- stale pre-#1761 schema, no current #2056 content
-    marker, no documents, or absolute-path documents). One rebuild covers
+    marker, or absolute-path documents; a current marker on an empty index
+    means a complete, empty repository). One rebuild covers
     every case; the marker check short-circuits, so a pre-#2056 index is
     not even opened before its rebuild."""
     exists = (index_dir / "meta.json").exists()
@@ -294,9 +295,10 @@ def finish_fts_run(
     then follow `_settle_fts_content`. Returns its message (None when FTS
     is complete), also sent to `progress_callback`.
 
-    A run already propagating its own exception (`run_raised`) only commits
-    what it wrote; it never raises here (its own error must surface) and
-    never marks the index. `source_files` is walked lazily, only when the
+    A run already propagating its own exception, or one that was cancelled
+    (`run_raised`), only commits what it wrote; it never raises here (its
+    own outcome must surface) and never marks the index -- its content is
+    incomplete, so the next run rebuilds it. `source_files` is walked lazily, only when the
     committed index is empty.
 
     Raises:

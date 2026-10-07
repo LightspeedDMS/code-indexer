@@ -402,8 +402,10 @@ def _empty_fts_index(repo: _CliRepo) -> None:
         fts.commit()
     finally:
         fts.close()
-    # Content-current, so only the empty-index probe can trigger the heal.
-    mark_fts_content_current(repo.fts_dir)
+    # No content marker: a pre-fix index never carries one (the marker came
+    # with this fix), and a CURRENT marker on an empty index would mean a
+    # complete, empty repository -- the missing marker triggers the heal.
+    assert not (repo.fts_dir / _CONTENT_MARKER_FILE).exists()
     assert repo.fts_docs_per_path() == Counter()
 
 
@@ -1075,6 +1077,9 @@ class TestWatchFrontDoor2056:
 #: the fixture's stop() releases it early.
 _HELD_REQUEST_SECONDS = 60
 _HELD_REQUEST_WAIT_SECONDS = 90
+#: The cancelled run's held request is answered after this long, so the run
+#: sees its interrupt flag at the next file boundary and returns cancelled.
+_CANCEL_HOLD_SECONDS = 5
 
 
 class TestFtsMarkerSurvivesOnlyCompletedRuns2056:
@@ -1126,6 +1131,70 @@ class TestFtsMarkerSurvivesOnlyCompletedRuns2056:
         assert repo.fts_paths_for("BRANDNEWTOKEN") == ["src/brand_new.py"]
         assert repo.fts_paths_for("AUTHTOKEN") == []
         assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+
+    def test_repo_with_nothing_to_index_is_not_rebuilt_every_run(
+        self, tmp_path: Path, fake_provider
+    ) -> None:
+        """A current marker means complete content, even when empty."""
+        repo = _CliRepo(tmp_path, fake_provider)
+        repo.write("src/empty.py", "")
+        repo.commit("nothing to index")
+        repo.init()
+        _backdate_all_files(repo)
+        repo.cidx("index", "--fts")
+        assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+        assert sum(repo.fts_docs_per_path().values()) == 0
+
+        for _ in range(2):
+            repo.cidx("index", "--fts")
+            assert _REBUILT not in repo.last_output, repo.last_output[-2000:]
+            assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+
+    def test_cancelled_run_leaves_the_marker_cleared_and_next_run_rebuilds(
+        self, tmp_path: Path, fake_provider
+    ) -> None:
+        """The real cancel path: SIGINT sets the CLI's interrupt flag, the
+        progress callback answers INTERRUPT and the run returns cancelled,
+        without raising. Its FTS content is incomplete: never marked."""
+        import signal
+
+        repo = _make_repo(tmp_path, fake_provider)
+        repo.cidx("index", "--fts")
+        for relative, content in SMALL_FILES.items():
+            repo.write(relative, content + "# edited\n")
+        repo.write("src/big.py", _multi_chunk_file("NEWTAILTOKEN"))
+        repo.commit("edit everything")
+
+        fake_provider.ledger.begin_run(
+            f"{repo.run_label_prefix}-cancelled", hold_seconds=_CANCEL_HOLD_SECONDS
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "code_indexer.cli", "index", "--fts"],
+            cwd=repo.path,
+            env=repo.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output = ""
+        try:
+            assert fake_provider.ledger.wait_for_held(1, _HELD_REQUEST_WAIT_SECONDS), (
+                "the run never reached its embedding request"
+            )
+            proc.send_signal(signal.SIGINT)
+            output, _ = proc.communicate(timeout=_CLI_TIMEOUT_SECONDS)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
+        assert "cancel" in output.lower() or "interrupt" in output.lower(), output
+        assert not (repo.fts_dir / _CONTENT_MARKER_FILE).exists(), output[-3000:]
+
+        repo.cidx("index", "--fts")
+        assert _REBUILT in repo.last_output
+        assert (repo.fts_dir / _CONTENT_MARKER_FILE).is_file()
+        assert repo.fts_paths_for("NEWTAILTOKEN") == ["src/big.py"]
+        assert repo.fts_paths_for("OLDTAILTOKEN") == []
 
     @pytest.mark.parametrize(
         "args",

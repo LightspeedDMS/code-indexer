@@ -350,6 +350,40 @@ class TestOpenFtsIndexForWatchLock2056:
         assert _count(index_dir) == 1
 
 
+class TestCurrentEmptyIndex2056:
+    """A CURRENT content marker means the content is complete, even when it
+    is empty (a repository with nothing to index): zero documents call for
+    a rebuild only when the marker is not current."""
+
+    def test_current_empty_index_is_reused_not_rebuilt(self, tmp_path: Path) -> None:
+        config = Config(codebase_dir=tmp_path)
+        _current_index(config, [])
+
+        fts, rebuilt = open_fts_index_for_run(config, force_full=False)
+        fts.close()
+
+        assert rebuilt is False
+
+    def test_scheduler_sees_no_rebuild_due_for_a_current_empty_index(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.services.fts_lifecycle import fts_content_rebuild_due
+
+        _current_index(Config(codebase_dir=tmp_path), [])
+
+        assert fts_content_rebuild_due(tmp_path) is False
+
+    def test_unmarked_empty_index_is_rebuilt(self, tmp_path: Path) -> None:
+        config = Config(codebase_dir=tmp_path)
+        index_dir = _current_index(config, [])
+        (index_dir / FTS_CONTENT_VERSION_FILE).unlink()
+
+        fts, rebuilt = open_fts_index_for_run(config, force_full=False)
+        fts.close()
+
+        assert rebuilt is True
+
+
 class TestRebuildFtsIndex2056:
     def _repo(self, tmp_path: Path) -> Tuple[Config, Path, Path]:
         (tmp_path / ".code-indexer").mkdir()

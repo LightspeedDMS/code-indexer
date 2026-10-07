@@ -159,6 +159,10 @@ class SmartIndexer(HighThroughputProcessor):
     #: The failed files it names (relative paths): the FTS finish rebuilds
     #: their documents from disk -- FTS needs no embedding (Bug #2056).
     _run_failed_paths: FrozenSet[str] = frozenset()
+    #: This run's processing was cancelled (its stats): its FTS content is
+    #: incomplete, so the FTS finish treats it like a run that raised and
+    #: leaves the index unmarked (Bug #2056).
+    _run_cancelled: bool = False
 
     def __init__(
         self,
@@ -505,6 +509,7 @@ class SmartIndexer(HighThroughputProcessor):
             self._run_rebuilt_fts = fts_manager is not None and create_new_fts
             self._run_failed_files = 0  # set by this run's _finish_run
             self._run_failed_paths = frozenset()  # likewise
+            self._run_cancelled = False  # likewise
             # Bug #2056: every FileChunkingManager of this run records the
             # files whose FTS documents could not be replaced; the finish
             # retries them from disk (_finish_fts_run).
@@ -599,6 +604,9 @@ class SmartIndexer(HighThroughputProcessor):
                                 "Graph-optimized branch indexing was cancelled, not marking as completed for resume capability"
                             )
 
+                        # Bug #2056: returns without _finish_run; the FTS
+                        # finish still needs its cancellation.
+                        self._run_cancelled = stats.cancelled
                         return stats
 
                     except Exception as e:
@@ -870,7 +878,9 @@ class SmartIndexer(HighThroughputProcessor):
                 if fts_manager is not None:
                     self._finish_fts_run(
                         fts_manager,
-                        run_raised=run_raised,
+                        # A cancelled run's FTS content is incomplete: it is
+                        # settled like one that raised (left unmarked).
+                        run_raised=run_raised or self._run_cancelled,
                         bootstrap_failures=fts_bootstrap_failures,
                         progress_callback=progress_callback,
                     )
@@ -924,6 +934,7 @@ class SmartIndexer(HighThroughputProcessor):
         files, hidden/deleted/un-hidden paths, a rebuilt full-text index)."""
         self._run_failed_files = stats.failed_files
         self._run_failed_paths = stats.failed_paths
+        self._run_cancelled = stats.cancelled
         if not stats.cancelled:
             changed = (
                 stats.files_processed > 0

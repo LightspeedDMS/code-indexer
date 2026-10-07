@@ -254,17 +254,19 @@ def ensure_fts_index_not_empty(
 def fts_index_needs_repopulation(index_dir: Path) -> bool:
     """True when the existing on-disk FTS index at `index_dir` must be
     rebuilt from disk once, because per-file indexing would never repair it
-    (Bug #2056):
+    (Bug #2056): it holds a document stored under an absolute path -- what
+    the pre-fix `--rebuild-fts-index` wrote; per-file supersession deletes
+    by the relative path, so those would stay as duplicates forever.
 
-    * it holds no document at all -- what the pre-fix `cidx index --fts`
-      bootstrap committed; a refresh that selects no file never refills it;
-    * it holds a document stored under an absolute path -- what the pre-fix
-      `--rebuild-fts-index` wrote; per-file supersession deletes by the
-      relative path, so those would stay as duplicates forever.
+    Zero documents is NOT a reason here: the caller checks this only for an
+    index with a current content marker, and a current marker means the
+    content is complete even when empty (a repository with nothing to
+    index). A pre-fix emptied index carries no current marker, so it is
+    rebuilt by that check instead.
 
-    Cheap: the document count is segment metadata, and the absolute-path
-    probe is one regex TERM query on the untokenized exact-path field,
-    limit 1 (walks the term dictionary, never the documents).
+    Cheap: the absolute-path probe is one regex TERM query on the
+    untokenized exact-path field, limit 1 (walks the term dictionary, never
+    the documents).
 
     Precondition: the index has the current schema (the exact-path field
     exists). A pre-#1761 schema is rebuilt anyway (Bug #1763), so callers
@@ -279,7 +281,5 @@ def fts_index_needs_repopulation(index_dir: Path) -> bool:
     # tantivy-py's Searcher has no close()/context manager and holds no
     # writer lock; it is released when this local reference drops.
     searcher = index.searcher()
-    if searcher.num_docs == 0:
-        return True
     query = tantivy.Query.regex_query(index.schema, _PATH_EXACT_FIELD, "/.*")
     return len(searcher.search(query, 1).hits) > 0
